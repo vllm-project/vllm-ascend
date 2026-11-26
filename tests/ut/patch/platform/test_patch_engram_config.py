@@ -29,7 +29,6 @@ def test_engram_patch_is_noop_without_upstream_config(monkeypatch):
 def engram_config():
     config_module = pytest.importorskip("vllm.config.engram")
     return SimpleNamespace(
-        use_v2_model_runner=False,
         model_config=SimpleNamespace(
             architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
         ),
@@ -93,8 +92,7 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
         ("model_config", "architecture", "UnsupportedModel", "non-empty n-gram"),
         ("engram_config", "embedding_across_dp", True, "embedding_across_dp"),
         ("parallel_config", "tensor_parallel_size", 16, "TP=1/2/4/8"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=DCP"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
         ("parallel_config", "data_parallel_size", 1, "dp_shared_memory requires"),
         ("parallel_config", "enable_elastic_ep", True, "elastic EP"),
         ("load_config", "load_format", "pt", "indexed safetensors"),

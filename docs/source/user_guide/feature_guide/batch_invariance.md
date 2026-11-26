@@ -193,7 +193,7 @@ Request preemption is triggered when the KV cache runs out: the preempted reques
 - Set `--max-model-len` to the smallest value your workload needs, and cap the per-request output length (`max_tokens`).
 - Increase `--gpu-memory-utilization` to leave more memory for the KV cache.
 
-Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... tokens per request`) to size your workload against the KV cache capacity, and watch the engine stats: `GPU KV cache usage` approaching 100% signals imminent preemption. See the [preemption FAQ](../../faqs.md#22-why-does-tpot-increase-drastically-as-concurrency-grows) for details.
+Use the startup logs (`NPU KV cache size` and `Maximum concurrency for ... tokens per request`) to size your workload against the KV cache capacity, and watch the engine stats: `NPU KV cache usage` approaching 100% signals imminent preemption. See the [preemption FAQ](../../faqs.md#22-why-does-tpot-increase-drastically-as-concurrency-grows) for details.
 
 ## Tested Models
 
@@ -230,4 +230,4 @@ The batch invariance feature is under active development. Planned improvements i
 - Performance optimizations
 - Additional testing and validation
 
-For the latest status and to contribute ideas, see the [tracking issue](https://github.com/vllm-project/vllm-ascend/issues/5487).
+For the latest status and to contribute ideas, see the [tracking issue #5487](https://github.com/vllm-project/vllm-ascend/issues/5487).

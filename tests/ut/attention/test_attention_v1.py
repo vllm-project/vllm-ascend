@@ -16,10 +16,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
     AscendMetadata,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPImpl,
-    AscendAttentionDCPMetadataBuilder,
-)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
@@ -40,7 +36,7 @@ class TestAttentionGraphHelpers(TestBase):
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
         spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
-        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl, AscendAttentionDCPImpl):
+        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl):
             with self.subTest(impl=impl_cls):
                 impl = impl_cls.__new__(impl_cls)
                 impl.sliding_window = None
@@ -140,18 +136,13 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
+        self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+        self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
@@ -159,20 +150,6 @@ class TestAscendAttentionBackend(TestBase):
                 return AscendC8AttentionBackendImpl
 
         self.assertFalse(OtherAttentionBackend.supports_pcp())
-
-    def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_impl_cls(),
-                AscendAttentionDCPImpl,
-            )
-
-    def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_builder_cls(),
-                AscendAttentionDCPMetadataBuilder,
-            )
 
     def test_get_kv_cache_shape(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
@@ -699,7 +676,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.actual_seq_lengths_q = [2]
         metadata.causal = True
         metadata.attn_mask = None
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
             result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
@@ -741,7 +718,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_prefills = 0
         metadata.seq_lens_list = [10, 20]
         metadata.max_query_len = 1
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_fia.return_value = (torch.empty_like(query), None)
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
@@ -771,7 +748,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_prefills = 0
         metadata.seq_lens_list = [10, 20]
         metadata.max_query_len = 2
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_fia.return_value = (torch.empty_like(query), None)
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
@@ -796,7 +773,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_decodes = 0
         metadata.num_prefills = 1
         metadata.seq_lens_list = [10]
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_fia.return_value = (torch.empty_like(query), None)
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
@@ -832,7 +809,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_actual_tokens = 2
         metadata.seq_lens_list = [10, 20]
         metadata.max_query_len = 1
-        mock_get_forward_context.return_value = MagicMock(capturing=True)
+        mock_get_forward_context.return_value = MagicMock(capturing=True, additional_kwargs={"capturing": True})
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
         self.impl.value_cache = torch.empty_like(self.impl.key_cache)
@@ -864,7 +841,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_actual_tokens = 4
         metadata.seq_lens_list = [10]
         metadata.max_query_len = 4
-        mock_get_forward_context.return_value = MagicMock(capturing=True)
+        mock_get_forward_context.return_value = MagicMock(capturing=True, additional_kwargs={"capturing": True})
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
         self.impl.value_cache = torch.empty_like(self.impl.key_cache)
@@ -891,7 +868,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.actual_seq_lengths_q = [2]
         metadata.num_actual_tokens = 2
         metadata.seq_lens_list = [10]
-        mock_get_forward_context.return_value = MagicMock(capturing=True)
+        mock_get_forward_context.return_value = MagicMock(capturing=True, additional_kwargs={"capturing": True})
 
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
         self.impl.value_cache = torch.empty_like(self.impl.key_cache)
@@ -918,7 +895,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.actual_seq_lengths_q = [1, 2]
         metadata.num_actual_tokens = 2
         metadata.seq_lens_list = [10, 20]
-        mock_get_forward_context.return_value = MagicMock(capturing=True)
+        mock_get_forward_context.return_value = MagicMock(capturing=True, additional_kwargs={"capturing": True})
 
         self.impl_swa.key_cache = torch.empty(4, 128, 8, 64)
         self.impl_swa.value_cache = torch.empty_like(self.impl_swa.key_cache)
@@ -1087,7 +1064,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), torch.ones(10, 8, 64))
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
@@ -1145,7 +1122,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty(10, 8, 64)
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly

@@ -13,6 +13,7 @@ intersect at identical block ids.
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -32,10 +33,6 @@ from vllm_ascend.models.step5.cache_config import (
     get_step5_pool_bytes_per_block,
     is_step5_groups,
     is_step5_kv_cache_spec,
-)
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
-    _ascend_pool_bytes_per_block,
 )
 
 BLOCK = 128
@@ -143,9 +140,12 @@ def _vllm_config(max_model_len: int = 8192, num_gpu_blocks_override: int | None 
 
 
 def _planner_vllm_config():
-    """Config for builder/patch dispatch: they read hf_config.model_type."""
+    """Config for builder/planner dispatch: they read hf_config.model_type."""
     config = _vllm_config()
     config.model_config.hf_config = SimpleNamespace(model_type="step5")
+    # The generic planner probes vllm_config.attention_config.hisparse_config
+    # before consulting the builder's pool-bytes hook.
+    config.attention_config = SimpleNamespace(hisparse_config=None)
     return config
 
 
@@ -326,16 +326,16 @@ def test_config_from_groups_ring_only_layout_stacks_from_byte_zero() -> None:
     assert tensor.block_stride == RING_PAGE
 
 
-def test_builder_and_patch_dispatch_step5_groups_to_step5_planner() -> None:
+def test_builder_and_generic_planner_dispatch_step5_groups_to_step5_planner() -> None:
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
     vllm_config = _planner_vllm_config()
     groups = _planned_groups()
     envelope = 2 * MAIN_PAGE + 2 * SUMMARY_PAGE
 
     builder = AscendKVCacheConfigBuilder.__new__(AscendKVCacheConfigBuilder)
     assert builder._get_pool_bytes_per_block(vllm_config, groups) == envelope
-    assert _ascend_pool_bytes_per_block(vllm_config, groups) == envelope
     expected_usage = (64 + 65 + 1) * envelope
-    assert _ascend_max_memory_usage_bytes_from_groups(builder, vllm_config, groups) == expected_usage
+    assert planning._max_memory_usage_bytes_from_groups(builder, vllm_config, groups) == expected_usage
 
 
 def test_builder_pool_bytes_keeps_default_layout_without_step5_aux_layers() -> None:

@@ -303,15 +303,17 @@ def _gather_lm_head_candidates(
         values.dtype in (torch.float16, torch.bfloat16, torch.float32)
         and lm_head.num_embeddings_padded <= _MAX_EXACT_FP32_TOKEN_ID
     )
+    # Packed scores and IDs complete this TP column's candidates in one exchange.
+    output_gather_group = getattr(lm_head, "output_gather_group", None)
     if packed:
         score_dtype = values.dtype
         pairs = torch.stack((values.float(), ids.float()), dim=-1)
-        pairs = gather_lm_head_outputs(pairs, parallel_mode)
+        pairs = gather_lm_head_outputs(pairs, parallel_mode, output_gather_group)
         values = pairs[..., 0].to(score_dtype)
         ids = pairs[..., 1].to(torch.int64)
     else:
-        values = gather_lm_head_outputs(values, parallel_mode)
-        ids = gather_lm_head_outputs(ids, parallel_mode)
+        values = gather_lm_head_outputs(values, parallel_mode, output_gather_group)
+        ids = gather_lm_head_outputs(ids, parallel_mode, output_gather_group)
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         values, ids = values[:num_rows], ids[:num_rows]
     # Global TopK over the union of each resident vocabulary shard's TopK.

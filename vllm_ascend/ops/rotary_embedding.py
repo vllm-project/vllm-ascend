@@ -717,7 +717,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             query, key = self.forward_triton(positions, query, key)
-        elif self.mrope_section != [16, 24, 24]:
+        elif self.mrope_section is None or tuple(self.mrope_section) not in ((16, 24, 24), (8, 12, 12)):
             query, key = super().forward_oot(positions, query, key)
         else:
             import torch_npu

@@ -1,142 +1,96 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheTensor,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    compute_layout_strides,
-)
-from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.config import KVTransferConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    LayerwiseCachePlanner,
+    get_layerwise_offload_config,
+    plan_layerwise_cache_reuse,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LayerwiseCacheConfig,
+    allocate_cache_backing,
     apply_layerwise_kv_cache_plan,
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_layerwise_reuse_config,
+    get_cache_views,
+    get_layerwise_reuse_layout,
     get_physical_layer_index,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
-def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
-    """Build one contiguous block per layer using the vLLM descriptor contract."""
-    return KVCacheTensor(size=size, layers=layer_names, layer_stride=size, block_stride=size, offset=0)
-
-
-def _make_full_attention_spec(
-    *,
-    num_kv_heads: int = 1,
-    head_size: int = 8,
-) -> FullAttentionSpec:
-    return FullAttentionSpec(
-        block_size=2,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        head_size_v=head_size,
-        dtype=torch.int8,
+def _native_config(groups, num_blocks=3):
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=groups,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * group.kv_cache_spec.page_size_bytes,
+                layers=[name],
+                layer_stride=0,
+                block_stride=group.kv_cache_spec.page_size_bytes,
+            )
+            for group in groups
+            for name in group.layer_names
+        ],
     )
 
 
-def _make_vllm_config(num_layers: int, num_shared_buffers: int):
-    model_config = MagicMock()
-    model_config.get_num_layers.return_value = num_layers
+def _runtime(num_layers, num_buffers, model_type="glm5_next_text", **extra):
     return SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
+        model_config=SimpleNamespace(
+            get_total_num_hidden_layers=lambda: num_layers,
+            hf_text_config=SimpleNamespace(model_type=model_type),
+        ),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None),
+        kv_transfer_config=KVTransferConfig(
             kv_connector="AscendStoreConnector",
+            kv_role="kv_producer",
             kv_connector_extra_config={
                 "backend": "memcache",
                 "use_layerwise": True,
-                "layerwise_num_shared_buffers": num_shared_buffers,
+                "layerwise_num_shared_buffers": num_buffers,
+                **extra,
             },
         ),
-        model_config=model_config,
-        parallel_config=MagicMock(),
     )
 
 
-def test_no_reuse_skips_topology_validation():
-    spec = MambaSpec(
-        block_size=2,
-        shapes=((1,),),
-        dtypes=(torch.int8,),
-    )
-    original_tensors = [
-        _make_kv_cache_tensor(32, ["model.layers.0.self_attn"]),
-        _make_kv_cache_tensor(32, ["model.layers.1.self_attn"]),
-        _make_kv_cache_tensor(32, ["model.mtp.0.self_attn"]),
-    ]
-    layer_names = [get_kv_cache_tensor_layers(tensor)[0] for tensor in original_tensors]
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=original_tensors.copy(),
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=layer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(layer_names, spec),
-                ),
-            )
-        ],
-    )
-
-    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(2, 2))
-
-    assert kv_cache_config.kv_cache_tensors == original_tensors
+def _plan(config, runtime, rules):
+    return LayerwiseCachePlanner(
+        config, runtime, runtime.kv_transfer_config.kv_connector_extra_config, spec_reuse_rules=rules
+    ).build()
 
 
-def test_base_layers_are_merged_into_shared_slots():
-    original_tensors = [_make_kv_cache_tensor(32, [f"model.layers.{layer}.self_attn"]) for layer in range(6)]
-    layer_names = [get_kv_cache_tensor_layers(tensor)[0] for tensor in original_tensors]
-    spec = _make_full_attention_spec()
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=original_tensors,
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=layer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(layer_names, spec),
-                ),
-            )
-        ],
-    )
-
-    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(6, 2))
-
-    assert [get_kv_cache_tensor_layers(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
-        ["model.layers.0.self_attn"],
-        ["model.layers.1.self_attn", "model.layers.3.self_attn", "model.layers.5.self_attn"],
-        ["model.layers.2.self_attn", "model.layers.4.self_attn"],
-    ]
+def _attention_spec(dtype=torch.int8, head_size=8):
+    return FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=head_size, head_size_v=head_size, dtype=dtype)
 
 
-def test_default_layout_keeps_one_buffer_per_layer():
-    layout = build_layerwise_cache_layout(27)
-
-    assert layout.has_layer_reuse is False
-    assert layout.num_shared_buffers == 27
-    assert layout.num_prefetch_layers == 8
-    assert layout.independent_layers == [0]
-    assert len(layout.storage_indices) == 27
+def test_default_layout_keeps_native_buffers():
+    settings = LayerwiseCacheConfig.parse(27)
+    assert settings.num_shared_buffers is None
+    assert settings.num_prefetch_layers == 8
+    assert settings.independent_layers == [0]
+    names = [f"model.layers.{index}.self_attn" for index in range(27)]
+    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    assert plan_layerwise_cache_reuse(config, _runtime(27, None)) is None
 
 
 def test_reuse_layout_matches_round_robin_buffer_assignments():
-    layout = build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 6})
-
-    assert layout.has_layer_reuse is True
-    assert layout.prefetch_layer_map[7] == 1
-    assert layout.prefetch_layer_map[8] == 2
-    assert layout.storage_indices[0] == [0]
-    assert layout.storage_indices[1] == [1, 7, 13, 19, 25]
-    assert layout.storage_indices[2] == [2, 8, 14, 20, 26]
-    assert sorted(layer for slot in layout.storage_indices for layer in slot) == list(range(27))
+    names = [f"model.layers.{index}.self_attn" for index in range(27)]
+    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    runtime = _runtime(27, 6)
+    layout = _plan(config, runtime, {FullAttentionSpec: True})
+    assert layout.prefetch_layer_map[7] == (1,)
+    assert layout.prefetch_layer_map[8] == (2,)
+    assert [tensor.layers for tensor in layout.kv_cache_tensors][:3] == [[names[0]], names[1::6], names[2::6]]
+    assert sorted(name for tensor in layout.kv_cache_tensors for name in tensor.layers) == sorted(names)
 
 
 @pytest.mark.parametrize(
@@ -149,24 +103,24 @@ def test_reuse_layout_matches_round_robin_buffer_assignments():
     ],
 )
 def test_independent_layer_parsing(value, expected):
-    layout = build_layerwise_cache_layout(27, {"layerwise_independent_layers": value})
+    layout = LayerwiseCacheConfig.parse(27, {"layerwise_independent_layers": value})
 
     assert layout.independent_layers == expected
 
 
 def test_invalid_layout_config_is_rejected():
     with pytest.raises(TypeError):
-        build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": True})
+        LayerwiseCacheConfig.parse(27, {"layerwise_num_shared_buffers": True})
     with pytest.raises(ValueError):
-        build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 0})
+        LayerwiseCacheConfig.parse(27, {"layerwise_num_shared_buffers": 0})
     with pytest.raises(TypeError):
-        build_layerwise_cache_layout(27, {"layerwise_independent_layers": 27})
+        LayerwiseCacheConfig.parse(27, {"layerwise_independent_layers": 27})
     with pytest.raises(TypeError):
-        build_layerwise_cache_layout(27, {"layerwise_independent_layers": "1,4"})
+        LayerwiseCacheConfig.parse(27, {"layerwise_independent_layers": "1,4"})
 
 
 def test_prefetch_count_can_be_overridden():
-    layout = build_layerwise_cache_layout(
+    layout = LayerwiseCacheConfig.parse(
         27,
         {
             "layerwise_num_shared_buffers": 6,
@@ -207,7 +161,7 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
         kv_connector_extra_config={"backend": "memcache"},
     )
 
-    assert get_layerwise_reuse_config(multi_config) is ascend_store_config
+    assert get_layerwise_offload_config(multi_config) is ascend_store_config
     for connector_name in (
         "AscendStoreConnector",
         "MooncakeConnectorStoreV1",
@@ -216,87 +170,9 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
             kv_connector=connector_name,
             kv_connector_extra_config=ascend_store_config,
         )
-        assert get_layerwise_reuse_config(direct_config) is ascend_store_config
-    assert get_layerwise_reuse_config(unsupported) is None
-    assert get_layerwise_reuse_config(not_opted_in) is None
-
-
-def test_incompatible_cache_specs_use_separate_slots():
-    layer_names = [f"model.layers.{layer}.self_attn" for layer in range(4)]
-    first_spec = _make_full_attention_spec()
-    incompatible_spec = _make_full_attention_spec(
-        num_kv_heads=2,
-        head_size=4,
-    )
-    layer_specs = {layer_name: first_spec for layer_name in layer_names}
-    layer_specs[layer_names[2]] = incompatible_spec
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=[_make_kv_cache_tensor(32, [layer_name]) for layer_name in layer_names],
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=layer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=layer_specs,
-                ),
-            )
-        ],
-    )
-
-    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(4, 1))
-
-    assert [get_kv_cache_tensor_layers(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
-        [layer_names[0]],
-        [layer_names[1], layer_names[3]],
-        [layer_names[2]],
-    ]
-
-
-def test_partial_layout_skips_tensor_merge():
-    layer_names = [
-        "model.layers.0.self_attn",
-        "model.layers.1.self_attn",
-    ]
-    original_tensors = [_make_kv_cache_tensor(32, [layer_name]) for layer_name in layer_names]
-    spec = _make_full_attention_spec()
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=original_tensors.copy(),
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=layer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(layer_names, spec),
-                ),
-            )
-        ],
-    )
-    vllm_config = _make_vllm_config(4, 1)
-    vllm_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = []
-
-    apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
-
-    assert kv_cache_config.kv_cache_tensors == original_tensors
-
-
-def test_layout_includes_mtp_layers():
-    spec = _make_full_attention_spec()
-    specs = {
-        **{f"model.layers.{layer}.self_attn": spec for layer in range(4)},
-        "model.mtp.0.self_attn": spec,
-    }
-
-    layout = build_layerwise_reuse_layout(
-        specs,
-        4,
-        {"layerwise_num_shared_buffers": 2},
-    )
-
-    assert 4 in layout.layer_cache_specs
-    assert layout.buffer_slots == ((0,), (1, 3), (2, 4))
-    assert layout.prefetch_layer_map == {3: 1, 4: 2}
+        assert get_layerwise_offload_config(direct_config) is ascend_store_config
+    assert get_layerwise_offload_config(unsupported) is None
+    assert get_layerwise_offload_config(not_opted_in) is None
 
 
 @pytest.mark.parametrize(
@@ -316,484 +192,93 @@ def test_physical_layer_index_supports_mtp_names(
     assert get_physical_layer_index(layer_name, 4) == expected
 
 
-def test_main_spec_controls_reuse_regardless_of_indexer():
-    main_spec = AscendMLAAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.int8,
-        cache_sparse_sfa_c8=True,
+def test_pp_stage_uses_global_independent_layers():
+    names = [f"model.layers.{index}.attn" for index in range(4, 8)]
+    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    runtime = _runtime(8, 1, layerwise_independent_layers=[0, 6])
+    layout = _plan(config, runtime, {FullAttentionSpec: True})
+    assert layout.layers == (4, 5, 6, 7)
+    assert layout.independent_layers == [6]
+    assert layout.prefetch_layer_map == {5: (4,), 7: (5,)}
+
+
+@pytest.mark.parametrize("num_buffers", [None, 6])
+@pytest.mark.parametrize("model_type", ["glm5_next_text", "deepseek_v4"])
+def test_no_reuse_preserves_native_descriptors(num_buffers, model_type):
+    state = MambaSpec(block_size=2, shapes=((4,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    names = [f"model.layers.{index}.state" for index in range(6)]
+    config = _native_config([KVCacheGroupSpec(names, state)])
+    original_tensors = tuple(config.kv_cache_tensors)
+    assert plan_layerwise_cache_reuse(config, _runtime(6, num_buffers, model_type)) is None
+    assert tuple(config.kv_cache_tensors) == original_tensors
+
+
+@pytest.mark.parametrize("num_blocks", [1, 3])
+def test_registered_glm_reuse_preserves_resident_components_and_native_views(num_blocks):
+    names = [f"model.layers.{index}.self_attn.attn" for index in range(4)]
+    indexer_names = [f"model.layers.{index}.self_attn.indexer.k_cache" for index in (1, 2, 3)]
+    draft = "model.mtp.0.self_attn.attn"
+    main = AscendMLAAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, model_version="glm5_next"
     )
-    indexer_spec = AscendSFAIndexerCacheSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=4,
-        dtype=torch.int8,
-        scale_dim=1,
-        scale_dtype=torch.float16,
-        cache_sparse_li_c8=True,
-    )
-    specs = {
-        **{f"model.layers.{layer}.self_attn.attn": main_spec for layer in range(6)},
-        **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (1, 3, 5)},
-    }
-
-    layout = build_layerwise_reuse_layout(
-        specs,
-        6,
-        {
-            "layerwise_num_shared_buffers": 1,
-            "layerwise_independent_layers": [],
-        },
-    )
-
-    # Identical main specs put every layer in one buffer; the indexer subset rides along.
-    assert layout.buffer_slots == ((0, 1, 2, 3, 4, 5),)
-    assert tuple(layer for layer in layout.buffer_slots[0] if layout.layer_cache_specs[layer].indexer is not None) == (
-        1,
-        3,
-        5,
-    )
-    assert layout.prefetch_layer_map == {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
-    assert layout.layer_cache_specs[0].indexer is None
-    assert layout.layer_cache_specs[1].indexer is not None
-
-
-def test_cache_spec_roles_do_not_depend_on_order():
-    main_spec = _make_sfa_main_spec()
-    indexer_spec = _make_sfa_indexer_spec()
-    indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-    main_name = "model.layers.0.self_attn.attn"
-    specs = {
-        indexer_name: indexer_spec,
-        main_name: main_spec,
-        "model.layers.1.self_attn.attn": main_spec,
-    }
-
-    layout = build_layerwise_reuse_layout(
-        specs,
-        2,
-        {
-            "layerwise_num_shared_buffers": 1,
-            "layerwise_independent_layers": [],
-        },
-    )
-
-    assert layout.layer_cache_specs[0].main.layer_name == main_name
-    assert layout.layer_cache_specs[0].indexer is not None
-    assert layout.layer_cache_specs[0].indexer.layer_name == indexer_name
-
-
-def test_single_indexer_spec_is_the_primary_spec():
-    indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-    layout = build_layerwise_reuse_layout(
-        {indexer_name: _make_sfa_indexer_spec()},
-        1,
-        {"layerwise_num_shared_buffers": 1},
-    )
-
-    assert layout.layer_cache_specs[0].main.layer_name == indexer_name
-    assert layout.layer_cache_specs[0].indexer is None
-
-
-def test_multi_main_spec_layer_selects_attn_as_main():
-    main_spec = _make_sfa_main_spec()
-    specs = {
-        "model.layers.0.self_attn.attn": main_spec,
-        "model.layers.0.self_attn.other_cache": main_spec,
-    }
-
-    layout = build_layerwise_reuse_layout(
-        specs,
-        1,
-        {"layerwise_num_shared_buffers": 1},
-    )
-
-    layer_specs = layout.layer_cache_specs[0]
-    assert layer_specs.main.layer_name == "model.layers.0.self_attn.attn"
-    assert [s.layer_name for s in layer_specs.extra_main_specs] == ["model.layers.0.self_attn.other_cache"]
-
-
-def test_multi_group_sfa_descriptors_are_merged_by_main_component():
-    main_names = [
-        *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
-        "model.mtp.0.self_attn.attn",
-    ]
-    indexer_names = [f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in (1, 2, 4)]
-    main_spec = AscendMLAAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
-    )
-    indexer_spec = AscendSFAIndexerCacheSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=4,
-        dtype=torch.int8,
-        scale_dim=1,
-        scale_dtype=torch.float16,
-    )
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=[
-            *(_make_kv_cache_tensor(main_spec.page_size_bytes, [name]) for name in main_names),
-            *(_make_kv_cache_tensor(indexer_spec.page_size_bytes, [name]) for name in indexer_names),
+    indexer = replace(main, head_size=4, tokens_per_state=2)
+    config = _native_config(
+        [
+            KVCacheGroupSpec(names + [draft], main),
+            KVCacheGroupSpec(indexer_names, indexer),
         ],
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=main_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(main_names, main_spec),
-                ),
-            ),
-            SimpleNamespace(
-                layer_names=indexer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(indexer_names, indexer_spec),
-                ),
-            ),
-        ],
+        num_blocks,
     )
+    runtime = _runtime(4, 1)
+    layout = plan_layerwise_cache_reuse(config, runtime)
+    assert layout is not None
+    assert layout.draft_entry_names == {draft}
+    assert layout.reused_cache_names == set(names[1:])
+    assert layout.prefetch_layer_map == {2: (1,), 3: (2,)}
+    assert set(layout.cache_view_sizes) == set(names + indexer_names + [draft])
+    specs = dict.fromkeys(names + [draft], main) | dict.fromkeys(indexer_names, indexer)
+    native_views = get_cache_views(config, specs)
+    assert layout.cache_view_sizes == {name: end - start for name, (_, start, end) in native_views.items()}
+    worker_config = apply_layerwise_kv_cache_plan(config, runtime.kv_transfer_config, layout)
+    assert get_layerwise_reuse_layout(worker_config) is layout
+    assert get_layerwise_reuse_layout(config) is None
+    allocated_sizes: list[int] = []
 
-    apply_layerwise_kv_cache_plan(
-        kv_cache_config,
-        _make_vllm_config(4, 1),
-    )
+    def allocate(size):
+        allocated_sizes.append(size)
+        return torch.empty(size, dtype=torch.uint8)
 
-    # One independent main tensor, one main tensor shared by every reused layer (incl.
-    # MTP), and one indexer tensor shared only by the indexer-bearing layers.
-    assert [get_kv_cache_tensor_layers(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
-        [main_names[0]],
-        [main_names[1], main_names[2], main_names[3], main_names[4]],
-        indexer_names,
-    ]
-
-
-def _make_sfa_main_spec(dtype=torch.int8) -> AscendMLAAttentionSpec:
-    return AscendMLAAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=dtype,
-        cache_sparse_sfa_c8=True,
-    )
-
-
-def _make_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
-    return AscendSFAIndexerCacheSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=4,
-        dtype=torch.int8,
-        scale_dim=1,
-        scale_dtype=torch.float16,
-        cache_sparse_li_c8=True,
-    )
+    tensors = allocate_cache_backing(worker_config, specs, allocate, layout.cache_view_sizes)
+    # Independent layer, one rotating slot, and the persistent MTP cache.
+    expected_bytes = num_blocks * (3 * main.page_size_bytes + 3 * indexer.page_size_bytes)
+    assert allocated_sizes == [expected_bytes]
+    assert tensors[names[1]] is tensors[names[2]] is tensors[names[3]]
+    offsets = {tensors[name].data_ptr() for name in [names[0], names[1], draft, *indexer_names]}
+    assert len(offsets) == 6
 
 
-def test_component_sharing_merges_main_across_a_and_b_layers():
-    # GLM5.2/SFA: A-class layers own main + indexer, B-class layers own main only. Every
-    # main spec is identical, so one buffer's main tensor is shared by all layers in the
-    # buffer while its indexer tensor is shared only by the buffer's A-class layers.
-    main_spec = _make_sfa_main_spec()
-    indexer_spec = _make_sfa_indexer_spec()
-    a_layers = [1, 4]  # main + indexer
-    b_layers = [2, 3, 5]  # main only
-    # physical layer 0 is independent; layers 1..5 are reused; 6 = MTP (main only).
-    main_by_layer = {
-        0: "model.layers.0.self_attn.attn",
-        **{layer: f"model.layers.{layer}.self_attn.attn" for layer in (*a_layers, *b_layers)},
-        6: "model.mtp.0.self_attn.attn",
-    }
-    indexer_by_layer = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in a_layers}
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=[
-            *(_make_kv_cache_tensor(main_spec.page_size_bytes, [name]) for name in main_by_layer.values()),
-            *(_make_kv_cache_tensor(indexer_spec.page_size_bytes, [name]) for name in indexer_by_layer.values()),
-        ],
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=list(main_by_layer.values()),
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(main_by_layer.values(), main_spec),
-                ),
-            ),
-            SimpleNamespace(
-                layer_names=list(indexer_by_layer.values()),
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(indexer_by_layer.values(), indexer_spec),
-                ),
-            ),
-        ],
-    )
-
-    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(6, 2))
-
-    main_shared_by = []
-    indexer_shared_by = []
-    for tensor in kv_cache_config.kv_cache_tensors:
-        names = list(get_kv_cache_tensor_layers(tensor))
-        if any(".indexer." in name for name in names):
-            indexer_shared_by.append(names)
-        else:
-            main_shared_by.append(names)
-
-    # 1 independent layer + 2 reused buffers == 3 main tensors.
-    assert len(main_shared_by) == 3
-    # The independent layer keeps its own main; every reused layer's main (incl. MTP)
-    # lands in exactly one shared main tensor.
-    assert main_shared_by[0] == [main_by_layer[0]]
-    merged_reused_main = sorted(name for names in main_shared_by[1:] for name in names)
-    assert merged_reused_main == sorted(main_by_layer[layer] for layer in (1, 2, 3, 4, 5, 6))
-    # Indexer layers follow their main slots, so layers 1 and 4 use separate tensors.
-    assert indexer_shared_by == [[indexer_by_layer[1]], [indexer_by_layer[4]]]
+def test_layout_resolves_two_source_dependencies_on_one_target_layer():
+    attention = _attention_spec()
+    state = MambaSpec(block_size=2, shapes=((attention.page_size_bytes,),), dtypes=(torch.int8,))
+    attn_names = ["model.layers.0.attn", "model.layers.2.attn"]
+    state_names = ["model.layers.1.state", "model.layers.2.state"]
+    config = _native_config([KVCacheGroupSpec(attn_names, attention), KVCacheGroupSpec(state_names, state)])
+    layout = _plan(config, _runtime(3, 1, layerwise_independent_layers=[]), {FullAttentionSpec: True, MambaSpec: True})
+    assert layout.prefetch_layer_map == {2: (0, 1)}
+    assert set(layout.kv_cache_tensors[0].layers) == set(attn_names + state_names)
 
 
-def test_non_attention_cache_spec_is_rejected():
-    mamba_spec = MambaSpec(
-        block_size=2,
-        shapes=((1,),),
-        dtypes=(torch.int8,),
-    )
-    layer_specs = {f"model.layers.{layer}.mixer": mamba_spec for layer in range(3)}
-
-    with pytest.raises(NotImplementedError, match="attention cache specs only"):
-        build_layerwise_reuse_layout(
-            layer_specs,
-            3,
-            {"layerwise_num_shared_buffers": 1},
-        )
-
-
-def test_packed_cache_tensor_descriptors_are_rejected():
-    layer_names = [
-        "model.layers.0.self_attn",
-        "model.layers.1.self_attn",
-        "model.layers.2.self_attn",
-    ]
-    spec = _make_full_attention_spec()
-    kv_cache_config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=[
-            (KVCacheTensor(size=16, layers=[layer_name], layer_stride=16, block_stride=64, offset=8))
-            for layer_name in layer_names
-        ],
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=layer_names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=2,
-                    kv_cache_specs=dict.fromkeys(layer_names, spec),
-                ),
-            )
-        ],
-    )
-
-    with pytest.raises(NotImplementedError, match="contiguous per-layer pages"):
-        apply_layerwise_kv_cache_plan(
-            kv_cache_config,
-            _make_vllm_config(3, 1),
-        )
-
-
-@pytest.mark.parametrize("offset", [0, 64])
-def test_standardized_multi_layer_descriptor_becomes_private_reuse_slots(offset):
-    names = [f"model.layers.{i}.self_attn" for i in range(4)]
-    spec = _make_full_attention_spec()
-    num_blocks = 3
-    layer_size = num_blocks * spec.page_size_bytes
-    config = SimpleNamespace(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=offset + len(names) * layer_size,
-                layers=names,
-                layer_stride=layer_size,
-                block_stride=spec.page_size_bytes,
-                offset=offset,
-            )
-        ],
-        kv_cache_groups=[SimpleNamespace(layer_names=names, kv_cache_spec=spec)],
-    )
-
-    apply_layerwise_kv_cache_plan(config, _make_vllm_config(4, 1))
-
-    assert [tensor.layers for tensor in config.kv_cache_tensors] == [names[:1], names[1:]]
-    assert sum(tensor.size for tensor in config.kv_cache_tensors) == 2 * layer_size
-    assert all(
-        tensor.size == layer_size
-        and tensor.layer_stride == tensor.offset == 0
-        and tensor.block_stride == spec.page_size_bytes
-        for tensor in config.kv_cache_tensors
-    )
-
-
-def test_out_of_bounds_contiguous_descriptor_is_rejected():
-    names = [f"model.layers.{i}.self_attn" for i in range(3)]
-    spec = _make_full_attention_spec()
-    config = SimpleNamespace(
-        num_blocks=1,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * spec.page_size_bytes,
-                layers=names,
-                layer_stride=spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
-            )
-        ],
-        kv_cache_groups=[SimpleNamespace(layer_names=names, kv_cache_spec=spec)],
-    )
-    with pytest.raises(ValueError, match="exceeds its backing allocation"):
-        apply_layerwise_kv_cache_plan(config, _make_vllm_config(3, 1))
-
-
-@pytest.mark.parametrize("c8_first", [False, True])
-def test_mixed_indexers_share_max_capacity_without_changing_reuse_order(c8_first):
-    main = _make_full_attention_spec()
-    bf16 = AscendSFAIndexerCacheSpec(block_size=2, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    c8 = AscendSFAIndexerCacheSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.int8,
-        scale_dim=1,
-        scale_dtype=torch.float16,
-        cache_sparse_li_c8=True,
-    )
-    names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
-    indexers = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
-    specs = dict.fromkeys(names, main)
-    specs.update(zip(indexers, (c8, bf16) if c8_first else (bf16, c8)))
-    config = SimpleNamespace(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * spec.page_size_bytes,
-                layers=[name],
-                layer_stride=0,
-                block_stride=spec.page_size_bytes,
-                offset=0,
-            )
-            for name, spec in specs.items()
-        ],
-        kv_cache_groups=[
-            SimpleNamespace(
-                layer_names=list(specs),
-                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
-            )
-        ],
-    )
-    layout = build_layerwise_reuse_layout(specs, 5, {"layerwise_num_shared_buffers": 1})
-    assert layout.prefetch_layer_map == {2: 1, 3: 2, 4: 3}
-    apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
-    assert len(config.kv_cache_tensors) == 3  # independent main, shared main, shared indexer
-    shared = next(t for t in config.kv_cache_tensors if t.layers == indexers)
-    assert shared.size == 2 * bf16.page_size_bytes
-    assert shared.layer_stride == 0
-    assert specs[indexers[0]] is (c8 if c8_first else bf16)
-
-
-def _make_generic_indexer_descriptors(replication=1, quantized=True):
-    main = _make_full_attention_spec()
-    indexer = AscendSFAIndexerCacheSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.int8 if quantized else torch.bfloat16,
-        scale_dim=1 if quantized else 0,
-        scale_dtype=torch.float16,
-        cache_sparse_li_c8=quantized,
-        sfa_dcp_replicated_indexer_size=replication,
-    )
-    names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
-    indexer_names = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
-    specs = dict.fromkeys(names, main)
-    specs.update(dict.fromkeys(indexer_names, indexer))
-    num_blocks = 3
-    tensors = []
-    for spec, layers in [(main, names), (indexer, indexer_names)]:
-        layer_stride, block_stride, _, _, _ = compute_layout_strides(
-            spec,
-            num_blocks,
-            len(layers),
-            KVCacheLayout.LBNHC,
-        )
-        tensors.append(
-            KVCacheTensor(
-                size=num_blocks * len(layers) * spec.page_size_bytes,
-                layers=layers,
-                layer_stride=layer_stride,
-                block_stride=block_stride,
-                offset=0,
-            )
-        )
-    return (
-        SimpleNamespace(
-            num_blocks=num_blocks,
-            kv_cache_tensors=tensors,
-            kv_cache_groups=[
-                SimpleNamespace(
-                    layer_names=list(specs),
-                    kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
-                )
-            ],
-        ),
-        indexer,
-        indexer_names,
-    )
-
-
-@pytest.mark.parametrize("replication", [1, 2])
-@pytest.mark.parametrize("quantized", [False, True])
-def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(replication, quantized):
-    config, spec, names = _make_generic_indexer_descriptors(replication, quantized)
-    original = config.kv_cache_tensors[-1]
-    # Stored rows include scale bytes and all replicated indexer regions.
-    content_bytes = replication * (130 if quantized else 256)
-    assert spec.state_content_size_bytes == content_bytes
-    assert original.block_stride == spec.block_size * content_bytes
-    assert spec.page_size_bytes == spec.block_size * replication * (130 if quantized else 256)
-
-    apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
-
-    shared = next(t for t in config.kv_cache_tensors if t.layers == names)
-    assert shared.size == config.num_blocks * spec.page_size_bytes
-    assert shared.block_stride == spec.page_size_bytes
-    assert shared.layer_stride == shared.offset == 0
-    assert spec.state_content_size_bytes == content_bytes
-    assert original.block_stride == spec.block_size * content_bytes
-
-
-@pytest.mark.parametrize("reuse_disabled", [True, False])
-def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
-    config, spec, _ = _make_generic_indexer_descriptors(replication=2)
-    original = config.kv_cache_tensors
-    vllm_config = _make_vllm_config(5, 5)
-    if reuse_disabled:
-        vllm_config.kv_transfer_config = None
-
-    apply_layerwise_kv_cache_plan(config, vllm_config)
-
-    assert config.kv_cache_tensors is original
-    assert spec.state_content_size_bytes == 2 * 130
-    assert original[-1].block_stride == 2 * 2 * 130
-
-
-def test_reuse_rejects_unknown_indexer_stride():
-    config, _, _ = _make_generic_indexer_descriptors()
-    config.kv_cache_tensors[-1].block_stride += 1
-    with pytest.raises(NotImplementedError, match="contiguous per-layer pages"):
-        apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
-
-
-def test_reuse_rejects_out_of_bounds_generic_indexer_descriptor():
-    config, _, _ = _make_generic_indexer_descriptors()
-    config.kv_cache_tensors[-1].offset = config.kv_cache_tensors[-1].size - 1
-    with pytest.raises(ValueError, match="exceeds its backing allocation"):
-        apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"size": 1}, "exceeds its backing"),
+        ({"block_stride": 0}, "positive block strides"),
+        ({"offset": 1}, "is not aligned"),
+    ],
+)
+def test_invalid_native_view_is_rejected(changes, message):
+    names = [f"model.layers.{index}.attn" for index in range(3)]
+    config = _native_config([KVCacheGroupSpec(names, _attention_spec(torch.float16))])
+    config.kv_cache_tensors[-1] = replace(config.kv_cache_tensors[-1], **changes)
+    with pytest.raises(ValueError, match=message):
+        _plan(config, _runtime(3, 1), {FullAttentionSpec: True})

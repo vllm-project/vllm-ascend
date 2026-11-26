@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, sentinel
 
 import pytest
 import torch
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -16,24 +16,26 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
+from vllm_ascend._310p.attention.gdn_attn_builder_310 import (
     AscendGDNAttentionBackend310,
     GDNAttentionMetadataBuilder310,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.ops import gdn as ascend_gdn
-from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention import gdn as ascend_gdn
+from vllm_ascend.attention import gdn_attn_builder as ascend_gdn_attn_builder
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
+from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
+from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -199,6 +201,7 @@ def _make_vllm_config(
     if num_speculative_tokens > 0:
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
             enable_adaptive_verification=enable_adaptive_verification,
             use_eagle_block_drop=lambda: False,
@@ -220,7 +223,7 @@ def _make_vllm_config(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
         ),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
             tensor_parallel_size=1,
@@ -228,6 +231,123 @@ def _make_vllm_config(
         model_config=model_config,
         additional_config=None,
     )
+
+
+@pytest.mark.parametrize("pcp_size", [2, 8, 32])
+@pytest.mark.parametrize("num_spec", [0, 5])
+def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
+    config = _make_vllm_config(
+        max_num_seqs=32, num_speculative_tokens=num_spec, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+    )
+    config.use_v2_model_runner = True
+    config.cache_config.use_kda_recoverssm = True
+    config.model_config.hf_text_config.index_kpool = 4
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    query_len = num_spec + 1
+    local_tokens = 2 * query_len
+    config.compilation_config.max_cudagraph_capture_size = local_tokens
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    # Both GLM builders share capacity preparation; cover the full matrix once.
+    builder = Glm5NextGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    global_reqs = min(2 * pcp_size, config.scheduler_config.max_num_seqs)
+    global_tokens = global_reqs * query_len
+    assert builder.decode_cudagraph_max_bs == global_tokens
+    assert builder.spec_state_indices_tensor.shape[0] >= global_reqs
+    assert builder.non_spec_state_indices_tensor.numel() >= global_reqs
+    assert builder.spec_query_start_loc.numel() >= global_reqs + 1
+    assert builder.non_spec_query_start_loc.numel() >= global_reqs + 1
+    assert builder.num_accepted_tokens.numel() >= global_reqs
+    assert builder.spec_token_indx.numel() >= global_tokens
+    assert builder.non_spec_token_indx.numel() >= global_tokens
+    assert config.compilation_config.max_cudagraph_capture_size == local_tokens
+    query_start = torch.arange(global_reqs + 1, dtype=torch.int32) * query_len
+    common = SimpleNamespace(
+        num_reqs=global_reqs,
+        num_actual_tokens=global_tokens,
+        query_start_loc=query_start,
+        query_start_loc_cpu=query_start.clone(),
+    )
+    # Exercise upstream's real capture-capacity assertion and draft metadata.
+    # Kernel-specific metadata construction is covered by the build tests.
+    with patch.object(builder, "build", return_value=sentinel.metadata) as build:
+        assert builder.build_for_cudagraph_capture(common) is sentinel.metadata
+    torch.testing.assert_close(build.call_args.args[2], torch.full((global_reqs,), query_len, dtype=torch.int32))
+    torch.testing.assert_close(build.call_args.args[3], torch.full((global_reqs,), num_spec, dtype=torch.int32))
+
+
+@pytest.mark.parametrize("capture_limit", [4, None])
+def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
+    config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    config.use_v2_model_runner = True
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.compilation_config.max_cudagraph_capture_size = capture_limit
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    builder = AscendGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    assert builder.vllm_config is config
+    assert builder.decode_cudagraph_max_bs == (16 if capture_limit is None else capture_limit)
+
+
+@pytest.mark.parametrize("excluded", ["pcp1", "dcp", "eager", "unbounded"])
+def test_glm_global_capture_capacity_respects_configuration(excluded):
+    config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    config.cache_config.use_kda_recoverssm = True
+    config.model_config.hf_text_config.index_kpool = 4
+    config.parallel_config.prefill_context_parallel_size = 1 if excluded == "pcp1" else 8
+    config.parallel_config.decode_context_parallel_size = 4 if excluded == "dcp" else 1
+    config.compilation_config.max_cudagraph_capture_size = None if excluded == "unbounded" else 4
+    if excluded == "eager":
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    builder = Glm5NextGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    if excluded != "unbounded":
+        assert builder.vllm_config is config
+    assert config.compilation_config.max_cudagraph_capture_size == (None if excluded == "unbounded" else 4)
+    expected_capacity = 16 if excluded == "unbounded" else 4
+    assert builder.decode_cudagraph_max_bs == expected_capacity
+
+
+@pytest.mark.parametrize("builder_cls", [Glm5NextGDNHostMetadataBuilder, Glm5NextRecoverSSMMetadataBuilder])
+def test_glm_pcp2_mtp5_capture_exceeds_local_limit(builder_cls):
+    config = _make_vllm_config(
+        max_num_seqs=128, num_speculative_tokens=5, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+    )
+    config.use_v2_model_runner = True
+    config.cache_config.use_kda_recoverssm = True
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.compilation_config.max_cudagraph_capture_size = 256
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    # 42 requests * 6 tokens locally; PCP2 restores 84 requests / 504 tokens.
+    query_start = torch.arange(85, dtype=torch.int32) * 6
+    common = SimpleNamespace(
+        num_reqs=84,
+        num_actual_tokens=504,
+        query_start_loc=query_start,
+        query_start_loc_cpu=query_start.clone(),
+    )
+    local_builder = AscendGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    with pytest.raises(AssertionError, match="GDN only supports decode-only"):
+        local_builder.build_for_cudagraph_capture(common)
+    builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+    with patch.object(builder, "build", return_value=sentinel.metadata):
+        assert builder.build_for_cudagraph_capture(common) is sentinel.metadata
+    assert builder.decode_cudagraph_max_bs == 512
+    assert config.compilation_config.max_cudagraph_capture_size == 256
+
+
+def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
+    config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    config.use_v2_model_runner = True
+    config.cache_config.use_kda_recoverssm = True
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.compilation_config.max_cudagraph_capture_size = 4
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    with patch("vllm_ascend.ops.recurrent_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
+        builder = AscendKimiKDARecoverSSMMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    assert builder.decode_cudagraph_max_bs == 8
+    assert config.compilation_config.max_cudagraph_capture_size == 4
+    assert builder.pcp_rank == 1
+    assert builder._pcp_restore_idx.numel() == 2 * config.scheduler_config.max_num_batched_tokens
+    assert not hasattr(builder, "_pcp_gather_indices")
 
 
 def _make_builder(
@@ -380,7 +500,7 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
-    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBackend
 
     fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
     kimi_attention = SimpleNamespace(use_recoverssm=False)
@@ -404,13 +524,13 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     ],
 )
 def test_host_backend_selects_recoverssm_only_for_opted_in_glm(model_type, enabled, recover):
-    from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+    from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
 
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
         cache_config=SimpleNamespace(use_replayssm=enabled, use_kda_recoverssm=False),
     )
-    expected = AscendKDARecoverSSMMetadataBuilder if recover else AscendGDNHostMetadataBuilder
+    expected = Glm5NextRecoverSSMMetadataBuilder if recover else AscendGDNHostMetadataBuilder
     with set_current_vllm_config(config):
         assert AscendGDNHostMetadataBackend.get_builder_cls() is expected
         assert not config.cache_config.use_kda_recoverssm

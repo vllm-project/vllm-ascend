@@ -32,8 +32,10 @@ class Store:
 
     def batch_get_key_info(self, keys, **kwargs):
         self.queries.extend(keys)
-        assert all(key in self.committed for key in keys), keys
-        return [SimpleNamespace(size=lambda: 4096, gva_list=lambda k=k: [self.data[k]]) for k in keys]
+        return [
+            SimpleNamespace(size=lambda: 4096, gva_list=lambda k=k: [self.data[k]]) if k in self.committed else None
+            for k in keys
+        ]
 
     def batch_add_lease(self, keys, ttl):
         assert all(key in self.committed for key in keys)
@@ -45,17 +47,22 @@ def worker():
     w.use_layerwise = w.use_layerwise_transfer = w.layerwise_offload = True
     w.use_block_key_layerwise = False
     w.tp_size = 16
-    w.kv_role, w.consumer_is_to_put = "kv_producer", False
+    w.kv_role, w.save_decode_cache = "kv_producer", False
     w.can_put = True
     w.num_kv_cache_groups, w.num_layers = 1, 2
     w.grouped_block_size, w.hash_block_size = [128], 128
     w.group_uses_align_state = [False]
     w.cacheable_group_ids = {0}
-    w.independent_layers = [0]
+    w.cache_coordinator = None
+    w._reused_layers_by_group = {0: {1}}
+    w._snapshot_keys = {}
     w._is_layerwise_save_owner = lambda group: True
     w._global_group_alloc_size = lambda group: 4096
     w._compute_reachable_load_masks = lambda request, cached: None
     w._make_layerwise_full_key = lambda group, key: "full:" + key
+    w.layerwise_keys = SimpleNamespace(make_full_key=lambda group, key, *ranks: "full:" + key)
+    w.metadata = [SimpleNamespace(head_or_tp_rank=0)]
+    w.pp_rank = w.pcp_rank = w.dcp_rank = 0
     w._make_layerwise_partial_key = lambda r, group, block, end: f"{r.req_id}:snapshot:{block}:{end}"
     w._invalid_block_ids, w._invalid_block_ids_lock = set(), threading.Lock()
     w._save_disabled = threading.Event()
@@ -81,9 +88,6 @@ def step(tracker, target, hashes, cached=None):
             kvpool_cached_tokens=cached,
             can_load=True,
             layerwise_previous_step=True,
-            layerwise_snapshot_end_token=tracker.last_layerwise_snapshot_end_token,
-            layerwise_snapshot_block_index=tracker.last_layerwise_snapshot_block_index,
-            layerwise_snapshot_start_block=tracker.last_layerwise_snapshot_start_block,
         )
     )
     tracker.token_len = target
@@ -122,15 +126,17 @@ class SnapshotTests(unittest.TestCase):
         saved = save(w, m)
         self.assertEqual(set(saved), {0, 1})
         self.assertEqual(t.num_saved_tokens, 0)
-        self.assertEqual(t.last_layerwise_snapshot_start_block, 0)
+        self.assertEqual(set(w._snapshot_keys[t.req_id][0]), {0, 1})
         reset(w)
         m = step(t, 131, ["h0"], 129)
         w._data_plane._prepare_load_gvas([m])
         w._process_load_for_layer_batch([m], 1)
         self.assertEqual(transferred(w, False), saved)
-        self.assertNotIn("full:h0", w.m_store.queries)
+        self.assertIn("full:h0", w.m_store.queries)
+        self.assertIn(w._snapshot_keys[t.req_id][0][0], w.m_store.queries)
         save(w, m)
         self.assertIn("full:h0", w.m_store.committed)
+        self.assertNotIn(0, w._snapshot_keys[t.req_id][0])
         self.assertEqual(t.num_saved_tokens, 128)
         reset(w)
         m = step(t, 133, ["h0"], 131)
@@ -139,22 +145,19 @@ class SnapshotTests(unittest.TestCase):
         save(w, m)
         self.assertNotIn("full:h0", m.save_keys)
 
-    def test_multiblock_snapshot_and_rollback(self):
+    def test_multiblock_snapshot_restores_the_previous_prefill_extent(self):
         for end in (128, 129, 256, 385):
-            for cached in (127, 128, end):
-                if cached > end:
-                    continue
-                with self.subTest(end=end, cached=cached):
-                    w = worker()
-                    t = RequestTracker("r", 0, allocated_block_ids_by_group=[[0, 1, 2, 3]])
-                    saved = save(w, step(t, end, []))
-                    self.assertEqual(set(saved), set(range((end + 127) // 128)))
-                    reset(w)
-                    m = step(t, cached + 2, ["h" + str(i) for i in range(cached // 128)], cached)
-                    w._data_plane._prepare_load_gvas([m])
-                    w._process_load_for_layer_batch([m], 1)
-                    self.assertEqual(transferred(w, False), {i: saved[i] for i in range((cached + 127) // 128)})
-                    self.assertFalse(w._invalid_block_ids)
+            with self.subTest(end=end):
+                w = worker()
+                t = RequestTracker("r", 0, allocated_block_ids_by_group=[[0, 1, 2, 3]])
+                saved = save(w, step(t, end, []))
+                self.assertEqual(set(saved), set(range((end + 127) // 128)))
+                reset(w)
+                m = step(t, end + 2, ["h" + str(i) for i in range(end // 128)], end)
+                w._data_plane._prepare_load_gvas([m])
+                w._process_load_for_layer_batch([m], 1)
+                self.assertEqual(transferred(w, False), saved)
+                self.assertFalse(w._invalid_block_ids)
 
     def test_known_hash_boundaries_and_prefill(self):
         for end in (128, 129, 8192):
@@ -165,7 +168,7 @@ class SnapshotTests(unittest.TestCase):
                 saved = save(w, m)
                 self.assertEqual(len(saved), (end + 127) // 128)
                 self.assertEqual(t.num_saved_tokens, end // 128 * 128)
-                self.assertEqual(t.last_layerwise_snapshot_start_block, end // 128 if end % 128 else None)
+                self.assertEqual(set(w._snapshot_keys[t.req_id][0]), {end // 128} if end % 128 else set())
 
     def test_external_hit_is_not_previous_snapshot(self):
         w = worker()
@@ -229,16 +232,13 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(bool(m.load_keys), recover)
 
     def test_other_data_planes_keep_their_save_range(self):
-        legacy = LoadSpec(1, 1, True, None, 0, 7, 0, True)
-        self.assertTrue(legacy.layerwise_previous_step)
-        self.assertIsNone(legacy.layerwise_snapshot_start_block)
         w = worker()
         m = ReqMeta("r", target_token_len=385, save_end_token=128)
         w.use_layerwise_transfer = False
-        self.assertEqual(w._layerwise_save_full_end(m, 0, 128, 3), 1)
+        self.assertEqual(w._layerwise_save_full_end(m, 128, 3), 1)
         w.use_layerwise_transfer = True
-        w.group_uses_align_state = [True]
-        self.assertEqual(w._layerwise_save_full_end(m, 0, 128, 3), 1)
+        w.layerwise_offload = False
+        self.assertEqual(w._layerwise_save_full_end(m, 128, 3), 1)
 
 
 if __name__ == "__main__":

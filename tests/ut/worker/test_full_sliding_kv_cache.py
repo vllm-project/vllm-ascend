@@ -80,17 +80,15 @@ def test_partial_model_configs_keep_existing_path(config):
     assert not can_share_full_and_sliding_kv_cache(config, _specs(_cache_config()).values())
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("sliding_groups", [4, 5])
 @pytest.mark.parametrize("supports_shared", [False, True])
 @pytest.mark.parametrize("model_type", ["gemma4_text", "other_full_sliding_model", "step3p5", "step3p7"])
-def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared, model_type, use_v2):
+def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared, model_type):
     config = _config()
     config.model_config.hf_text_config.model_type = model_type
     cache = _cache_config(sliding_groups)
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
     worker.vllm_config = config
-    worker.use_v2_model_runner = use_v2
     worker.model_config = config.model_config
     worker.get_kv_cache_spec = lambda: _specs(cache)
     worker.model_runner = SimpleNamespace(
@@ -99,20 +97,17 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
     # Divisible by both five and six; the unsupported runner must retain scaling.
     available = 60 * cache.kv_cache_tensors[0].size
-    shares_pool = supports_shared and (model_type in ("step3p5", "step3p7") or (use_v2 and model_type == "gemma4_text"))
+    shares_pool = supports_shared and model_type in ("step3p5", "step3p7", "gemma4_text")
     expected = available if shares_pool else available // (sliding_groups + 1)
     assert worker._scale_kv_cache_memory_for_multi_group(available) == expected
 
 
 @pytest.mark.parametrize("budget_source", ["profiled", "explicit", "startup_plan"])
-@pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize(
     "model_type,sliding_groups",
     [("gemma3_text", 5), ("gemma4_text", 5), ("step3p5", 5), ("step3p7", 5), ("gemma3_text", 0)],
 )
-def test_memory_budget_sources_preserve_physical_capacity(
-    monkeypatch, budget_source, use_v2, model_type, sliding_groups
-):
+def test_memory_budget_sources_preserve_physical_capacity(monkeypatch, budget_source, model_type, sliding_groups):
     config = _config()
     config.model_config.hf_text_config.model_type = model_type
     cache = _cache_config(sliding_groups)
@@ -123,7 +118,6 @@ def test_memory_budget_sources_preserve_physical_capacity(
     worker.vllm_config = config
     worker.model_config = config.model_config
     worker.cache_config = config.cache_config
-    worker.use_v2_model_runner = use_v2
     worker.device = torch.device("cpu")
     worker.init_snapshot = SimpleNamespace(free_memory=2 * available)
     worker.requested_memory = available + 3
@@ -155,11 +149,10 @@ def test_memory_budget_sources_preserve_physical_capacity(
     monkeypatch.setattr(worker_module.envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
     monkeypatch.setattr(worker_module.torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 1})
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
-    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _, *, vllm_config: None)
 
     result = worker.determine_available_memory()
 
-    shares_pool = model_type in ("step3p5", "step3p7") or (use_v2 and model_type == "gemma4_text")
+    shares_pool = model_type in ("step3p5", "step3p7", "gemma4_text")
     expected = available if shares_pool else available // (sliding_groups + 1)
     assert result == expected
     assert worker.available_kv_cache_memory_bytes == expected
@@ -178,6 +171,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
@@ -189,7 +183,6 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
     raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))

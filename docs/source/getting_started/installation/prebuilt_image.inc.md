@@ -2,7 +2,7 @@
 
     <span id="installation-prebuilt-image"></span>
 
-    The host needs only a working Ascend driver and firmware, plus Docker. The image includes the CANN user-space environment, PyTorch/TorchNPU, vLLM, and vLLM Ascend.
+    The host needs a working Ascend driver and firmware, plus Docker and [Ascend Docker Runtime](#installation-ascend-docker-runtime). The image includes the CANN user-space environment, PyTorch/TorchNPU, vLLM, and vLLM Ascend.
 
     Choose an official image for the fastest setup, or build an image manually when you need to customize it.
 
@@ -16,12 +16,12 @@
 
             | Image name | Hardware | OS |
             | --- | --- | --- |
-            | `vllm-ascend:{{ vllm_ascend_version }}` | Ascend A2 series products | Ubuntu |
-            | `vllm-ascend:{{ vllm_ascend_version }}-openeuler` | Ascend A2 series products | openEuler |
-            | `vllm-ascend:{{ vllm_ascend_version }}-a3` | Ascend A3 series products | Ubuntu |
-            | `vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler` | Ascend A3 series products | openEuler |
-            | `vllm-ascend:{{ vllm_ascend_version }}-310p` | Atlas 300I DUO / Atlas 200I Pro | Ubuntu |
-            | `vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` | Atlas 300I DUO / Atlas 200I Pro | openEuler |
+            | `vllm-ascend:{{ vllm_ascend_version }}` | Atlas A2 Products | Ubuntu |
+            | `vllm-ascend:{{ vllm_ascend_version }}-openeuler` | Atlas A2 Products | openEuler |
+            | `vllm-ascend:{{ vllm_ascend_version }}-a3` | Atlas A3 Products | Ubuntu |
+            | `vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler` | Atlas A3 Products | openEuler |
+            | `vllm-ascend:{{ vllm_ascend_version }}-310p` | Atlas 300I Duo / Atlas 200I Pro | Ubuntu |
+            | `vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` | Atlas 300I Duo / Atlas 200I Pro | openEuler |
             | `vllm-ascend:{{ vllm_ascend_version }}-a5` | 950DT Products | Ubuntu |
             | `vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler` | 950DT Products | openEuler |
 
@@ -49,7 +49,7 @@
 
         <span id="installation-prebuilt-image-build"></span>
 
-        Run the command for your hardware and operating system:
+        Run the command for your hardware and operating system to build the image, then start a container from the built image and verify the environment.
 
         === "A2"
 
@@ -91,7 +91,7 @@
                 docker build -t vllm-ascend-dev:latest -f Dockerfile.a3.openEuler .
                 ```
 
-        === "Atlas 300I DUO / Atlas 200I Pro"
+        === "Atlas 300I Duo / Atlas 200I Pro"
 
             === "Ubuntu"
 

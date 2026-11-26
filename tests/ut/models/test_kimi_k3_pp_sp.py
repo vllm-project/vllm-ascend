@@ -19,6 +19,13 @@ from torch import nn
 
 ROOT = Path(__file__).resolve().parents[3]
 
+_pp_state = threading.local()
+
+
+def _pp_group():
+    # CPU stand-in for the release mixin's get_pp_group in BaseModel below.
+    return getattr(_pp_state, "pp", SimpleNamespace(is_first_rank=True, is_last_rank=True))
+
 
 def _keep_definition(item, allowed):
     if getattr(item, "name", None) in allowed:
@@ -62,9 +69,8 @@ class IntermediateTensors:
         return IntermediateTensors({name: torch.empty_like(tensor) for name, tensor in tensors.tensors.items()})
 
 
-def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runner_v2=False):
+def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM"):
     return SimpleNamespace(
-        use_v2_model_runner=runner_v2,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
@@ -78,10 +84,30 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
 
 
 class BaseModel(nn.Module):
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+    _aux_slot_base_cached = 0
+    _aux_upstream_total_cached = 0
+
     def _cache_aux_pp_layout(self):
-        # Upstream EagleModelMixin caches post-layer aux slots with <= start.
-        self._aux_slot_base_cached = bisect_right(self.aux_hidden_state_layers, self.start_layer)
-        self._aux_upstream_total_cached = self._aux_slot_base_cached
+        # Upstream EagleModelMixin caches post-layer aux slots with <= start;
+        # middle stages do not collect them - the runner relays the payload.
+        pp = _pp_group()
+        if not pp.is_first_rank:
+            self._aux_slot_base_cached = bisect_right(self.aux_hidden_state_layers, self.start_layer)
+        if pp.is_last_rank:
+            self._aux_upstream_total_cached = self._aux_slot_base_cached
+
+    def pack_local_aux_hidden_states(self, aux_hidden_states):
+        # v0.34.0 carries the cumulative aux payload through the PP tensors.
+        if not aux_hidden_states:
+            return {}
+        base = self._aux_slot_base_cached
+        return {f"{self.AUX_HIDDEN_STATE_KEY}{base + i}": t for i, t in enumerate(aux_hidden_states)}
+
+    def collect_remote_aux_hidden_states(self, intermediate_tensors):
+        if self._aux_upstream_total_cached == 0:
+            return []
+        return [intermediate_tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] for i in range(self._aux_upstream_total_cached)]
 
     def _maybe_add_hidden_state(self, states, layer_idx, hidden, residual):
         if layer_idx in self.aux_hidden_state_layers:
@@ -203,6 +229,8 @@ def runtime(monkeypatch):
     context = threading.local()
     context.rank = 0
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    # BaseModel above models the release's cumulative aux protocol.
+    # Native main's centralized relay is covered separately with its real mixin/PPHandler.
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -224,6 +252,9 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
+        # BaseModel models the cumulative release protocol, so the module
+        # takes its v0.34.0 path. The native fixture installs the real check.
+        "vllm_version_is": lambda _target: True,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -332,6 +363,87 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     return model
 
 
+@pytest.fixture
+def native_aux_runtime(runtime, monkeypatch):
+    # Keep the standalone CPU fixture importable without a vLLM installation;
+    # this additional fixture explicitly exercises the installed native ABI.
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.model_executor.models.interfaces import EagleModelMixin
+    from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+    from vllm_ascend.utils import vllm_version_is
+
+    namespace, context = runtime
+    # Exercise the installed ABI, so the module must see the real version.
+    namespace["vllm_version_is"] = vllm_version_is
+
+    class NativeBase(BaseModel, EagleModelMixin):
+        _cache_aux_pp_layout = EagleModelMixin._cache_aux_pp_layout
+        _set_aux_hidden_state_layers = EagleModelMixin._set_aux_hidden_state_layers
+        pack_local_aux_hidden_states = EagleModelMixin.pack_local_aux_hidden_states
+        # Bind the installed collector explicitly: BaseModel's stub shadows it
+        # through the MRO. main returns [] (the runner merges the upstream
+        # states); v0.34.0 returns the relayed upstream slots on the last rank.
+        collect_remote_aux_hidden_states = EagleModelMixin.collect_remote_aux_hidden_states
+        AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+
+    # vLLM main exposes the slot-key contract; v0.34.0 relays the cumulative
+    # payload through the mixin's collect_remote_aux_hidden_states instead.
+    if hasattr(EagleModelMixin, "aux_hidden_state_slot_keys"):
+        NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
+    namespace.update(BaseModel=NativeBase)
+    load_definitions(
+        "vllm_ascend/models/kimi_k3/kimi_k3.py",
+        {"AscendKimiLinearModel"},
+        namespace,
+        bases={"AscendKimiLinearModel": "BaseModel"},
+        methods={
+            "AscendKimiLinearModel": {
+                "__init__",
+                "forward",
+                "_cache_aux_pp_layout",
+                "make_empty_intermediate_tensors",
+                "aux_hidden_state_slot_keys",
+            }
+        },
+    )
+
+    def pp_group():
+        if not hasattr(context.pp, "world_size"):
+            context.pp.world_size = 3
+        return context.pp
+
+    namespace["get_pp_group"] = pp_group
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state, "get_pp_group", pp_group)
+    model_cls = namespace["AscendKimiLinearModel"]
+    forward = model_cls.forward
+
+    def forward_with_runner(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
+        self._cache_aux_pp_layout()
+        handler = SimpleNamespace()
+        PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=self))
+        output = forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
+        if not context.pp.is_last_rank:
+            return PPHandler.relay_aux_hidden_states(handler, intermediate_tensors, output)
+        if hasattr(PPHandler, "add_upstream_aux_hidden_states"):
+            # vLLM main merges the earlier stages' slots in the runner.
+            return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
+        # v0.34.0 already collects them through the model's forward.
+        return output
+
+    model_cls.forward = forward_with_runner
+    return namespace, context
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("sp", [False, True])
+@pytest.mark.parametrize("tp,num_tokens", [(2, 3), (16, 8)])
+@pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5), (0, 2, 2, 5), (0, 2, 5, 5)])
+def test_native_aux_relay_preserves_pipeline_shards(native_aux_runtime, materialized, sp, tp, num_tokens, cuts):
+    test_pipeline_shards_match_unsplit_model(native_aux_runtime, materialized, sp, tp, num_tokens, cuts)
+
+
 @pytest.mark.parametrize("materialized", [False, True])
 @pytest.mark.parametrize("sp", [False, True])
 @pytest.mark.parametrize("tp,num_tokens", [(2, 8), (2, 3), (16, 8)])
@@ -363,6 +475,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         intermediate = None
         for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
             context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2)
+            _pp_state.pp = context.pp
             context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
             model = make_model(namespace, context, start, end, block_size, sp, materialized)
             if intermediate is not None:
@@ -371,7 +484,10 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 buffers = model.make_empty_intermediate_tensors(capacity, dtype, "cpu")
                 assert buffers.tensors.keys() == intermediate.tensors.keys()
                 assert model._aux_slot_base_cached == len(intermediate.tensors) - 2
-                if context.pp.is_last_rank:
+                if context.pp.is_last_rank and namespace["vllm_version_is"]("0.34.0"):
+                    # v0.34.0's mixin totals the upstream slots on the last rank;
+                    # main merges the upstream slots in the runner instead, so
+                    # BaseModel's zero placeholder must not be asserted there.
                     assert model._aux_upstream_total_cached == len(intermediate.tensors) - 2
                 # Boundary tensors are full-sequence replicas under the
                 # stage-boundary gather contract.
@@ -393,6 +509,14 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 assert not context.forward.is_padding.any()
             if context.pp.is_last_rank:
                 return output
+            if intermediate is not None:
+                # The runner relays the received upstream slots into the
+                # outgoing payload (PPHandler.relay_aux_hidden_states); the
+                # native fixture already relays inside its runner hook, so
+                # merge only what is still missing to keep the payload
+                # cumulative across the hop.
+                relayed = {k: v for k, v in intermediate.tensors.items() if k not in output.tensors}
+                output = IntermediateTensors({**relayed, **output.tensors})
             intermediate = output
 
     with ThreadPoolExecutor(max_workers=tp) as pool:
@@ -407,7 +531,6 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
 
 
 @pytest.mark.parametrize("stage", range(4))
-@pytest.mark.parametrize("runner_v2", [False, True])
 @pytest.mark.parametrize(
     "draft_type,draft_arch,materialized",
     [
@@ -417,11 +540,11 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         (None, None, False),
     ],
 )
-def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draft_type, draft_arch, materialized):
+def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, draft_arch, materialized):
     namespace, context = runtime
     context.tp = 2
     context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
-    cfg = config(tp=2, pp=4, runner_v2=runner_v2)
+    cfg = config(tp=2, pp=4)
     cfg.model_config.hf_text_config = SimpleNamespace(
         vocab_size=16,
         hidden_size=3,
@@ -451,7 +574,7 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draf
     namespace["AscendKimiLinearModel"].dspark_aux_capture_materialized = False
     model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
     assert model.dspark_aux_capture_materialized is materialized
-    assert model.use_sequence_parallel is runner_v2
+    assert model.use_sequence_parallel is True
 
 
 @pytest.mark.parametrize("owns_embed", [False, True])

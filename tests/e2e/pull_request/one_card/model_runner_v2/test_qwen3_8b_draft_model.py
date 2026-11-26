@@ -14,8 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import os
-from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
@@ -30,7 +28,6 @@ MIN_ACCEPTED_DRAFT_TOKENS_PER_ROUND = 0.1
 
 
 @pytest.mark.e2e_model(MODEL)
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_plain_draft_model_spec_decoding() -> None:
     """Smoke-test plain draft-model speculative decoding on ModelRunner V2."""

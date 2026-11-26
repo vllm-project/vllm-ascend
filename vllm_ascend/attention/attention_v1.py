@@ -45,12 +45,10 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
-    is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -88,26 +86,17 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-
-            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-
-            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @classmethod
     def supports_pcp(cls) -> bool:
-        # vLLM checks this capability before any instance-level PCP dispatch.
-        # The main backend owns both the ordinary GQA implementation and its
-        # DCP specialization. Keep derived backends such as 310P and C8 opted
-        # out unless they declare support themselves.
+        # vLLM checks this capability before instance-level PCP dispatch.
+        # Enable PCP for this concrete GQA backend only. Subclasses must
+        # explicitly declare their own PCP support.
         return cls is AscendAttentionBackend
 
     @staticmethod
@@ -306,24 +295,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             treat_short_extends_as_decodes=not self.use_pcp,
         )
 
-    def _build_backend_metadata(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        *,
-        block_table: torch.Tensor,
-        query_lens: torch.Tensor,
-        seq_lens: torch.Tensor,
-        num_decodes: int,
-        num_prefills: int,
-    ) -> dict[str, Any]:
-        """Extension point for layouts such as DCP.
-
-        The base builder owns common token classification, padding, masks and
-        cache metadata. Specialized backends only add their phase-specific
-        metadata here.
-        """
-        return {}
-
     def build(
         self,
         common_prefix_len: int,
@@ -373,29 +344,26 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # (speculative) decode where one request spans several query tokens:
         # single-token decode never pads requests beyond the query start loc,
         # and prefill (including the EAGLE drafter's merged prefill) reuses the
-        # target's num_input_tokens while its own query is shorter. Only the V2
-        # runner needs this: it applies the metadata to the FULL graph at every
-        # replay, while V1 bakes actual_seq_lengths_q into the captured graph
-        # (and trims the query to its last entry), so padding there only changes
-        # the captured graph. The V2 runner reports speculative decode as
+        # target's num_input_tokens while its own query is shorter. The V2
+        # runner applies the metadata to the FULL graph at every replay, so the
+        # padded tail must be reflected there. It reports speculative decode as
         # ChunkedPrefill, so decide from the per-request is_prefilling flags
         # (falling back to the state when they are unavailable).
-        if self.vllm_config.use_v2_model_runner:
-            is_prefilling = common_attn_metadata.is_prefilling
-            if is_prefilling is None:
-                decode_like = common_attn_metadata.attn_state in (
-                    AscendAttentionState.DecodeOnly,
-                    AscendAttentionState.SpecDecoding,
-                )
-            else:
-                decode_like = not bool(is_prefilling.any())
-            if (
-                decode_like
-                and (common_attn_metadata.max_query_len or 0) > 1
-                and actual_seq_lengths_q
-                and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
-            ):
-                actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
+        is_prefilling = common_attn_metadata.is_prefilling
+        if is_prefilling is None:
+            decode_like = common_attn_metadata.attn_state in (
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            )
+        else:
+            decode_like = not bool(is_prefilling.any())
+        if (
+            decode_like
+            and (common_attn_metadata.max_query_len or 0) > 1
+            and actual_seq_lengths_q
+            and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
+        ):
+            actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
@@ -431,14 +399,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        backend_metadata = self._build_backend_metadata(
-            common_attn_metadata,
-            block_table=block_table,
-            query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-            seq_lens=seq_lens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-        )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -458,7 +418,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
-            **backend_metadata,
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
@@ -600,7 +559,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

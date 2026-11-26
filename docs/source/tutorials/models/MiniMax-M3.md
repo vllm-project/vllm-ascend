@@ -45,6 +45,8 @@ For multi-node deployment, verify the communication environment by following [Ve
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 **Step 1:** Download the latest Docker image
@@ -66,34 +68,11 @@ Select the `docker run` command for your hardware platform:
 
     # Start the container with the variables defined above.
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     --name $NAME \
     --net=host \
     --shm-size=100g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
@@ -107,27 +86,12 @@ Select the `docker run` command for your hardware platform:
 
     # 950DT products have 8 NPUs and use Device UB.
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name $NAME \
     --net=host \
-    --privileged=true \
     --shm-size=60g \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hixlep:/etc/hixlep \
     -v /etc/hccn.conf:/etc/hccn.conf \
     -v /var/log/npu/:/usr/slog \
@@ -135,7 +99,7 @@ Select the `docker run` command for your hardware platform:
     -it $IMAGE bash
     ```
 
-Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
+Adjust data volume mounts (for example, model weights and datasets) according to your environment. The runtime mounts only devices that exist on the host, so the 950DT command needs no Atlas A3-only devices such as `/dev/devmm_svm`.
 
 In another terminal on the same host, check the container status (replace `minimax-m3-dev` if you changed `NAME`):
 
@@ -334,7 +298,15 @@ Text requests do not require `--limit-mm-per-prompt`, but omitting this flag doe
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
+Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, and `LOG_PATH` as described in Section 3.1.
+
+Before running either node's deployment command, define the following variables in its container shell. Use the same `NODE0_IP` and `NODE1_IP` values on both nodes, set to their reachable communication IPs. Set `NETWORK_INTERFACE` to the current node's communication NIC name (for example, `eth0`); HCCL and Gloo use it directly. The commands below derive `local_ip` and `node0_ip` from these variables.
+
+```bash
+export NODE0_IP="<NODE0_COMMUNICATION_IP>"
+export NODE1_IP="<NODE1_COMMUNICATION_IP>"
+export NETWORK_INTERFACE="<CURRENT_NODE_NIC>"
+```
 
 === "A3 series (BF16)"
 
@@ -633,7 +605,7 @@ if __name__ == "__main__":
         process.join()
 ```
 
-The templates use named environment variables instead of positional shell arguments. Replace the `<...>` IP, NIC and weight-path placeholders in each template, or export those variables in the shell before launching. The numeric defaults below describe one engine; `launch_online_dp.py` overrides the per-rank values when it starts all local engines. You do not need to calculate a different port or device list for every rank. When using the launcher, edit `export DP_SIZE=...`, `export TP_SIZE=...`, `export PP_SIZE=...` and the other values in the node-specific launch block; these take precedence over the `${VARIABLE:-default}` values in the template.
+The templates use named environment variables instead of positional shell arguments. Replace the `<...>` IP, NIC and weight-path placeholders in each template, or export those variables in the shell before launching. The numeric defaults below describe one engine; `launch_online_dp.py` overrides the per-rank values when it starts all local engines. You do not need to calculate a different port or device list for every rank. When using the launcher, edit `export DP_SIZE=…`, `export TP_SIZE=…`, `export PP_SIZE=…` and the other values in the node-specific launch block; these take precedence over the `${VARIABLE:-default}` values in the template.
 
 | Variable | Meaning | How it is set |
 | -------- | ------- | ------------- |
@@ -673,13 +645,13 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
 
     **1. Prefill node**
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
@@ -934,7 +906,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
-    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
+    To use MindIE Motor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
 === "950DT products"
 
@@ -1272,7 +1244,7 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
+- `--speculative-config '{"method":"eagle3", …}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
 
 **Decode node-specific configurations:**
 
@@ -1468,7 +1440,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     **1. Prefill node**
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
@@ -2660,11 +2632,11 @@ print(msg.content)                       # the final answer
 
 #### 5.6.2 Reasoning Parser
 
-The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
+The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>…</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
 
 ##### 5.6.2.1 Server Configuration
 
-The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
+The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>…</mm:think>` delimiters:
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2988,7 +2960,7 @@ Use the following adjustments as starting points for the target workload. Rechec
 | Scenario | Parameter | Example Adjustment | Tuning Goal |
 | --- | --- | --- | --- |
 | Device-memory-bound workloads where KV cache capacity limits concurrency | `HCCL_BUFFSIZE` | Reduce from `2048` to `1024` (MB). | Reduce HCCL communication-buffer memory usage to make more device memory available for KV cache and allow higher concurrency. |
-| Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
+| Short-input workloads, such as 4k input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
 

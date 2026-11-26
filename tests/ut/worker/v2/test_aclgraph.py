@@ -11,7 +11,6 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
     CudaGraphManager,
@@ -24,7 +23,7 @@ def _parent_init(
     vllm_config,
     device,
     cudagraph_mode,
-    decode_query_len,
+    decode_query_lens,
     lora_capture_cases=None,
     varlen_decode=False,
     **kwargs,
@@ -39,8 +38,6 @@ def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
 
 
 def _query_shape(query_len):
-    if vllm_version_is("0.33.0"):
-        return {"decode_query_len": query_len}
     return {"decode_query_lens": {query_len: 8}}
 
 
@@ -112,7 +109,6 @@ def test_init_draft_decode_graph():
     set_prefill.assert_not_called()
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Independent draft request grids require main's graph API")
 @pytest.mark.parametrize(
     "draft_moe,method,query_len,mode,limit,expected_max_requests",
     [
@@ -471,10 +467,10 @@ def test_graph_replay_updates_full_graph_params():
     )
 
 
-@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "GQA"), (True, "MLA")])
+@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "MLA")])
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_prefill):
-    """Build every draft step from the first metadata with one shared-source update."""
+def test_updatable_graph_replay_uses_param_source(use_dcp, architecture, is_prefill):
+    """Resolve the parameter source built for the current draft graph."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
     manager.is_draft_model_prefill = is_prefill
@@ -484,13 +480,12 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
     steps = [{"draft": object()} for _ in range(1 if is_prefill else 2)]
-    fia_params = [{"layer_name": "draft", "step": i} for i in range(len(steps))]
+    source = object()
     manager.speculator = SimpleNamespace(
         use_dcp=use_dcp,
         attn_architecture=architecture,
-        build_fia_params=MagicMock(return_value=fia_params),
+        build_param_source=MagicMock(return_value=source),
     )
-    source = object()
     current_stream = object()
 
     with (
@@ -498,10 +493,6 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.UpdatableGraph",
             MagicMock,
         ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.SharedSource",
-            return_value=source,
-        ) as shared_source,
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
@@ -514,10 +505,48 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     ):
         result = manager._updatable_graph_replay(desc, steps)
 
-    manager.speculator.build_fia_params.assert_called_once_with(2, steps[0], is_prefill)
-    shared_source.assert_called_once_with(fia_params)
+    manager.speculator.build_param_source.assert_called_once_with(2, steps[0], is_prefill, num_tokens=desc.num_tokens)
     assert result == "result"
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
     graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
+
+
+@pytest.mark.parametrize(
+    "use_dcp,architecture,is_prefill",
+    [(True, "MLA", True), (True, "MLA", False), (True, "GQA", True), (False, "MLA", True)],
+)
+def test_target_dependent_param_source_selects_metadata_or_fia(use_dcp, architecture, is_prefill):
+    from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
+
+    metadata = {"layer": object()}
+    params = [{"layer_name": "layer", "actual_seq_kvlen": [3]}]
+    speculator = SimpleNamespace(
+        use_dcp=use_dcp, attn_architecture=architecture, build_fia_params=MagicMock(return_value=params)
+    )
+    source = AscendTargetDependentARSpeculator.build_param_source(speculator, 2, metadata, is_prefill, num_tokens=4)
+
+    if use_dcp and architecture == "MLA" and is_prefill:
+        assert isinstance(source, ContextSource)
+        assert source.context is metadata
+        speculator.build_fia_params.assert_not_called()
+    else:
+        assert isinstance(source, SharedSource)
+        assert source.params is params
+        speculator.build_fia_params.assert_called_once_with(2, metadata, is_prefill, num_tokens=4)
+
+
+def test_multi_module_param_source_keeps_fia_parameters():
+    from vllm_ascend.compilation.updatable_graph import SharedSource
+    from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+    metadata = {"layer": object()}
+    params = [{"layer_name": "layer", "actual_seq_kvlen": [3]}]
+    speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=params))
+    source = AscendMultiModuleMTPSpeculator.build_param_source(speculator, 2, metadata, False, num_tokens=4)
+
+    assert isinstance(source, SharedSource)
+    assert source.params is params
+    speculator.build_fia_params.assert_called_once_with(2, metadata, False, num_tokens=4)
