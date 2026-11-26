@@ -86,7 +86,7 @@ RUN set -e; \
         yaml-cpp-devel gflags-devel boost-devel \
         zstd libzstd-devel \
         jemalloc clang && \
-    for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel xxhash xxhash-devel; do \
+    for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel xxhash xxhash-devel msgpack-devel; do \
         $PM install -y "$p" || echo "WARN: 可选依赖 $p 不可用，稍后由源码编译环节兜底"; \
     done; \
     if ! command -v mpicc >/dev/null 2>&1; then \
@@ -375,46 +375,55 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 #    mooncake 的 cmake 通过 find_package(yalantinglibs) 找 coro_rpc 依赖，该库以子模块
 #    extern/yalantinglibs 形式提供，必须 --recurse-submodules 一起拉下来并先装好，
 #    否则 configure 直接报 "Could not find a package configuration file provided by yalantinglibs"。
-RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done; \
-    LOG=/tmp/mooncake_build.log; : > "$LOG"; \
-    if { git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake && \
-      cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build \
-          -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
-          -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
-      cmake --build /tmp/ylt-build -j"${MAX_JOBS:-$(nproc)}" && \
-      cmake --install /tmp/ylt-build && \
-      rm -rf /tmp/ylt-build && ldconfig && \
-      if [ ! -e /usr/include/xxhash.h ] && [ ! -e /usr/local/include/xxhash.h ]; then \
-          echo "INFO: 系统无 xxhash 开发头文件，源码编译 xxHash v0.8.3"; \
-          git clone --depth 1 -b v0.8.3 https://github.com/Cyan4973/xxHash.git /tmp/xxHash && \
-          cmake -S /tmp/xxHash/cmake_unofficial -B /tmp/xxHash/build \
-              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
-              -DXXHASH_BUILD_XXHSUM=OFF && \
-          cmake --build /tmp/xxHash/build -j"${MAX_JOBS:-$(nproc)}" && \
-          cmake --install /tmp/xxHash/build && \
-          rm -rf /tmp/xxHash && ldconfig; \
-      fi; \
-      cd /tmp/Mooncake && mkdir -p build && cd build && \
-      MPI_ARGS=""; \
-      for d in /usr/lib64/mpich /usr/lib64/openmpi /usr/lib/x86_64-linux-gnu/openmpi \
-               /usr/lib/aarch64-linux-gnu/openmpi; do \
-          if [ -x "$d/bin/mpicc" ]; then \
-              MPI_ARGS="-DMPI_C_COMPILER=$d/bin/mpicc -DMPI_CXX_COMPILER=$d/bin/mpicxx"; \
-              export LD_LIBRARY_PATH="$d/lib:$d/lib64:$LD_LIBRARY_PATH"; \
-              break; \
-          fi; \
-      done; \
-      cmake .. -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_CXX_FLAGS="-Wno-maybe-uninitialized -Wno-stringop-overflow" \
-          -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND_DIRECT=ON ${MPI_ARGS} && \
-      make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig; } > "$LOG" 2>&1; then \
-        echo "MOONCAKE_BUILD_OK"; \
-    else \
-        echo "MOONCAKE_BUILD_FAILED"; \
-        grep -m2 -nE "error:|undefined reference|Error [0-9]+|No such file" "$LOG" | cut -c1-400 || \
-            tail -n 3 "$LOG" | cut -c1-400; \
-        exit 1; \
-    fi
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    'set -u' \
+    'for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done' \
+    'LOG=/tmp/mooncake_build.log' \
+    ': > "$LOG"' \
+    'if {' \
+    '  git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake &&' \
+    '  cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF &&' \
+    '  cmake --build /tmp/ylt-build -j"${MAX_JOBS:-$(nproc)}" &&' \
+    '  cmake --install /tmp/ylt-build &&' \
+    '  rm -rf /tmp/ylt-build && ldconfig &&' \
+    '  if [ ! -e /usr/include/xxhash.h ] && [ ! -e /usr/local/include/xxhash.h ]; then' \
+    '    echo "INFO: 系统无 xxhash 开发头文件，源码编译 xxHash v0.8.3"' \
+    '    git clone --depth 1 -b v0.8.3 https://github.com/Cyan4973/xxHash.git /tmp/xxHash &&' \
+    '    cmake -S /tmp/xxHash/cmake_unofficial -B /tmp/xxHash/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DXXHASH_BUILD_XXHSUM=OFF &&' \
+    '    cmake --build /tmp/xxHash/build -j"${MAX_JOBS:-$(nproc)}" &&' \
+    '    cmake --install /tmp/xxHash/build &&' \
+    '    rm -rf /tmp/xxHash && ldconfig' \
+    '  fi &&' \
+    '  if [ ! -e /usr/include/msgpack.hpp ] && [ ! -e /usr/local/include/msgpack.hpp ]; then' \
+    '    echo "INFO: 无 msgpack-cxx 头文件，安装官方 header-only 包"' \
+    '    curl -fsSL --retry 3 -o /tmp/msgpack.tar.gz https://github.com/msgpack/msgpack-c/releases/download/cpp-6.1.0/msgpack-cxx-6.1.0.tar.gz &&' \
+    '    mkdir -p /tmp/msgpack && tar -xzf /tmp/msgpack.tar.gz -C /tmp/msgpack --strip-components=1 &&' \
+    '    cp -r /tmp/msgpack/include/. /usr/local/include/ &&' \
+    '    rm -rf /tmp/msgpack /tmp/msgpack.tar.gz' \
+    '  fi &&' \
+    '  cd /tmp/Mooncake && mkdir -p build && cd build &&' \
+    '  MPI_ARGS="" &&' \
+    '  for d in /usr/lib64/mpich /usr/lib64/openmpi /usr/lib/x86_64-linux-gnu/openmpi /usr/lib/aarch64-linux-gnu/openmpi; do' \
+    '    if [ -x "$d/bin/mpicc" ]; then' \
+    '      MPI_ARGS="-DMPI_C_COMPILER=$d/bin/mpicc -DMPI_CXX_COMPILER=$d/bin/mpicxx"' \
+    '      export LD_LIBRARY_PATH="$d/lib:$d/lib64:$LD_LIBRARY_PATH"' \
+    '      break' \
+    '    fi' \
+    '  done &&' \
+    '  cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-maybe-uninitialized -Wno-stringop-overflow" -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND_DIRECT=ON ${MPI_ARGS} &&' \
+    '  make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig' \
+    '} > "$LOG" 2>&1; then' \
+    '  echo MOONCAKE_BUILD_OK' \
+    'else' \
+    '  echo MOONCAKE_BUILD_FAILED' \
+    '  grep -m2 -nE "error:|undefined reference|Error [0-9]+|No such file" "$LOG" | cut -c1-400 || tail -n 3 "$LOG" | cut -c1-400' \
+    '  exit 1' \
+    'fi' \
+    > /opt/build_mooncake.sh && chmod +x /opt/build_mooncake.sh
+
+#    失败时只打印 2 行，且本步骤命令串很短，GitHub 的错误注解能完整显示这两行
+RUN bash /opt/build_mooncake.sh
 
 # 9) mooncake python 绑定
 RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done && \
