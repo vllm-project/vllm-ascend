@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch_npu
@@ -290,10 +290,13 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Compressed SplitFuse can admit future tokens on 310P (issue #21902).
         # Build one explicit mask per batch and share it across attention layers.
         if attn_metadata.splitfuse_mask is None:
-            max_context_len = attn_metadata.splitfuse_max_context_len
-            if capturing or max_context_len is None:
+            max_context_len = None if capturing else attn_metadata.splitfuse_max_context_len
+            if max_context_len is None:
                 # Replay can use more KV blocks than the batch used to capture the graph.
-                max_context_len = block_table.size(1) * self.key_cache.size(-2)
+                key_cache = cast(torch.Tensor | None, self.key_cache)
+                if key_cache is None:
+                    raise RuntimeError("310P SplitFuse requires an initialized key cache.")
+                max_context_len = int(block_table.size(1) * key_cache.size(-2))
             attn_metadata.splitfuse_mask = AttentionMaskBuilder310.get_splitfuse_mask(
                 attn_metadata.query_start_loc,
                 attn_metadata.seq_lens,

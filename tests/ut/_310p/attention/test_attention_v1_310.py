@@ -97,7 +97,6 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillNoCache
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
         metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
@@ -145,7 +144,6 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.ChunkedPrefill
         metadata.attn_mask = torch.randn(1, 128, 16, 16)
-        metadata.query_lens = torch.tensor([1, 4])
         metadata.seq_lens = torch.tensor([2049, 4])
         metadata.query_start_loc = torch.tensor([0, 1, 5])
         metadata.splitfuse_max_context_len = 2049
@@ -186,7 +184,6 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 128, 16, 16)
-        metadata.query_lens = torch.tensor([5])
         metadata.seq_lens = torch.tensor([1, 4])
         metadata.query_start_loc = torch.tensor([0, 1, 5])
         metadata.splitfuse_max_context_len = 4
