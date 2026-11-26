@@ -2064,11 +2064,12 @@ Select the tab for the target hardware.
 
     unset https_proxy
     unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -2082,21 +2083,19 @@ Select the tab for the target hardware.
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
         --prefill-context-parallel-size 4 \
         --enable-expert-parallel \
         --enable-eplb \
@@ -2180,11 +2179,12 @@ Select the tab for the target hardware.
 
     unset https_proxy
     unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
@@ -2197,21 +2197,19 @@ Select the tab for the target hardware.
     export HCCL_BUFFSIZE=4096
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
         --prefill-context-parallel-size 1 \
         --enable-expert-parallel \
         --seed 1024 \
