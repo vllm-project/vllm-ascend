@@ -64,6 +64,11 @@ env_decode: &env_decode
 
 templates:
   - node_index: 0
+    # P only: probe all TP*PP KV ports; retry only a confirmed bind collision.
+    # Other cases and both D nodes keep their existing startup behavior.
+    mooncake_port_retry:
+      bases: [26000, 26100, 26200]
+      max_attempts: 3
     envs:
       <<: *env_prefill
     server_cmd_template:

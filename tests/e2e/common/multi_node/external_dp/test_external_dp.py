@@ -252,7 +252,7 @@ def test_external_dp() -> None:
                 current_node_index=current_node_index,
                 log_root=log_root,
                 extra_envs=kv_pool_manager.server_envs,
-            ),
+            ) as server_manager,
             proxy_launcher,
         ):
             if is_master:
@@ -260,6 +260,9 @@ def test_external_dp() -> None:
                 proxy_launcher.wait_ready()
 
                 all_commands = build_all_server_commands(config, ranks)
+                all_commands = [
+                    server_manager.effective_commands.get(rank, cmd) for rank, cmd in zip(ranks, all_commands)
+                ]
                 first_server_cmd = _get_first_server_cmd(config, ranks, all_commands)
                 completion_server, tokenize_server, metrics_server = _build_external_dp_servers(config, ranks)
 

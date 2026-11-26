@@ -5,8 +5,8 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     RankInfo,
     replace_cluster_placeholders,
 )
+from tests.e2e.common.multi_node.external_dp.mooncake_ports import start_with_port_retry
 from tests.e2e.common.multi_node.external_dp.utils import (
     format_server_cmd,
     is_http_ready,
@@ -482,6 +483,7 @@ class ExternalDPServerManager:
             config.cluster_ips[0],
         )
         self.rank_processes: list[RankProcess] = []
+        self.effective_commands: dict[RankInfo, ServerCommand] = {}
 
     def start_current_node(self) -> None:
         local_ranks = [rank for rank in self.ranks if rank.node_index == self.current_node_index]
@@ -489,13 +491,43 @@ class ExternalDPServerManager:
         try:
             for rank in local_ranks:
                 template = self.config.launch_templates[rank.node_index]
-                template = type(template)(
+                template = replace(
+                    template,
                     envs={**template.envs, **self.dist_envs, **self.extra_envs},
-                    server_cmd_template=template.server_cmd_template,
                 )
                 server_cmd = self.command_builder.build(rank, template)
                 log_file = self._rank_log_file(rank)
-                process = start_logged_process(server_cmd.cmd, server_cmd.env, log_file)
+                if template.mooncake_port_retry is None:
+                    process = start_logged_process(server_cmd.cmd, server_cmd.env, log_file)
+                else:
+
+                    def wait_ready(
+                        process: subprocess.Popen,
+                        path: Path,
+                        check: Callable[[], None],
+                        rank: RankInfo = rank,
+                    ) -> None:
+                        wait_ranks_ready(
+                            [rank],
+                            timeout=SERVER_READY_TIMEOUT_SECONDS,
+                            rank_processes=[(process, rank, path)],
+                            startup_check=check,
+                        )
+
+                    process, effective_cmd, log_file = start_with_port_retry(
+                        cmd=server_cmd.cmd,
+                        env=server_cmd.env,
+                        host=rank.host,
+                        count=rank.tp_size * rank.pp_size,
+                        policy=template.mooncake_port_retry,
+                        log_file=log_file,
+                        start_process=start_logged_process,
+                        wait_ready=wait_ready,
+                        stop_process=terminate_process_tree,
+                    )
+                    self.effective_commands[rank] = ServerCommand(
+                        effective_cmd, server_cmd.env, format_server_cmd(effective_cmd, server_cmd.env)
+                    )
                 self.rank_processes.append((process, rank, log_file))
 
             wait_ranks_ready(
@@ -664,6 +696,7 @@ def wait_ranks_ready(
     ranks: Iterable[RankInfo],
     timeout: int,
     rank_processes: list[RankProcess] | None = None,
+    startup_check: Callable[[], None] | None = None,
 ) -> None:
     ranks = list(ranks)
     rank_ready = {rank: False for rank in ranks}
@@ -676,6 +709,8 @@ def wait_ranks_ready(
     last_log_time = 0.0
 
     while True:
+        if startup_check is not None:
+            startup_check()
         _raise_if_rank_process_exited(rank_processes)
 
         all_ready = True
