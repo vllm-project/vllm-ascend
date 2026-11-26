@@ -1,8 +1,8 @@
 meta:
-  title: InternVL3_5-241B-A28B
+  title: InternVL3_5-241B-A28B (Ascend historical deployment)
   slug: internvl3-5-241b-a28b
   provider: OpenGVLab
-  description: InternVL3.5 241B-A28B visual-language serving on Atlas 800I A3 with W8A8 and TP4 × DP2 + EP.
+  description: InternVL3.5 241B-A28B W8A8 on Atlas 800I A3. This recipe records the vLLM Ascend v0.30.0 deployment, the release in which official support ended.
   date_added: 2026-11-20
   date_updated: 2026-11-21
   tasks:
@@ -16,6 +16,9 @@ model:
   parameter_count: 240.7B
   active_parameters: 28B
   context_length: 40960
+  min_vllm_version: "0.30.0"
+  docker_image: "quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0"
+  nightly_required: false
   default_frontend: python
   base_args:
     - --host
@@ -45,9 +48,11 @@ model:
     - --enable-expert-parallel
     - --safetensors-load-strategy
     - prefetch
-    - --allowed-local-media-path
-    - /models/evidence/internvl-release-retest
+    - --revision
+    - 14f6db45aad1fcc208903a1507285baa30ab0583
   base_env:
+    VLLM_USE_MODELSCOPE: "True"
+    MODELSCOPE_CACHE: /root/.cache/huggingface/modelscope
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     TASK_QUEUE_ENABLE: "1"
     HCCL_OP_EXPANSION_MODE: AIV
@@ -58,26 +63,18 @@ model:
   install:
     pip: false
     docker:
-      command: |-
-        # A3 release container
-        # quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
-        IMAGE=quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
-        docker run --rm -it --name internvl241-release --net=host --ipc=host \
-          --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
-          --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
-          --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
-          -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-          -v /usr/local/dcmi:/usr/local/dcmi \
-          -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-          -v /etc/ascend_install.info:/etc/ascend_install.info \
-          -v /models:/models -w /models "$IMAGE" bash
-      note: The Guide uses this installation command. Run its Serve and image request in the documented workflow.
+      command: "docker pull quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0"
+      note: "InternVL3.5 is discontinued since vLLM Ascend v0.30.0. No support is claimed for later releases. Start the container using the Guide."
 variants:
   default:
     model_id: Eco-Tech/InternVL3_5-241B-A28B-w8a8
     precision: int8
-    label: W8A8
-    vram_minimum_gb: 296
+    label: W8A8 (Ascend)
+    description: >-
+      The Guide was tested on one Atlas 800I A3 node with TP4 × DP2 + EP, 8 logical devices,
+      and port 2001. Coverage includes an image request, a GSM8K sample, full MMMU
+      and a text benchmark. The generated Docker command has no runtime verification.
+    vram_minimum_gb: 289
     supported_hardware:
       - ascend_910c
     tp: 4
@@ -85,7 +82,7 @@ variants:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
         docker_ipc: host
-        docker_serve_command: env --chdir=/models vllm serve
+        docker_serve_command: vllm serve
 compatible_strategies:
   - single_node_tp
 strategy_min_gpus: 8
@@ -95,20 +92,31 @@ hardware_notes:
   ascend_910c:
     title: Tested A3 deployment
     body: >-
-      Open Install → Docker to start the tested container with 8 devices
-      and the /models mount. Run the Guide's Serve and image request on port 2001.
-      The generated Docker command maps 16 devices and omits the /models mount.
+      Follow the Guide to start the container with 8 logical devices and the /models mount.
+      Run the Guide's Serve and image request on port 2001.
+      The generated Docker command uses ModelScope and the mounted host cache.
+      Use the Guide for the tested local weights and image request.
     link:
       href: '#check-readiness-and-run-image-inference'
       label: Verify in Guide
+notes:
+  - title: Historical release boundary
+    when:
+      hardware: [ascend_910c]
+    body: |-
+      InternVL3.5 241B-A28B has been discontinued in vLLM Ascend since v0.30.0.
+      This recipe records the deployment tested with the pinned v0.30.0 image.
+      Later releases, main and nightly are outside its validation scope.
 guide: |-
   ## Atlas 800I A3 / W8A8 / TP4 DP2 EP
 
   InternVL3.5 241B-A28B pairs an InternViT vision encoder with a Qwen3 language model for image understanding and multimodal dialogue. This sparse MoE checkpoint has 240.7B total parameters and about 28B active parameters.
 
-  This guide serves the W8A8 checkpoint on one A3 node with TP4 × DP2 + EP across eight logical devices. It covers an image request, an eight-question GSM8K check, the full 900-example MMMU validation set and a text benchmark. The runs used vLLM Ascend v0.30.0. The historical tutorial documents single-node serving and lists multi-node PD separation as unsupported.
+  This guide serves the W8A8 checkpoint on one A3 node with TP4 × DP2 + EP across eight logical devices. It covers an image request, an eight-question GSM8K check, the full 900-example MMMU validation set and a text benchmark. The runs used the pinned vLLM Ascend v0.30.0 image. Official support ended in v0.30.0. Later releases, main and nightly are outside this deployment’s validation scope. The historical tutorial documents single-node serving and lists multi-node PD separation as unsupported.
 
   Start the Guide's Docker container on the host. It maps devices 0–7, mounts the host's /models and uses /models as the working directory. Start the service in that container and use the Guide's verification commands on port 2001.
+
+  The generated Docker command is configured to load the same checkpoint revision from ModelScope. Its host cache needs room for the checkpoint and access to ModelScope. For an image request against that server, use an HTTPS image URL or a Base64 data URL in `image_url.url`. The generated Docker path has not been run on A3. The steps below reproduce the tested local deployment.
 
   ### Prepare the checkpoint
 
@@ -223,7 +231,7 @@ guide: |-
   ```shell
   (
     set -euo pipefail
-    bench=/models/tools/aisbench-38b
+    bench=/models/tools/aisbench-241b
     revision=e968d1bd7f48404bd913b95560f33938072336fa
     git init -q "$bench/benchmark"
     git -C "$bench/benchmark" fetch --depth=1 https://gitee.com/aisbench/benchmark.git "$revision" \
@@ -264,7 +272,7 @@ guide: |-
   models[0]["generation_kwargs"]["temperature"] = 0
   work_dir = "/models/evidence/internvl-release-retest/internvl241/aisbench-results"
   PY
-  (cd /models/tools/aisbench-38b/benchmark && /models/tools/aisbench-38b/venv/bin/ais_bench "$out/gsm8k-demo.py")
+  (cd /models/tools/aisbench-241b/benchmark && /models/tools/aisbench-241b/venv/bin/ais_bench "$out/gsm8k-demo.py")
   ```
 
   ### MMMU evaluator and dataset setup
@@ -374,4 +382,4 @@ guide: |-
   ### Sources
 
   - [Historical tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/InternVL3.5.html)
-  - [v0.30.0 release support status](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/InternVL3.5.html)
+  - [Main tutorial support status](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/InternVL3.5.html)
