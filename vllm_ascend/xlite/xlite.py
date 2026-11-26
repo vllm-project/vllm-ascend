@@ -355,12 +355,30 @@ class XliteModelBase(ABC):
             meta.query_start_loc = query_start_loc
             meta.positions = positions
             meta.slot_mapping = [common.slot_mapping]
-            meta.block_tables = [common.block_table_tensor]
+            meta.block_tables = [self._main_block_table(common)]
         # Hybrid adapters append their mamba/tail family tables to the common main-KV slot —
         # the constant dummy batch too (its per-family entries are (1,1) zero tables).
         if (augment := getattr(self, "augment_attn_meta", None)) is not None:
             augment(meta, self._common_attn_metadata_by_group(), self._kv_cache_groups(), is_dummy)
         return meta
+
+    def _main_block_table(self, common: Any) -> torch.Tensor:
+        """Main KV group's kernel-granularity block table via the upstream AttentionGroup mapping."""
+        groups = self._kv_cache_groups()
+        main = getattr(self, "_main_attn_group", lambda kv_groups: kv_groups[0])(groups)
+        gid = next(i for i, g in enumerate(groups) if g is main)
+        for group_list in getattr(self.npu_runner, "attn_groups", None) or []:
+            if not group_list or group_list[0].kv_cache_group_id != gid:
+                continue
+            mapped_sizes = {g.kernel_block_size for g in group_list if g.kernel_block_size is not None}
+            assert len(mapped_sizes) <= 1, (
+                f"xlite: main group {gid} AttentionGroups disagree on kernel block size: {mapped_sizes}"
+            )
+            with_mapping = next((g for g in group_list if g.kernel_block_size is not None), None)
+            if with_mapping is not None:
+                return with_mapping._with_kernel_block_table(common).block_table_tensor
+            break
+        return common.block_table_tensor
 
     def _common_attn_metadata(self) -> AscendCommonAttentionMetadata:
         """Return the main full-attention group's common attention metadata.
