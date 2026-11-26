@@ -152,9 +152,6 @@ variants:
           - '0'
           - '--additional-config'
           - '{"enable_cpu_binding":true}'
-          - '--enable-auto-tool-choice'
-          - '--tool-call-parser'
-          - qwen3_coder
           - '--reasoning-parser'
           - qwen3
           - '--mm-encoder-tp-mode'
@@ -168,9 +165,15 @@ variants:
           OMP_NUM_THREADS: '1'
           TASK_QUEUE_ENABLE: '1'
   default:
+    tp:
+      ascend_910c: 2
+      ascend_910b: 2
     hardware_overrides:
       ascend_910c:
-        docker_image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
         extra_args:
           - '--data-parallel-size'
           - '8'
@@ -179,7 +182,7 @@ variants:
           - '--max-num-seqs'
           - '32'
           - '--max-model-len'
-          - '133000'
+          - '133120'
           - '--max-num-batched-tokens'
           - '16384'
           - '--gpu-memory-utilization'
@@ -195,8 +198,18 @@ variants:
           OMP_PROC_BIND: 'false'
           OMP_NUM_THREADS: '1'
           TASK_QUEUE_ENABLE: '1'
-    tp:
-      ascend_910c: 2
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+        extra_args:
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8000'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
 meta:
   hardware:
     ascend_950dt: supported

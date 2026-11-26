@@ -12,13 +12,14 @@
 #   * Ascend 950DT is intentionally absent. The tutorial's weight and
 #     single-node tables list A3 / A2 / 300I DUO for Qwen3.5-27B only; the
 #     950DT path starts at Qwen3.6-27B.
-#   * `meta.hardware` uses `supported`, not `verified`: no end-to-end run on
-#     Ascend hardware backs this file. Promote to `verified` only after a real
-#     NPU run of the rendered command.
+#   * `meta.hardware`: `ascend_910c` is `verified` from the four A3
+#     configurations run for this recipe (throughput, low latency, long
+#     context, BF16). `ascend_910b` stays `supported`: the A2 path was not run
+#     on real hardware in this round.
 
 meta:
   hardware:
-    ascend_910c: supported
+    ascend_910c: verified
     ascend_910b: supported
     # 950DT / 950PR are not verified for Qwen3.5-27B this round. Marking them
     # unsupported keeps the renderer from emitting an unbacked command and
@@ -154,7 +155,6 @@ variants:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - '--additional-config'
       - '{"enable_cpu_binding":true}'
-      - '--async-scheduling'
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -170,7 +170,9 @@ variants:
           pip: false
     description: ModelSlim W8A8 checkpoint with the MTP head, one Atlas 800 A3 node (16x 910C) at TP2+DP8. Requires --quantization ascend.
 
-  # W8A8 on one Atlas 800 A2 (8x 910B), TP=2 + DP=4 fills the node.
+  # W8A8 on one Atlas 800 A2 (8x 910B). 32768 is sized for the 32 GB A2 CI
+  # lane; the 64 GB A2 layout and this 32768 path were not run on real A2
+  # hardware in this round, so A2 stays `supported`.
   ascend_w8a8_a2:
     model_id: Eco-Tech/Qwen3.5-27B-w8a8-mtp
     precision: int8
@@ -230,7 +232,7 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
-    description: Same W8A8 MTP checkpoint on one Atlas 800 A2 node (8x 910B) at TP2+DP4. Requires --quantization ascend.
+    description: Same W8A8 MTP checkpoint on one Atlas 800 A2 node (8x 910B) at TP2+DP4, 32768 context for the 32 GB A2 CI lane; A2 was not validated on real hardware this round. Requires --quantization ascend.
 
 strategy_overrides:
   multi_node_tp:
