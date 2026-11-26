@@ -597,32 +597,22 @@ class NPUPlatform(Platform):
             os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
 
         abort_timeout = get_ascend_config().ft_communication_abort_timeout
-        if abort_timeout <= 0:
-            return
-        # User HCCL timeouts win; otherwise derive them from
-        # ft_communication_abort_timeout. HCCL requires EXEC < EVENT,
-        # so EXEC defaults to abort_timeout - 1.
-        os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
-        os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
-        if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
-            raise ValueError(
-                f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
-                "must be greater than HCCL_EXEC_TIMEOUT "
-                f"({os.environ['HCCL_EXEC_TIMEOUT']})"
-            )
-        if (
-            int(os.environ["HCCL_EVENT_TIMEOUT"]) != abort_timeout
-            or int(os.environ["HCCL_EXEC_TIMEOUT"]) != abort_timeout - 1
-        ):
+        env_timeouts = {
+            name: os.environ[name] for name in ("HCCL_EXEC_TIMEOUT", "HCCL_EVENT_TIMEOUT") if name in os.environ
+        }
+        if env_timeouts:
             logger.warning(
-                "Fault tolerance: HCCL communication timeouts are taken from the "
-                "HCCL_EVENT_TIMEOUT (%s s) / HCCL_EXEC_TIMEOUT (%s s) environment "
-                "variables instead of the NPU operator timeout "
-                "(ft_communication_abort_timeout=%s s).",
-                os.environ["HCCL_EVENT_TIMEOUT"],
-                os.environ["HCCL_EXEC_TIMEOUT"],
+                "Fault tolerance: overriding HCCL timeout environment variables "
+                "%s with ft_communication_abort_timeout=%s s "
+                "(HCCL_EXEC_TIMEOUT=%s s, HCCL_EVENT_TIMEOUT=%s s).",
+                env_timeouts,
                 abort_timeout,
+                abort_timeout,
+                abort_timeout + 1,
             )
+        # Keep the inner HCCL timeout lower than the outer EVENT_WAIT timeout.
+        os.environ["HCCL_EXEC_TIMEOUT"] = str(abort_timeout)
+        os.environ["HCCL_EVENT_TIMEOUT"] = str(abort_timeout + 1)
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.

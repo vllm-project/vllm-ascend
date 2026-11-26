@@ -568,9 +568,8 @@ class NPUWorker(GPUWorker):
 
         if self.parallel_config.enable_fault_tolerance:
             abort_timeout = get_ascend_config().ft_communication_abort_timeout
-            if abort_timeout > 0:
-                torch.npu.current_stream()
-                torch.npu.set_op_timeout_ms(abort_timeout * 1000)
+            torch.npu.current_stream()
+            torch.npu.set_op_timeout_ms(abort_timeout * 1000)
 
         if enable_custom_op():
             register_device_print()

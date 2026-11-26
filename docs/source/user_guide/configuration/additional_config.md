@@ -75,6 +75,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+| `ft_communication_abort_timeout`    | int  | `60`    | NPU operator execution timeout in seconds. Must be at least `1`. Derives `HCCL_EXEC_TIMEOUT=T` and `HCCL_EVENT_TIMEOUT=T+1`; only applies with `--enable-fault-tolerance`. See the [HCCL_EVENT_TIMEOUT reference](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/ENV/docs/zh/api/environment_variable/collective_communication/HCCL_EVENT_TIMEOUT.md). |
 
 The details of each configuration option are as follows:
 

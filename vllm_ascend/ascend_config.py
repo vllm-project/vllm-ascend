@@ -710,10 +710,8 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
-    # ---- fault-tolerance: comm op abort timeout (s); 0 = disable ----
-    # Drives HCCL_EVENT_TIMEOUT / HCCL_EXEC_TIMEOUT (= timeout - 1) and
-    # set_op_timeout_ms(timeout * 1000). Validated to be 0 or >= 2.
-    ft_communication_abort_timeout: int = 0
+    # NPU operator execution timeout in seconds (default: 60; values below 1 are invalid).
+    ft_communication_abort_timeout: int = 60
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -1064,15 +1062,11 @@ class AscendConfig:
             # during graph warmup when enable_npugraph_ex is False.
             self.ascend_compilation_config.enable_npugraph_ex = False
 
-        # ft_communication_abort_timeout only takes effect when fault tolerance
-        # is enabled, so validate it only then: a stray value in additional_config
-        # must not fail startup for non-FT runs.
-        if vc.parallel_config.enable_fault_tolerance and (
-            self.ft_communication_abort_timeout != 0 and self.ft_communication_abort_timeout < 2
-        ):
+        # Reject 0 because HCCL treats it as no timeout.
+        if vc.parallel_config.enable_fault_tolerance and self.ft_communication_abort_timeout < 1:
             raise ValueError(
-                f"ft_communication_abort_timeout must be 0 (disabled) or an integer of at least "
-                f"2 seconds, got {self.ft_communication_abort_timeout}"
+                f"ft_communication_abort_timeout must be an integer of at least 1 second, "
+                f"got {self.ft_communication_abort_timeout}"
             )
         return self
 
