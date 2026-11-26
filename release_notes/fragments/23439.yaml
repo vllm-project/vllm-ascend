@@ -1,0 +1,12 @@
+pr: 23439
+entries:
+  - category: bugfix
+    text: >-
+      Fixed speculative decoding draft models (DSpark and DFlash2) silently skipping QuaRot
+      weight alignment when the target checkpoint declared is_rot_used=true but its
+      quant_model_description.json was missing the optional.quarot.rotation_map.global_rotation
+      entry, which made draft tokens be rejected from the first position and acceptance stay
+      at ~0% with no diagnostic. Draft alignment now falls back to the conventional
+      optional/quarot.safetensors checkpoint file after a shape check and emits a warning;
+      targets without that file also warn instead of failing silently. Models relying on
+      MTP (rot.weight) are unaffected.
