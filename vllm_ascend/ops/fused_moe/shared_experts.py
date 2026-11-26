@@ -34,7 +34,7 @@ from vllm.model_executor.layers.activation import (
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_multistream_overlap_disabled, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_shared_expert_tp_group
 from vllm_ascend.lora.fused_moe import has_lora
@@ -148,7 +148,7 @@ class AscendSharedExperts:
         self.quant_type = quant_type
         self.lora_context = None
         ascend_config = get_ascend_config()
-        self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
+        self._multistream_overlap = bool(ascend_config.multistream_overlap_shared_expert)
         self.weights_replicated = ascend_config.enable_shared_expert_dp
         self.finegrained_tp_group = None
         if shared_expert_tp_enable():
@@ -173,7 +173,7 @@ class AscendSharedExperts:
         # shared linears are rebuilt; see MegamoeSharedExpertFusion.
         self._megamoe_shared_fusion = MegamoeSharedExpertFusion()
 
-        if self.multistream_overlap:
+        if self._multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
             # splitting shared expert computation (gate_up projection, activation,
             # then down projection) yields identical results to integrated
@@ -189,6 +189,14 @@ class AscendSharedExperts:
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
         self._setup_megamoe_shared_fusion()
+
+    @property
+    def multistream_overlap(self) -> bool:
+        return getattr(self, "_multistream_overlap", False) and not is_multistream_overlap_disabled()
+
+    @multistream_overlap.setter
+    def multistream_overlap(self, value: bool) -> None:
+        self._multistream_overlap = bool(value)
 
     def _setup_megamoe_shared_fusion(self) -> None:
         """Fuse the shared expert into the MegaMoe operator when supported.

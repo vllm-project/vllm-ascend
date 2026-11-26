@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.ascend_forward_context import disable_multistream_overlap
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -241,3 +242,100 @@ def test_preprocess_equivalence_and_stream_dependencies(
     store = trace.index(("main" if cache_on_main else "aux", "cache", "scatter"))
     assert (join < store) == cache_on_main
     assert join < trace.index(("main", "rope", "apply"))
+
+
+@pytest.mark.parametrize("config_overlap", [False, True])
+@pytest.mark.parametrize("replay_disabled", [False, True])
+def test_indexer_prepare_and_quantize_respect_multistream_overlap(monkeypatch, config_overlap, replay_disabled):
+    trace = []
+    aux_stream_calls = []
+    active = "main"
+
+    class FakeStream:
+        def __init__(self, name):
+            self.name = name
+
+        def record_event(self):
+            event = f"{self.name}:{len(trace)}"
+            trace.append((self.name, "record", event))
+            return event
+
+        def wait_event(self, event):
+            trace.append((self.name, "wait", event))
+
+    main = FakeStream("main")
+    aux = FakeStream("aux")
+
+    @contextmanager
+    def switch(stream):
+        nonlocal active
+        previous = active
+        active = stream.name
+        try:
+            yield
+        finally:
+            active = previous
+
+    def get_aux_stream():
+        aux_stream_calls.append(active)
+        return aux
+
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main)
+    monkeypatch.setattr(torch.npu, "stream", switch)
+    monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", get_aux_stream)
+
+    class FakeIndexer:
+        def project_query(self, qr):
+            trace.append((active, "project_query", None))
+            return qr + 1
+
+        def project_weights(self, hidden):
+            trace.append((active, "project_weights", None))
+            return hidden[:, :1]
+
+        def apply_query_rope(self, query, cos, sin):
+            trace.append((active, "apply_query_rope", None))
+
+        def quantize_query(self, query):
+            trace.append((active, "quantize_query", None))
+            return query, torch.ones(query.shape[0])
+
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    assert not impl.multistream_dsv4_dsa_overlap
+    impl.multistream_dsv4_dsa_overlap = config_overlap
+    impl.role = SimpleNamespace(has_long_context=True, is_index_source=True)
+
+    attn = SimpleNamespace(indexer=FakeIndexer())
+    hidden = torch.randn(2, 4)
+    qr = torch.randn(2, 4)
+    cos = torch.ones(2, 1, 1, 2)
+    sin = torch.zeros(2, 1, 1, 2)
+    metadata = SimpleNamespace(indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=8)))
+
+    with disable_multistream_overlap(replay_disabled):
+        prepared = impl._prepare_indexer_inputs(attn, hidden, qr, cos, sin)
+        impl._quantize_indexer_query(attn, prepared, metadata)
+
+    assert impl.multistream_dsv4_dsa_overlap is config_overlap
+    assert prepared is not None
+    assert prepared.quantized_query is not None
+    assert prepared.query_scale is not None
+
+    expect_overlap = config_overlap and not replay_disabled
+    if not expect_overlap:
+        assert prepared.quantize_done is None
+        assert aux_stream_calls == []
+        assert all(stream == "main" and op not in {"record", "wait"} for stream, op, _ in trace)
+        assert [op for _, op, _ in trace] == [
+            "project_query",
+            "project_weights",
+            "apply_query_rope",
+            "quantize_query",
+        ]
+    else:
+        assert prepared.quantize_done is not None
+        assert len(aux_stream_calls) == 2
+        assert ("aux", "project_weights", None) in trace
+        assert ("aux", "quantize_query", None) in trace
+        assert any(op == "record" for _, op, _ in trace)
+        assert any(op == "wait" for _, op, _ in trace)

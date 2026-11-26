@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 
+from vllm_ascend.ascend_forward_context import disable_multistream_overlap, is_multistream_overlap_disabled
 from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
@@ -597,8 +598,10 @@ def test_replay_context_preserves_moe_cursor_and_restores_mc2(state, monkeypatch
             current[0] = outer
 
     monkeypatch.setattr(replay_mod, "set_forward_context", forward)
+    assert not is_multistream_overlap_disabled()
     try:
         with state.forward_context():
+            assert is_multistream_overlap_disabled()
             assert mask.tolist() == (
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
@@ -609,10 +612,26 @@ def test_replay_context_preserves_moe_cursor_and_restores_mc2(state, monkeypatch
                 raise RuntimeError("decoder failure")
     except RuntimeError:
         assert fail
+    assert not is_multistream_overlap_disabled()
     assert current[0] is outer and outer.moe_layer_index == 21
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
     assert gather_padding.call_count == int(sequence_parallel)
+
+
+def test_disable_multistream_overlap_context_nesting_and_exception():
+    assert not is_multistream_overlap_disabled()
+    with disable_multistream_overlap():
+        assert is_multistream_overlap_disabled()
+        with disable_multistream_overlap(False):
+            assert not is_multistream_overlap_disabled()
+        assert is_multistream_overlap_disabled()
+    assert not is_multistream_overlap_disabled()
+
+    with pytest.raises(RuntimeError, match="boom"), disable_multistream_overlap():
+        assert is_multistream_overlap_disabled()
+        raise RuntimeError("boom")
+    assert not is_multistream_overlap_disabled()
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ import torch_npu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import is_multistream_overlap_disabled
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -31,10 +32,13 @@ def maybe_record_event() -> torch.npu.Event | None:
     Host-side record_event is expensive, and the events are consumed only by
     the shared-expert side stream, which exists solely when multistream overlap
     is enabled (the wait sites in shared_experts.py gate on the same flag);
-    skip the record only when the initialized config proves the overlap is off.
+    skip the record when multistream overlap is suppressed in the active forward
+    context or when the initialized config proves the overlap is off.
     An uninitialized config cannot prove that, so it keeps the legacy
     always-record behavior instead of changing what the caller sees.
     """
+    if is_multistream_overlap_disabled():
+        return None
     try:
         overlap = get_ascend_config().multistream_overlap_shared_expert
     except RuntimeError:
