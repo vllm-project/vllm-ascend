@@ -7,7 +7,7 @@ import mmap
 import sys
 from dataclasses import replace
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -50,6 +50,44 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+
+
+@pytest.mark.parametrize(
+    ("a5", "rows", "expected"),
+    [
+        (False, 64, "batched"),
+        (False, 65, "sorted"),
+        (False, 32768, "sorted"),
+        (False, 32769, "direct"),
+        (True, 128, "direct"),
+        (True, 8064, "sorted"),
+    ],
+)
+def test_written_slot_invalidation_dispatch(monkeypatch, a5, rows, expected):
+    monkeypatch.setattr(hisparse_ops, "is_950", lambda: a5)
+    monkeypatch.setattr(hisparse_ops, "_check_tensor", Mock())
+    monkeypatch.setattr(hisparse_ops, "triton", NS(cdiv=lambda size, tile: (size + tile - 1) // tile))
+    monkeypatch.setattr(
+        hisparse_ops,
+        "torch",
+        NS(int32=torch.int32, int64=torch.int64, empty=Mock(), empty_like=Mock(), sort=Mock()),
+    )
+    batched, sorted_search, direct = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(hisparse_ops, "invalidate_written_slots_batched", batched)
+    monkeypatch.setattr(hisparse_ops, "invalidate_written_slots_sorted", sorted_search)
+    monkeypatch.setattr(hisparse_ops, "invalidate_kernel", direct)
+    monkeypatch.setattr(hisparse_ops, "pack_written_slot_keys", MagicMock())
+    group_table = NS(device=NS(type="npu"), numel=lambda: 6)
+    writes = NS(numel=lambda: rows, shape=(rows,))
+
+    hisparse_ops.HiSparseNPUOps.hisparse_invalidate_written_slots(
+        group_table, NS(numel=lambda: 1), writes, writes, 32, 32768
+    )
+
+    kernels = {"batched": batched, "sorted": sorted_search, "direct": direct}
+    assert [name for name, kernel in kernels.items() if kernel.__getitem__.called] == [expected]
+    if expected == "sorted":
+        assert sorted_search.__getitem__.return_value.call_args.kwargs["UNROLL_SEARCH"] == a5
 
 
 def test_resident_decode_pages_reorder_requests_and_mask_padding():
@@ -137,45 +175,49 @@ def test_pooled_hisparse_scope(
     assert hisparse.supports_pooled_hisparse(config) is expected
 
 
+@pytest.mark.parametrize("cache_dtype", [torch.float8_e4m3fn, torch.int8], ids=["a5-fp8", "a3-int8"])
 @pytest.mark.parametrize(
-    ("resident", "padded"),
-    [(True, False), (False, False), (True, True)],
-    ids=["resident", "cold", "padded"],
+    ("resident", "padded", "capture"),
+    [(True, False, False), (False, False, False), (True, True, False), (True, False, True)],
+    ids=["resident-mixed", "cold-mixed", "padded-mixed", "resident-q6-capture"],
 )
-def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, resident, padded):
+def test_resident_attention_preserves_native_paged_metadata(monkeypatch, cache_dtype, resident, padded, capture):
     from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
 
     from vllm_ascend import hisparse
     from vllm_ascend.attention import sfa_hisparse
-    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
     from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 
-    num_decode, num_live = 6, 15
+    int8 = cache_dtype == torch.int8
+    first_req_tokens = 6
+    num_decode, num_live = (12, 12) if capture else (6, 15)
     query = torch.arange(num_live, dtype=torch.bfloat16).view(num_live, 1, 1)
     logical_topk = torch.full((num_live, 1, 2176), -1, dtype=torch.int32)
     logical_topk[:, 0, 0] = torch.arange(num_live)
     logical_topk[:, 0, 2050] = 9
-    query_ends = torch.tensor([num_decode, num_live], dtype=torch.int32)
+    query_ends = torch.tensor([first_req_tokens, num_live], dtype=torch.int32)
     key_lengths = torch.tensor([130, 255], dtype=torch.int32)
     resident_table = torch.tensor([[1, 3, 0], [4, 3 if resident else 0, 2]], dtype=torch.int32)
     source_table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
     metadata = NS(
         num_reqs=2,
-        num_decodes=1,
-        num_prefills=1,
+        num_decodes=2 if capture else 1,
+        num_prefills=0 if capture else 1,
         num_decode_tokens=num_decode,
         num_actual_tokens=num_live,
         num_input_tokens=num_live + int(padded),
         block_size=128,
-        hisparse_for_capture=False,
-        req_id_per_token=torch.tensor([0] * num_decode + [1] * (num_live - num_decode), dtype=torch.int32),
+        hisparse_for_capture=capture,
+        req_id_per_token=torch.tensor([0] * first_req_tokens + [1] * (num_live - first_req_tokens), dtype=torch.int32),
         query_start_loc=torch.cat((query_ends.new_zeros(1), query_ends)),
         prefill_valid_token_mask=(torch.arange(num_live + int(padded)) < query_ends[-1])[:, None],
     )
     raw = torch.empty(5 * 9 * 128 * 528, dtype=torch.int8)
     layer_runtime = object.__new__(HiSparseRuntime)
-    layer_runtime.kv_dtype = torch.float8_e4m3fn
+    layer_runtime.kv_dtype = cache_dtype
     layer_runtime.row_width = 528
     handle = HiSparseCacheHandle(layer_runtime)
     install_flash_layer_view_bounds(handle)
@@ -192,12 +234,12 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
     calls = []
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
-    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.c8_cache_dtype = cache_dtype
     impl.qk_rope_head_dim = 0
     impl.vllm_config = NS(
-        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="fp8"),
+        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="auto" if int8 else "fp8"),
         compilation_config=NS(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
-        cache_config=NS(cache_dtype="fp8"),
+        cache_config=NS(cache_dtype="int8" if int8 else "fp8"),
         model_config=NS(
             hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)
         ),
@@ -236,7 +278,9 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
         swap_in=resolve,
     )
     monkeypatch.setattr(
-        hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+        hisparse,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A3 if int8 else AscendDeviceType.A5),
     )
     monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)

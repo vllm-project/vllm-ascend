@@ -698,7 +698,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             not metadata.hisparse_for_capture
             or cache.draft_layer
             or not self.enable_sparse_sfa_c8
-            or self.c8_cache_dtype != torch.float8_e4m3fn
+            or self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
             or self.qk_rope_head_dim != 0
             or metadata.num_prefills
             or metadata.num_decode_tokens != query.shape[0]
@@ -735,7 +735,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         if (
             not self.enable_sparse_sfa_c8
-            or self.c8_cache_dtype != torch.float8_e4m3fn
+            or self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
             or self.qk_rope_head_dim != 0
             or metadata.hisparse_for_capture
             or not cache.all_context_pages_resident

@@ -389,7 +389,8 @@ class HiSparseNPUOps:
             return
         if region_stride == 0 or num_state_rows == 0 or groups == 0:
             return
-        if not is_950() and num_tokens <= _BATCH_INVALIDATE_MAX_WRITES:
+        use_unrolled_search = is_950()
+        if not use_unrolled_search and num_tokens <= _BATCH_INVALIDATE_MAX_WRITES:
             invalidate_written_slots_batched[(triton.cdiv(region_stride, _BATCH_INVALIDATE_TILE), groups)](
                 group_table,
                 request_state_indices,
@@ -407,13 +408,14 @@ class HiSparseNPUOps:
         hot_tiles = triton.cdiv(region_stride, tile)
         table_tiles = groups * hot_tiles
         search_steps = num_tokens.bit_length()
-        # Direct invalidation scans the Hot tiles for each write. Sorting
-        # instead searches once per state and Hot tile. Keep a margin for
-        # sorting and cap the three int64 buffers before launching it.
+        # Direct invalidation launches a program for each write and Hot tile.
+        # On arch22 that launch grid is costly even for medium batches.
+        # Retain the work estimate on A5 and cap the three int64 buffers.
         direct_tiles = num_tokens * table_tiles
         search_probes = num_state_rows * table_tiles * search_steps
         sort_buffer_bytes = 3 * num_tokens * torch.int64.itemsize
-        if direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES:
+        sort_wins = direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES
+        if sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES and (not use_unrolled_search or sort_wins):
             keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
             sorted_keys = torch.empty_like(keys)
             order = torch.empty_like(keys)
@@ -436,7 +438,7 @@ class HiSparseNPUOps:
                 HOT=region_stride,
                 TILE=tile,
                 STEPS=search_steps,
-                UNROLL_SEARCH=is_950(),
+                UNROLL_SEARCH=use_unrolled_search,
                 multibuffer=False,
             )
             return
