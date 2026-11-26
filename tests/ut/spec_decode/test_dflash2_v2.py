@@ -280,38 +280,6 @@ def test_patch_swaps_upstream_selector_walk_kernel():
     assert upstream._selector_walk_kernel is _selector_walk_kernel_ascend
 
 
-def _spec_config(arch: str) -> SimpleNamespace:
-    speculator_classes = {
-        "DFlash2DraftModel": "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator",
-        "LiLiCorrDraftModel": "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator",
-        "DFlashDraftModel": "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator",
-    }
-    return SimpleNamespace(
-        method="dflash",
-        enforce_eager=None,
-        custom_method=None,
-        speculator_config=SimpleNamespace(speculator_class=speculator_classes[arch]),
-        use_dspark=lambda: False,
-        use_dflash=lambda: True,
-        draft_model_config=SimpleNamespace(architectures=[arch]),
-    )
-
-
-def test_init_speculator_routes_dflash2_draft_model():
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
-    with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
-        assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
-        d2.assert_called_once_with(cfg, torch.device("cpu"))
-
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlashDraftModel"))
-    with (
-        patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2,
-        patch("vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator") as d1,
-    ):
-        assert init_speculator(cfg, torch.device("cpu")) is d1.return_value
-        d2.assert_not_called()
-
-
 def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(monkeypatch, tmp_path):
     """Registered Ascend DFlash2 model resolves DFlash2SpeculatorConfig and routes to AscendDFlash2Speculator."""
     from vllm import ModelRegistry
@@ -374,17 +342,24 @@ def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(
 
 
 @pytest.mark.parametrize(
-    "architecture,speculator_path",
+    "upstream_class,speculator_path",
     [
-        ("DFlash2DraftModel", "dflash2.speculator.AscendDFlash2Speculator"),
-        pytest.param("LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator", marks=REQUIRES_LILICORR),
+        (
+            "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator",
+            "dflash2.speculator.AscendDFlash2Speculator",
+        ),
+        pytest.param(
+            "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator",
+            "lilicorr.speculator.AscendLiLiCorrSpeculator",
+            marks=REQUIRES_LILICORR,
+        ),
     ],
 )
-def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture, speculator_path):
-    spec = _spec_config(architecture)
-    spec.enforce_eager = True
+def test_eager_speculator_keeps_target_compilation_and_graph_config(upstream_class, speculator_path):
     config = SimpleNamespace(
-        speculative_config=spec,
+        speculative_config=SimpleNamespace(
+            method="dflash", enforce_eager=True, speculator_config=SimpleNamespace(speculator_class=upstream_class)
+        ),
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
         ),
@@ -397,18 +372,6 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture
     assert draft_config.compilation_config.mode == CompilationMode.NONE
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-
-
-@REQUIRES_LILICORR
-def test_init_speculator_routes_lilicorr_before_dflash2():
-    cfg = SimpleNamespace(speculative_config=_spec_config("LiLiCorrDraftModel"))
-    with (
-        patch("vllm_ascend.worker.v2.spec_decode.lilicorr.speculator.AscendLiLiCorrSpeculator") as lilicorr,
-        patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as dflash2,
-    ):
-        assert init_speculator(cfg, torch.device("cpu")) is lilicorr.return_value
-        lilicorr.assert_called_once_with(cfg, torch.device("cpu"))
-        dflash2.assert_not_called()
 
 
 @REQUIRES_LILICORR

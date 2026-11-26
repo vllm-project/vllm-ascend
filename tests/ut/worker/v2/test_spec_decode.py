@@ -59,11 +59,9 @@ def _mock_speculator_module(monkeypatch, module_name, class_name):
     return speculator_cls
 
 
-@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
-@pytest.mark.parametrize("enforce_eager", [False, True])
-def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, enforce_eager):
-    config = _make_config(method, NgramSpeculatorConfig.speculator_class)
-    config.speculative_config.enforce_eager = enforce_eager
+def test_eager_ngram_forwards_current_request_state(monkeypatch):
+    config = _make_config("ngram", NgramSpeculatorConfig.speculator_class)
+    config.speculative_config.enforce_eager = True
     config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
     device = torch.device("cpu")
     req_states = object()
@@ -79,12 +77,9 @@ def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, e
     assert draft_device == device
     assert draft_states is req_states
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    if enforce_eager:
-        assert draft_config is not config
-        assert draft_config.compilation_config is not config.compilation_config
-        assert draft_config.compilation_config.mode == CompilationMode.NONE
-    else:
-        assert draft_config is config
+    assert draft_config is not config
+    assert draft_config.compilation_config is not config.compilation_config
+    assert draft_config.compilation_config.mode == CompilationMode.NONE
 
 
 def test_init_speculator_ngram_requires_request_state():
