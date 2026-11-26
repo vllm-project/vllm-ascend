@@ -57,12 +57,29 @@ the production caller always requests fresh outputs.
 
 ### JIT specialization
 
-Widths, row strides and tile sizes are constexpr. Prefill token count is also
-constexpr for the row mask; distinct token counts may produce new variants.
-Generic token count affects the grid, not an explicit constexpr argument.
-Input dtypes also select variants. No new warmup registration or configuration
-is added. Serving-time compilation counts and model-level warmup coverage for
-this standalone revision remain to be measured before merge.
+Widths, row strides and tile sizes are constexpr. Prefill token count is a
+runtime row-mask argument marked `do_not_specialize`, so different counts of
+the same integer type do not add value or divisibility specializations.
+Generic token count affects only the grid. Input dtypes, pointer alignment,
+integer types, layouts and compiler options can still select variants.
+
+### Startup compilation and warmup
+
+This operator does not register with `JitWarmupRegistry`. Configured model dummy
+runs can compile the variants they actually exercise; they do not guarantee
+coverage of both dispatch paths or every supported dtype and layout. An unseen
+variant can therefore compile on first use. Removing token-count specialization
+reduces that risk but does not establish zero serving-time compilation.
+
+The contribution guide requires complete wrapper/registration coverage **where
+warmup is used**. A future registry integration must use the same
+`AscendTritonJitKernel` wrappers for runtime and warmup, enumerate both generic
+and prefill variants, and register during the model's active registry window;
+import-time registration or custom-op registration alone is insufficient.
+See [Triton JIT warmup](../../../../docs/source/developer_guide/Design_Documents/triton_jit_warmup.md).
+Cold/warm cache measurements and compilation counts separated into startup,
+capture and serving phases remain required before merge. If model dummy runs
+leave reachable variants uncovered, add registry coverage before merging.
 
 ## Origin and Differences
 
@@ -90,6 +107,8 @@ python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fu
 
 Hardware tests cover TP1/2/4/8, both kernel paths, the 1024-token boundary,
 partial row tiles, row padding/storage offsets, FP16/BF16 and mixed BA dtype.
+The prefill cache test holds storage, strides and dtype fixed across aligned and
+unaligned token counts, checks compiled-artifact reuse, and validates outputs.
 Model accuracy, MTP parity, parallel-mode integration, black-box compilation
 counts and controlled operator/end-to-end performance remain merge gates.
 Historical combined-runtime performance is not attributed to this PR alone.

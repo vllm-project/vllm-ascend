@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare
+from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare, fused_gdn_prepare_prefill_kernel
 
 
 def check_outputs(outputs, x, ba, width, heads):
@@ -72,3 +72,39 @@ def test_dtype_and_prefill_column_tail(tokens, dtype, ba_dtype):
     x = torch.randn(tokens, width + heads * 128, dtype=dtype, device="npu")
     ba = torch.randn(tokens, 2 * heads, dtype=ba_dtype, device="npu")
     check_outputs(fused_gdn_prepare(x, ba, width, heads, 128), x, ba, width, heads)
+
+
+def test_prefill_token_counts_reuse_compiled_kernel():
+    """Changing only the row mask must reuse the compiled prefill artifact."""
+    # Reuse storage to hold pointer alignment, dtype and strides constant.
+    x = torch.randn(1040, 12288, dtype=torch.bfloat16, device="npu")
+    ba = torch.randn(1040, 64, dtype=torch.float32, device="npu")
+    qkv = torch.empty(1040, 8192, dtype=x.dtype, device=x.device)
+    b = torch.empty(1040, 32, dtype=ba.dtype, device=ba.device)
+    a = torch.empty_like(b)
+    core = torch.empty(1040, 32, 128, dtype=x.dtype, device=x.device)
+    compiled = []
+    for tokens in (1024, 1025, 1031, 1040):
+        compiled.append(
+            fused_gdn_prepare_prefill_kernel.warmup(
+                qkv,
+                b,
+                a,
+                core,
+                x,
+                ba,
+                tokens,
+                x.stride(0),
+                ba.stride(0),
+                8192,
+                32,
+                4096,
+                BLOCK_ROWS=4,
+                BLOCK_WIDTH=8192,
+                BLOCK_HEADS=32,
+                grid=((tokens + 3) // 4,),
+            )
+        )
+        check_outputs(fused_gdn_prepare(x[:tokens], ba[:tokens], 8192, 32, 128), x[:tokens], ba[:tokens], 8192, 32)
+    assert compiled[0] is not None
+    assert all(kernel is compiled[0] for kernel in compiled[1:])

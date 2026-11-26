@@ -46,7 +46,7 @@ def fused_gdn_prepare_kernel(
     tl.store(a + row * BA_WIDTH + ba_offsets, a_data, mask=ba_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def fused_gdn_prepare_prefill_kernel(
     mixed_qkv,
     b,
@@ -54,7 +54,7 @@ def fused_gdn_prepare_prefill_kernel(
     core_attn_out,
     mixed_qkvz,
     mixed_ba,
-    NUM_TOKENS: tl.constexpr,
+    num_tokens,
     QKVZ_ROW_STRIDE: tl.constexpr,
     BA_ROW_STRIDE: tl.constexpr,
     QKV_WIDTH: tl.constexpr,
@@ -68,7 +68,7 @@ def fused_gdn_prepare_prefill_kernel(
     # per token or repeat the small BA operation for each QKV column tile.
     rows = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     columns = tl.arange(0, BLOCK_WIDTH)
-    valid_rows = rows[:, None] < NUM_TOKENS
+    valid_rows = rows[:, None] < num_tokens
     qkv_mask = valid_rows & (columns[None, :] < QKV_WIDTH)
     qkv = tl.load(mixed_qkvz + rows[:, None] * QKVZ_ROW_STRIDE + columns[None, :], qkv_mask, other=0)
     tl.store(mixed_qkv + rows[:, None] * QKV_WIDTH + columns[None, :], qkv, qkv_mask)
