@@ -442,6 +442,23 @@ def builders(monkeypatch):
     return make_specialized
 
 
+@pytest.mark.parametrize("world", [1, 2])
+@pytest.mark.parametrize("specialized", [False, True])
+def test_c2_packing_warmup_registers_in_selected_builder_window(builders, world, specialized):
+    from tests.ut.model_executor.warmup.helpers import make_registry
+    from vllm_ascend.ops.triton.compressor.compressor_triton import _PACK_PCP_C2_ROWS_KERNEL
+
+    registry = make_registry()
+    builders(world=world, specialized=specialized)
+    assert _PACK_PCP_C2_ROWS_KERNEL not in registry._registrations
+    with registry.activate():
+        builders(world=world, specialized=specialized)
+    if world == 1:
+        assert _PACK_PCP_C2_ROWS_KERNEL not in registry._registrations
+    else:
+        assert registry._registrations[_PACK_PCP_C2_ROWS_KERNEL] == [((), {"width": 2})]
+
+
 def _batch(world, rank, scenario, *, decode_sharded=False):
     """The runner's local view and independent canonical global context."""
     if scenario == "prefill":

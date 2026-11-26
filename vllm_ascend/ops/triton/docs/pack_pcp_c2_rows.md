@@ -46,9 +46,26 @@ All parameters are required. All tensors are on the same NPU.
 - Workspace views in the production PCP path are borrowed storage shared by
   serial layers on the main stream. Concurrent forwards/replays need separate
   workspaces or explicit lifetime synchronization.
-- Warmup: no new explicit registry wrapper is introduced in this proposal.
-  Validate coverage of existing dummy-run/capture initialization before serving;
-  add explicit registration if required variants remain uncovered.
+- Warmup: `PackPCPC2RowsKernel` derives from `AscendTritonJitKernel`.
+  `AscendDSAV41PCPMetadataBuilder.__init__` registers the shared
+  `_PACK_PCP_C2_ROWS_KERNEL` instance for compressor-state owners when
+  PCP world size is greater than one. The runner activates its registry around
+  metadata-builder construction during KV-cache initialization. Non-PCP
+  configurations and other cache planes do not register this packing kernel.
+- `pack_pcp_c2_rows` calls that same wrapper instance. Its decorated launcher
+  supplies the grid, strides, width and fixed tile for both runtime execution
+  and compile-only warmup. `warmup_inputs` uses `TritonWarmupTensor` metadata;
+  it does not allocate output, pack rows, clear buffers or run collectives.
+- The default warmup domain is the model `head_dim` with both projection
+  strides `(D, 1)`, aligned production buffers and the fixed FP32/INT64/BOOL
+  pointer types. This requires one key per model width. Runtime T is
+  `do_not_specialize`; S only changes the grid. T=0 with S>0 must still
+  launch to clear invalid rows, while S=0 returns before any launch.
+- Owners with another fixed layout can register `projection_strides` as
+  `(kv_row_stride, kv_col_stride, score_row_stride, score_col_stride)`.
+  Supported unregistered layouts or pointer-alignment classes can still
+  compile lazily. Actual backend specialization metadata must be compared
+  against the warmup domain on the deployed device before claiming coverage.
 
 ## Origin and Differences
 
@@ -74,6 +91,8 @@ from the target run and provided separately; synthetic boundaries are not
 evidence of production-shape coverage.
 
 ```bash
+python -m pytest -q tests/ut/model_executor/warmup/test_jit_warmup_pack_pcp_c2_rows.py
+python -m pytest -q tests/ut/attention/test_dsa_v41_cp.py
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compressor_triton.py -k pack_pcp_c2_rows
 VLLM_PCP_C2_CASES_JSON=/path/to/observed_cases.json python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compressor_triton.py -k observed_model_cases
 ```
@@ -99,6 +118,12 @@ Confirm the observed stride domain with the target workload; this is not a
 claim that every backend output layout has already been measured. Strided
 views remain supported and may compile additional variants; boundary tests of
 such views do not imply that production needs runtime stride arguments.
+
+The explicit compile key contains D and the four projection strides. Dtypes
+and the 128-element tile are fixed by this operator's interface and launcher.
+Warmup keys deduplicate startup work, rather than replacing Triton's own JIT
+cache key. Compiler options, target, source changes, pointer alignment and
+runtime scalar type changes remain possible compilation conditions.
 
 The 128-element tile is inherited as a conservative starting point, not a
 measured optimum. Benchmark this constexpr-stride implementation against both

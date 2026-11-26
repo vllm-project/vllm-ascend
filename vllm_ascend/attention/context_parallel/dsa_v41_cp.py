@@ -328,6 +328,15 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._pcp_rope_buffers: dict[str, tuple[torch.Tensor, ...]] = {}
         self._c2_metadata_buffers: dict[str, torch.Tensor] = {}
         self._pcp_row_workspace: V41PCPRowWorkspace | None = None
+        if self.use_pcp and self._cache_kind == "compressor_state":
+            # The runner activates its registry while constructing metadata
+            # builders. State-cache owners select the ratio-2 PCP packing path.
+            # Keep Triton loading scoped to that worker initialization path.
+            from vllm_ascend.ops.triton.compressor.compressor_triton import _PACK_PCP_C2_ROWS_KERNEL
+
+            _PACK_PCP_C2_ROWS_KERNEL.register_warmup(
+                width=int(v41._config_value(vllm_config.model_config.hf_text_config, "head_dim"))
+            )
 
     def _prepare_row_workspace(self):
         owner = self._pcp_context_owner

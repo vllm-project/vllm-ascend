@@ -10,11 +10,17 @@ slot. Concurrent execution could overwrite the residual before it is read.
 compressor_ref is the pure PyTorch reference implementation.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import LaunchSpec, TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
 DEV = "npu"
 MAX_CHUNK_ROWS = 8  # Max rows per pooling chunk; intermediates across three passes use <192 KB of UB.
@@ -732,6 +738,102 @@ def _pack_pcp_c2_rows_kernel(
     tl.store(output_ptr + WIDTH, scores, mask=columns < WIDTH)
 
 
+class PackPCPC2RowsKernel(AscendTritonJitKernel["PackPCPC2RowsKernel.CompileKey"]):
+    """Share the packing launch specification with compile-only warmup."""
+
+    kernel = _pack_pcp_c2_rows_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        width: int
+        kv_row_stride: int
+        kv_col_stride: int
+        score_row_stride: int
+        score_col_stride: int
+
+    def dispatch(
+        self,
+        *,
+        width: int,
+        kv_row_stride: int,
+        kv_col_stride: int,
+        score_row_stride: int,
+        score_col_stride: int,
+    ) -> "PackPCPC2RowsKernel.CompileKey":
+        return self.CompileKey(
+            width=width,
+            kv_row_stride=kv_row_stride,
+            kv_col_stride=kv_col_stride,
+            score_row_stride=score_row_stride,
+            score_col_stride=score_col_stride,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        width: int,
+        projection_strides: tuple[int, int, int, int] | None = None,
+    ) -> list["PackPCPC2RowsKernel.CompileKey"]:
+        # The PCP caller packs two FP32 nn.Linear outputs with (width, 1)
+        # strides. T is do_not_specialize and S only controls the launch grid.
+        # Register a separate tuple if an owner uses a different fixed layout.
+        if projection_strides is None:
+            projection_strides = (width, 1, width, 1)
+        return [
+            self.dispatch(
+                width=width,
+                kv_row_stride=projection_strides[0],
+                kv_col_stride=projection_strides[1],
+                score_row_stride=projection_strides[2],
+                score_col_stride=projection_strides[3],
+            )
+        ]
+
+    def warmup_inputs(self, key: "PackPCPC2RowsKernel.CompileKey") -> dict[str, Any]:
+        # Aligned production buffers, represented without allocating device
+        # storage or executing packing/collectives. Pointer dtypes are fixed.
+        return dict(
+            kv=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, key.width),
+                strides=(key.kv_row_stride, key.kv_col_stride),
+            ),
+            scores=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, key.width),
+                strides=(key.score_row_stride, key.score_col_stride),
+            ),
+            send_indices=TritonWarmupTensor(torch.int64, shape=(1,)),
+            valid_mask=TritonWarmupTensor(torch.bool, shape=(1,)),
+            packed_output=TritonWarmupTensor(torch.float32, shape=(1, 2 * key.width)),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        kv: torch.Tensor,
+        scores: torch.Tensor,
+        send_indices: torch.Tensor,
+        valid_mask: torch.Tensor,
+        packed_output: torch.Tensor,
+    ) -> LaunchSpec:
+        width = kv.shape[1]
+        return (send_indices.shape[0], triton.cdiv(width, _PCP_C2_PACK_BLOCK_SIZE)), dict(
+            num_tokens=kv.shape[0],
+            KV_ROW_STRIDE=kv.stride(0),
+            KV_COL_STRIDE=kv.stride(1),
+            SCORE_ROW_STRIDE=scores.stride(0),
+            SCORE_COL_STRIDE=scores.stride(1),
+            WIDTH=width,
+            BLOCK_SIZE=_PCP_C2_PACK_BLOCK_SIZE,
+        )
+
+
+# The selected PCP metadata owner registers this same runtime instance.
+# Only framework compilation state is retained, never request tensors.
+_PACK_PCP_C2_ROWS_KERNEL = PackPCPC2RowsKernel()
+
+
 def pack_pcp_c2_rows(kv, scores, send_indices, valid_mask, packed_output):
     """Pack FP32 C2 projections into a caller-owned contiguous [S, 2*D].
 
@@ -779,19 +881,12 @@ def pack_pcp_c2_rows(kv, scores, send_indices, valid_mask, packed_output):
     if any(t.numel() and t.untyped_storage().data_ptr() == output_storage for t in tensors[:-1]):
         raise ValueError("C2 output must not share storage with inputs")
 
-    _pack_pcp_c2_rows_kernel[(send_rows, triton.cdiv(width, _PCP_C2_PACK_BLOCK_SIZE))](
-        kv,
-        scores,
-        send_indices,
-        valid_mask,
-        packed_output,
-        kv.shape[0],
-        KV_ROW_STRIDE=kv.stride(0),
-        KV_COL_STRIDE=kv.stride(1),
-        SCORE_ROW_STRIDE=scores.stride(0),
-        SCORE_COL_STRIDE=scores.stride(1),
-        WIDTH=width,
-        BLOCK_SIZE=_PCP_C2_PACK_BLOCK_SIZE,
+    _PACK_PCP_C2_ROWS_KERNEL(
+        kv=kv,
+        scores=scores,
+        send_indices=send_indices,
+        valid_mask=valid_mask,
+        packed_output=packed_output,
     )
     return packed_output
 
