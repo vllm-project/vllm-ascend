@@ -31,7 +31,7 @@ def _common(query, weights, source_cache, source_metadata, compress_ratio, quant
     query_start_loc = source_metadata.query_start_loc
     return (
         quantized_query,
-        query_scale.unflatten(-1, (2, 2)).contiguous(),
+        query_scale.view(query.shape[0], query.shape[1], 2, 2),
         weights.float().contiguous(),
         source_cache[0],
         source_cache[1].unflatten(-1, (2, 2)),

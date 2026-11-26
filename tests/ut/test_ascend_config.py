@@ -141,9 +141,15 @@ class TestQuantizedAllReduceConfig(TestBase):
             with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
                 config = QuantizedAllReduceConfig()
                 self.assertFalse(config.enable)
-                self.assertEqual(config.min_numel, 16777216)
+                # None means "pick the per-TP int8 default measured on A2".
+                self.assertIsNone(config.min_numel)
                 self.assertEqual(config.quant_dtype, expected_dtype)
                 self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
+
+    def test_auto_min_numel_accepts_null(self):
+        config = QuantizedAllReduceConfig(enable=True, min_numel=None)
+        self.assertTrue(config.enable)
+        self.assertIsNone(config.min_numel)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
@@ -482,6 +488,34 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
         with self.assertRaises(ValueError):
             init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_requires_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        # The per-TP gates are A2 measurements; A5 int8 has no calibration, so
+        # None must fail at config time instead of silently reusing an A2 gate.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "quant_dtype": "int8"}}
+        with self.assertRaisesRegex(ValueError, "measured on Atlas A2 only"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_accepts_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {
+            "quantized_all_reduce_config": {
+                "enable": True,
+                "quant_dtype": "int8",
+                "min_numel": 16777216,
+            }
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 16777216)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1487,6 +1521,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             vc = self._oproj_tp_vllm_config()
             vc.parallel_config.pipeline_parallel_size = 1
             vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            vc.model_config.hf_config = vc.model_config.hf_text_config
             return vc
 
         for size in (2, 4, 8):
@@ -1504,8 +1539,10 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.model_config.hf_text_config.model_type = "other"
-        with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
+        with self.assertRaisesRegex(ValueError, "supports GLM-5.3-Flash and Kimi-K3.1 only"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        for size in (0, 1):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)._validate_preconditions(vc)
         with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
         vc = deployment()
@@ -1514,6 +1551,16 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=4)._validate_preconditions(vc)
         with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=-1)
+
+    def test_gproj_tp_rejects_models_without_gate_sharding(self):
+        vc = self._oproj_tp_vllm_config()
+        for model_type in ("glm5_next", "kimi_linear", "other"):
+            with self.subTest(model_type=model_type):
+                vc.model_config.hf_config = SimpleNamespace(model_type=model_type)
+                with self.assertRaisesRegex(ValueError, "supported only on Kimi K3.1 Pro"):
+                    FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
+                for size in (0, 1):
+                    FinegrainedTPConfig(gproj_tensor_parallel_size=size)._validate_preconditions(vc)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)

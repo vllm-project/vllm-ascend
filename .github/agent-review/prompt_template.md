@@ -1,5 +1,12 @@
 {{INSTRUCTIONS}}
 
+## Working directory
+
+Your current directory is the trusted checkout at the workflow revision.
+Read review rules from `./.github/agent-review/`, proposed code from
+`head/<path>`, and earlier code from `base/<path>`. The `base/` checkout
+contains the merge base used to compute the supplied diff.
+
 ## Trusted knowledge base map
 
 {{KB_MAP}}
@@ -10,7 +17,7 @@
 
 ## Fixed snapshot
 
-Base: {{BASE_SHA}}
+Merge base: {{BASE_SHA}}
 Head: {{HEAD_SHA}}
 Diff truncated: {{TRUNCATED}}
 

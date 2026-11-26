@@ -20,7 +20,7 @@ This guide is based on **vLLM-Ascend 0.30.0**, which introduces experimental sup
 
 ## 2 Supported Features {: #2-supported-features}
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md#generative-models_1) for the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md#generative-models) for the model's supported feature matrix.
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
@@ -428,7 +428,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -527,7 +527,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false
@@ -1052,7 +1052,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -1151,7 +1151,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false
@@ -1696,7 +1696,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -1817,7 +1817,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false

@@ -1081,6 +1081,10 @@ def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
+def shared_expert_tp_enable() -> bool:
+    return get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size > 1
+
+
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
@@ -1116,6 +1120,18 @@ def enable_sp(vllm_config=None) -> bool:
     from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
 
     return enable_dense_sp(vllm_config)
+
+
+def pad_num_tokens(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    enable_shared_expert_dp: bool = False,
+) -> int:
+    """Pad TP-shared token rows to the tensor-parallel world size."""
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    if tp_size <= 1 or not (enable_sp(vllm_config) or enable_shared_expert_dp):
+        return num_tokens
+    return (num_tokens + tp_size - 1) // tp_size * tp_size
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1444,9 +1460,6 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
-    if ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size > 1:
-        # QKV input projection exchanges require the same padded capacity on every DP rank.
-        return False
     # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
     # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
@@ -1459,6 +1472,14 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
     if not is_context_moe_model:
         return True
+    if getattr(ascend_config.finegrained_tp_config, "qkv_iproj_tensor_parallel_size", 1) > 1:
+        # MoE target/draft QKV exchanges need a uniform capacity. Dense
+        # drafters returned above and do not execute these projections.
+        return False
+    # Projection collectives belong to the target's execution plan. A dense
+    # drafter does not run them and must retain its rank-local K=0 fast path.
+    if not is_draft_model and ascend_config.finegrained_tp_config.requires_graph(vllm_config):
+        return False
 
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer

@@ -305,6 +305,8 @@
 #       worker pickle IPC), read the PD role back in the coordinator, and
 #       skip the EAGLE drop in both lookup entry points on a pure producer.
 #       The EAGLE-group fallback marks FullAttention groups only.
+#       Checkpoint writes apply the role-gated drop to all Mamba managers,
+#       including unmarked target groups, matching the scheduler boundary.
 #    Related PR (if no, explain why):
 #       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:
@@ -440,36 +442,29 @@
 #       separate hook that can be overridden per-model-type.
 #
 # ** 18. File: platform/patch_speculative_config.py**
-# Native MiniMax Flash draft extension:
-#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
-#   Why: native DSpark exports use a standalone architecture and carry their
-#        own dspark/config.json, while upstream normalizes unknown drafts to
-#        DSparkDraftModel.
-#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
-#        normalize the checkpoint's dspark/config.json without changing the
-#        target or checkpoint. The adapter, its checkpoint contract and weight
-#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
-#        DSpark drafting and changes only Flash norms, MLP and loading.
-#   Related PR:
-#        https://github.com/vllm-project/vllm/pull/64111
-#   Future Plan: remove the architecture guard and config/weight normalization
-#        once upstream loads native MiniMax Flash drafts. Retain only required
-#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
-#       natively. The remaining Ascend deltas are legacy checkpoint
-#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
-#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
+#       Upstream v0.34.0 remaps most MTP/DSpark draft model_types/architectures
+#       natively (including MiniMax DSpark subfolder discovery and architecture
+#       preservation in vllm#64111). The remaining Ascend deltas are legacy
+#       checkpoint normalizations upstream does not cover (Kimi K2.5 DFlash
+#       YaRN amplitude, un-converted Qwen3 DSpark drafts, and the VL
+#       glm5_next_text wrapper) plus MiniMax DSpark's Ascend config
+#       normalization and weight-header-derived quantization metadata.
 #    How：
-#       Call upstream `hf_config_override` first, then apply the legacy
-#       normalizations on top.
+#       Route MiniMax DSpark drafts through `draft_hf_override`; otherwise call
+#       upstream `hf_config_override` first and apply the legacy normalizations
+#       on top.
 #    Related PR (if no, explain why):
-#       No, Ascend-specific legacy checkpoint compatibility.
+#       https://github.com/vllm-project/vllm/pull/64111 handles native MiniMax
+#       DSpark recognition and default checkpoint selection. No upstream PR
+#       covers the remaining legacy compatibility or Ascend weight-header
+#       quantization metadata.
 #    Future Plan:
 #       Remove these normalizations once the checkpoints ship converted
-#       configs and upstream handles glm5_next_text MTP remapping.
+#       configs, upstream handles glm5_next_text MTP remapping, and Ascend can
+#       derive MiniMax metadata through a loader extension point.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
@@ -488,26 +483,6 @@
 #       Remove this normalization once upstream performs multimodal conversion
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
-#
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
 #
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -566,6 +541,22 @@
 #    Future Plan:
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
+#
+# ** 21b. File: platform/patch_torch_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
+#    Why:
+#       The upstream UVA helper supports CUDA, ROCm, and XPU, but not NPU.
+#       Qwen4Exp Engram imports that common helper for its host-resident table.
+#    How:
+#       Replace the common helper during the Ascend platform patch phase with
+#       an NPU implementation backed by `_C_ascend.get_npu_view_from_cpu_tensor`.
+#       Model code then uses the normal upstream import without a model-local
+#       rebinding.
+#    Related PR (if no, explain why):
+#       Pending upstream vLLM support; requested in review of vllm-ascend #20311.
+#    Future Plan:
+#       Remove this patch after the NPU branch is available upstream.
 #
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

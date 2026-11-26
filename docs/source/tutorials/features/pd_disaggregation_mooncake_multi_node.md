@@ -554,6 +554,26 @@ Modify `run_dp_template.sh` on each node.
         1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
         2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 
+#### Manual launch of external DP ranks
+
+!!! note
+
+    If you skip the launcher and template above, run one `vllm serve` command
+    per external DP rank. For ranks on the same node, follow the
+    [upstream vLLM guidance](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
+
+    > assign each process a disjoint device set with `CUDA_VISIBLE_DEVICES` or
+    > `--device-ids`; devices are not partitioned automatically between processes.
+
+    On Ascend, the visibility variable is `ASCEND_RT_VISIBLE_DEVICES`.
+
+    For example, with two TP2 ranks on one node, both `vllm serve`
+    processes can inherit `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`.
+    Give each process only its own device IDs.
+
+    - Rank 0: `--device-ids 8,9`
+    - Rank 1: `--device-ids 0,1`
+
 #### Layerwise
 
 === "Prefiller node 1"
@@ -1430,6 +1450,24 @@ ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf
 ### 1. Prefiller nodes need to warmup
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
+
+### 2. Network interface selection for multi-node deployments {: #2-gloo}
+
+Depending on the hardware and cluster network configuration, a node may have both a management interface for administration (for example, 1 Gb/s) and a high-speed interface for traffic between nodes (for example, 100 Gb/s). In the launch examples, some components use `nic_name` to select an interface for cross-node TCP connections. If bandwidth limits these connections, try setting `nic_name` to a higher-bandwidth interface and compare performance under the same workload.
+
+Run the following command inside the service container to list the interfaces it can see and their IP addresses.
+
+```bash
+ip -br addr
+```
+
+Set `nic_name` to the name of a listed interface that can reach the other nodes in the deployment.
+
+To check the link speed, run the following command on the host. Replace `<physical-interface>` with the name of the physical interface.
+
+    ethtool <physical-interface>
+
+Check `Speed` in the output. For example, `100000Mb/s` means 100 Gb/s.
 
 ## Verification
 

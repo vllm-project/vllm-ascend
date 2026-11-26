@@ -15,15 +15,38 @@ if TYPE_CHECKING:
     from .kda import Glm5NextLinearAttention
 
 
+# TODO: Move this shared layout to a model-neutral module under ops/.
 class KDAInputProjectionTPLayout:
-    def __init__(self, group: GroupCoordinator, num_heads: int, head_dim: int):
+    def __init__(self, group: GroupCoordinator | None, num_heads: int, head_dim: int):
         self.group = group
-        self.size = group.world_size
+        self.size = group.world_size if group is not None else 1
+        self.num_heads = num_heads
         self.heads = num_heads // self.size
         self.head_dim = head_dim
         self.width = self.heads * head_dim
 
-    def _all_to_all(self, tensor: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def prepare_input(hidden: torch.Tensor) -> tuple[torch.Tensor, int]:
+        local_tokens = hidden.shape[0]
+        dp_tokens = _EXTRA_CTX.max_tokens_across_dp
+        capacity = max(local_tokens, dp_tokens) if dp_tokens is not None else local_tokens
+        if capacity > local_tokens:
+            hidden = F.pad(hidden, (0, 0, 0, capacity - local_tokens))
+        return hidden, capacity
+
+    def restore_qkv_beta(self, received: torch.Tensor, capacity: int) -> tuple[torch.Tensor, torch.Tensor]:
+        qkv, beta = received.view(self.size, capacity, -1).split((3 * self.width, self.heads), dim=-1)
+        qkv = qkv.view(self.size, capacity, 3, self.heads, self.head_dim)
+        qkv = qkv.permute(1, 2, 0, 3, 4).reshape(capacity, -1)
+        beta = beta.permute(1, 0, 2).reshape(1, capacity, self.num_heads)
+        return qkv, beta
+
+    def restore_gate(self, gate: torch.Tensor, capacity: int) -> torch.Tensor:
+        gate = gate.view(self.size, capacity, self.heads, self.head_dim)
+        return gate.transpose(0, 1).reshape(capacity, self.num_heads, self.head_dim)
+
+    def all_to_all(self, tensor: torch.Tensor) -> torch.Tensor:
+        assert self.group is not None
         output = torch.empty_like(tensor)
         dist.all_to_all_single(output, tensor, group=self.group.device_group)
         return output
@@ -33,11 +56,10 @@ class KDAInputProjectionTP(KDAInputProjectionTPLayout):
     def project(
         self, layer: "Glm5NextLinearAttention", hidden: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        local_tokens = hidden.shape[0]
-        capacity = max(local_tokens, _EXTRA_CTX.max_tokens_across_dp or local_tokens)
+        hidden, capacity = self.prepare_input(hidden)
         if capacity == 0:
             return None
-        hidden = F.pad(hidden, (0, 0, 0, capacity - local_tokens))
+        assert self.group is not None
         gathered = self.group.all_gather(hidden, dim=0)
         projected = layer.in_proj_qkvbfg_a(gathered)[0]
         qkv_beta, forget_a, gate_a = projected.split(
@@ -53,10 +75,7 @@ class KDAInputProjectionTP(KDAInputProjectionTPLayout):
         gate = layer.g_b_proj(gate_a.narrow(0, start, capacity))[0]
         assert work is not None
         work.wait()
-        qkv, beta = received.view(self.size, capacity, -1).split((3 * self.width, self.heads), dim=-1)
-        qkv = qkv.view(self.size, capacity, 3, self.heads, self.head_dim)
-        qkv = qkv.permute(1, 2, 0, 3, 4).reshape(capacity, -1)
-        beta = beta.permute(1, 0, 2).reshape(1, capacity, -1)
+        qkv, beta = self.restore_qkv_beta(received, capacity)
         forget = forget.view(1, capacity, layer.num_heads, self.head_dim)
         gate = gate.view(capacity, layer.num_heads, self.head_dim)
         return qkv, forget, beta, gate

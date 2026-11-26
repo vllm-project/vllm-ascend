@@ -69,6 +69,17 @@ class CVLinearWrapper:
             return quant_method.quant_method
         return None
 
+    def can_share_mxfp8_input(self, linear, *, group_size: int) -> bool:
+        source = self._mxfp8_quant_method
+        target = self._detect_mxfp8_dynamic(linear.quant_method)
+        return (
+            not self._has_communication
+            and source is not None
+            and target is not None
+            and source.group_size == target.group_size == group_size
+            and source.dynamic_mx_quant_scale_alg == target.dynamic_mx_quant_scale_alg
+        )
+
     @staticmethod
     def _detect_communication(linear):
         """
