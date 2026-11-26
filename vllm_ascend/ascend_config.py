@@ -747,6 +747,9 @@ class AscendConfig:
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
+    enable_deepgemm_mega_moe: bool = False
+    """Experimental Ascend950 FP8 x FP4 routed MegaMoE; requires fused_mc2=2."""
+
     enable_fused_mc2: int = 0
     # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
     # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
@@ -815,6 +818,8 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
+        if self.enable_deepgemm_mega_moe and self.enable_fused_mc2 != 2:
+            raise ValueError("enable_deepgemm_mega_moe requires enable_fused_mc2=2")
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             self._megamoe_supported = False
@@ -822,7 +827,10 @@ class AscendConfig:
             # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
             # with the shared expert fused into the operator.
             self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
-            self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
+            # DeepGEMM is validated when the worker constructs the MoE.
+            self._megamoe_supported = (
+                self.enable_deepgemm_mega_moe or importlib.util.find_spec("cann_ops_transformer") is not None
+            )
             if self.enable_fused_mc2 == 3 and not self._megamoe_supported:
                 logger.warning_once(
                     "enable_fused_mc2=3 requires the cann_ops_transformer package; "
@@ -843,6 +851,8 @@ class AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         vc = vllm_config
+        if self.enable_deepgemm_mega_moe:
+            self._validate_deepgemm_mega_moe(vc)
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
@@ -972,7 +982,12 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
+        if (
+            self.enable_fused_mc2 == 1
+            and self._megamoe_supported
+            and not self.enable_deepgemm_mega_moe
+            and not self._is_megamoe_supported_by_config(vc)
+        ):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -1228,6 +1243,52 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    def _validate_deepgemm_mega_moe(self, vc):
+        """Reject modes that cannot reuse the fixed, rank-ordered FP4 layout."""
+        model = vc.model_config
+        parallel = vc.parallel_config
+        hf = model.hf_text_config
+        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            raise ValueError("DeepGEMM MegaMoE requires Ascend950")
+        if "DeepseekV41ForCausalLM" not in model.architectures:
+            raise ValueError("DeepGEMM MegaMoE currently supports only DeepSeek V4.1")
+        if not model.enforce_eager:
+            raise ValueError("DeepGEMM MegaMoE currently requires enforce_eager")
+        if model.quantization != "deepseek_v4_fp8":
+            raise ValueError("DeepGEMM MegaMoE requires --quantization deepseek_v4_fp8")
+        if (
+            not parallel.enable_expert_parallel
+            or parallel.tensor_parallel_size != 1
+            or parallel.pipeline_parallel_size != 1
+            or not 2 <= parallel.data_parallel_size <= 64
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+        ):
+            raise ValueError("DeepGEMM MegaMoE requires EP with DP=2..64, TP=PP=PCP=DCP=1")
+        if hf.n_routed_experts % parallel.data_parallel_size:
+            raise ValueError("DeepGEMM MegaMoE requires experts divisible by EP size")
+        quant = getattr(model.hf_config, "quantization_config", {}) or {}
+        if quant.get("expert_dtype") != "fp4" or quant.get("scale_fmt") != "ue8m0":
+            raise ValueError("DeepGEMM MegaMoE requires original FP4 experts and UE8M0 scales")
+        if (
+            self.eplb_config.dynamic_eplb
+            or self.enable_force_eplb
+            or getattr(parallel, "enable_eplb", False)
+            or getattr(parallel, "expert_placement_strategy", "linear") != "linear"
+        ):
+            raise ValueError("DeepGEMM MegaMoE requires fixed linear expert placement without EPLB")
+        if (
+            vc.speculative_config is not None
+            or vc.lora_config is not None
+            or getattr(model, "enable_sleep_mode", False)
+            or self.rl_config.enabled
+        ):
+            raise ValueError("DeepGEMM MegaMoE does not support speculation, LoRA, sleep mode or RL mode")
+        if self._has_per_layer_swiglu_limit(vc):
+            raise ValueError("DeepGEMM MegaMoE does not support per-layer SwiGLU limits")
+        if hf.hidden_size % 128 or hf.moe_intermediate_size % 128:
+            raise ValueError("DeepGEMM MegaMoE dimensions must be multiples of 128")
 
     @staticmethod
     def _has_per_layer_swiglu_limit(vllm_config: VllmConfig) -> bool:

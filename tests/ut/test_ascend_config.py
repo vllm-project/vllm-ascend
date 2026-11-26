@@ -1969,23 +1969,37 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
 
     @_clean_up
-    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
-        # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
-        # the published MegaMoE flag to False, regardless
-        # of whether the model config supports megamoe. So even when
-        # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
-        # up False and the fused path routes to dispatch_ffn_combine instead of
-        # mega_moe.
+    def test_fused_mc2_rolls_back_even_when_config_supported(self, _mock_fix, _mock_megamoe_supported):
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
-        config = init_ascend_config(vc)
-        self.assertEqual(config.enable_fused_mc2, 1)
-        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
-        # routes to dispatch_ffn_combine instead of mega_moe.
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()):
+            config = init_ascend_config(vc)
+            self.assertEqual(config.enable_fused_mc2, 1)
+            self.assertFalse(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rejected_deepgemm_config_preserves_active_mc2_mode(self, _mock_fix):
+        active = VllmConfig()
+        active.additional_config = {"enable_fused_mc2": 1}
+        active_config = init_ascend_config(active)
+        self.assertFalse(is_mega_moe_supported())
+
+        rejected = VllmConfig()
+        rejected.additional_config = {"enable_fused_mc2": 2, "enable_deepgemm_mega_moe": True}
+        with (
+            patch(
+                "vllm_ascend.ascend_config.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            self.assertRaisesRegex(ValueError, "DeepGEMM MegaMoE currently supports only DeepSeek V4.1"),
+        ):
+            init_ascend_config(rejected)
+
+        self.assertIs(get_ascend_config(), active_config)
         self.assertFalse(is_mega_moe_supported())
 
     @_clean_up
@@ -2172,6 +2186,13 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         with patch.object(AscendConfig, "_validate_megamoe_shared_expert_fusion") as mock_check:
             init_ascend_config(vc)
         mock_check.assert_called_once()
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None)
+    def test_megamoe_support_checks_cann_before_config_initialization(self):
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()) as find_spec:
+            self.assertTrue(is_mega_moe_supported())
+        find_spec.assert_called_once_with("cann_ops_transformer")
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

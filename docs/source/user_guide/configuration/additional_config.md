@@ -67,6 +67,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. Supported fused modes (`1`, `2`, and `3`) fall back to `0` when the target model or MTP draft uses per-layer SwiGLU limits. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_deepgemm_mega_moe`           | bool | `False` | Experimental DeepGEMM-Ascend routed FP8 x FP4 MegaMoE backend for DeepSeek V4.1 on Ascend950. Requires the [supported DeepGEMM-Ascend build](#deepgemm-ascend-megamoe), `enable_fused_mc2=2`, `enforce_eager`, `--quantization deepseek_v4_fp8`, original FP4 experts with UE8M0 scales, EP with DP=2..64 and TP=PP=PCP=DCP=1, and fixed linear expert placement without EPLB. The expert count must be divisible by DP; hidden and MoE intermediate dimensions must be multiples of 128. Per-layer SwiGLU limits, weight reloading, RL mode, sleep mode, LoRA, and speculative decoding are unsupported. Shared experts use the existing shared-expert path. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
@@ -77,6 +78,17 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
+
+<span id="deepgemm-ascend-megamoe"></span>**enable_deepgemm_mega_moe**
+
+Use [DeepGEMM-Ascend revision `3a35326271b069b8b5bf1a754435acd6cc91575b`](https://github.com/deepseek-ai/DeepGEMM-Ascend/commit/3a35326271b069b8b5bf1a754435acd6cc91575b)
+with the [HCCL and CANN compatibility patch `9c12bc1`](https://github.com/lengrongfu/DeepGEMM-Ascend/commit/9c12bc1217e2f3b15d3c722a58cd5547ee69adf2).
+This build was validated on Ascend 950DT with CANN 9.2.0, where the patch is
+required for single-layer HCCL initialization and device compilation.
+
+Install the patched build in the worker's Python environment as `deep_gemm`.
+Before converting expert weights, each enabled worker checks for the
+Ascend-specific `get_npu_arch` export and the required MegaMoE entry points.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

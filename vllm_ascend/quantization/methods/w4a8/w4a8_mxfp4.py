@@ -23,6 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import WeightFormat
@@ -581,3 +582,33 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        if get_ascend_config().enable_deepgemm_mega_moe:
+            return MoEWeights(
+                w1=layer.deepgemm_l1[0],
+                w1_scale=layer.deepgemm_l1[1],
+                w2=layer.deepgemm_l2[0],
+                w2_scale=layer.deepgemm_l2[1],
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        return super().get_fused_mc2_weights(layer)
+
+    def process_weights_after_loading(self, layer):
+        if get_ascend_config().enable_deepgemm_mega_moe:
+            # Load the optional extension only in the NPU worker.
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import prepare_weights
+
+            if hasattr(layer, "deepgemm_l1"):
+                raise RuntimeError("DeepGEMM MegaMoE weight reload is not supported")
+            layer.deepgemm_l1, layer.deepgemm_l2 = prepare_weights(
+                layer.w13_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight,
+                layer.w2_weight_scale,
+            )
+            for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
+                dispose_tensor(getattr(layer, name))
+            return
+        return super().process_weights_after_loading(layer)

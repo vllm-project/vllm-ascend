@@ -1,0 +1,4 @@
+pr: 20742
+entries:
+  - category: feature
+    text: Added an opt-in DeepGEMM-Ascend routed FP8 x FP4 MegaMoE backend for DeepSeek V4.1 on Ascend950 in eager mode. Weight reloading, RL mode, sleep mode, LoRA, and speculative decoding are not supported.
