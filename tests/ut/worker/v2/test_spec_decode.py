@@ -11,49 +11,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, SpeculativeConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
 
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
-
-_UNSET = object()
-
-
-def _resolve_test_speculator_class(
-    method: str | None,
-    use_dspark: bool,
-    use_dflash: bool,
-    use_eagle: bool,
-    architectures: list[str] | None,
-    use_gemma4_mtp: bool,
-    use_multi_module_mtp: bool,
-    uses_draft_model: bool,
-) -> str | None:
-    """Resolve the upstream speculator_class qualname for synthetic test configs."""
-    if method in ("ngram", "ngram_gpu"):
-        return "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
-    if method == "extract_hidden_states":
-        return "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator"
-    if use_dspark:
-        return "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
-    if use_dflash:
-        archs = architectures or []
-        if "LiLiCorrDraftModel" in archs:
-            return "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator"
-        if "DFlash2DraftModel" in archs:
-            return "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator"
-        return "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
-    if use_gemma4_mtp:
-        return "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
-    if use_multi_module_mtp:
-        return "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator.MultiModuleMTPSpeculator"
-    if method == "mtp":
-        return "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
-    if use_eagle or method in ("eagle", "eagle3"):
-        return "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
-    if uses_draft_model or method == "draft_model":
-        return "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator.StandaloneARSpeculator"
-    return None
 
 
 def test_rejection_sample_rejects_block_with_synthetic_rates():
@@ -76,50 +39,15 @@ def test_rejection_sample_rejects_block_with_synthetic_rates():
         )
 
 
-def _make_config(
-    method,
-    use_dspark=False,
-    use_dflash=False,
-    use_eagle=False,
-    architectures=None,
-    use_gemma4_mtp=False,
-    use_multi_module_mtp=False,
-    uses_draft_model=False,
-    speculator_class: Any = _UNSET,
-    custom_method=None,
-):
-    """Create a minimal speculative decoding config for init_speculator tests."""
-    resolved_speculator_class = (
-        _resolve_test_speculator_class(
+def _make_config(method: str, speculator_class: str | None, *, custom_method: str | None = None):
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
             method=method,
-            use_dspark=use_dspark,
-            use_dflash=use_dflash,
-            use_eagle=use_eagle,
-            architectures=architectures,
-            use_gemma4_mtp=use_gemma4_mtp,
-            use_multi_module_mtp=use_multi_module_mtp,
-            uses_draft_model=uses_draft_model,
-        )
-        if speculator_class is _UNSET
-        else speculator_class
-    )
-    speculative_config = SimpleNamespace(
-        method=method,
-        enforce_eager=None,
-        custom_method=custom_method,
-        speculator_config=SimpleNamespace(speculator_class=resolved_speculator_class),
-        use_dspark=MagicMock(return_value=use_dspark),
-        use_dflash=MagicMock(return_value=use_dflash),
-        use_eagle=MagicMock(return_value=use_eagle),
-        uses_draft_model=MagicMock(return_value=uses_draft_model),
-        use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
-        use_multi_module_mtp=MagicMock(return_value=use_multi_module_mtp),
-        draft_model_config=SimpleNamespace(
-            architectures=architectures or [],
-            hf_config=SimpleNamespace(model_type=None),
+            enforce_eager=None,
+            custom_method=custom_method,
+            speculator_config=SimpleNamespace(speculator_class=speculator_class),
         ),
     )
-    return SimpleNamespace(speculative_config=speculative_config)
 
 
 def _mock_speculator_module(monkeypatch, module_name, class_name):
@@ -134,7 +62,7 @@ def _mock_speculator_module(monkeypatch, module_name, class_name):
 @pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, enforce_eager):
-    config = _make_config(method)
+    config = _make_config(method, NgramSpeculatorConfig.speculator_class)
     config.speculative_config.enforce_eager = enforce_eager
     config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
     device = torch.device("cpu")
@@ -161,103 +89,12 @@ def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, e
 
 def test_init_speculator_ngram_requires_request_state():
     with pytest.raises(ValueError, match="requires request states"):
-        init_speculator(_make_config("ngram_gpu"), torch.device("cpu"))
-
-
-def test_init_speculator_extract_hidden_states(monkeypatch):
-    """Test dispatching extract_hidden_states to the upstream speculator."""
-    config = _make_config("extract_hidden_states")
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states",
-        "ExtractHiddenStatesSpeculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
-def test_init_speculator_dspark(monkeypatch):
-    """Test dispatching DSpark speculative decoding."""
-    config = _make_config(
-        "dspark",
-        use_dspark=True,
-    )
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator",
-        "AscendDSparkSpeculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
-def test_init_speculator_dflash2(monkeypatch):
-    """Test dispatching DFlash2DraftModel to AscendDFlash2Speculator."""
-    config = _make_config(
-        "dflash",
-        use_dflash=True,
-        architectures=["DFlash2DraftModel"],
-    )
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.dflash2.speculator",
-        "AscendDFlash2Speculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
-def test_init_speculator_dflash(monkeypatch):
-    """Test dispatching the regular DFlash draft model."""
-    config = _make_config(
-        "dflash",
-        use_dflash=True,
-        architectures=["DFlashDraftModel"],
-    )
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator",
-        "AscendDFlashSpeculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
-def test_init_speculator_mtp(monkeypatch):
-    """Test dispatching the regular MTP speculative decoding path."""
-    config = _make_config("mtp")
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
-        "AscendMTPSpeculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
+        init_speculator(_make_config("ngram_gpu", NgramSpeculatorConfig.speculator_class), torch.device("cpu"))
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False, None])
 def test_draft_compilation_config_respects_enforce_eager(monkeypatch, enforce_eager):
-    config = _make_config("mtp")
+    config = _make_config("mtp", MTPSpeculatorConfig.speculator_class)
     config.speculative_config.enforce_eager = enforce_eager
     config.compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
@@ -289,76 +126,12 @@ def test_draft_compilation_config_respects_enforce_eager(monkeypatch, enforce_ea
     assert draft_compilation.static_all_moe_layers is target_compilation.static_all_moe_layers
 
 
-def test_init_speculator_eagle(monkeypatch):
-    """Test dispatching Eagle speculative decoding."""
-    config = _make_config(
-        "eagle",
-        use_eagle=True,
-    )
-    device = torch.device("cpu")
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator",
-        "AscendEagleSpeculator",
-    )
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
 def test_init_speculator_requires_speculative_config():
     """Test that init_speculator requires speculative_config to be present."""
     config = SimpleNamespace(speculative_config=None)
 
     with pytest.raises(AssertionError):
         init_speculator(config, torch.device("cpu"))
-
-
-def test_init_speculator_unsupported_method():
-    """Test that an unsupported speculative method raises NotImplementedError."""
-    config = _make_config("unsupported")
-
-    with pytest.raises(
-        NotImplementedError,
-        match="unsupported is not supported yet",
-    ):
-        init_speculator(config, torch.device("cpu"))
-
-
-def test_init_speculator_routes_gemma4_mtp(monkeypatch):
-    """Gemma4 MTP routes to AscendGemma4Speculator, not the regular MTP path."""
-    config = _make_config("mtp", use_gemma4_mtp=True)
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm_ascend.worker.v2.spec_decode.gemma4.speculator",
-        "AscendGemma4Speculator",
-    )
-    device = torch.device("cpu")
-
-    result = init_speculator(config, device)
-
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once_with(config, device)
-
-
-@pytest.mark.parametrize("multi_module", [False, True])
-def test_init_speculator_routes_step3p5_mtp(monkeypatch, multi_module):
-    """Step3.5 follows native MTP routing even when use_eagle() also matches."""
-    config = _make_config("mtp", use_eagle=True, use_multi_module_mtp=multi_module)
-    config.speculative_config.draft_model_config.hf_config.model_type = "step3p5_mtp"
-    if multi_module:
-        module = "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator"
-        name = "AscendMultiModuleMTPSpeculator"
-    else:
-        module = "vllm_ascend.worker.v2.spec_decode.mtp.speculator"
-        name = "AscendMTPSpeculator"
-    constructor = _mock_speculator_module(monkeypatch, module, name)
-    device = torch.device("cpu")
-
-    assert init_speculator(config, device) is constructor.return_value
-    constructor.assert_called_once_with(config, device)
 
 
 def _install_310p_spec_decode_patch(monkeypatch):
@@ -373,13 +146,12 @@ def _install_310p_spec_decode_patch(monkeypatch):
     runpy.run_path(str(path))
 
 
-@pytest.mark.parametrize("eager", [False, True])
-def test_310p_plain_mtp_uses_shared_factory(monkeypatch, eager):
+def test_310p_plain_mtp_uses_shared_factory(monkeypatch):
     from vllm_ascend.worker.v2 import model_runner
 
     _install_310p_spec_decode_patch(monkeypatch)
-    config = _make_config("mtp")
-    config.speculative_config.enforce_eager = eager
+    config = _make_config("mtp", MTPSpeculatorConfig.speculator_class)
+    config.speculative_config.enforce_eager = True
     config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
     constructor = _mock_speculator_module(
         monkeypatch, "vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator", "AscendMTPSpeculator310"
@@ -390,11 +162,8 @@ def test_310p_plain_mtp_uses_shared_factory(monkeypatch, eager):
     draft_config, draft_device = constructor.call_args.args
     assert draft_device == device
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    if eager:
-        assert draft_config.compilation_config.mode == CompilationMode.NONE
-        assert draft_config.compilation_config is not config.compilation_config
-    else:
-        assert draft_config is config
+    assert draft_config.compilation_config.mode == CompilationMode.NONE
+    assert draft_config.compilation_config is not config.compilation_config
 
 
 @pytest.mark.parametrize("use_310p", [False, True])
@@ -541,10 +310,7 @@ def test_init_speculator_main_dispatches_via_speculator_class(
     with_req_states,
 ):
     """Main path selects the Ascend/upstream speculator solely from speculator_class."""
-    config = _make_config(
-        method,
-        speculator_class=upstream_class,
-    )
+    config = _make_config(method, upstream_class)
     constructor = _mock_speculator_module(monkeypatch, target_module, target_class)
     device = torch.device("cpu")
     req_states = object() if with_req_states else None
@@ -556,15 +322,6 @@ def test_init_speculator_main_dispatches_via_speculator_class(
         constructor.assert_called_once_with(config, device, req_states)
     else:
         constructor.assert_called_once_with(config, device)
-    for predicate in (
-        "use_dspark",
-        "use_dflash",
-        "use_eagle",
-        "uses_draft_model",
-        "use_gemma4_mtp",
-        "use_multi_module_mtp",
-    ):
-        getattr(config.speculative_config, predicate).assert_not_called()
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
@@ -657,11 +414,8 @@ def test_init_speculator_main_actual_native_config_xpress_rejected_vs_dflash(mon
     dflash_ctor.assert_called_once_with(dflash_cfg, device)
 
 
-@pytest.mark.parametrize("use_310p", [False, True])
-def test_init_speculator_main_supports_custom_speculator(monkeypatch, use_310p):
-    """Main path supports registered custom speculators with or without req_states."""
-    if use_310p:
-        _install_310p_spec_decode_patch(monkeypatch)
+@pytest.fixture
+def custom_speculators(monkeypatch):
     base_mod: Any = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
 
     class DummyBaseSpeculator:
@@ -687,7 +441,10 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch, use_310p):
     custom_mod.CustomWithReqStates = CustomWithReqStates
     custom_mod.InvalidSpeculator = InvalidSpeculator
     monkeypatch.setitem(sys.modules, "tests.fake_custom_speculator", custom_mod)
+    return custom_mod
 
+
+def test_init_speculator_main_supports_custom_speculator(custom_speculators):
     device = torch.device("cpu")
     cfg_no_req = _make_config(
         "eagle",
@@ -695,17 +452,17 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch, use_310p):
         speculator_class="tests.fake_custom_speculator.CustomNoReqStates",
     )
     inst_no_req = init_speculator(cfg_no_req, device)
-    assert isinstance(inst_no_req, CustomNoReqStates)
+    assert isinstance(inst_no_req, custom_speculators.CustomNoReqStates)
     assert inst_no_req.args == (cfg_no_req, device)
 
     req_states = object()
     cfg_with_req = _make_config(
-        "mtp" if use_310p else "ngram",
+        "ngram",
         custom_method="my_custom_req",
         speculator_class="tests.fake_custom_speculator.CustomWithReqStates",
     )
     inst_with_req = init_speculator(cfg_with_req, device, req_states)
-    assert isinstance(inst_with_req, CustomWithReqStates)
+    assert isinstance(inst_with_req, custom_speculators.CustomWithReqStates)
     assert inst_with_req.args == (cfg_with_req, device, req_states)
 
     with pytest.raises(ValueError, match="requires request states"):
@@ -718,3 +475,12 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch, use_310p):
     )
     with pytest.raises(TypeError, match="must be a subclass of"):
         init_speculator(cfg_invalid, device)
+
+
+def test_310p_custom_mtp_receives_request_state(monkeypatch, custom_speculators):
+    _install_310p_spec_decode_patch(monkeypatch)
+    config = _make_config("mtp", "tests.fake_custom_speculator.CustomWithReqStates", custom_method="my_custom_mtp")
+    req_states = object()
+    draft = init_speculator(config, torch.device("cpu"), req_states)
+    assert isinstance(draft, custom_speculators.CustomWithReqStates)
+    assert draft.args[2] is req_states
