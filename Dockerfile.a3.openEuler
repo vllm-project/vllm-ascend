@@ -378,7 +378,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done; \
     LOG=/tmp/mooncake_build.log; : > "$LOG"; \
     set -o pipefail; \
-    trap 'rc=$?; if [ $rc -ne 0 ]; then echo "ERROR: mooncake 构建失败，日志尾部："; tail -n 40 "$LOG"; fi' EXIT; \
+    trap 'rc=$?; if [ $rc -ne 0 ]; then echo "===== MOONCAKE ERROR SUMMARY ====="; grep -nE "error:|undefined reference|Error [0-9]+|No such file|not found" "$LOG" | tail -n 40; echo "===== END SUMMARY ====="; fi' EXIT; \
     { git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake && \
       cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build \
           -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -407,6 +407,7 @@ RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/
           fi; \
       done; \
       cmake .. -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_FLAGS="-Wno-maybe-uninitialized -Wno-stringop-overflow" \
           -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON ${MPI_ARGS} && \
       make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig; } 2>&1 | tee -a "$LOG"
 
