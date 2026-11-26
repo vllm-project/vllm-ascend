@@ -157,10 +157,10 @@ for single-layer calls; it does not introduce a layer-count constexpr.
 - The caller prepares convolution state before commit. Commit writes only the
   accepted checkpoint destinations and the first `W` convolution positions;
   verification writes `out` and the valid correction/key/gate record spans.
-  On A5 the Kimi and GLM5Next integration also supplies two contiguous FP32
+  On A5 the Kimi and GLM5Next integration also supplies two contiguous BF16
   buffers of shape `[capacity, H, Q, K]` per layer. Verify stores the decay
-  and normalized key once per valid record, and commit reuses both. Together
-  the buffers require `8 * capacity * H * Q * K` bytes per layer. Callers
+  and normalized key once per valid record. Commit loads both into FP32 for state updates. Together
+  the buffers require `4 * capacity * H * Q * K` bytes per layer. Callers
   that omit these optional buffers can still commit from the raw records.
   When the A5 model commit context has a complete decay address table, verify leaves the raw gate half of the
   key/gate record untouched. Its allocation and strides are preserved. The standalone verify default writes both halves.
@@ -338,11 +338,11 @@ result for the tested configuration, not a guarantee for arbitrary shapes or
 low-level align serving. Explicit specialization attributes are listed above;
 runtime strides may still trigger Triton type/alignment specialization.
 
-### A5 verify and state commit latency
+### A5 verify and state commit latency with FP32 vector records
 
 Measured on one Ascend950DT with main at `7844c21` and the raw-gate store change at `c08a320`. BF16 activations and FP32 state. Each value is the median of 12 paired samples with 16 graph replays per sample. Each graph includes one verify per layer and the first state commit. State reset, plan and convolution are outside the timed interval. Full means every request accepts Q tokens. The mixed ramp cycles through lengths 0 to Q; the alternating and clustered cases contain equal numbers of zero- and full-acceptance requests.
 
-| B / L / H / K / V / Q | Acceptance per request | main (µs) | This PR (µs) |
+| B / L / H / K / V / Q | Acceptance per request | main (µs) | FP32 records at `c08a320` (µs) |
 |---|---|---:|---:|
 | 30 / 23 / 12 / 128 / 128 / 4 | full | 1395.09 | 1318.14 |
 | 30 / 23 / 12 / 128 / 128 / 4 | mixed ramp | 1299.83 | 1250.26 |

@@ -1260,7 +1260,7 @@ def test_commit_window_uses_device_path(
         assert_accuracy(output, golden_output, record_property, f"window_layer{layer_no}_verify")
         assert_verify_records(correction, kg, records, blocks, record_property, raw_gate_stored=decay is None)
         if decay is not None:
-            # Commit must read both FP32 records even if raw keys and gates are overwritten.
+            # Commit must read both BF16 records even if raw keys and gates are overwritten.
             kg.fill_(float("nan"))
         torch.testing.assert_close(state, initial, atol=0, rtol=0)
         for row, count in enumerate(accepted[:3]):

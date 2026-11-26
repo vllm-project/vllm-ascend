@@ -2,4 +2,4 @@ pr: 22516
 entries:
   - category: performance
     hardware: [A5]
-    text: Reduced combined KDA verification and ordinary state commit latency by 5.5% on A5 for 30 requests across 23 layers with four accepted speculative tokens per request.
+    text: Kimi and GLM5Next speculative decoding on A5 now reuses gate decay and normalized keys when committing accepted tokens, avoiding repeated gate and normalization work.

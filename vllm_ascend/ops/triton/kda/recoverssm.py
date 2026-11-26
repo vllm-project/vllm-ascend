@@ -389,7 +389,7 @@ def _accumulate_kda_commit_step(
     else:
         normalized_k = tl.load(
             normalized_key_ptr + token_offset * K + offs_k, mask=mask_k, other=0.0 if mask_k is not None else None
-        )
+        ).to(tl.float32)
     correction = tl.load(
         correction_ptr + offs_v * stride_correction_cache_dim,
         mask=mask_v,
@@ -411,7 +411,9 @@ def _accumulate_kda_commit_step(
         tl.static_assert(gate.dtype == tl.float32)
         decay = tl.exp(gate)
     else:
-        decay = tl.load(decay_ptr + token_offset * K + offs_k, mask=mask_k, other=0.0 if mask_k is not None else None)
+        decay = tl.load(
+            decay_ptr + token_offset * K + offs_k, mask=mask_k, other=0.0 if mask_k is not None else None
+        ).to(tl.float32)
     if normalized_key_ptr is None:
         normalized_k = _kda_l2_normalize(k)
     weighted_k = normalized_k * final_decay
@@ -546,7 +548,7 @@ def _commit_kda_state_kernel(
                 ).to(tl.float32)
                 decay_ptr = None
             else:
-                base_addr = tl.load(decay_base_addrs_ptr + pid_l).to(tl.pointer_type(tl.float32))
+                base_addr = tl.load(decay_base_addrs_ptr + pid_l).to(tl.pointer_type(tl.bfloat16))
                 decay_ptr = base_addr + (pid_b * NUM_HEADS + pid_h) * SPEC_QUERY_LEN * K
                 A = None
                 dt_bias = None
@@ -557,7 +559,7 @@ def _commit_kda_state_kernel(
 
             normalized_key_ptr = None
             if normalized_key_base_addrs_ptr is not None:
-                key_base_addr = tl.load(normalized_key_base_addrs_ptr + pid_l).to(tl.pointer_type(tl.float32))
+                key_base_addr = tl.load(normalized_key_base_addrs_ptr + pid_l).to(tl.pointer_type(tl.bfloat16))
                 normalized_key_ptr = key_base_addr + (pid_b * NUM_HEADS + pid_h) * SPEC_QUERY_LEN * K
             if batch is not None and not ALIGN_MODE:
                 for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
@@ -652,7 +654,7 @@ def _commit_kda_state_kernel(
 def allocate_kda_decay_cache(key_gate: torch.Tensor) -> torch.Tensor | None:
     if not is_950():
         return None
-    return torch.empty((*key_gate.shape[:-1], key_gate.size(-1) // 2), device=key_gate.device, dtype=torch.float32)
+    return torch.empty((*key_gate.shape[:-1], key_gate.size(-1) // 2), device=key_gate.device, dtype=torch.bfloat16)
 
 
 def allocate_kda_verify_caches(key_gate: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -661,8 +663,8 @@ def allocate_kda_verify_caches(key_gate: torch.Tensor) -> tuple[torch.Tensor | N
 
 
 def _validate_vector_cache(cache: torch.Tensor, shape: tuple[int, ...], device: torch.device) -> None:
-    if cache.shape != shape or cache.dtype != torch.float32 or cache.device != device or not cache.is_contiguous():
-        raise ValueError(f"KDA RecoverSSM vector record needs contiguous FP32 shape {shape} on {device}")
+    if cache.shape != shape or cache.dtype != torch.bfloat16 or cache.device != device or not cache.is_contiguous():
+        raise ValueError(f"KDA RecoverSSM vector record needs contiguous BF16 shape {shape} on {device}")
 
 
 def kda_recoverssm_verify(

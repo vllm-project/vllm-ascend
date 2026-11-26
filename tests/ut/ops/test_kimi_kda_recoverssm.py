@@ -71,7 +71,8 @@ def test_context_binds_normalized_key_record(monkeypatch):
     decay, normalized_key = recoverssm.allocate_kda_verify_caches(layer.recoverssm_records.key_gate)
     assert normalized_key is not None and decay is not None
     assert normalized_key.shape == layer.recoverssm_records.correction.shape
-    assert normalized_key.dtype == torch.float32 and normalized_key.data_ptr() != decay.data_ptr()
+    assert normalized_key.dtype == decay.dtype == torch.bfloat16
+    assert normalized_key.data_ptr() != decay.data_ptr()
     layer.recoverssm_normalized_key_cache = normalized_key
     with pytest.raises(ValueError, match="require the decay record"):
         recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
