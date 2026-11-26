@@ -1078,7 +1078,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
 - Keep Mooncake DP2/TP2 declarations consistent with the services. The proxy connects to Prefill on port 8088 and Decode on port 8092. Keep the configured KV base ports at 30000 and 30100; the connector applies rank offsets internally.
 
-### 5.3 Image-and-Text 10K PD Separation Deployment
+### 5.3 Image-and-Text 10k PD Separation Deployment
 
 The 10K target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
 

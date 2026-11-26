@@ -670,8 +670,8 @@ msgstr "**A2/A3关键参数：**"
 msgid "**950DT products key parameters:**"
 msgstr "**Ascend 950DT系列产品关键参数：**"
 
-msgid "### 5.3 Image-and-Text 10K PD Separation Deployment"
-msgstr "### 5.3 图文 10K PD 分离部署"
+msgid "### 5.3 Image-and-Text 10k PD Separation Deployment"
+msgstr "### 5.3 图文 10k PD 分离部署"
 
 msgid ""
 "This case uses the same eight-device 950DT products host as the basic PD "
