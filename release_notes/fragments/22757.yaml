@@ -1,0 +1,9 @@
+pr: 22757
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in process-shared disk cache for multimodal encoder outputs.
+      Enable it with
+      `--additional-config '{"mm_global_cache_config": {"cache_dir": "/shared/path"}}'`
+      to reuse ViT embeddings for repeated images across requests, data-parallel
+      ranks, restarts, and processes that share the directory.
