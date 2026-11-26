@@ -2,7 +2,7 @@
 """Keep FIA workspaces owned by each target/draft graph and reused within that graph."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -14,27 +14,30 @@ from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMlaDCPImpl,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata, DecodeMLAPreprocessResult
-from vllm_ascend.compilation import acl_graph
+from vllm_ascend.compilation import updatable_graph
 
 
 @pytest.mark.parametrize("draft,prefill", [(False, False), (True, False), (True, True)])
 def test_fia_workspace_is_owned_and_reused_by_selected_graph(draft, prefill):
-    def registry(workspace=None):
-        return SimpleNamespace(
-            workspaces={12: workspace},
-            events={12: []},
-            attn_params={12: []},
-            handles={12: []},
+    def registry():
+        graph = SimpleNamespace(capture_resources={})
+        graph.get_capture_resource = lambda key, factory, use_max_workspace=False: (
+            updatable_graph.UpdatableGraph.get_capture_resource(graph, key, factory, use_max_workspace)
         )
+        graph.register_task = lambda operation, kwargs, provider: operation(**kwargs)
+        return graph
 
     target_marker = torch.empty(7, dtype=torch.uint8)
-    target = registry(target_marker if draft else None)
+    target = registry()
+    if draft:
+        target.capture_resources["other"] = target_marker
     draft_decode = registry()
     draft_prefill = registry()
     selected = (draft_prefill if prefill else draft_decode) if draft else target
     workspace = torch.empty(11, dtype=torch.uint8)
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.layer_name = "model.layers.0.self_attn.attn"
     impl.dcp_size = 8
     impl.num_heads = 2
     impl.num_kv_heads = 1
@@ -90,14 +93,7 @@ def test_fia_workspace_is_owned_and_reused_by_selected_graph(draft, prefill):
                 is_draft_model_prefill=prefill,
             ),
         ),
-        patch.object(acl_graph, "_graph_params", target),
-        patch.object(acl_graph, "_draft_graph_params", draft_decode),
-        patch.object(acl_graph, "_draft_graph_prefill_params", draft_prefill),
-        patch.object(mla_cp, "weak_ref_tensors", side_effect=lambda tensor: tensor),
-        patch.object(mla_cp.torch_npu.npu, "current_stream", return_value=Mock()),
-        patch.object(mla_cp.torch.npu, "ExternalEvent", return_value=Mock()),
-        patch.object(mla_cp.torch.npu, "graph_task_group_begin"),
-        patch.object(mla_cp.torch.npu, "graph_task_group_end", return_value=Mock()),
+        patch.object(updatable_graph, "_ACTIVE_GRAPH", SimpleNamespace(get=lambda: selected)),
         patch.object(
             mla_cp.torch_npu,
             "npu_fused_infer_attention_score_v2",
@@ -111,9 +107,14 @@ def test_fia_workspace_is_owned_and_reused_by_selected_graph(draft, prefill):
         ) as allocate,
     ):
         impl._forward_decode(inputs, 2, metadata)
-        assert selected.workspaces[12] is workspace
+        assert len(selected.capture_resources) == 1
+        assert next(iter(selected.capture_resources.values())) is workspace
         if draft:
-            assert target.workspaces[12] is target_marker
+            assert target.capture_resources["other"] is target_marker
+            assert len(target.capture_resources) == 1
+        for graph in (draft_decode, draft_prefill):
+            if graph is not selected:
+                assert not graph.capture_resources
 
         impl._forward_decode(inputs, 2, metadata)
         assert allocate.call_count == 1

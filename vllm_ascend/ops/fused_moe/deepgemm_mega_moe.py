@@ -5,18 +5,46 @@ Shared experts remain in vLLM's shared-expert path. The symmetric allocation
 belongs to the cached MoE communicator and is reused sequentially across layers.
 """
 
+from functools import cache
+from importlib import import_module
+from types import ModuleType
+
 import torch
 import torch_npu
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 
+_INSTALL_HINT = (
+    "Install DeepGEMM-Ascend revision 3a35326 with the HCCL/CANN compatibility patch "
+    "documented under enable_deepgemm_mega_moe."
+)
+
+
+@cache
+def load_deepgemm_mega_moe_ops() -> ModuleType:
+    """Import and cache the validated Ascend backend in the NPU worker."""
+    try:
+        ops = import_module("deep_gemm")
+    except (ImportError, OSError, RuntimeError, AssertionError) as exc:
+        raise RuntimeError(f"Could not import deep_gemm for Ascend MegaMoE. {_INSTALL_HINT}") from exc
+
+    # CUDA DeepGEMM exports the same MegaMoE names. get_npu_arch identifies Ascend.
+    required = ("get_npu_arch", "transform_weights_for_mega_moe", "SymmBuffer", "fp8_fp4_mega_moe")
+    missing = [name for name in required if not callable(getattr(ops, name, None))]
+    if missing:
+        source = getattr(ops, "__file__", "deep_gemm")
+        raise RuntimeError(
+            f"Incompatible deep_gemm module at {source}. Missing required APIs ({', '.join(missing)}). {_INSTALL_HINT}"
+        )
+    return ops
+
 
 def prepare_weights(w13, w13_scale, w2, w2_scale):
-    # Optional native extension is loaded only in the worker, after device setup.
-    import deep_gemm
+    ops = load_deepgemm_mega_moe_ops()
 
-    return deep_gemm.transform_weights_for_mega_moe(
+    return ops.transform_weights_for_mega_moe(
         (
             w13.detach().contiguous().view(torch.int8),
             w13_scale.detach().contiguous().view(torch.uint8).view(torch.int16),
@@ -27,12 +55,9 @@ def prepare_weights(w13, w13_scale, w2, w2_scale):
 
 class DeepGemmMegaMoE:
     def __init__(self, moe_config, max_tokens):
-        import deep_gemm
-
-        required = ("fp8_fp4_mega_moe", "transform_weights_for_mega_moe", "SymmBuffer")
-        if any(not callable(getattr(deep_gemm, name, None)) for name in required):
-            raise RuntimeError("DeepGEMM-Ascend must expose the native MegaMoE API")
-        self.ops = deep_gemm
+        if moe_config.activation is not MoEActivation.SILU:
+            raise NotImplementedError("DeepGEMM-Ascend MegaMoE requires SwiGLU activation")
+        self.ops = load_deepgemm_mega_moe_ops()
         self.config = moe_config
         self.max_tokens = max_tokens
         self.buffer = None

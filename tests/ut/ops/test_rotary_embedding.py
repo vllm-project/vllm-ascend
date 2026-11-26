@@ -454,10 +454,10 @@ class TestAscendMRotaryEmbeddingForwardTriton:
 
 class TestAscendMRotaryEmbeddingForwardOOT:
     @staticmethod
-    def _build_mrope():
+    def _build_mrope(mrope_section=None):
         emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
         emb.mrope_interleaved = False
-        emb.mrope_section = [16, 24, 24]
+        emb.mrope_section = mrope_section if mrope_section is not None else [16, 24, 24]
         emb.is_neox_style = True
         emb.head_size = HEAD_SIZE
         emb.cos_sin_cache = torch.zeros(MAX_POS, HEAD_SIZE, dtype=torch.float32)
@@ -485,6 +485,60 @@ class TestAscendMRotaryEmbeddingForwardOOT:
         torch.testing.assert_close(positions_arg, positions.to(torch.int64))
         assert query_out is query
         assert key_out is key
+
+    @pytest.mark.parametrize("mrope_section", [[16, 24, 24], [8, 12, 12]])
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_whitelisted_sections_use_npu_mrope(self, mock_npu_mrope, mrope_section):
+        """Qwen2.5-VL uses [16, 24, 24] and MinerU2.5 (Qwen2-VL) uses
+        [8, 12, 12]; both must take the fused npu_mrope path instead of the
+        decomposed base-class fallback."""
+        emb = self._build_mrope(mrope_section)
+        positions = torch.arange(SEQ_LEN, dtype=torch.long).repeat(3, 1)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE)
+        mock_npu_mrope.return_value = query, key
+
+        query_out, key_out = emb.forward_oot(positions, query, key)
+
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["mrope_section"] == mrope_section
+        assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == "half"
+        assert query_out is query
+        assert key_out is key
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_1d_positions_degrade_to_standard_rope_section(self, mock_npu_mrope):
+        """1D positions are not multimodal: the section degrades to
+        [0, 0, 0] so npu_mrope runs in standard RoPE mode."""
+        emb = self._build_mrope([8, 12, 12])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE)
+        mock_npu_mrope.return_value = query, key
+
+        emb.forward_oot(positions, query, key)
+
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["mrope_section"] == [0, 0, 0]
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_cos_sin_cache_dtype_follows_query(self, mock_npu_mrope):
+        """The cache is converted to the query dtype before npu_mrope, and
+        the converted cache is what the operator receives."""
+        emb = self._build_mrope([8, 12, 12])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long).repeat(3, 1)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float16)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE, dtype=torch.float16)
+        mock_npu_mrope.return_value = query, key
+
+        emb.forward_oot(positions, query, key)
+
+        assert emb.cos_sin_cache.dtype == torch.float16
+        cache_arg = mock_npu_mrope.call_args.args[3]
+        assert cache_arg.dtype == torch.float16
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:

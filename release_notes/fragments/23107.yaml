@@ -1,0 +1,4 @@
+pr: 23107
+entries:
+  - category: performance
+    text: For layerwise AscendStore KV pooling, next-layer KV prefetch can start after the current layer's load completes, instead of waiting for attention submission. No configuration change is needed.

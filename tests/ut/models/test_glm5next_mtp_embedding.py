@@ -12,13 +12,13 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
 from vllm_ascend.models.glm5next import mtp as mtp_module
-from vllm_ascend.utils import vllm_version_is
 
 
 def _draft_pp_context(pp_size):
-    if vllm_version_is("0.33.0"):
-        return patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=pp_size))
-    return patch.object(eagle_utils, "in_single_pp_stage", return_value=pp_size > 1)
+    # vLLM main gates on in_single_pp_stage(); v0.34.0 reads the PP group size.
+    if hasattr(eagle_utils, "in_single_pp_stage"):
+        return patch.object(eagle_utils, "in_single_pp_stage", return_value=pp_size > 1)
+    return patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=pp_size))
 
 
 @pytest.fixture

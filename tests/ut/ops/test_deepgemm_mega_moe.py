@@ -4,16 +4,57 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend import ascend_config
 from vllm_ascend.ops.fused_moe import deepgemm_mega_moe as backend
+from vllm_ascend.ops.fused_moe import moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
+from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.w4a8 import w4a8_mxfp4
+
+
+@pytest.fixture(autouse=True)
+def clear_backend_cache():
+    backend.load_deepgemm_mega_moe_ops.cache_clear()
+    yield
+    backend.load_deepgemm_mega_moe_ops.cache_clear()
+
+
+@pytest.fixture
+def native_module():
+    return SimpleNamespace(
+        __file__="/site-packages/deep_gemm/__init__.py",
+        get_npu_arch=MagicMock(),
+        transform_weights_for_mega_moe=MagicMock(),
+        SymmBuffer=lambda group, experts, capacity, topk, hidden, intermediate, *, num_shared_experts: None,
+        fp8_fp4_mega_moe=lambda output, l1, l2, buffer, *, activation_clamp: None,
+    )
+
+
+@pytest.fixture
+def make_deepgemm_communicator(monkeypatch):
+    dispatcher = object.__new__(TokenDispatcherWithMC2)
+    dispatcher.max_num_tokens_per_rank = 8
+    config = SimpleNamespace(enable_fused_mc2=1, enable_deepgemm_mega_moe=True)
+    monkeypatch.setattr(moe_comm_method, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(FusedMC2CommImpl, "_get_token_dispatcher", lambda self: dispatcher)
+    monkeypatch.setattr(FusedMC2CommImpl, "_get_prepare_finalize", lambda self: None)
+
+    def make():
+        moe_config = SimpleNamespace(
+            activation=MoEActivation.SILU, num_local_experts=2, swiglu_limit=10.0, swiglu_alpha=None, swiglu_beta=None
+        )
+        with patch.object(torch, "zeros"):
+            return FusedMC2CommImpl(moe_config)
+
+    return make
 
 
 def make_case(tokens=3):
     obj = object.__new__(backend.DeepGemmMegaMoE)
     obj.max_tokens = 8
-    obj.config = SimpleNamespace(num_experts=4, experts_per_token=2, swiglu_limit=10.0)
+    obj.config = SimpleNamespace(activation=MoEActivation.SILU, num_experts=4, experts_per_token=2, swiglu_limit=10.0)
     obj.ops = MagicMock()
     obj.buffer = SimpleNamespace(
         x=torch.zeros(8, 64),
@@ -76,7 +117,7 @@ def test_reject_invalid_input_before_launch(invalid):
 
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 @pytest.mark.parametrize("noncontiguous", [False, True])
-def test_packed_weight_and_scale_bits_preserved(scale_dtype, noncontiguous):
+def test_packed_weight_and_scale_bits_preserved(scale_dtype, noncontiguous, native_module):
     weights = torch.tensor([0, 127, 128, 255], dtype=torch.uint8).repeat(2, 2, 1)
     scale_bytes = torch.tensor([122, 128], dtype=torch.uint8).repeat(2, 2, 1)
     scales = scale_bytes.view(scale_dtype)
@@ -84,10 +125,9 @@ def test_packed_weight_and_scale_bits_preserved(scale_dtype, noncontiguous):
         weights = weights.transpose(0, 2)
         scales = scales.transpose(0, 2)
         scale_bytes = scale_bytes.transpose(0, 2)
-    module = MagicMock()
-    with patch.dict("sys.modules", {"deep_gemm": module}):
+    with patch.dict("sys.modules", {"deep_gemm": native_module}):
         backend.prepare_weights(weights, scales, weights, scales)
-    args = module.transform_weights_for_mega_moe.call_args.args
+    args = native_module.transform_weights_for_mega_moe.call_args.args
     for weight, scale in args:
         assert weight.dtype == torch.int8 and scale.dtype == torch.int16
         assert torch.equal(weight.view(torch.uint8), weights)
@@ -140,6 +180,16 @@ def test_opt_in_requires_explicit_mega_mode():
 
     with pytest.raises(ValueError, match="requires enable_fused_mc2=2"):
         AscendConfig(sparse_kv_offload_config={}, enable_deepgemm_mega_moe=True)
+
+
+def test_config_defers_package_resolution_to_worker():
+    with patch.object(ascend_config.importlib.util, "find_spec") as find_spec:
+        config = ascend_config.AscendConfig(
+            sparse_kv_offload_config={}, enable_fused_mc2=2, enable_deepgemm_mega_moe=True
+        )
+    assert config.enable_fused_mc2 == 1
+    assert config._megamoe_supported
+    find_spec.assert_not_called()
 
 
 @pytest.mark.parametrize("invalid", ["valid", "eager", "tp", "ep", "fp4", "model", "placement", "lora", "loader"])
@@ -215,33 +265,59 @@ def test_buffer_allocated_once_and_layer_clamp_used():
 
 
 @pytest.mark.parametrize("missing", ["fp8_fp4_mega_moe", "transform_weights_for_mega_moe", "SymmBuffer"])
-def test_reject_incomplete_native_api(missing):
-    module = SimpleNamespace(
-        fp8_fp4_mega_moe=lambda *args: None,
-        transform_weights_for_mega_moe=lambda *args: None,
-        SymmBuffer=lambda *args: None,
-    )
-    delattr(module, missing)
+def test_reject_incomplete_native_api(native_module, missing):
+    delattr(native_module, missing)
     with (
-        patch.dict("sys.modules", {"deep_gemm": module}),
-        pytest.raises(RuntimeError, match="native MegaMoE API"),
+        patch.dict("sys.modules", {"deep_gemm": native_module}),
+        pytest.raises(RuntimeError, match=f"Missing required APIs.*{missing}"),
     ):
-        backend.DeepGemmMegaMoE(SimpleNamespace(), 8)
+        backend.load_deepgemm_mega_moe_ops()
 
 
-def test_native_api_accepts_empty_rank_without_patch_arguments():
+def test_communicator_rejects_installed_cuda_backend(native_module, make_deepgemm_communicator):
+    del native_module.get_npu_arch
+    with (
+        patch.dict("sys.modules", {"deep_gemm": native_module}),
+        pytest.raises(RuntimeError, match="Missing required APIs.*get_npu_arch.*Install DeepGEMM-Ascend"),
+    ):
+        make_deepgemm_communicator()
+    native_module.transform_weights_for_mega_moe.assert_not_called()
+
+
+def test_rejects_unsupported_activation_before_loading_backend():
+    config = SimpleNamespace(activation=MoEActivation.GELU)
+    with (
+        patch.object(backend, "load_deepgemm_mega_moe_ops") as load_backend,
+        pytest.raises(NotImplementedError, match="requires SwiGLU activation"),
+    ):
+        backend.DeepGemmMegaMoE(config, 8)
+    load_backend.assert_not_called()
+
+
+def test_communicators_and_weight_preparation_share_validated_backend(native_module, make_deepgemm_communicator):
+    weights = torch.zeros(2, 2, dtype=torch.uint8)
+    with (
+        patch.dict("sys.modules", {"deep_gemm": native_module}),
+        patch.object(backend, "import_module", wraps=backend.import_module) as import_package,
+    ):
+        first = make_deepgemm_communicator()
+        backend.prepare_weights(weights, weights, weights, weights)
+        second = make_deepgemm_communicator()
+
+    assert first.deepgemm_backend.ops is second.deepgemm_backend.ops is native_module
+    native_module.transform_weights_for_mega_moe.assert_called_once()
+    import_package.assert_called_once_with("deep_gemm")
+
+
+def test_native_api_accepts_empty_rank_without_patch_arguments(native_module):
     calls = []
 
     def native_moe(y, l1_weights, l2_weights, sym_buffer, *, activation_clamp=None):
         calls.append(activation_clamp)
 
-    module = SimpleNamespace(
-        fp8_fp4_mega_moe=native_moe,
-        transform_weights_for_mega_moe=lambda *args: None,
-        SymmBuffer=lambda *args: None,
-    )
+    native_module.fp8_fp4_mega_moe = native_moe
     fixture, inputs = make_case(0)
-    with patch.dict("sys.modules", {"deep_gemm": module}):
+    with patch.dict("sys.modules", {"deep_gemm": native_module}):
         obj = backend.DeepGemmMegaMoE(fixture.config, 8)
     obj.buffer = fixture.buffer
     assert obj.apply(inputs).shape == (0, 64)

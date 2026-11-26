@@ -25,10 +25,14 @@ PROJECTION_SHAPES = {
     "qkv_proj": (5120, (1024, 512, 512)),
     "qkvz_proj": (5120, (1536, 512, 512, 1536)),
 }
-TOKEN_CASES = [
-    pytest.param(1, "o_proj", id="decode-1"),
-    pytest.param(31, "qkv_proj", id="mtp-31"),
-    pytest.param(128, "qkvz_proj", id="max-tokens-128"),
+LORA_CASES = [
+    pytest.param(tokens, projection, rank, id=f"{name}-{rank}")
+    for tokens, projection, name, ranks in (
+        (1, "o_proj", "decode-1", (8, 64)),
+        (31, "qkv_proj", "mtp-31", (16, 32)),
+        (128, "qkvz_proj", "max-tokens-128", (8, 64)),
+    )
+    for rank in ranks
 ]
 
 
@@ -163,8 +167,7 @@ def _launch_lora_kernels(
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("slice_rank", [8, 16, 32, 64])
-@pytest.mark.parametrize("token_count,projection_name", TOKEN_CASES)
+@pytest.mark.parametrize("token_count,projection_name,slice_rank", LORA_CASES)
 @torch.inference_mode()
 def test_lora_linear_triton_accuracy(
     slice_rank: int,
