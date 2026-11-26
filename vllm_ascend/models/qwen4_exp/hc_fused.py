@@ -25,8 +25,16 @@ class AscendTextGatedResidual(GatedResidual):
         self.register_buffer("_textgr_up", None, persistent=False)
         self.register_buffer("_textgr_gate", None, persistent=False)
 
+    def _update_textgr_buffer(self, name: str, value: torch.Tensor) -> None:
+        buffer = getattr(self, name)
+        if buffer is None:
+            setattr(self, name, value.contiguous())
+        elif not buffer.is_set_to(value):
+            # Weight reload must preserve addresses recorded by ACL graphs.
+            buffer.copy_(value)
+
     def prepare_textgr_weights(self) -> None:
-        """Prepare immutable inference views after normal checkpoint loading."""
+        """Refresh the inference buffers after checkpoint loading or reload."""
         if not getattr(self, "_textgr_enabled", True):
             return
 
@@ -52,15 +60,17 @@ class AscendTextGatedResidual(GatedResidual):
         down.skip_weight_nz_conversion = True
         self.input_mix_weight_up.skip_weight_nz_conversion = True
         gamma = self.hc_norm.weight.detach().to(dtype=torch.float32)
-        self._textgr_gamma = gamma.contiguous()
+        self._update_textgr_buffer("_textgr_gamma", gamma)
         if self.use_combine:
-            merged = self.input_mix_weight_down_block_inject.weight.detach()
-            self._textgr_down = merged[: self.config.hc_lowrank].contiguous()
-            self._textgr_gate = merged[self.config.hc_lowrank : self.config.hc_lowrank + self.hc_count].contiguous()
+            merged = down.weight.detach()
+            self._update_textgr_buffer("_textgr_down", merged[: self.config.hc_lowrank])
+            self._update_textgr_buffer(
+                "_textgr_gate", merged[self.config.hc_lowrank : self.config.hc_lowrank + self.hc_count]
+            )
         else:
-            self._textgr_down = self.input_mix_weight_down.weight.detach().contiguous()
+            self._update_textgr_buffer("_textgr_down", down.weight.detach())
             self._textgr_gate = None
-        self._textgr_up = self.input_mix_weight_up.weight.detach().contiguous()
+        self._update_textgr_buffer("_textgr_up", self.input_mix_weight_up.weight.detach())
 
     def mix(self, hidden_states: torch.Tensor):
         if not getattr(self, "_textgr_enabled", True):
