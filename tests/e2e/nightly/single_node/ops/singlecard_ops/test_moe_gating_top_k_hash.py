@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.distributed.eplb.tensor_ops import build_expert_replica_routing_table
 from vllm_ascend.ops.fused_moe.eplb import map_to_physical_for_ascend
 from vllm_ascend.utils import enable_custom_op
@@ -110,6 +111,38 @@ def test_ordinary_map_graph_observes_table_updates(norm_type, renorm, groups, se
         table.add_(experts)
         graph.replay()
         expected_ids = table[torch.arange(rows, device="npu")[:, None] % 3, logical_ids.long()]
+        torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("experts,top_k", [(256, 8), (512, 10)])
+@pytest.mark.parametrize("rows,period", [(1, 1), (65, 3), (257, 5), (1027, 1023)])
+def test_a5_batched_softmax_map_observes_table_updates(experts, top_k, rows, period):
+    if not is_950():
+        pytest.skip("Batched FP32 softmax is specific to Ascend 950.")
+
+    torch.manual_seed(181)
+    logits = torch.randn(rows, experts, dtype=torch.float32, device="npu")
+    table = torch.arange(period * experts, dtype=torch.int32, device="npu").reshape(period, experts)
+    kwargs = dict(k=top_k, norm_type=0, renorm=1, out_flag=False, eps=1e-20, routed_scaling_factor=1.0)
+    expected_weights, logical_ids, _ = torch_npu.npu_moe_gating_top_k(logits, **kwargs)
+    op = torch.ops._C_ascend.moe_gating_top_k_hash
+    weights, ids, _ = op(logits, **kwargs)
+    torch.testing.assert_close(ids, logical_ids, rtol=0, atol=0)
+    torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+
+    def run():
+        return op(logits, expert_replica_routing_table=table, **kwargs)
+
+    run()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        weights, ids, _ = run()
+    for _ in range(2):
+        table.add_(experts)
+        graph.replay()
+        expected_ids = table[torch.arange(rows, device="npu")[:, None] % period, logical_ids.long()]
         torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
         torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
 

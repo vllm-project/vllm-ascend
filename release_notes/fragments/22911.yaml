@@ -1,4 +1,21 @@
 pr: 22911
 entries:
   - category: feature
-    text: EPLB routing with softmax or renormalized sigmoid can now map selected expert IDs within the gating operation for eligible configurations.
+    text: >-
+      On A3 and A5, eligible MoE layers with EPLB automatically fuse expert
+      mapping into softmax or renormalized sigmoid routing, saving one
+      operator launch per layer.
+  - category: performance
+    text: >-
+      On A3, fused EPLB routing reduced operator latency by 37.0%–80.7%
+      for softmax and renormalized sigmoid. In preliminary GLM-5.3-Flash W8A8
+      serving tests, the middle 50% of changes across settings ranged from
+      +0.38% to +1.58% for output token throughput and from −1.94% to −0.43%
+      for median time per output token (TPOT).
+  - category: performance
+    text: >-
+      On Ascend 950DT, fused FP32 softmax routing reduced measured operator
+      latency by 9.8%–44.3% versus CANN gating with standalone EPLB mapping.
+      Across five tested model configurations, the middle 50% of serving
+      changes ranged from +0.05% to +0.59% for output token throughput and
+      from −1.19% to +0.01% for median TPOT.

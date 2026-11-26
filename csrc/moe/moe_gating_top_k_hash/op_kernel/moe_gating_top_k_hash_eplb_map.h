@@ -12,7 +12,7 @@ using namespace AscendC;
 class EplbMap {
 public:
     __aicore__ inline void Init(GM_ADDR table, int64_t rows, int64_t experts,
-                               int64_t k, AscendC::TPipe *pipe)
+                               int64_t k, AscendC::TPipe *pipe, int64_t rowsPerCopy = 1)
     {
         rows_ = rows;
         experts_ = experts;
@@ -21,7 +21,7 @@ public:
             return;
         }
         table_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(table));
-        pipe->InitBuffer(rowQueue_, 1, AlignBytes(experts_));
+        pipe->InitBuffer(rowQueue_, 1, rowsPerCopy * AlignBytes(experts_));
         pipe->InitBuffer(offsetsBuf_, AlignBytes(k_));
     }
 
@@ -47,6 +47,47 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event);
         rowQueue_.FreeTensor(row);
     }
+
+#if defined(__DAV_C310__)
+    __aicore__ inline void ApplyBatch(AscendC::LocalTensor<int32_t> ids, int64_t globalRow,
+                                      uint16_t count, int64_t idStride)
+    {
+        if (rows_ == 0) {
+            return;
+        }
+        auto tableRows = rowQueue_.AllocTensor<int32_t>();
+        for (int64_t copied = 0; copied < count;) {
+            int64_t tableStart = (globalRow + copied) % rows_;
+            int64_t slice = (count - copied < rows_ - tableStart ? count - copied : rows_ - tableStart);
+            AscendC::DataCopy(tableRows[copied * experts_], table_[tableStart * experts_],
+                              static_cast<uint32_t>(slice * experts_));
+            copied += slice;
+        }
+        rowQueue_.EnQue(tableRows);
+        tableRows = rowQueue_.DeQue<int32_t>();
+        auto tableAddr = reinterpret_cast<__local_mem__ int32_t *>(tableRows.GetPhyAddr());
+        auto idAddr = reinterpret_cast<__local_mem__ int32_t *>(ids.GetPhyAddr());
+        uint32_t countK = k_;
+        int64_t rowWidth = experts_;
+        AscendC::PipeBarrier<PIPE_V>();
+        __VEC_SCOPE__
+        {
+            AscendC::MicroAPI::RegTensor<uint32_t> logical;
+            AscendC::MicroAPI::RegTensor<int32_t> physical;
+            AscendC::MicroAPI::MaskReg mask = AscendC::MicroAPI::UpdateMask<int32_t>(countK);
+            for (uint16_t row = 0; row < count; ++row) {
+                auto rowIds = idAddr + row * idStride;
+                AscendC::MicroAPI::DataCopy(logical, reinterpret_cast<__local_mem__ uint32_t *>(rowIds));
+                AscendC::MicroAPI::DataCopyGather(physical, tableAddr + row * rowWidth, logical, mask);
+                AscendC::MicroAPI::DataCopy(rowIds, physical, mask);
+            }
+        }
+        auto event = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_MTE3));
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event);
+        rowQueue_.FreeTensor(tableRows);
+    }
+#endif
 
 private:
     __aicore__ inline uint32_t AlignBytes(int64_t elements)
