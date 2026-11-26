@@ -5,20 +5,62 @@ This is functional coverage, not checkpoint accuracy or MTP acceptance quality.
 """
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import requests
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.common.glm53flash_pd_checks import check_checkpoint, check_completion, check_state_pulls
+from tests.e2e.common.multi_node.utils import get_net_interface
 from tests.e2e.conftest import RemotePDServer, wait_until_npu_memory_free
 
 MODEL_PATH = Path("/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5___3-Flash-W8A8-MXFP8-9L-MTP1")
 MODEL_NAME = "flash-pd-test"
 OUTPUT_TOKENS = 16
 MTP_TOKENS = 5
+
+
+def serving_env():
+    # Match the shared PD helper's Mooncake library lookup and the distributed
+    # launcher's NIC binding. HTTP clients can still use loopback.
+    host_ip = os.environ.get("VLLM_HOST_IP") or os.environ.get("HCCL_IF_IP") or get_ip()
+    interface = get_net_interface(host_ip)
+    env = {
+        "LD_LIBRARY_PATH": f"/usr/local/lib:{os.environ.get('LD_LIBRARY_PATH', '')}",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_LOGGING_LEVEL": "INFO",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "HCCL_BUFFSIZE": "400",
+        "VLLM_HOST_IP": host_ip,
+        "HCCL_IF_IP": host_ip,
+        "HCCL_SOCKET_IFNAME": interface,
+        "GLOO_SOCKET_IFNAME": interface,
+        "TP_SOCKET_IFNAME": interface,
+    }
+    # A runner may supply physical endpoint resources. Do not replace them
+    # with auto-discovery, as in run_pd_disaggregation's A5 setup.
+    if not any(name in os.environ for name in ("ASCEND_LOCAL_COMM_RES", "ASCEND_GLOBAL_RESOURCE_CONFIG")):
+        env["ASCEND_LOCAL_COMM_RES"] = '{"version":"1.3"}'
+    transport_keys = (
+        "ASCEND_LOCAL_COMM_RES",
+        "ASCEND_GLOBAL_RESOURCE_CONFIG",
+        "MC_ASCEND_GLOBAL_RESOURCE_CONFIG",
+        "HCCL_INTRA_ROCE_ENABLE",
+    )
+    print(
+        "Flash PD communication setup:",
+        {
+            "host_ip": host_ip,
+            "interface": interface,
+            **{key: env.get(key, os.environ.get(key)) for key in transport_keys},
+        },
+        flush=True,
+    )
+    return env
 
 
 class FlashPDServer(RemotePDServer):
@@ -167,14 +209,7 @@ def test_glm53flash_pcp2_dp2(eager, prefix_caching):
     ]
     with FlashPDServer(
         servers,
-        env_dict={
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
-            "VLLM_SERVER_DEV_MODE": "1",
-            "HCCL_OP_EXPANSION_MODE": "AIV",
-            "HCCL_BUFFSIZE": "400",
-            # Enable A5 HIXL endpoint discovery in both P and D subprocesses.
-            "ASCEND_LOCAL_COMM_RES": '{"version":"1.3"}',
-        },
+        env_dict=serving_env(),
         max_wait_seconds=900,
     ):
         for url, expected in ((p_url, (1, 2, 1, 2)), (d_url, (1, 1, 2, 2))):
