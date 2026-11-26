@@ -20,6 +20,7 @@ def test_ple_construction_and_registration(monkeypatch, dp, pcp, expected):
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=text),
         parallel_config=SimpleNamespace(
+            use_ubatching=False,
             data_parallel_size=dp,
             prefill_context_parallel_size=pcp,
             tensor_parallel_size=1,

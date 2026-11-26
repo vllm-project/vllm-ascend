@@ -1,0 +1,13 @@
+pr: 21924
+entries:
+  - category: feature
+    text: >-
+      Added experimental, opt-in AscendStore prefix reuse for HiSparse on A5
+      with Prefill and Decode colocated on a single node.
+      Enabling it requires a vLLM build with Ascend HiSparse support,
+      `MultiConnector` with `kv_role=kv_both` on the parent and both children,
+      MemCache `host_tcp`, and `load_async=true`, `discard_partial_chunks=true`,
+      and `eager_host_mirror=true`.
+      PD disaggregation, prefill context parallelism, layerwise transfers,
+      and Mooncake are unsupported in this combination.
+    hardware: [A5]

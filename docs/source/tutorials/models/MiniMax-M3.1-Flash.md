@@ -67,7 +67,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-7 \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -90,7 +90,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-15 \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -112,7 +112,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-7 \
-        --network host --ipc host --privileged --shm-size=100g \
+        --network host --ipc host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -2400,7 +2400,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
     export HCCL_IF_IP="$LOCAL_IP"
     export VLLM_HOST_IP="$LOCAL_IP"
     export HCCL_CONNECT_TIMEOUT=120
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
@@ -2505,7 +2505,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
     export HCCL_IF_IP="$LOCAL_IP"
     export VLLM_HOST_IP="$LOCAL_IP"
     export HCCL_CONNECT_TIMEOUT=120
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
@@ -2605,7 +2605,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
     export TORCH_DEVICE_BACKEND_AUTOLOAD=0
     export HCCL_CONNECT_TIMEOUT=180
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
     # Configure these values for the current host.
@@ -2705,7 +2705,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
     export TORCH_DEVICE_BACKEND_AUTOLOAD=0
     export HCCL_CONNECT_TIMEOUT=180
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
     # Configure these values for the current host.
@@ -2810,7 +2810,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
     export TORCH_DEVICE_BACKEND_AUTOLOAD=0
     export HCCL_CONNECT_TIMEOUT=180
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
     # Configure these values for the current host.

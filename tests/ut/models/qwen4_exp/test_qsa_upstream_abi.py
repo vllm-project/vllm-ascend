@@ -6,13 +6,15 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import ParallelConfig
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.qwen4_exp import qsa
+from vllm_ascend.models.qwen4_exp import model, qsa
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -425,8 +427,68 @@ def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> N
     assert common._token_to_req_indices_cache is local_mapping
 
 
+@pytest.fixture
+def cpu_token_to_req(monkeypatch):
+    def token_to_req(query_starts, out, num_mapped, num_tokens):
+        tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
+        requests = torch.searchsorted(query_starts[1:], tokens, right=True)
+        out[:num_tokens].copy_(torch.where(tokens < num_mapped, requests, 0))
+        return out[:num_tokens]
+
+    monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
+
+
+@pytest.mark.parametrize("full_graph, expected_rows", [(True, 56), (False, 52)])
+def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, expected_rows):
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=14, max_num_batched_tokens=56),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    device = torch.device("cpu")
+    indexer = qsa.QSAIndexerMetadataBuilder(spec, ["indexer"], config, device)
+    main = qsa.AscendQSAMetadataBuilder(spec, ["main"], config, device)
+    other = Mock()
+    other.build.side_effect = lambda common_prefix_len, common_attn_metadata: common_attn_metadata
+    groups = [
+        AttentionGroup(
+            backend=backend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=0, metadata_builders=[builder]
+        )
+        for name, backend, builder in (
+            ("indexer", qsa.QSAIndexerBackend, indexer),
+            ("main", qsa.AscendQSABackend, main),
+            ("other", AttentionBackend, other),
+        )
+    ]
+    starts = torch.arange(0, 57, 4, dtype=torch.int32)
+    metadata = build_attn_metadata(
+        attn_groups=[groups],
+        num_reqs=14,
+        num_actual_reqs=13,
+        num_tokens=56,
+        num_actual_tokens=52,
+        query_start_loc_gpu=starts,
+        query_start_loc_cpu=starts,
+        max_query_len=4,
+        seq_lens=torch.full((14,), 100, dtype=torch.int32),
+        max_seq_len=100,
+        is_prefilling=torch.zeros(14, dtype=torch.bool),
+        block_tables=(torch.zeros((14, 7), dtype=torch.int32),),
+        slot_mappings=(torch.arange(56),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        full_graph_mode=full_graph,
+        skip_ring_state_update=False,
+    )
+    assert metadata["indexer"].num_actual_tokens == metadata["main"].num_actual_tokens == expected_rows
+    assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * 13 + [-1] * (expected_rows - 52)
+    assert metadata["other"].num_actual_tokens == 52
+
+
 @pytest.mark.parametrize("local_live_tokens", [0, 1, 2])
-def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_live_tokens) -> None:
+def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, cpu_token_to_req, local_live_tokens) -> None:
     local_table = torch.tensor([[3], [0]], dtype=torch.int32)
     global_table = torch.tensor([[3], [4], [0], [0]], dtype=torch.int32)
     global_slots = torch.full((1, 4), -1, dtype=torch.long)
@@ -446,13 +508,6 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
         torch.device("cpu"),
     )
 
-    def token_to_req(query_starts, out, num_mapped, num_tokens):
-        tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
-        requests = torch.searchsorted(query_starts[1:], tokens, right=True)
-        out[:num_tokens].copy_(torch.where(tokens < num_mapped, requests, 0))
-        return out[:num_tokens]
-
-    monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
     monkeypatch.setattr(
         qsa.upstream_qsa.Qwen4ExpQSAMetadataBuilder,
         "build",
@@ -583,3 +638,79 @@ def test_qsa_kv_store_keeps_page_stride_with_multiple_heads(monkeypatch) -> None
 
     torch.testing.assert_close(cache[1, 1], rows[0])
     assert not backing[:, 1].any()
+
+
+@pytest.mark.parametrize(
+    "enable_dbo,ubatch_size,pcp_size,expected_sharing",
+    [
+        pytest.param(False, 0, 1, True, id="ordinary-decode"),
+        pytest.param(False, 2, 1, False, id="explicit-ubatching"),
+        pytest.param(True, 0, 1, False, id="dbo"),
+        pytest.param(False, 0, 2, False, id="pcp"),
+    ],
+)
+def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ubatch_size, pcp_size, expected_sharing):
+    # Bypass unrelated distributed config validation while retaining the real
+    # upstream use_ubatching property used by the target constructor.
+    parallel_config = object.__new__(ParallelConfig)
+    parallel_config.enable_dbo = enable_dbo
+    parallel_config.ubatch_size = ubatch_size
+    parallel_config.prefill_context_parallel_size = pcp_size
+    parallel_config.decode_context_parallel_size = 1
+    parallel_config.tensor_parallel_size = 1
+    config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_key_heads=4, linear_num_value_heads=4)),
+    )
+
+    def init_attention(self, *, vllm_config, **kwargs):
+        torch.nn.Module.__init__(self)
+        assert vllm_config.parallel_config.prefill_context_parallel_size == 1
+        self.indexer = SimpleNamespace(configure_pcp_cache_backends=Mock())
+        self.register_buffer("topk_indices_buffer", torch.empty(8, 4, dtype=torch.int32), persistent=False)
+
+    def init_backbone(self, **kwargs):
+        torch.nn.Module.__init__(self)
+        self.layers = torch.nn.ModuleList(qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(3))
+        self.start_layer, self.end_layer = 0, len(self.layers)
+
+    monkeypatch.setattr(qsa.upstream_qsa.Qwen4ExpQSAAttention, "__init__", init_attention)
+    # model.py replaces the upstream module global with its subclass.
+    monkeypatch.setattr(model.AscendQwen4ExpModel.__bases__[0], "__init__", init_backbone)
+    first = model.AscendQwen4ExpModel(vllm_config=config)
+    buffers = [attention.topk_indices_buffer for attention in first.layers]
+    assert config.parallel_config.prefill_context_parallel_size == pcp_size
+    for layer in first.layers:
+        if pcp_size > 1:
+            layer.indexer.configure_pcp_cache_backends.assert_called_once_with(config)
+        else:
+            layer.indexer.configure_pcp_cache_backends.assert_not_called()
+
+    if not expected_sharing:
+        assert len({buffer.data_ptr() for buffer in buffers}) == len(buffers)
+        first.to_empty(device="cpu")
+        assert len({attention.topk_indices_buffer.data_ptr() for attention in first.layers}) == len(buffers)
+        return
+
+    assert all(buffer is buffers[0] for buffer in buffers)
+    assert not hasattr(first, "topk_indices_buffer")
+    second = model.AscendQwen4ExpModel(vllm_config=config)
+    draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
+    assert all(attention.topk_indices_buffer is not buffers[0] for attention in [*second.layers, *draft])
+    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
+
+    # Parent conversion must preserve Top-K aliasing and still move ordinary buffers.
+    first.register_buffer("ordinary_buffer", torch.zeros(1), persistent=False)
+    parent = torch.nn.ModuleList([first, second, *draft])
+    parent.to(device="meta")
+    assert first.ordinary_buffer.device.type == "meta"
+    parent.to_empty(device="cpu")
+    assert first.ordinary_buffer.device.type == "cpu"
+    moved = [attention.topk_indices_buffer for attention in first.layers]
+    assert all(buffer.device.type == "cpu" and buffer is moved[0] for buffer in moved)
+    assert moved[0] is not buffers[0]
+    assert all(
+        attention.topk_indices_buffer.data_ptr() != moved[0].data_ptr() for attention in [*second.layers, *draft]
+    )
+    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
+    assert not parent.state_dict()

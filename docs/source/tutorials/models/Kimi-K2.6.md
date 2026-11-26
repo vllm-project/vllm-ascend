@@ -57,7 +57,6 @@ Select an image based on your machine type and start the Docker image on your no
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -74,7 +73,6 @@ Select an image based on your machine type and start the Docker image on your no
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -216,7 +214,7 @@ Parameter descriptions:
         sysctl kernel.sched_migration_cost_ns=50000
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
 
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -294,7 +292,7 @@ Parameter descriptions:
         sysctl kernel.sched_migration_cost_ns=50000
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
 
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -371,7 +369,7 @@ Parameter descriptions:
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
         export VLLM_RPC_TIMEOUT=3600000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
@@ -449,7 +447,7 @@ Parameter descriptions:
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
         export VLLM_RPC_TIMEOUT=3600000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 

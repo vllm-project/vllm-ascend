@@ -147,7 +147,6 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[i
     os.environ,
     {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "HCCL_BUFFSIZE": "1024",
         "LCCL_DETERMINISTIC": "1",
         "HCCL_DETERMINISTIC": "true",

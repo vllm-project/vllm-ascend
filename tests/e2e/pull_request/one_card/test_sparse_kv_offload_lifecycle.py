@@ -253,7 +253,6 @@ def _run_in_worker_process(model_path):
         },
     ) as runner:
         engine = runner.model.llm_engine
-        assert engine.vllm_config.use_v2_model_runner
         model_runner = engine.model_executor.driver_worker.model_runner
         state = model_runner.model_state
         probe = AttentionProbe(state._offload_request_identity)
@@ -307,7 +306,6 @@ def test_sparse_kv_offload_runner_request_lifecycle(tmp_path):
     (model_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
     env = {
         **os.environ,
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": "1",
         "OMP_NUM_THREADS": "8",

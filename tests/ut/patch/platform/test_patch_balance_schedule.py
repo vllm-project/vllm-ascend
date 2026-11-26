@@ -776,7 +776,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         "num_sampled_tokens_per_step": 1,
         "has_mamba_layers": False,
         "scheduler_reserve_full_isl": False,
-        "use_v2_model_runner": False,
         "needs_kv_cache_zeroing": False,
         "num_spec_tokens": 0,
         "dynamic_sd_lookup": None,
@@ -1005,7 +1004,6 @@ def test_balance_schedule_pause_freeze_and_v2():
 
     v2_sched = _make_balance_scheduler()
     v2_sched._pause_state = PauseState.UNPAUSED
-    v2_sched.use_v2_model_runner = True
     v2_sched.dynamic_sd_lookup = {1: 2}
     v2_sched.defer_block_free = True
     connector = MagicMock()

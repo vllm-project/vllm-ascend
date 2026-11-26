@@ -22,7 +22,6 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
@@ -66,8 +65,7 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False
 
     def get_weight(
         self,

@@ -79,6 +79,10 @@ The host Linux distribution and kernel must be supported by the selected Ascend 
 
 Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need Ascend Docker Runtime on the host. [Use Ascend Docker Runtime](#installation-ascend-docker-runtime) introduces the runtime and gives the installation steps. If the host cannot install it, the other steps stay the same and only the Docker device mapping changes: use the flags in [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime).
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
+
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |
 | Get a working vLLM Ascend environment as quickly as possible | **Use a prebuilt image** | First-time users or users who want a quick deployment |
