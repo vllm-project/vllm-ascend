@@ -9,6 +9,7 @@ from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
 _LATENT = 512
 _ROPE = 64
 _ROWS_PER_PROGRAM = 8
+_MAX_FIA_COMPACT_CANDIDATES = 8192
 _QK_HEAD_TILE = 16
 _QK_CANDIDATE_TILE = 32
 
@@ -163,6 +164,148 @@ def read_c8_banded(cache, block_table, block_size, rows):
         num_warps=1,
     )
     return key, value
+
+
+@triton.jit(do_not_specialize=["count"])
+def _read_c8_fia_rows(
+    cache,
+    rope_cache,
+    scale_cache,
+    block_table,
+    positions,
+    latent_output,
+    rope_output,
+    mask_output,
+    count,
+    ROW_BYTES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    LATENT: tl.constexpr,
+    ROPE: tl.constexpr,
+    SCALE_TILE: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    index = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    in_bounds = index < count
+    position = tl.load(positions + index, in_bounds, -1)
+    live = in_bounds & (position >= 0)
+    page = tl.load(block_table + position // PAGE_SIZE, live, 0).to(tl.int64)
+    slot = page * PAGE_SIZE + position % PAGE_SIZE
+    lane = tl.arange(0, LATENT)
+    bits = tl.load(cache + slot[:, None] * ROW_BYTES + lane[None, :], live[:, None], 0)
+    group = tl.arange(0, LATENT // SCALE_TILE)
+    scales = tl.load(
+        scale_cache + slot[:, None] * (ROW_BYTES // 4) + (LATENT + 2 * ROPE) // 4 + group[None, :],
+        live[:, None],
+        0.0,
+    )
+    decoded = _decode_e4m3fn(bits).reshape((ROWS, LATENT // SCALE_TILE, SCALE_TILE))
+    latent = (decoded * scales[:, :, None]).reshape((ROWS, LATENT))
+    tl.store(latent_output + index[:, None] * LATENT + lane[None, :], latent, in_bounds[:, None])
+    rope_lane = tl.arange(0, ROPE)
+    rope = tl.load(
+        rope_cache + slot[:, None] * (ROW_BYTES // 2) + LATENT // 2 + rope_lane[None, :],
+        live[:, None],
+        0.0,
+    )
+    tl.store(rope_output + index[:, None] * ROPE + rope_lane[None, :], rope, in_bounds[:, None])
+    tl.store(mask_output + index, position < 0, in_bounds)
+
+
+@triton.jit
+def _compact_fia_positions(
+    positions, output, candidates: tl.constexpr, input_stride: tl.constexpr, block: tl.constexpr
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, block)
+    value = tl.load(positions + row * input_stride + col, col < candidates, -1)
+    valid = (col < candidates) & (value >= 0)
+    destination = tl.cumsum(valid.to(tl.int32), 0) - 1
+    count = tl.sum(valid.to(tl.int32), 0)
+    # The two stores have disjoint destinations: [count, K) and [0, count).
+    # Every output is written, including all-invalid rows and graph padding.
+    tl.store(output + row * candidates + col, -1, (col < candidates) & (col >= count))
+    tl.store(output + row * candidates + destination, value, valid)
+
+
+def compact_fia_positions(positions):
+    """Stable-pack integer indices before decoding the much larger C8 rows."""
+    if positions.ndim != 2 or positions.stride(1) != 1 or positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("FIA index compaction requires 2D integer indices with unit column stride")
+    queries, candidates = positions.shape
+    output = torch.empty((queries, candidates), dtype=positions.dtype, device=positions.device)
+    if queries and candidates:
+        _compact_fia_positions[(queries,)](
+            positions, output, candidates, positions.stride(0), triton.next_power_of_2(candidates), num_warps=1
+        )
+    return output
+
+
+def empty_c8_fia_rows(queries, candidates, device):
+    latent = torch.empty((queries, candidates, 1, _LATENT), dtype=torch.bfloat16, device=device)
+    rope = torch.empty((queries, candidates, 1, _ROPE), dtype=torch.bfloat16, device=device)
+    mask = torch.empty((queries, 1, 1, candidates), dtype=torch.bool, device=device)
+    return latent, rope, mask
+
+
+def empty_compact_c8_fia_rows(queries, candidates, device):
+    from .fia_lengths import CompactFIAKV
+
+    return CompactFIAKV(*empty_c8_fia_rows(queries, candidates, device))
+
+
+def gather_compact_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
+    """Read stable-packed C8 directly into FIA layout; avoid BF16 KV repacking.
+
+    The raw reader stays unchanged, including its FP32 dequantization followed
+    by the BF16 store. Only the integer selection order changes before reading.
+    """
+    from .fia_lengths import CompactFIAKV, compact_fia_rows
+
+    if (
+        positions.device.type != "npu"
+        or positions.ndim != 2
+        or positions.stride(1) != 1
+        or positions.dtype not in (torch.int32, torch.int64)
+        or not 0 < positions.shape[1] <= _MAX_FIA_COMPACT_CANDIDATES
+    ):
+        rows = gather_c8_fia_rows(cache, block_table, block_size, positions, output=output)
+        nope, rope = compact_fia_rows(positions, rows[0], rows[1])
+        rows[0].copy_(nope)
+        rows[1].copy_(rope)
+        count = (positions >= 0).sum(dim=-1)
+        rows[2].copy_((torch.arange(positions.shape[1], device=positions.device) >= count[:, None])[:, None, None])
+        return CompactFIAKV(*rows)
+    packed = compact_fia_positions(positions)
+    rows = gather_c8_fia_rows(cache, block_table, block_size, packed, output=output)
+    return CompactFIAKV(*rows)
+
+
+def gather_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
+    """Gather sparse rows directly into contiguous BF16 FIA K/rope and mask."""
+    queries, candidates = positions.shape
+    if output is None:
+        output = empty_c8_fia_rows(queries, candidates, cache.device)
+    count = positions.numel()
+    if count:
+        _read_c8_fia_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](
+            cache,
+            cache.view(torch.bfloat16),
+            cache.view(torch.float32),
+            block_table,
+            positions.contiguous(),
+            *output,
+            count,
+            cache.shape[-1],
+            block_size,
+            _LATENT,
+            _ROPE,
+            SFA_QSFA_TILE_SIZE,
+            _ROWS_PER_PROGRAM,
+            num_warps=1,
+            enable_fp_fusion=False,
+            enable_graph_optimize=False,
+        )
+    return output
 
 
 @triton.jit

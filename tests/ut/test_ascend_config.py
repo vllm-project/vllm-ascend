@@ -2245,6 +2245,45 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             init_ascend_config(vc)
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_removed_hy4_controls_are_rejected(self, mock_fix):
+        keys = (
+            "decode_native_fusions",
+            "decode_rms",
+            "decode_rope_cache",
+            "decode_rope",
+            "decode_mhc_pre",
+            "decode_mhc_head",
+            "decode_add_rms_norm",
+            "decode_short_indexpool",
+            "decode_attention",
+            "decode_indexer",
+            "dfly_add_rms_norm",
+            "dfly_q_norm_quant",
+            "dfly_swiglu_quant",
+            "dfly_c8_attention",
+            "decode_data_fusions",
+            "cann_engram_rms",
+            "fused_ihc_pre_tail",
+            "fused_ihc_post",
+            "bulk_c8_decode_reads",
+            "gpu_c8_scale",
+            "precise_decode",
+            "triton_mla_logits",
+            "cannbot_mla_prolog",
+            "swa_cache",
+        )
+        for suffix in keys:
+            with self.subTest(control=suffix):
+                vc = VllmConfig()
+                vc.additional_config = {"hy4flash_" + suffix: False}
+                with (
+                    patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=None),
+                    self.assertRaises(ValueError),
+                ):
+                    init_ascend_config(vc)
+
+    @_clean_up
     @patch("vllm_ascend.ascend_config.logger.warning")
     @patch(
         "vllm_ascend.ascend_config.importlib.util.find_spec",

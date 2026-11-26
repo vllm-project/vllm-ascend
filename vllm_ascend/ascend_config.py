@@ -1986,15 +1986,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # AscendConfig field, so strip it before extra="forbid" validation.
         "enable_flashcomm1",
         # Consumed by the HYV4 Flash model and its attention metadata builder.
-        "hy4flash_cannbot_mla_prolog",
-        "hy4flash_fused_ihc_pre_tail",
-        "hy4flash_cann_engram_rms",
-        "hy4flash_fused_ihc_post",
-        "hy4flash_bulk_c8_decode_reads",
         "hy4flash_dfly_dp_graph",
-        "hy4flash_gpu_c8_scale",
-        "hy4flash_precise_decode",
-        "hy4flash_triton_mla_logits",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",

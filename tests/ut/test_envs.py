@@ -75,7 +75,10 @@ class TestEnvVariables(TestBase):
         # The expected defaults are spelled out on purpose: deriving them from
         # the implementation would let a wrong default still pass the assertions
         # below.
-        expected_defaults = {"COMPILE_CUSTOM_KERNELS": True, "VERBOSE": False}
+        expected_defaults = {
+            "COMPILE_CUSTOM_KERNELS": True,
+            "VERBOSE": False,
+        }
         # Fail loudly if a boolean variable is added without covering it here.
         self.assertEqual(set(expected_defaults), self.boolean_vars)
 
@@ -96,7 +99,9 @@ class TestEnvVariables(TestBase):
                     os.environ.pop(var_name, None)
                     self.assertIs(getattr(envs_ascend, var_name), expected_default)
                     os.environ[var_name] = ""
-                    self.assertIs(getattr(envs_ascend, var_name), expected_default)
+                    self.assertIs(
+                        getattr(envs_ascend, var_name), False if expected_default is None else expected_default
+                    )
 
                     # Everything else is rejected, and the error names the
                     # variable so users can locate the offending export.

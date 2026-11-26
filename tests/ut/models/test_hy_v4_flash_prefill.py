@@ -14,17 +14,17 @@ from vllm_ascend.models.hy_v4_flash import attention
 @pytest.mark.parametrize("other_layer_first", [False, True])
 def test_prefill_attention_uses_current_layer_metadata(monkeypatch, other_layer_first):
     layer_name = "layers.8.attn"
-    metadata = attention.FlashAttentionMetadata(
-        (0, 2), (2,), torch.empty(0), torch.empty(0), prefill_reqs=(True,)
-    )
+    metadata = attention.FlashAttentionMetadata((0, 2), (2,), torch.empty(0), torch.empty(0), prefill_reqs=(True,))
     entries = [(layer_name, metadata), ("other.attn", SimpleNamespace())]
     if other_layer_first:
         entries.reverse()
     context = SimpleNamespace(attn_metadata=dict(entries))
     monkeypatch.setattr(attention, "get_forward_context", lambda: context)
+    monkeypatch.setattr(attention, "is_forward_context_available", lambda: True)
     layer = attention.AscendHYV4FlashAttention.__new__(attention.AscendHYV4FlashAttention)
     torch.nn.Module.__init__(layer)
     layer.layer_name = layer_name
+    layer.native_decode_attention = False
     layer.use_cann_prefill = True
     layer.use_cannbot_prolog = False
     layer.use_eager_prefill_rotary = False
@@ -86,6 +86,8 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
     model.scale = 576**-0.5
     model.learnable_sink_param = torch.randn(heads, generator=generator)
     model.indexer = None
+    model.use_pd_decode = False
+    model.bulk_c8_decode_reads = False
     if sparse:
         keys = torch.randn(20, 128, generator=generator)
         index_query = torch.randn(starts[-1], heads, 128, generator=generator)

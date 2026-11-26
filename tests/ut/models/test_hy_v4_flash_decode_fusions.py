@@ -57,9 +57,9 @@ def test_bulk_c8_boundary_and_padding(enabled, rows, monkeypatch):
         assert not gathered
 
 
-def test_ihc_tail_opt_in_preserves_fallback():
+def test_ihc_tail_cpu_preserves_fallback():
     pre = object.__new__(ihc.FlashHCPreLayer)
-    pre.fuse_decode_tail = False
+    pre.fuse_decode_tail = True
     assert not pre._can_fuse_decode_tail(torch.empty(6, 4, 3072, dtype=torch.bfloat16))
 
 
@@ -67,3 +67,20 @@ def test_disabled_ihc_needs_no_pre_layer():
     wrapper = object.__new__(ihc.FlashHCLayer)
     wrapper.enable_ihc = False
     wrapper.configure_decode_post()
+
+
+def test_ihc_decode_configuration_is_automatic(monkeypatch):
+    wrapper = object.__new__(ihc.FlashHCLayer)
+    wrapper.enable_ihc = True
+    wrapper.hc_pre = SimpleNamespace()
+    monkeypatch.setattr(ihc, "is_950", lambda: False)
+    wrapper.configure_decode_post()
+    assert wrapper.hc_pre.fuse_decode_tail is True
+
+
+def test_native_rms_unsupported_device_uses_reference():
+    from vllm_ascend.models.hy_v4_flash.decode_fusions import native_rms_norm
+
+    value = torch.randn(6, 128, dtype=torch.bfloat16)
+    norm = torch.nn.RMSNorm(128, eps=1e-6).to(torch.bfloat16)
+    torch.testing.assert_close(native_rms_norm(value, norm), norm(value), rtol=0, atol=0)

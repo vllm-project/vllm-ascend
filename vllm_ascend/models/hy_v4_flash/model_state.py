@@ -13,6 +13,7 @@ from vllm_ascend.utils import lmhead_tp_enable
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 from .aclgraph import FlashAclGraphManager
+from .decode_fusions import uses_decode_fusions
 from .pd_role import uses_prefill_ops
 
 logger = init_logger(__name__)
@@ -23,6 +24,7 @@ class FlashModelState(AscendModelState):
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
+        self._decode_optimizations = uses_decode_fusions(vllm_config) and device.type == "npu"
         self._graph_decode = False
         self._reuse_eager_embeddings = (
             uses_prefill_ops(vllm_config)
@@ -47,10 +49,12 @@ class FlashModelState(AscendModelState):
             if (
                 self._prefill_vocab_embedding is not None
                 and os.getenv("HY4_PREFILL_FIRST_IHC_BROADCAST") == "1"
-                and not first_layer.sequence_parallel and not first_engram
+                and not first_layer.sequence_parallel
+                and not first_engram
             ):
                 first_layer.hc_attn_layer.configure_prefill_broadcast(
-                    embedding, vllm_config.scheduler_config.max_num_batched_tokens,
+                    embedding,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
                 )
         self._defer_hc_head = (
             os.getenv("HY4_PREFILL_SAMPLE_ONLY_HEAD") == "1"
@@ -112,8 +116,7 @@ class FlashModelState(AscendModelState):
             and input_batch.num_tokens == input_batch.num_tokens_after_padding
             and input_batch.logits_indices.numel() > 0
             and (
-                input_batch.num_computed_prefill_tokens_np
-                < req_states.prefill_len.np[input_batch.idx_mapping_np]
+                input_batch.num_computed_prefill_tokens_np < req_states.prefill_len.np[input_batch.idx_mapping_np]
             ).all()
             and worker is not None
             and not worker.uses_prompt_logprobs[input_batch.idx_mapping_np].any()
@@ -144,7 +147,11 @@ class FlashModelState(AscendModelState):
             same_top1 = torch.equal(logits.argmax(dim=-1), reference.argmax(dim=-1))
             logger.info(
                 "HY4 LM_HEAD_CHECK rows=%d different=%d max_abs=%g close=%s same_top1=%s",
-                hidden_states.shape[0], different, max_abs, close, same_top1,
+                hidden_states.shape[0],
+                different,
+                max_abs,
+                close,
+                same_top1,
             )
         return logits
 
@@ -162,7 +169,6 @@ class FlashModelState(AscendModelState):
                 return PrefillSampler(sampler, fuse_counts=os.getenv("HY4_PREFILL_FUSED_COUNTS") == "1"), None
         return super().custom_sampler(sampler)
 
-
     def prepare_attn(self, input_batch, cudagraph_mode, *args, **kwargs):
         self._graph_decode = cudagraph_mode == CUDAGraphMode.FULL
         return super().prepare_attn(input_batch, cudagraph_mode, *args, **kwargs)
@@ -172,6 +178,12 @@ class FlashModelState(AscendModelState):
         return None if embedding is None else embedding.hy4_prefill_vocab_parameters()
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
+        if self._decode_optimizations:
+            from .target_embedding_triton import try_prepare_target_embeddings
+
+            result = try_prepare_target_embeddings(self, scheduled_encoder_inputs, input_batch, req_states)
+            if result is not None:
+                return result
         num_tokens = input_batch.num_tokens
         if (
             not self._reuse_eager_embeddings
@@ -195,7 +207,9 @@ class FlashModelState(AscendModelState):
             input_batch.hy4_text_vocab_embeddings = True
         else:
             embeddings = self.model.embed_input_ids(
-                input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed,
+                input_ids,
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
         buffer = self.encoder_runner.inputs_embeds
 
@@ -212,18 +226,105 @@ class FlashModelState(AscendModelState):
             )
         }
 
+    def _can_fuse_rope_hash(self, input_batch):
+        return (
+            self._decode_optimizations
+            and self._graph_decode
+            and not input_batch.is_dummy
+            and self._graph_hashes is not None
+            and self.model.token_lookback_depth > 0
+            and input_batch.num_tokens_after_padding > 0
+            and self.rope_state is not None
+            # Original RopeState launches once for every mapping entry, while
+            # hash uses num_reqs. Fall back if those scopes differ (padding).
+            and input_batch.idx_mapping.ndim == 1
+            and input_batch.idx_mapping.shape[0] == input_batch.num_reqs
+            and all(
+                0 <= int(b) - int(a) <= 6
+                for a, b in zip(
+                    input_batch.query_start_loc_np[: input_batch.num_reqs],
+                    input_batch.query_start_loc_np[1 : input_batch.num_reqs + 1],
+                )
+            )
+        )
+
     def prepare_inputs(self, input_batch, req_states):
         if self._reuse_eager_embeddings:
             return self._prepare_prefill_inputs(input_batch, req_states)
-        return super().prepare_inputs(input_batch, req_states)
+        if not self._can_fuse_rope_hash(input_batch):
+            return super().prepare_inputs(input_batch, req_states)
+        # Parent prepare_inputs performs only RoPE preparation followed by the
+        # Engram hook. Compute both here before either result is consumed.
+        model_inputs = self.prepare_engram_inputs(input_batch, req_states, rope_state=self.rope_state)
+        model_inputs["positions"] = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        return model_inputs
 
-    def prepare_engram_inputs(self, input_batch, req_states):
+    def prepare_engram_inputs(self, input_batch, req_states, *, rope_state=None):
         depth = self.model.token_lookback_depth
         if depth == 0:
             return {}
         history = getattr(input_batch, "hy4_lookback_token_ids", None)
         if history is not None:
             return {"lookback_token_ids": history}
+        if (
+            self._graph_decode
+            and not input_batch.is_dummy
+            and all(
+                0 <= int(b) - int(a) <= 6
+                for a, b in zip(
+                    input_batch.query_start_loc_np[: input_batch.num_reqs],
+                    input_batch.query_start_loc_np[1 : input_batch.num_reqs + 1],
+                )
+            )
+            and self._decode_optimizations
+        ):
+            from .engram_hash_triton_extra import fused_engram_hashes
+
+            inputs = self.prepare_engram_dummy_inputs(
+                input_batch.num_reqs_after_padding, input_batch.num_tokens_after_padding
+            )
+            hashes, rows = inputs["prepared_engram"]
+            packed_hashes = None
+            if rows and all(
+                output.shape == rows[0].shape
+                and embedding.embedding.weight.device.type == "cpu"
+                and embedding.embedding.weight.dtype == torch.bfloat16
+                and not embedding.fp8
+                for embedding, output in zip(self._engram_embeddings, rows, strict=True)
+            ):
+                # Keep graph-visible hash addresses/strides unchanged. The flat
+                # staging allocation is reused, but its compact layer stride
+                # follows this batch's NTOK, so .cpu() needs no Slice packing.
+                storage = getattr(self, "_engram_packed_hash_storage", None)
+                if storage is None:
+                    storage = self._engram_packed_hash_storage = torch.empty(
+                        self._graph_hashes.numel(), dtype=hashes.dtype, device=hashes.device
+                    )
+                packed_hashes = storage[: hashes.numel()].view(hashes.shape)
+            state = self._flash_model.engram_hash
+            if state.layout.lookup_table is None:
+                raise ValueError("Missing checkpoint Engram token map")
+            fused_engram_hashes(
+                input_batch.input_ids,
+                input_batch.query_start_loc,
+                input_batch.idx_mapping,
+                req_states.num_computed_tokens.gpu,
+                req_states.all_token_ids.gpu,
+                state.token_map,
+                state.multipliers,
+                state.primes,
+                state.offsets,
+                state.pad_id,
+                state.layout.pad_token_id,
+                state.visual_token_ids,
+                hashes,
+                num_reqs=input_batch.num_reqs,
+                rope_state=rope_state,
+                prefill_lens=req_states.prefill_len.gpu,
+                packed_output=packed_hashes,
+            )
+            self._prepare_engram_rows(hashes, rows, packed_hashes=packed_hashes)
+            return inputs
         history = torch.empty((input_batch.num_reqs, depth), dtype=torch.int32, device=self.device)
         if input_batch.is_dummy:
             history.fill_(-1)
@@ -258,7 +359,12 @@ class FlashModelState(AscendModelState):
             return inputs
         return {"lookback_token_ids": history}
 
-    def _prepare_engram_rows(self, hashes, rows):
+    def _prepare_engram_rows(self, hashes, rows, *, packed_hashes=None):
+        if self._decode_optimizations:
+            from .engram_row_prepare import try_prepare_engram_rows
+
+            if try_prepare_engram_rows(self, hashes, rows, packed_hashes):
+                return
         embeddings = self._engram_embeddings
         if rows and all(
             output.shape == rows[0].shape
@@ -269,14 +375,30 @@ class FlashModelState(AscendModelState):
         ):
             # Each layer keeps its existing shard and clamp rules. Transfer the
             # hashes and native BF16 rows together to avoid per-layer barriers.
-            host_hashes = hashes.cpu()
+            if packed_hashes is not None:
+                if (
+                    packed_hashes.shape != hashes.shape
+                    or packed_hashes.dtype != hashes.dtype
+                    or packed_hashes.device != hashes.device
+                    or not packed_hashes.is_contiguous()
+                ):
+                    raise ValueError("Invalid packed Engram hash staging view")
+                host_hashes = packed_hashes.cpu()
+            else:
+                host_hashes = hashes.cpu()
             host_rows = [
                 embedding.gather_rows(layer_hashes)[0]
                 for embedding, layer_hashes in zip(embeddings, host_hashes, strict=True)
             ]
             device_rows = torch.stack(host_rows).to(hashes.device)
-            for output, layer_rows in zip(rows, device_rows, strict=True):
-                output.copy_(layer_rows)
+            fused_rows = False
+            if self._decode_optimizations:
+                from .engram_row_scatter import scatter_engram_rows
+
+                fused_rows = scatter_engram_rows(device_rows, rows)
+            if not fused_rows:
+                for output, layer_rows in zip(rows, device_rows, strict=True):
+                    output.copy_(layer_rows)
             logger.info_once("HYV4 Decode batches CPU-offloaded BF16 Engram lookups")
             return
 

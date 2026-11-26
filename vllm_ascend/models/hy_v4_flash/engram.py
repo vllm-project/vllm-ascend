@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HYV4 Flash Engram with request-local n-grams and TP-sharded row storage."""
 
+import os
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -30,6 +32,11 @@ _CANN_RMS_ALIGNMENT = 32
 
 
 def _engram_inverse_rms(value, weight, epsilon, use_cann):
+    from .attention import get_flash_attention_metadata
+    from .decode_fusions import is_decode_batch
+
+    if is_decode_batch(get_flash_attention_metadata()):
+        return torch_npu.npu_rms_norm(value, weight, epsilon)[1]
     if (
         use_cann
         and value.device.type == "npu"
@@ -199,11 +206,62 @@ class FlashNgramHashState(nn.Module):
         self.prepare_batch_hashes(input_ids, lookback, starts, output)
 
     def prepare_batch_hashes(self, input_ids, lookback, query_start_loc, output):
-        output.fill_(-1)
         if self.layout.lookup_table is None:
             raise ValueError("Missing checkpoint Engram token map")
         if lookback is None or lookback.shape[1] != self.lookback_depth:
             raise ValueError("Flash Engram requires per-request lookback_token_ids")
+        # Decode graph inputs carry host boundaries. Batch all requests so
+        # launch count does not grow with the number of active requests.
+        if (
+            not isinstance(query_start_loc, torch.Tensor)
+            and self.lookback_depth > 0
+            and len(query_start_loc) > 1
+            and max(np.diff(query_start_loc), default=0) <= 6
+        ):
+            from .engram_batch_hash import DecodeHashGraph, batched_hashes
+
+            if input_ids.device.type == "npu" and output.device.type == "npu":
+                graphs = getattr(self, "_decode_hash_graphs", None)
+                if graphs is None:
+                    self._decode_hash_graphs = graphs = {}
+                key = (
+                    output.data_ptr(),
+                    tuple(output.shape),
+                    tuple(output.stride()),
+                    input_ids.dtype,
+                    lookback.dtype,
+                    lookback.shape[1],
+                )
+                if key not in graphs:
+                    graphs[key] = DecodeHashGraph(
+                        input_ids,
+                        lookback,
+                        self.token_map,
+                        self.multipliers,
+                        self.primes,
+                        self.offsets,
+                        self.pad_id,
+                        self.layout.pad_token_id,
+                        self.visual_token_ids,
+                        output,
+                    )
+                    logger.info("HYV4 ENGRAM_HASH_GRAPH_CAPTURE capacity=%d pid=%d", output.shape[1], os.getpid())
+                return graphs[key].run(input_ids, lookback, query_start_loc)
+
+            return batched_hashes(
+                input_ids,
+                lookback,
+                query_start_loc,
+                self.token_map,
+                self.multipliers,
+                self.primes,
+                self.offsets,
+                self.pad_id,
+                self.layout.pad_token_id,
+                self.visual_token_ids,
+                output,
+            )
+        output.fill_(-1)
         for request, (start, stop) in enumerate(zip(query_start_loc, query_start_loc[1:])):
             if start == stop:
                 continue
@@ -259,16 +317,27 @@ class FlashEmbedding(nn.Module):
         self.embedding.register_parameter("weight_scale_inv", None)
         if self.fp8:
             self.embedding.weight_scale_inv = nn.Parameter(
-                self._allocate_storage((rows,), torch.bfloat16, "weight_scale_inv"), requires_grad=False
+                self._allocate_storage((rows,), torch.bfloat16, "weight_scale_inv"),
+                requires_grad=False,
             )
         for parameter in self.embedding.parameters():
             set_weight_attrs(parameter, {"weight_loader": self._load_shard})
 
     def _allocate_storage(self, shape, dtype, leaf):
         if self._shared_group is not None and shape[0]:
-            from vllm_ascend.models.deepseek_v41.engram.npu import SharedUvaBuffer
+            if not self.map_host_weight:
+                from .engram_shared_cpu import PageableEngramBuffer
 
-            buffer = SharedUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()), self._shared_group)
+                buffer = PageableEngramBuffer(shape, dtype, self._shared_group)
+            else:
+                from vllm_ascend.models.deepseek_v41.engram.npu import SharedUvaBuffer
+
+                buffer = SharedUvaBuffer(
+                    shape,
+                    dtype,
+                    torch.device("npu", torch.npu.current_device()),
+                    self._shared_group,
+                )
             self._host_buffers[leaf] = buffer
             logger.info(
                 "HYV4 Flash Engram DP shared table: dp_rank=%d tp_rank=%d field=%s rows=%d bytes=%d backing=%s",
@@ -298,7 +367,10 @@ class FlashEmbedding(nn.Module):
         parameter = getattr(self.embedding, leaf, None)
         storage = {"device": parameter.device} if parameter is not None else {}
         if self.cpu_offload:
-            storage = {"device": "cpu", "pin_memory": True}
+            storage = {
+                "device": "cpu",
+                "pin_memory": self.map_host_weight,
+            }
         return torch.empty(shape, dtype=dtype, **storage)
 
     def _copy_shared_weight(self, parameter, shard):
@@ -401,13 +473,9 @@ class FlashEngram(nn.Module):
     def __init__(self, vllm_config, layout, layer_id, prefix):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
-        use_cann = vllm_config.additional_config.get("hy4flash_cann_engram_rms", False)
-        if not isinstance(use_cann, bool):
-            raise ValueError("hy4flash_cann_engram_rms must be a boolean")
         transfer = vllm_config.kv_transfer_config
         self.use_cann_inverse_rms = (
-            use_cann
-            and is_950()
+            is_950()
             and hasattr(torch_npu, "npu_rms_norm")
             and transfer is not None
             and transfer.kv_role == "kv_consumer"
@@ -445,6 +513,8 @@ class FlashEngram(nn.Module):
         self.key_projs = nn.ModuleList(
             [nn.Linear(local * layout.head_dim, self.hidden_size) for _ in range(self.hc_mult)]
         )
+
+        self._decode_pack_constants = None
         self.norm_key = nn.ModuleList([nn.RMSNorm(self.hidden_size) for _ in range(self.hc_mult)])
         self.norm_query = nn.ModuleList([nn.RMSNorm(self.hidden_size) for _ in range(self.hc_mult)])
         self.unified_pre_gamma = nn.Parameter(torch.empty(self.hidden_size))
@@ -475,8 +545,7 @@ class FlashEngram(nn.Module):
             self._residual_scales = torch.stack(list(self.unified_per_hc_scales)).float()
 
             if all(
-                norm.eps is None and norm.weight.dtype == torch.bfloat16
-                for norm in (*self.norm_key, *self.norm_query)
+                norm.eps is None and norm.weight.dtype == torch.bfloat16 for norm in (*self.norm_key, *self.norm_query)
             ):
                 self._key_gamma = torch.stack([norm.weight for norm in self.norm_key])
                 self._query_gamma = torch.stack([norm.weight for norm in self.norm_query])
@@ -494,6 +563,14 @@ class FlashEngram(nn.Module):
         return result
 
     def forward(self, hidden, hashes, embedding_rows=None):
+        from .attention import get_flash_attention_metadata
+        from .decode_fusions import is_decode_batch
+
+        if is_decode_batch(get_flash_attention_metadata()) and hidden.device.type == "npu" and is_950() and HAS_TRITON:
+            return self._forward_decode(hidden, hashes, embedding_rows)
+        return self._forward_prefill(hidden, hashes, embedding_rows)
+
+    def _forward_prefill(self, hidden, hashes, embedding_rows=None):
         rows = self.multi_head_embedding(hashes) if embedding_rows is None else embedding_rows
         eps = torch.finfo(torch.float32).eps
         use_fused = (
@@ -539,14 +616,15 @@ class FlashEngram(nn.Module):
         x = x.flatten(1)
         # Cap the batched workspace based on the current token count.
         use_batched_norm = (
-            use_fused and 512 <= hidden.shape[0] <= 2048 and self._key_gamma is not None
-            and x.dtype is torch.bfloat16
+            use_fused and 512 <= hidden.shape[0] <= 2048 and self._key_gamma is not None and x.dtype is torch.bfloat16
         )
         gate_scale = self.hidden_size**-0.5
         # This TP4 message range keeps the BF16 collective's tested reduction order.
         packed_projection = (
-            use_fused and self._packed_kv_weight is not None
-            and x.dtype is torch.bfloat16 and x.is_contiguous()
+            use_fused
+            and self._packed_kv_weight is not None
+            and x.dtype is torch.bfloat16
+            and x.is_contiguous()
             and 64 <= x.shape[0] <= 1024
         )
         if packed_projection:
@@ -563,7 +641,11 @@ class FlashEngram(nn.Module):
             dots = tuple(
                 gate_dot(
                     packed_keys[channel] if packed_projection else self._project(projection, x),
-                    hidden, self._key_gamma[channel], self._query_gamma[channel], channel, eps,
+                    hidden,
+                    self._key_gamma[channel],
+                    self._query_gamma[channel],
+                    channel,
+                    eps,
                 )
                 for channel, projection in enumerate(self.key_projs)
             )
@@ -571,14 +653,23 @@ class FlashEngram(nn.Module):
                 value = self._project(self.value_proj, x)
             inverse = gate_value_inverse(value, eps)
             return engram_gate_residual(
-                hidden, hashes, dots, self._residual_scales, value, self._pre_gamma, inverse, gate_scale,
+                hidden,
+                hashes,
+                dots,
+                self._residual_scales,
+                value,
+                self._pre_gamma,
+                inverse,
+                gate_scale,
             )
 
         if use_batched_norm:
             from .prefill_ops.engram_norm import engram_batched_dots
 
-            keys = tuple(packed_keys) if packed_projection else tuple(
-                self._project(projection, x) for projection in self.key_projs
+            keys = (
+                tuple(packed_keys)
+                if packed_projection
+                else tuple(self._project(projection, x) for projection in self.key_projs)
             )
             dots = engram_batched_dots(keys, hidden, self._key_gamma, self._query_gamma)
         else:
@@ -610,10 +701,7 @@ class FlashEngram(nn.Module):
             value = self._project(self.value_proj, x)
         simple_dots = use_fused and all(dot.dtype is torch.bfloat16 and dot.is_contiguous() for dot in dots)
         contiguous_value_norm = (
-            use_fused
-            and value.dtype == torch.bfloat16
-            and value.is_contiguous()
-            and 512 <= value.shape[0] <= 4096
+            use_fused and value.dtype == torch.bfloat16 and value.is_contiguous() and 512 <= value.shape[0] <= 4096
         )
         if contiguous_value_norm and simple_dots:
             from .prefill_ops.engram_norm import engram_value_inverse
@@ -621,7 +709,14 @@ class FlashEngram(nn.Module):
 
             inverse = engram_value_inverse(value, eps)
             return engram_gate_residual(
-                hidden, hashes, dots, self._residual_scales, value, self._pre_gamma, inverse, gate_scale,
+                hidden,
+                hashes,
+                dots,
+                self._residual_scales,
+                value,
+                self._pre_gamma,
+                inverse,
+                gate_scale,
             )
 
         if use_fused:
@@ -641,8 +736,13 @@ class FlashEngram(nn.Module):
 
             inverse = engram_value_inverse(value, eps)
             return engram_residual(
-                hidden, hashes, gate, self._residual_scales, value,
-                gamma=self._pre_gamma, inverse=inverse,
+                hidden,
+                hashes,
+                gate,
+                self._residual_scales,
+                value,
+                gamma=self._pre_gamma,
+                inverse=inverse,
             )
         value = value.float()
         if use_fused:
@@ -652,5 +752,69 @@ class FlashEngram(nn.Module):
         inverse = _engram_inverse_rms(value, gamma, eps, self.use_cann_inverse_rms)
         signal = gamma * value * inverse
         scales = torch.stack(list(self.unified_per_hc_scales)).float()
+        result = ((gate.float().unsqueeze(-1) + scales) * signal.unsqueeze(1)).to(hidden.dtype)
+        return hidden + result.masked_fill((hashes < 0).all(-1)[:, None, None], 0)
+
+    def _forward_decode(self, hidden, hashes, embedding_rows=None):
+        from .attention import get_flash_attention_metadata
+        from .decode_fusions import is_decode_batch
+
+        native_norm = is_decode_batch(get_flash_attention_metadata())
+        rows = self.multi_head_embedding(hashes) if embedding_rows is None else embedding_rows
+        eps = torch.finfo(torch.float32).eps
+        if native_norm:
+            if self._decode_pack_constants is None:
+                # Parameters are immutable after checkpoint loading. Capture
+                # stable tensors instead of rebuilding them on every replay.
+                self._decode_pack_constants = (
+                    torch.stack([norm.weight for norm in self.lookup_per_head_norms]).float(),
+                    torch.stack(list(self.unified_per_hc_scales)).float(),
+                    self.unified_pre_gamma.detach().float(),
+                )
+            gamma, packed_scales, unified_gamma = self._decode_pack_constants
+        else:
+            gamma = torch.stack([norm.weight for norm in self.lookup_per_head_norms]).float()
+            packed_scales = None
+        local = self.multi_head_embedding
+        local_hashes = hashes[:, local.head_start : local.head_end]
+        if native_norm:
+            from .engram_fusions import fused_lookup_norm, fused_norm_dot_gate
+
+            x = fused_lookup_norm(rows, local_hashes, gamma, eps, hidden.dtype).flatten(1)
+        else:
+            x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
+            inverse = _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
+            x = (x * inverse * gamma).to(hidden.dtype).flatten(1)
+        gates = []
+        for channel in range(self.hc_mult):
+            key = self.key_projs[channel](x)
+            if local.tp_size > 1:
+                key = tensor_model_parallel_all_reduce(key)
+            if native_norm:
+                gate = fused_norm_dot_gate(
+                    key,
+                    hidden[:, channel],
+                    self.norm_key[channel],
+                    self.norm_query[channel],
+                )
+            else:
+                norm_key = self.norm_key[channel](key)
+                norm_query = self.norm_query[channel](hidden[:, channel])
+                gate = (norm_key * norm_query).sum(-1) * self.hidden_size**-0.5
+                gate = (gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid()
+            gates.append(gate)
+        gate = torch.stack(gates, dim=1)
+        value = self.value_proj(x)
+        if local.tp_size > 1:
+            value = tensor_model_parallel_all_reduce(value)
+        value = value.float()
+        gamma = unified_gamma if native_norm else self.unified_pre_gamma.float()
+        inverse = _engram_inverse_rms(value, gamma, eps, self.use_cann_inverse_rms)
+        scales = packed_scales if packed_scales is not None else torch.stack(list(self.unified_per_hc_scales)).float()
+        if native_norm:
+            from .engram_fusions import fused_residual
+
+            return fused_residual(hidden, value, gamma, inverse, gate, scales, hashes)
+        signal = gamma * value * inverse
         result = ((gate.float().unsqueeze(-1) + scales) * signal.unsqueeze(1)).to(hidden.dtype)
         return hidden + result.masked_fill((hashes < 0).all(-1)[:, None, None], 0)

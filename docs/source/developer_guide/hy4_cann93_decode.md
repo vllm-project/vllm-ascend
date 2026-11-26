@@ -4,28 +4,16 @@ This contribution ports selected model changes from the
 [run09 archive](https://github.com/peterDengcx/vllm-ascend-118/tree/codex/hy4-cann93-run09-20261123/examples/hy4flash/experiments/20261123-cann93-run09)
 onto `LostFox11/vllm-ascend` commit `36c207820`, retaining its Engram prefetch support.
 
-## Configuration
+## Current configuration
 
-Merge the following booleans into `--additional-config` on the decode service:
+Only `hy4flash_dfly_dp_graph` remains as a HY4 optimization boolean. It
+selects supported local DP Draft graphs and defaults to false. Other supported
+optimizations are selected automatically; former per-operator booleans and
+experiment environment aliases have been removed. See
+[the current integration guide](hy4_decode_integration.md) for dependencies,
+fallbacks, migration and the next validation procedure.
 
-| Key | Default | Behavior |
-| --- | --- | --- |
-| `hy4flash_cann_engram_rms` | `false` | Use CANN rstd for aligned, contiguous FP32 Engram tensors on Ascend950, dedicated KV consumer only. |
-| `hy4flash_fused_ihc_pre_tail` | `false` | Fuse gate arithmetic for precise BF16 decode, 4 channels, hidden 3072, 6-query batches up to 48 tokens. |
-| `hy4flash_bulk_c8_decode_reads` | `false` | Use existing bulk gather/dequantization above the fused-read threshold, preserving negative-position masking. |
-| `hy4flash_fused_ihc_post` | `true` | Preserve the existing fused post path; `false` selects explicit FP32 multiply/add for comparisons. |
-| `hy4flash_dfly_dp_graph` | `false` | Experimental local dense draft graph capture for DP replicas with TP/PP/PCP/DCP all one and no embedding/head collectives. |
-
-Invalid non-boolean values raise an error. Unsupported shapes retain the original
-paths. Disabling an option requires restarting and recapturing graphs.
-The Engram rstd substitution is tolerance-equivalent, **not bitwise equivalent**.
-The original gamma multiplication order and invalid-hash mask are preserved.
-
-The draft graph uses a copied dense forward context; the target MoE configuration
-and actual communication groups are unchanged. Explicit eager mode and non-FULL
-graph modes retain eager drafting. Capture uses the Ascend communicator context.
-Graph buffers are private to the draft manager; real-checkpoint graph memory and
-end-to-end performance remain to be measured before recommending this option.
+The measurements below describe historical revisions, not this candidate.
 
 ## Recorded experiments (2026-11-23)
 

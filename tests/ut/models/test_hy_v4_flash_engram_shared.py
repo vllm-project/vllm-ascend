@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm_ascend.models.deepseek_v41.engram import npu
-from vllm_ascend.models.hy_v4_flash import engram
+from vllm_ascend.models.hy_v4_flash import engram, engram_shared_cpu
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def shared_embedding(monkeypatch):
     buffers = {}
 
     class SharedBuffer:
-        def __init__(self, shape, dtype, device, peers):
+        def __init__(self, shape, dtype, *args):
             key = (tuple(shape), dtype)
             self.tensor = buffers.setdefault(key, torch.empty(shape, dtype=dtype, device="cpu"))
             self.shm = SimpleNamespace(name="test-shared-table")
@@ -29,6 +29,7 @@ def shared_embedding(monkeypatch):
     monkeypatch.setattr(engram, "get_dp_group", lambda: group)
     monkeypatch.setattr(engram, "in_the_same_node_as", lambda _: [True, True])
     monkeypatch.setattr(npu, "SharedUvaBuffer", SharedBuffer)
+    monkeypatch.setattr(engram_shared_cpu, "PageableEngramBuffer", SharedBuffer)
     monkeypatch.setattr(torch.npu, "current_device", lambda: 0)
     original = engram.FlashEmbedding._allocate_storage
 
@@ -173,3 +174,20 @@ def test_private_mapped_table_registration_fallback(shared_embedding, monkeypatc
         with pytest.raises(RuntimeError, match="failed"):
             embedding.load_weight("weight", weight)
         assert embedding.map_host_weight
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_shared_storage_follows_mapping_requirements(shared_embedding, monkeypatch, mapped):
+    calls = []
+
+    class Buffer:
+        def __init__(self, shape, dtype, *args):
+            calls.append("uva" if len(args) == 2 else "pageable")
+            self.tensor = torch.empty(shape, dtype=dtype)
+            self.shm = SimpleNamespace(name="route-test")
+
+    monkeypatch.setattr(npu, "SharedUvaBuffer", Buffer)
+    monkeypatch.setattr(engram_shared_cpu, "PageableEngramBuffer", Buffer)
+    embedding = engram.FlashEmbedding([3, 4], 2, None, True, True, map_host_weight=mapped)
+    embedding.load_weight("weight", torch.zeros(7, 2, dtype=torch.bfloat16))
+    assert calls == ["uva" if mapped else "pageable"]

@@ -15,6 +15,7 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm_ascend.device.device_config import is_950
 
 from .attention import get_flash_attention_metadata
+from .decode_fusions import is_decode_batch
 from .ihc_first import first_ihc_post, first_ihc_pre
 
 logger = init_logger(__name__)
@@ -430,12 +431,18 @@ class FlashHCLayer(HYV4HCLayer):
         width, channels = self.config.hidden_size, pre.hc_mult
         weight = pre.hc_fn.weight
         if (
-            channels != 4 or not 0 < width <= 4096 or width % 16
-            or weight.shape != (2 * channels, channels * width) or weight.dtype != torch.float32
-            or pre.hc_scale.shape != (2,) or pre.hc_scale.dtype != torch.float32
-            or pre.hc_base.shape != (2 * channels,) or pre.hc_base.dtype != torch.float32
+            channels != 4
+            or not 0 < width <= 4096
+            or width % 16
+            or weight.shape != (2 * channels, channels * width)
+            or weight.dtype != torch.float32
+            or pre.hc_scale.shape != (2,)
+            or pre.hc_scale.dtype != torch.float32
+            or pre.hc_base.shape != (2 * channels,)
+            or pre.hc_base.dtype != torch.float32
             or embedding.hy4_prefill_vocab_parameters() is None
-            or embedding.weight.shape[1] != width or embedding.weight.dtype != torch.bfloat16
+            or embedding.weight.shape[1] != width
+            or embedding.weight.dtype != torch.bfloat16
         ):
             return
         org_start, org_end, added_start, added_end, added_local, _ = embedding.hy4_prefill_vocab_parameters()
@@ -456,30 +463,37 @@ class FlashHCLayer(HYV4HCLayer):
                     for start in range(first, last, rows):
                         count = min(rows, last - start)
                         offset = local + start - first
-                        scratch[:count].copy_(embedding.weight[offset:offset + count])
-                        self._write_broadcast_gates(pre, scratch, table[start:start + count])
+                        scratch[:count].copy_(embedding.weight[offset : offset + count])
+                        self._write_broadcast_gates(pre, scratch, table[start : start + count])
                 if embedding.tp_rank == 0:
                     scratch.zero_()
-                    self._write_broadcast_gates(pre, scratch, table[vocab_size:vocab_size + 1])
+                    self._write_broadcast_gates(pre, scratch, table[vocab_size : vocab_size + 1])
                 table = embedding._reduce_standard_embedding(table)
                 name = f"_broadcast_gates_{rows}"
                 pre.register_buffer(name, table, persistent=False)
                 pre.broadcast_gate_buffers[rows] = name
                 rows //= 2
         if pre.broadcast_gate_buffers:
-            logger.info_once("HY4 Prefill first iHC uses native vocab gates for row counts %s",
-                             tuple(pre.broadcast_gate_buffers))
+            logger.info_once(
+                "HY4 Prefill first iHC uses native vocab gates for row counts %s", tuple(pre.broadcast_gate_buffers)
+            )
 
     @staticmethod
     def _write_broadcast_gates(pre, scratch, destination):
         repeated = scratch.unsqueeze(1).repeat(1, pre.hc_mult, 1)
         _, post, _, _, _, gates = pre.cann_pre_op(
-            repeated, pre.hc_fn.weight, pre.hc_scale, pre.hc_base,
-            norm_eps=pre.layernorm_epsilon, hc_eps=pre.hc_eps, out_flag=1, inner_precise=0,
+            repeated,
+            pre.hc_fn.weight,
+            pre.hc_scale,
+            pre.hc_base,
+            norm_eps=pre.layernorm_epsilon,
+            hc_eps=pre.hc_eps,
+            out_flag=1,
+            inner_precise=0,
         )
         count = destination.shape[0]
-        destination[:, :pre.hc_mult].copy_(gates[:count])
-        destination[:, pre.hc_mult:].copy_(post[:count])
+        destination[:, : pre.hc_mult].copy_(gates[:count])
+        destination[:, pre.hc_mult :].copy_(post[:count])
 
     def prepare_input(self, hidden_states):
         if (
@@ -494,9 +508,14 @@ class FlashHCLayer(HYV4HCLayer):
             batch = get_flash_attention_metadata()
             token_ids = get_forward_context().additional_kwargs.get("hy4_first_ihc_token_ids")
             if (
-                token_ids is not None and token_ids.ndim == 1 and token_ids.is_contiguous()
-                and token_ids.device == hidden_states.device and token_ids.numel() == hidden_states.shape[0]
-                and batch is not None and batch.prefill_reqs and all(batch.prefill_reqs)
+                token_ids is not None
+                and token_ids.ndim == 1
+                and token_ids.is_contiguous()
+                and token_ids.device == hidden_states.device
+                and token_ids.numel() == hidden_states.shape[0]
+                and batch is not None
+                and batch.prefill_reqs
+                and all(batch.prefill_reqs)
             ):
                 return hidden_states
         return super().prepare_input(hidden_states)
@@ -504,14 +523,9 @@ class FlashHCLayer(HYV4HCLayer):
     def configure_decode_post(self):
         if not self.enable_ihc:
             return
-        enabled = get_current_vllm_config().additional_config.get("hy4flash_fused_ihc_pre_tail", False)
-        if not isinstance(enabled, bool):
-            raise ValueError("hy4flash_fused_ihc_pre_tail must be a boolean")
-        self.hc_pre.fuse_decode_tail = enabled
+        self.hc_pre.fuse_decode_tail = True
         if self.enable_ihc and is_950():
-            self.fuse_decode_post = get_current_vllm_config().additional_config.get("hy4flash_fused_ihc_post", True)
-            if not isinstance(self.fuse_decode_post, bool):
-                raise ValueError("hy4flash_fused_ihc_post must be a boolean")
+            self.fuse_decode_post = True
             self.cann_post_op = getattr(torch_npu, "npu_mhc_post", None)
             self.hc_pre.inverse_rms_workers = _decode_mean_workers(torch.npu.current_device())
 
@@ -552,6 +566,43 @@ class FlashHCLayer(HYV4HCLayer):
 
 
 class FlashHCHeadLayer(HYV4HCHeadLayer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.register_buffer("_native_head_phi", None, persistent=False)
+        self.register_buffer("_native_head_alpha", None, persistent=False)
+        self.register_buffer("_native_head_bias", None, persistent=False)
+
+    def forward(self, x):
+        if (
+            is_decode_batch(get_flash_attention_metadata())
+            and is_950()
+            and x.device.type == "npu"
+            and x.dtype == torch.bfloat16
+            and x.ndim == 3
+            and x.shape[1:] == (4, 3072)
+            and x.is_contiguous()
+            and hasattr(torch_npu, "npu_mhc_pre")
+        ):
+            if self._native_head_phi is None:
+                weight = self.hc_head_fn.weight.detach().float()
+                alpha = self.hc_head_scale.detach().float()
+                bias = self.hc_head_base.detach().float()
+                # The head is exactly the pre half of iHC. Supply a zero post
+                # projection to reuse the native 2*n interface; post is unused.
+                self._native_head_phi = torch.cat((weight, torch.zeros_like(weight)), 0).contiguous()
+                self._native_head_alpha = torch.cat((alpha, torch.zeros_like(alpha)), 0).contiguous()
+                self._native_head_bias = torch.cat((bias, torch.zeros_like(bias)), 0).contiguous()
+            return torch_npu.npu_mhc_pre(
+                x,
+                self._native_head_phi,
+                self._native_head_alpha,
+                self._native_head_bias,
+                norm_eps=self.config.rms_norm_eps,
+                hc_eps=self.hc_eps,
+                inner_precise=0,
+            )[0]
+        return super().forward(x)
+
     def _inverse_rms(self, x: torch.Tensor) -> torch.Tensor:
         if not is_forward_context_available():
             # Deferred eager Prefill runs the head on selected rows in sampling.

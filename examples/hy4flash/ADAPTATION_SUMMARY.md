@@ -81,42 +81,15 @@ cd /opt/hy4flash
 - **文本或视觉**。默认加载视觉塔。启动追加 `--language-model-only` 可用于纯文本评测。
 - **调度对照**。默认传入 `--async-scheduling`；启动追加 `--no-async-scheduling` 可固定到同步调度。比较精度时还要核对实际 prefill 分块和 batch。
 
-### 算子调试与实验开关
+### Draft 入图开关
 
-以下模型键通过 `--additional-config` JSON 传入。启动脚本已经构造该 JSON，手工传入整段配置时应带上原启动项，包括 `enable_mlapo: false`、`enable_fused_mc2: 0`、共享专家双流设置和 `ascend_compilation_config.enable_npugraph_ex: false`。
+模型仅保留 `--additional-config` 中的 `hy4flash_dfly_dp_graph`，默认 `false`。
+在 TP1/DP4 的本地 DFly 场景设为 `true`，启用 Draft FULL Decode 图。
+显式 eager 设置优先；不支持的并行布局继续使用 eager Draft。
 
-| 键或变量 | 当前默认 | 作用和实测状态 |
-| --- | --- | --- |
-| `hy4flash_precise_decode` | 开 DFly 时 `true` | 控制 decode 精度策略，包括 iHC 的逐行均方归约。 |
-| `hy4flash_gpu_c8_scale` | `false` | 使用 `fp8` KV 时可设为 `true`，按 GPU 的 2 次幂规则计算 C8 scale。覆盖目标模型和 DFly，沿用现有缓存布局。 |
-| `hy4flash_triton_mla_logits` | `false` | Triton logits 实验，单算子输出及回放已验证，实测性能收益不足。 |
-| `hy4flash_cannbot_mla_prolog` | `false` | CANNBot BF16 prolog 实验。需要匹配容器 Python 和 CPU 架构的 CANNBot 运行时，并从 `PYTHONPATH` 导入 `mla_prolog_v4`。整网对照 336 个输出 token 中有 126 个位置不同。 |
-| `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 或 JSON `enable_flashcomm1: true` | `0` / `false` | FlashComm1 / sequence parallel 实验已启动验证，观测到首 token 和后续输出差异。关闭时设变量为 `0` 并保持 JSON 为 `false` 或省略该键。 |
-
-已验证的 LightningIndexerV2、CANN IHC、C8 窗口融合及 Decode 融合由模型按硬件、P/D 角色和张量形状自动选择。
-
-目标模型第 1 层（从 0 编号）的 `q_b_proj` 默认将 checkpoint 的 block FP8 权重解量为 BF16，推理使用 BF16 GEMM。可单独打开 GPU C8 scale 做 KV 精度对照。
-
-```bash
-./start_hy4flash.sh --language-model-only --additional-config '{
-  "enable_mlapo": false,
-  "enable_fused_mc2": 0,
-  "multistream_overlap_shared_expert": true,
-  "ascend_compilation_config": {"enable_npugraph_ex": false},
-  "hy4flash_gpu_c8_scale": true
-}'
-```
-
-此前 950DT 验证中，448 行 C8 输入在 eager 和图回放中得到相同的 scale 和 FP8 字节，逐项符合 GPU 写缓存公式的 CPU 参考。GPU C8 scale 和第 1 层 BF16 投影同时启用时，TP8 + EP、DFly 5 的全量语言模型通过 9 和 2,052 token 输入的生成测试，目标和 draft 都回放了 FULL 图。
-
-| 实验 | 结果 |
-| --- | --- |
-| C8 QSFA | 4 head、Top-K 2,048 的 strided PA 探针通过。相同页布局的连续与零拷贝读取结果逐值一致，和现行 C8 attention 对照时仍有反量化舍入与带 sink 的差异。 |
-| SMLA | 容器测试的接口要求 head dim 512，Hy4 吸收后需要 576。MixedQuant 路径的测试布局要求 KV 行宽 608，Hy4 的 C8 基础行宽为 656。 |
-| CANNBot BF16 prolog | 四组整网对照中，出现差异的位置分别为 5 / 24、44 / 192、62 / 96 和 15 / 24。 |
-| FlashComm1 | 固定环境对照中，短请求有 12 / 24 个输出 token 位置不同，混合长度有 67 / 96 个位置不同。短请求相同前缀的所选 logprob 最大绝对差为 0.906。 |
-
-C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读取和分步 MLA。
+已验证的 Decode、DFly、C8 和输入准备优化按硬件、P/D 角色及张量形状自动选择，
+不再提供单独的算子回退开关。已删除的 HY4 配置项不应继续写入启动配置。
+部署和依赖说明见 [Decode 集成说明](../../docs/source/developer_guide/hy4_decode_integration.md)。
 
 ## 性能证据和当前边界
 
@@ -156,7 +129,7 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 
 ### 全套优化的评测与启动
 
-所有已验证的融合在支持条件满足时默认启用。各项 `hy4flash_*` 配置仍可显式设为 `false` 做对照。
+所有已验证的融合在支持条件满足时自动启用，仅保留 Draft 入图开关。
 
 `all-optimizations.json` 保存共享专家双流和编译选项。Gate、SWA、IndexPool 和 C8 的已验证优化由源码调度。第 1 层（从 0 编号）的 `q_b_proj` 固定使用 checkpoint 解量后的 BF16 权重。启动脚本根据 checkpoint 选择计算 dtype。
 
@@ -184,7 +157,7 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 
 在具有配套 vLLM Ascend 编译依赖的环境中，准备有该分支的 `vllm-ascend` 源码和上述基线的 `vllm` 源码。对干净的 vLLM 基线应用一次补丁，再复制启动脚本到两份源码的上一级。
 
-HY4 Flash 在 V2 Model Runner 和混合 KV Cache 管理器下默认启用 SWA KV Cache。可以在 `--additional-config` 中设置 `hy4flash_swa_cache: false` 关闭。升级已有环境时，在干净的 vLLM 基线上应用下方更新后的完整补丁。
+HY4 Flash 在 V2 Model Runner 和混合 KV Cache 管理器下默认启用 SWA KV Cache。SWA 路径按运行条件自动选择。升级已有环境时，在干净的 vLLM 基线上应用下方更新后的完整补丁。
 
 ```bash
 git -C vllm apply --check ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch

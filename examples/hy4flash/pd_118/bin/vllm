@@ -1,0 +1,35 @@
+#!/usr/local/python3.12.13/bin/python
+import importlib.util
+import json
+import os
+import sys
+
+paths = [
+    "/workspace/hy4-cann93/hy4-draft-only-20261126/vllm-src",
+    "/workspace/hy4-cann93/hy4-draft-only-20261126/source",
+]
+sys.path[:] = paths + [p for p in sys.path if p not in paths]
+for name, base in [("vllm", paths[0]), ("vllm_ascend", paths[1])]:
+    spec = importlib.util.find_spec(name)
+    if spec is None or not spec.origin.startswith(base + "/"):
+        raise RuntimeError(f"Unexpected source: {name}: {spec}")
+    print("VERIFIED_SOURCE", name, spec.origin, flush=True)
+# Register the NPU backend before vLLM probes Triton drivers.
+import torch_npu  # noqa: E402,F401
+import vllm.triton_utils as triton_utils  # noqa: E402
+from vllm.entrypoints.cli.main import main  # noqa: E402
+from vllm.v1.worker.gpu.mm import rope  # noqa: E402
+
+kernel = rope._prepare_rope_positions_kernel
+diagnostic = {
+    "pid": os.getpid(),
+    "has_triton": triton_utils.HAS_TRITON,
+    "rope_kernel_type": type(kernel).__module__ + "." + type(kernel).__name__,
+    "kernel_supports_launch": hasattr(kernel, "__getitem__"),
+    "rope_module": rope.__file__,
+}
+print("VERIFIED_TRITON", json.dumps(diagnostic), flush=True)
+if not diagnostic["has_triton"] or not diagnostic["kernel_supports_launch"]:
+    raise RuntimeError("NPU Triton/RoPE kernel unavailable before model loading: " + json.dumps(diagnostic))
+if __name__ == "__main__":
+    main()

@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 import importlib.util
+import json
+import os
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType
 from unittest.mock import MagicMock, call, patch
 
@@ -30,6 +33,31 @@ class TestGlobalTE(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self.global_te_cls = module.GlobalTE
+        self.module = module
+
+    def test_connector_descriptor_uses_physical_device(self):
+        config = {"version": "1.3", "endpoint_list": [{"protocol": "ub_ctp", "placement": "device"}]}
+        with TemporaryDirectory() as directory:
+            Path(directory, "6.json").write_text(json.dumps(config))
+            with (
+                patch("torch.npu.current_device", return_value=0),
+                patch("vllm.platforms.current_platform.visible_device_id_to_physical_device_id", return_value=6),
+                patch.dict(os.environ),
+            ):
+                self.module._configure_local_comm_res(directory)
+                self.assertEqual(json.loads(os.environ["ASCEND_LOCAL_COMM_RES"]), config)
+
+    def test_connector_descriptor_is_forwarded_before_initialization(self):
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        events = []
+        engine.initialize.side_effect = lambda *args: events.append("initialize") or 0
+        with (
+            patch.object(self.module, "_configure_local_comm_res", side_effect=lambda path: events.append(path)),
+            patch("mooncake.engine.TransferEngine", return_value=engine),
+        ):
+            self.global_te_cls().get_transfer_engine("localhost", None, local_comm_res_path="/resources")
+        self.assertEqual(events, ["/resources", "initialize"])
 
     def test_concurrent_getters_only_receive_initialized_engine(self):
         started = threading.Event()

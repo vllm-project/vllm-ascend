@@ -85,3 +85,42 @@ def encode_indexpool_fp8(vectors: torch.Tensor) -> torch.Tensor:
         transformed, normalized, scale, INDEX_DIM, FP8_MAX, num_warps=1, enable_fp_fusion=False
     )
     return normalized
+
+
+@triton.jit
+def _indexpool_encode_fused(
+    vectors, output, width: tl.constexpr, levels: tl.constexpr, quant_max: tl.constexpr, min_amax: tl.constexpr
+):
+    row = tl.program_id(0)
+    lane = tl.arange(0, width)
+    value = tl.load(vectors + row * width + lane).to(tl.float32)
+    for level in tl.static_range(levels):
+        stride = 1 << level
+        partner = tl.gather(value, lane ^ stride, 0)
+        value = tl.where((lane & stride) == 0, value + partner, partner - value)
+    value = value * (width**-0.5)
+    maximum = tl.maximum(tl.max(tl.abs(value), 0), min_amax)
+    scale = tl.exp2(tl.ceil(tl.log2(maximum / quant_max)))
+    magnitude = tl.minimum(tl.abs(value / scale), quant_max)
+    bits = tl.maximum(magnitude, _E4M3_MIN_NORMAL).to(tl.int32, bitcast=True)
+    exponent = (bits >> _FP32_FRACTION_BITS) - _FP32_EXPONENT_BIAS - _E4M3_FRACTION_BITS
+    unit = ((exponent + _FP32_EXPONENT_BIAS) << _FP32_FRACTION_BITS).to(tl.float32, bitcast=True)
+    inverse_unit = ((_FP32_EXPONENT_BIAS - exponent) << _FP32_FRACTION_BITS).to(tl.float32, bitcast=True)
+    rounded = tl.extra.cann.libdevice.nearbyint(magnitude * inverse_unit)
+    sign = tl.where(value > 0, 1.0, tl.where(value < 0, -1.0, 0.0))
+    tl.store(output + row * width + lane, rounded * unit * sign * scale)
+
+
+def encode_indexpool_fp8_fused(vectors):
+    output = torch.empty_like(vectors, dtype=torch.float32)
+    _indexpool_encode_fused[(vectors.numel() // INDEX_DIM,)](
+        vectors.contiguous(),
+        output,
+        INDEX_DIM,
+        INDEX_DIM.bit_length() - 1,
+        FP8_MAX,
+        _MIN_AMAX,
+        num_warps=1,
+        enable_fp_fusion=False,
+    )
+    return output

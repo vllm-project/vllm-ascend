@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
+from typing import NamedTuple
 
 import torch
 from vllm.config import CUDAGraphMode, set_current_vllm_config
@@ -13,7 +14,7 @@ from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.worker.v2.utils import communicator_switch
@@ -21,6 +22,27 @@ from vllm_ascend.worker.v2.utils import communicator_switch
 from .dfly import CHECKPOINT_PREFIX, MODEL_PREFIX, FlashDFlyDraft
 
 logger = init_logger(__name__)
+
+
+class DFlyProposeInputs(NamedTuple):
+    """Target outputs used by the upstream HYV4 DFly preparation contract."""
+
+    query_start_loc: torch.Tensor
+    positions: torch.Tensor
+    idx_mapping: torch.Tensor
+    num_sampled: torch.Tensor
+    num_rejected: torch.Tensor
+    last_sampled: torch.Tensor
+    last_hidden_states: torch.Tensor
+
+
+class DFlyAttentionMetadata(NamedTuple):
+    """C8 gather state; query K/V stay temporary instead of writing target KV."""
+
+    block_size: int
+    block_table: torch.Tensor
+    indices: torch.Tensor
+    query_positions: torch.Tensor
 
 
 def build_reuse_indices(target_rows, anchor, width, window, active):
@@ -52,11 +74,27 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         self.num_query_per_req = self.num_speculative_steps + 1
         self.offsets = torch.arange(self.num_query_per_req, device=device)
         self.cudagraph_manager = None
+        self._draft_vllm_config = copy(vllm_config)
+        self._draft_vllm_config.model_config = self.draft_model_config
+        self._draft_vllm_config.parallel_config = copy(self.speculative_config.draft_parallel_config)
+        self._draft_vllm_config.parallel_config.enable_expert_parallel = False
+        self._draft_vllm_config.parallel_config.is_moe_model = False
+        self._init_query_buffers()
+
+    def _init_query_buffers(self):
+        self.query_capacity = min(self.max_num_reqs, self.max_num_tokens // self.num_query_per_req)
+        self.target_hidden_states = torch.zeros(
+            (self.query_capacity, self.hidden_size), dtype=self.dtype, device=self.device
+        )
+        self.active_requests = torch.zeros(self.query_capacity, dtype=torch.bool, device=self.device)
+        self.source_rows = torch.zeros(self.query_capacity, dtype=torch.long, device=self.device)
+        self.anchors = torch.zeros_like(self.source_rows)
+        self.mrope_positions = None
+        self.query_block_tables = None
+        self.query_indices = None
 
     def load_draft_model(self, target_model, target_attn_layer_names):
-        config = copy(self.vllm_config)
-        config.model_config = self.draft_model_config
-        config.parallel_config = self.speculative_config.draft_parallel_config
+        config = copy(self._draft_vllm_config)
         config.load_config = get_draft_load_config(config)
         # The target loader has already mapped checkpoint prefixes into the
         # language-model wrapper. Resolve the draft's exclusions from HF again.
@@ -82,6 +120,7 @@ class FlashDFlySpeculator(DraftModelSpeculator):
                 draft = FlashDFlyDraft(config)
             loader.load_weights(draft, self.draft_model_config)
             process_weights_after_loading(draft, self.draft_model_config, self.device)
+        self._draft_vllm_config = config
         self.target = getattr(target_model, "language_model", target_model)
         target_layers = self.target.model.layers
         self.index_layers = tuple(target_layers[i].self_attn for i in draft.config.target_index_layer)
@@ -104,6 +143,13 @@ class FlashDFlySpeculator(DraftModelSpeculator):
 
     def set_attn(self, model_state, kv_cache_config, block_tables, target_input_buffers, target_attn_groups):
         self.model_state = model_state
+        rope = getattr(model_state, "rope_state", None)
+        if rope is not None:
+            if rope.num_dims <= 0 or rope.prefill_delta.gpu.ndim != 1:
+                raise ValueError("HYV4 DFly requires a one-dimensional per-request RoPE delta")
+            self.mrope_positions = torch.zeros(
+                (rope.num_dims, self.max_num_tokens), dtype=torch.long, device=self.device
+            )
 
     def init_cudagraph_manager(self, cudagraph_mode):
         if not cudagraph_mode.has_full_cudagraphs() or self.speculative_config.enforce_eager:
@@ -130,28 +176,15 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         )
         if not graph_batches:
             return
-        # The draft has dense FFNs, even though the target is MoE. Do not let
-        # set_forward_context coordinate draft capture batches across DP.
-        # Copy the config: the target still needs its original DP/EP metadata.
-        self.graph_vllm_config = copy(self.vllm_config)
-        self.graph_vllm_config.parallel_config = copy(self.vllm_config.parallel_config)
-        self.graph_vllm_config.parallel_config.is_moe_model = False
         self.cudagraph_manager = CudaGraphManager(
-            self.graph_vllm_config,
+            self._draft_vllm_config,
             self.device,
             CUDAGraphMode.FULL_DECODE_ONLY,
             {width: max_reqs},
             decode_request_sizes=graph_batches,
         )
-        # Draft replay follows target replay while target-derived inputs are live.
+        # Keep target-derived hidden/topk storage independent of draft outputs.
         self.cudagraph_manager.pool = torch.npu.graph_pool_handle()
-        capacity = max(graph_batches)
-        self.graph_ids = torch.empty((capacity, width), dtype=torch.long, device=self.device)
-        self.graph_hidden = torch.empty((capacity, self.hidden_size), dtype=self.dtype, device=self.device)
-        self.graph_active = torch.empty(capacity, dtype=torch.bool, device=self.device)
-        self.graph_source_rows = torch.empty(capacity, dtype=torch.long, device=self.device)
-        self.graph_query_positions = torch.empty_like(self.graph_ids)
-        self.graph_rope_dims = getattr(getattr(self.model_state, "rope_state", None), "num_dims", 0)
         if self.dp_size > 1:
             logger.info(
                 "HYV4 DFly local DP ACLGraph enabled for %d replicas; capture request sizes: %s.",
@@ -183,62 +216,181 @@ class FlashDFlySpeculator(DraftModelSpeculator):
             return False
         return all(getattr(module, "tp_size", 1) == 1 for module in self.model.modules())
 
+    @torch.inference_mode()
     def capture(self):
-        if self.cudagraph_manager is None:
+        manager = self.cudagraph_manager
+        if manager is None or not manager.needs_capture():
             return
 
-        self.graph_block_tables = tuple(
+        def create_forward_fn(desc, warmup):
+            batch = desc.num_tokens // self.num_query_per_req
+            # Follow upstream HYV4 DFly: prepare an all-padding query and its
+            # attention state OUTSIDE the graph. Only the query model is captured.
+            self._prepare_query(None, 0, batch)
+            metadata = self._query_attention_state(desc, 0, None)
+            return lambda mode: self._run_query_model(desc.num_tokens, metadata, mode)
+
+        with communicator_switch():
+            manager.capture(create_forward_fn, progress_bar_desc="Capturing HYV4 DFly ACLGraphs")
+
+    def _prepare_query(self, inputs, num_reqs, padded_batch):
+        if self.device.type == "npu":
+            from .dfly_prepare import try_prepare_query
+
+            if try_prepare_query(self, inputs, num_reqs, padded_batch):
+                return
+        self._prepare_query_reference(inputs, num_reqs, padded_batch)
+
+    def _prepare_query_reference(self, inputs, num_reqs, padded_batch):
+        """Torch adaptation of upstream HYV4 DFly's input preparation reference.
+
+        Source: vLLM 4fd24951, common/dfly_inputs.py and its preparation tests.
+        Preparation stays eager on NPU; the installed vLLM 0.33 lacks that
+        upstream module. Greedy drafting needs no copied sampling distribution.
+        """
+        width = self.num_query_per_req
+        count = padded_batch * width
+        ids = self.input_buffers.input_ids[:count].view(padded_batch, width)
+        positions = self.input_buffers.positions[:count].view(padded_batch, width)
+        ids.fill_(self.model.config.mask_token_id)
+        ids[:, 0].zero_()
+        positions.copy_(self.offsets)
+        self.input_buffers.is_padding[:count].fill_(True)
+        self.input_buffers.query_start_loc[: padded_batch + 1].copy_(
+            torch.arange(padded_batch + 1, dtype=torch.int32, device=self.device) * width
+        )
+        self.input_buffers.seq_lens[:padded_batch].fill_(width)
+        self.target_hidden_states[:padded_batch].zero_()
+        self.active_requests[:padded_batch].zero_()
+        self.source_rows[:padded_batch].zero_()
+        self.anchors[:padded_batch].zero_()
+        if self.mrope_positions is not None:
+            self.mrope_positions[:, :count].zero_()
+        if num_reqs == 0:
+            return
+
+        rows = (inputs.query_start_loc[1 : num_reqs + 1] - inputs.num_rejected[:num_reqs] - 1).long()
+        anchors = inputs.positions[rows] + 1
+        active = (inputs.num_sampled[:num_reqs] > 0) & (anchors + width <= self.max_model_len)
+        mapping = inputs.idx_mapping[:num_reqs].long()
+        previous = inputs.last_sampled[mapping, 0].masked_fill(~active, 0)
+        query = torch.where(active[:, None], anchors[:, None] + self.offsets, self.offsets)
+        ids[:num_reqs, 0].copy_(previous)
+        positions[:num_reqs].copy_(query)
+        self.input_buffers.is_padding[: num_reqs * width].copy_((~active[:, None]).expand(-1, width).flatten())
+        self.input_buffers.seq_lens[:num_reqs].copy_(anchors.masked_fill(~active, 0) + width)
+        self.target_hidden_states[:num_reqs].copy_(inputs.last_hidden_states[rows])
+        self.active_requests[:num_reqs].copy_(active)
+        self.source_rows[:num_reqs].copy_(rows)
+        self.anchors[:num_reqs].copy_(anchors)
+        if self.mrope_positions is not None:
+            delta = self.model_state.rope_state.prefill_delta.gpu[mapping].long()
+            rope = (query + delta[:, None]).masked_fill(~active[:, None], 0)
+            self.mrope_positions[:, : num_reqs * width].copy_(rope.flatten())
+
+    def _init_attention_buffers(self):
+        if self.query_block_tables is not None:
+            return
+        self.query_block_tables = tuple(
             torch.zeros(
-                (self.graph_ids.shape[0], cdiv(self.max_model_len, source.kv_cache.shape[2])),
+                (self.query_capacity, cdiv(self.max_model_len, source.kv_cache.shape[2])),
                 dtype=torch.int32,
                 device=self.device,
             )
             for source in self.kv_layers
         )
+        candidates = self.model.config.target_index_topk + (self.model.config.context_local_window or 0)
+        self.query_indices = tuple(
+            torch.full(
+                (self.query_capacity, self.num_query_per_req, candidates + self.num_query_per_req),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            for _ in self.kv_layers
+        )
 
-        def prepare(desc, warmup):
-            batch = desc.num_reqs
-            count = desc.num_tokens
-            ids = self.graph_ids[:batch]
-            ids.fill_(self.model.config.mask_token_id)
-            ids[:, 0].zero_()
-            flat_positions = self.input_buffers.positions[:count]
-            flat_positions.view_as(ids).copy_(self.offsets)
-            positions = flat_positions.expand(self.graph_rope_dims, -1) if self.graph_rope_dims else flat_positions
-            target_hidden = self.graph_hidden[:batch].zero_()
-            active = self.graph_active[:batch].zero_()
-            source_rows = self.graph_source_rows[:batch].zero_()
-            query_positions = self.graph_query_positions[:batch].copy_(self.offsets)
-            tables = tuple(table[:batch] for table in self.graph_block_tables)
-            result = self.draft_tokens[:batch]
+    def _query_attention_state(self, desc, num_reqs, target_metadata):
+        """Update persistent C8 metadata before either eager execution or replay.
 
-            def forward(mode):
-                with set_forward_context(None, self.graph_vllm_config, num_tokens=count, cudagraph_runtime_mode=mode):
-                    self._forward_queries(
-                        ids, positions, target_hidden, active, result, source_rows, query_positions, tables
-                    )
+        Unlike upstream MLA, DFlyAttention gathers history and concatenates
+        temporary query K/V. It must not create writable slots into target KV.
+        Native attention lengths are bounded by the fixed candidate width and
+        are computed from these indices, not by a captured host max_seq_len.
+        """
+        self._init_attention_buffers()
+        batch = desc.num_tokens // self.num_query_per_req
+        positions = self.input_buffers.positions[: desc.num_tokens].view(batch, self.num_query_per_req)
+        metadata = {}
+        for layer, index, source, table, indices in zip(
+            self.model.layers,
+            self.index_layers,
+            self.kv_layers,
+            self.query_block_tables,
+            self.query_indices,
+            strict=True,
+        ):
+            prepared = False
+            if num_reqs and self.device.type == "npu":
+                from .dfly_prepare import try_prepare_c8_metadata
 
-            return forward
-
-        with communicator_switch():
-            self.cudagraph_manager.capture(prepare, progress_bar_desc="Capturing HYV4 DFly ACLGraphs")
-
-    def _forward_queries(
-        self, ids, positions, target_hidden, active, result, source_rows, query_positions, block_tables
-    ):
-        try:
-            for layer, index_layer, kv_layer, table in zip(
-                self.model.layers, self.index_layers, self.kv_layers, block_tables, strict=True
-            ):
-                selected = build_reuse_indices(
-                    index_layer.topk_snapshot[source_rows],
-                    query_positions[:, 0],
-                    self.num_query_per_req,
-                    self.model.config.context_local_window,
-                    active,
+                prepared = try_prepare_c8_metadata(
+                    index.topk_snapshot,
+                    target_metadata[source.layer_name].block_table,
+                    table,
+                    indices,
+                    self.active_requests,
+                    self.source_rows,
+                    self.anchors,
+                    num_reqs,
+                    batch,
+                    self.model.config.context_local_window or 0,
                 )
-                layer.self_attn.context = (kv_layer.kv_cache.shape[2], table, selected, query_positions)
-            self._draft_tokens(ids, positions, target_hidden, active, result)
+            if not prepared:
+                table[:batch].zero_()
+                indices[:batch].fill_(-1)
+            if num_reqs and not prepared:
+                current = target_metadata[source.layer_name].block_table
+                table[:num_reqs].copy_(current[:num_reqs, : table.shape[1]])
+                selected = build_reuse_indices(
+                    index.topk_snapshot[self.source_rows[:num_reqs]],
+                    self.anchors[:num_reqs],
+                    self.num_query_per_req,
+                    self.model.config.context_local_window or 0,
+                    self.active_requests[:num_reqs],
+                )
+                indices[:num_reqs].copy_(selected)
+            metadata[layer.self_attn.layer_name] = DFlyAttentionMetadata(
+                source.kv_cache.shape[2], table[:batch], indices[:batch], positions
+            )
+        return metadata
+
+    def _run_query_model(self, count, metadata, cg_mode):
+        """Shared model-only execution boundary, as in upstream DFly."""
+        batch = count // self.num_query_per_req
+        ids = self.input_buffers.input_ids[:count].view(batch, self.num_query_per_req)
+        positions = (
+            self.input_buffers.positions[:count] if self.mrope_positions is None else self.mrope_positions[:, :count]
+        )
+        try:
+            for layer in self.model.layers:
+                layer.self_attn.context = metadata[layer.self_attn.layer_name]
+            # C8 metadata is passed explicitly to DFlyAttention.context. It is
+            # not metadata for the generic Ascend attention backend.
+            with set_forward_context(
+                None,
+                self._draft_vllm_config,
+                num_tokens=count,
+                cudagraph_runtime_mode=cg_mode,
+                is_padding=self.input_buffers.is_padding[:count],
+            ):
+                self._draft_tokens(
+                    ids,
+                    positions,
+                    self.target_hidden_states[:batch],
+                    self.active_requests[:batch],
+                    self.draft_tokens[:batch],
+                )
         finally:
             for layer in self.model.layers:
                 layer.self_attn.context = None
@@ -275,13 +427,15 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         num_speculative_tokens=None,
     ):
         batch = input_batch.num_reqs
+        count = batch * self.num_query_per_req
+        if count > self.max_num_tokens or batch > self.query_capacity:
+            raise ValueError("DFly query block exceeds max_num_batched_tokens")
         result = self.draft_tokens[:batch]
         if batch == 0 or num_speculative_tokens == 0:
             return result.fill_(-1)
         if dummy_run:
-            # Profile the draft workspace without reading unbound cache pages.
+            # Memory profiling precedes KV allocation; keep its no-cache path.
             if is_profile:
-                count = batch * self.num_query_per_req
                 positions = self.offsets.repeat(batch)
                 embeddings = self.target.embed_input_ids(positions)
                 target_config = self.vllm_config.model_config
@@ -290,51 +444,26 @@ class FlashDFlySpeculator(DraftModelSpeculator):
                 self.model(embeddings, positions)
             return result.fill_(-1)
 
-        source_rows = (input_batch.query_start_loc[1 : batch + 1] - num_rejected[:batch] - 1).long()
-        safe_rows = source_rows.clamp_min(0)
-        anchors = (input_batch.positions[safe_rows] + 1).long()
-        active = (num_sampled[:batch] > 0) & (anchors + self.num_query_per_req <= self.max_model_len)
-        anchors = anchors.masked_fill(~active, 0)
-        query_positions = anchors[:, None] + self.offsets
-        positions = query_positions.flatten()
-        rope = getattr(self.model_state, "rope_state", None)
-        if rope is not None:
-            delta = rope.prefill_delta.gpu.index_select(0, input_batch.idx_mapping).long()
-            rope_positions = (query_positions + delta[:, None]).masked_fill(~active[:, None], 0)
-            positions = rope_positions.flatten().expand(rope.num_dims, -1)
-
-        previous = last_sampled[input_batch.idx_mapping, 0].long().masked_fill(~active, 0)
-        ids = torch.full(
-            (batch, self.num_query_per_req), self.model.config.mask_token_id, dtype=torch.long, device=self.device
-        )
-        ids[:, 0] = previous
-        target_hidden = last_hidden_states[safe_rows]
-
-        tables = tuple(attn_metadata[source.layer_name].block_table[:batch] for source in self.kv_layers)
+        desc = BatchExecutionDescriptor(CUDAGraphMode.NONE, count, batch)
         manager = self.cudagraph_manager
         if manager is not None:
-            desc = manager.dispatch(batch, ids.numel(), self.num_query_per_req, 0)
-            if desc in manager.graphs:
-                padded = desc.num_reqs
-                self.graph_ids[:batch].copy_(ids)
-                self.input_buffers.positions[: ids.numel()].copy_(positions[0] if positions.ndim == 2 else positions)
-                self.graph_hidden[:batch].copy_(target_hidden)
-                self.graph_active[:batch].copy_(active)
-                self.graph_source_rows[:batch].copy_(safe_rows)
-                self.graph_query_positions[:batch].copy_(query_positions)
-                for graph_table, table in zip(self.graph_block_tables, tables, strict=True):
-                    graph_table[:batch].copy_(table[:, : graph_table.shape[1]])
-                if padded > batch:
-                    self.graph_ids[batch:padded].zero_()
-                    self.input_buffers.positions[ids.numel() : desc.num_tokens].zero_()
-                    self.graph_hidden[batch:padded].zero_()
-                    self.graph_active[batch:padded].zero_()
-                    self.graph_source_rows[batch:padded].zero_()
-                    self.graph_query_positions[batch:padded].zero_()
-                    for table in self.graph_block_tables:
-                        table[batch:padded].zero_()
-                manager.run_fullgraph(desc)
-                logger.info_once("FULL ACLGraph replay is active for HYV4 Flash DFly draft (%d requests).", padded)
-                return result
-        self._forward_queries(ids, positions, target_hidden, active, result, safe_rows, query_positions, tables)
+            desc = manager.dispatch(batch, count, self.num_query_per_req, 0)
+        assert desc.num_tokens % self.num_query_per_req == 0
+        padded_batch = desc.num_tokens // self.num_query_per_req
+        inputs = DFlyProposeInputs(
+            input_batch.query_start_loc,
+            input_batch.positions,
+            input_batch.idx_mapping,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            last_hidden_states,
+        )
+        self._prepare_query(inputs, batch, padded_batch)
+        metadata = self._query_attention_state(desc, batch, attn_metadata)
+        if desc.cg_mode == CUDAGraphMode.FULL:
+            manager.run_fullgraph(desc)
+            logger.info_once("FULL ACLGraph replay is active for HYV4 Flash DFly draft (%d requests).", padded_batch)
+        else:
+            self._run_query_model(desc.num_tokens, metadata, desc.cg_mode)
         return result

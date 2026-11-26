@@ -1938,7 +1938,9 @@ def use_updatable_graph(
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    return attn_backend is not None and (
+        issubclass(attn_backend, AscendAttentionBackend) or getattr(attn_backend, "supports_updatable_graph", False)
+    )
 
 
 def _is_glm_model(model_config) -> bool:

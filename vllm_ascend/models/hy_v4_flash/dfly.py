@@ -5,22 +5,28 @@ from collections.abc import Iterable
 from weakref import ref
 
 import torch
-from vllm_ascend.device.device_config import is_950
+import torch_npu
 from torch import nn
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear, ReplicatedLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.models.hy_v4.nvidia.model import HYV4DecoderLayer
 from vllm.models.hy_v4.nvidia.moe import HYV4FeedForward
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
+from vllm_ascend.device.device_config import is_950
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 
-from .attention import AscendHYV4FlashAttention
+from .attention import AscendFp8BlockLinearMethod, AscendHYV4FlashAttention
+from .dfly_fusions import compact_draft_c8_rows, dual_rms_concat, gated_residual, rounded_add_rms_norm
 
 logger = init_logger(__name__)
 
@@ -31,36 +37,81 @@ FP8 = torch.float8_e4m3fn
 ATTENTION_BATCH_CHUNK = 8
 
 
+def draft_swiglu_quant(gate_up, scale_alg):
+    return torch_npu.npu_swiglu_mx_quant(
+        gate_up,
+        activate_left=True,
+        swiglu_mode=0,
+        dst_type=torch.float8_e4m3fn,
+        scale_alg=scale_alg,
+    )
+
+
+def draft_c8_attention(query, rows, selected, sink, scale, candidate_offsets=None):
+    """Fuse packed C8 dequantization and attention on gathered draft candidates."""
+    from cann_ops_transformer import kv_quant_sparse_flash_attention
+
+    rows, indices, lengths, active = compact_draft_c8_rows(rows, selected)
+    batch, width = rows.shape[:2]
+    packed = rows.view(batch, width, 1, C8_ROW_BYTES).view(torch.float8_e4m3fn)
+    result, _, _ = kv_quant_sparse_flash_attention(
+        query[:, None].contiguous(),
+        packed,
+        packed,
+        indices,
+        scale,
+        2,
+        2,
+        actual_seq_lengths_kv=lengths,
+        sparse_block_size=1,
+        layout_query="BSND",
+        layout_kv="BSND",
+        sparse_mode=0,
+        attention_mode=2,
+        quant_scale_repo_mode=1,
+        tile_size=128,
+        rope_head_dim=64,
+        sinks=sink.contiguous(),
+    )
+    return result[:, 0].masked_fill(~active[:, None, None], 0)
+
+
+def draft_add_rms_norm(hidden, residual, norm):
+    """Keep the residual out of place while fusing its addition and norm."""
+    if (
+        not is_950()
+        or hidden.device.type != "npu"
+        or hidden.dtype != torch.bfloat16
+        or hidden.shape != residual.shape
+        or hidden.dtype != residual.dtype
+        or norm.weight.dtype != hidden.dtype
+    ):
+        updated_residual = hidden + residual
+        return norm(updated_residual), updated_residual
+    return rounded_add_rms_norm(hidden, residual, norm)
+
+
+def draft_shared_c8_attention(query, rows, selected, sink, scale, candidate_offsets):
+    """Share history gathering while preserving the native single-query ABI."""
+    return draft_c8_attention(query, rows, selected, sink, scale, candidate_offsets)
+
+
 class DFlyAttention(AscendHYV4FlashAttention):
     def __init__(self, vllm_config, config, layer_idx, prefix):
         super().__init__(vllm_config, config, layer_idx, prefix, reuse_target=True)
+        self.fuse_swa_q_norm = is_950() and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
         self.target_attention = None
         self.context = None
+        self._decode_index_constants = {}
         self.post_proj_norm = (
             RMSNorm(config.hidden_size, config.rms_norm_eps) if config.dfly_attn_post_proj_norm is not False else None
         )
+        logger.info("DFly layer %d uses fused Q normalization and C8 attention", layer_idx)
 
     def bind_target(self, source):
         # Weak ownership: registering the target as a submodule would make it
         # part of draft weight traversal and post-processing.
         self.target_attention = ref(source)
-
-    def _shared_draft_rows(self, cache, table, block_size, selected, positions, draft):
-        width = draft.shape[1]
-        # build_reuse_indices repeats history and the local window across all
-        # queries; only the last width indices contain causal draft positions.
-        history = selected[:, 0, :-width].clamp_min(0)
-        # Masked draft positions read logical row zero in the original path.
-        history_and_fallback = torch.cat((history, torch.zeros_like(history[:, :1])), dim=1)
-        packed = self._gather(cache, table, block_size, history_and_fallback, slice(C8_ROW_BYTES))
-        history_and_fallback, draft_decoded = dequantize_c8_rows(torch.cat((packed, draft), dim=1)).split(
-            (packed.shape[1], width), dim=1
-        )
-        history_decoded = history_and_fallback[:, None, :-1].expand(-1, width, -1, -1)
-        fallback = history_and_fallback[:, None, -1:]
-        use_draft = selected[..., -width:] >= positions[:, :1, None]
-        tail = torch.where(use_draft[..., None], draft_decoded[:, None], fallback)
-        return torch.cat((history_decoded, tail), dim=2)
 
     def _forward_paged(self, hidden, q_c, q_nope, q_pe, kv_c, k_pe, positions, out, *, absorbed=False):
         if self.context is None:
@@ -73,8 +124,11 @@ class DFlyAttention(AscendHYV4FlashAttention):
         batch, width = query_positions.shape
         query, wv = self._absorb_query(q_nope, q_pe, absorbed=absorbed)
         query_kv = self._pack_kv(kv_c, k_pe).reshape(batch, width, -1)
+        flat_query_kv = query_kv.flatten(0, 1)
         share_history = (
             source.use_pd_decode
+            and is_950()
+            and query.device.type == "npu"
             and self.use_fp8_cache
             and cache.dtype == torch.uint8
             and source.kv_storage_width == query_kv.shape[-1] == C8_ROW_BYTES
@@ -85,11 +139,22 @@ class DFlyAttention(AscendHYV4FlashAttention):
             selected = indices[first:last]
             tokens = slice(first * width, last * width)
             if share_history:
-                logger.info_once("HYV4 DFly reuses each request's packed C8 history across draft positions.")
-                decoded = self._shared_draft_rows(
-                    cache, block_table[first:last], block_size, selected, query_positions[first:last], query_kv[first:last]
+                # build_reuse_indices repeats history across the query axis;
+                # only the causal tail changes. Keep that history shared in KV.
+                history = selected[:, 0, :-width].clamp_min(0)
+                history_rows = self._gather(cache, block_table[first:last], block_size, history, slice(C8_ROW_BYTES))
+                rows = torch.cat((history_rows, query_kv[first:last]), dim=1)
+                candidate_key = ("shared_candidate_offsets", selected.shape[-1], query.device)
+                candidate_offsets = self._decode_index_constants.get(candidate_key)
+                if candidate_offsets is None:
+                    candidate_offsets = torch.arange(selected.shape[-1], device=query.device, dtype=torch.int32)
+                    self._decode_index_constants[candidate_key] = candidate_offsets
+                context = draft_shared_c8_attention(
+                    query[tokens], rows, selected, self.learnable_sink_param, self.scale, candidate_offsets
                 )
-                self._attend_decoded(query[tokens], selected.flatten(0, 1), decoded.flatten(0, 1), wv, out[tokens])
+                from .attention import _head_bmm
+
+                out[tokens].copy_(_head_bmm(context, wv).reshape_as(out[tokens]))
                 continue
             start = query_positions[first:last, :1, None]
             is_query = selected >= start
@@ -101,10 +166,57 @@ class DFlyAttention(AscendHYV4FlashAttention):
             )
             rows = rows.view(*selected.shape, source.kv_storage_width)
             offsets = (selected - start).clamp(0, width - 1)
-            local = torch.arange(first, last, device=indices.device)[:, None, None] * width + offsets
-            draft_rows = query_kv.flatten(0, 1).index_select(0, local.flatten()).reshape_as(rows)
+            row_key = ("draft_rows", first, last, width, indices.device)
+            row_offsets = self._decode_index_constants.get(row_key)
+            if row_offsets is None:
+                row_offsets = torch.arange(first * width, last * width, width, device=indices.device)[:, None, None]
+                self._decode_index_constants[row_key] = row_offsets
+            local = row_offsets + offsets
+            draft_rows = flat_query_kv.index_select(0, local.flatten()).reshape_as(rows)
+            candidate_key = ("candidate_offsets", selected.shape[-1], query.device)
+            candidate_offsets = self._decode_index_constants.get(candidate_key)
+            if candidate_offsets is None:
+                candidate_offsets = torch.arange(selected.shape[-1], device=query.device, dtype=torch.int32)
+                self._decode_index_constants[candidate_key] = candidate_offsets
             rows = torch.where(is_query[..., None], draft_rows, rows)
-            self._attend(query[tokens], selected.flatten(0, 1), rows.flatten(0, 1), wv, out[tokens])
+            if not (
+                is_950() and query.device.type == "npu" and rows.dtype == torch.uint8 and rows.shape[-1] == C8_ROW_BYTES
+            ):
+                self._attend(query[tokens], selected.flatten(0, 1), rows.flatten(0, 1), wv, out[tokens])
+                continue
+            context = draft_c8_attention(
+                query[tokens],
+                rows.flatten(0, 1),
+                selected.flatten(0, 1),
+                self.learnable_sink_param,
+                self.scale,
+                candidate_offsets,
+            )
+            from .attention import _head_bmm
+
+            out[tokens].copy_(_head_bmm(context, wv).reshape_as(out[tokens]))
+
+
+class DFlyFeedForward(HYV4FeedForward):
+    """Dense draft FFN with fused activation and MXFP8 quantization."""
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        scheme = getattr(self.down_proj.quant_method, "quant_method", None)
+        if not (
+            is_950()
+            and gate_up.device.type == "npu"
+            and gate_up.dtype == torch.bfloat16
+            and gate_up.ndim == 2
+            and gate_up.shape[-1] % 64 == 0
+            and isinstance(scheme, AscendFp8BlockLinearMethod)
+            and scheme.use_mxfp8
+            and scheme.mxfp8_method.group_size == 32
+            and not any(getattr(self.down_proj, "mxfp8_tp_padding", (0, 0)))
+        ):
+            return self.down_proj(self.act_fn(gate_up))[0]
+        quantized, scale = draft_swiglu_quant(gate_up, scheme.mxfp8_method.dynamic_mx_quant_scale_alg)
+        return self.down_proj(PreparedLinearInput(quantized, scale, gate_up.dtype))[0]
 
 
 class DFlyLayer(HYV4DecoderLayer):
@@ -119,8 +231,18 @@ class DFlyLayer(HYV4DecoderLayer):
         self.self_attn = DFlyAttention(vllm_config, config, index, f"{prefix}.self_attn")
         self.mlp = None
 
+    def _forward_normal(self, positions, hidden_states, residual):
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = draft_add_rms_norm(hidden_states, residual, self.input_layernorm)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states, residual = draft_add_rms_norm(hidden_states, residual, self.post_attention_layernorm)
+        return self.mlp(hidden_states), residual
+
     def materialize_mlp(self, config, quant_config, index, width):
-        self.mlp = HYV4FeedForward(
+        self.mlp = DFlyFeedForward(
             config.hidden_size, width, config.hidden_act, quant_config, prefix=f"{MODEL_PREFIX}.layers.{index}.mlp"
         )
 
@@ -135,8 +257,8 @@ class DFlyFusion(nn.Module):
         self.gate = nn.Parameter(torch.empty(hidden), requires_grad=False)
 
     def forward(self, anchor, hidden):
-        fused, _ = self.eh_proj(torch.cat((self.enorm(anchor), self.hnorm(hidden)), dim=-1))
-        return anchor + self.gate * fused
+        fused, _ = self.eh_proj(dual_rms_concat(anchor, hidden, self.enorm, self.hnorm))
+        return gated_residual(anchor, fused, self.gate)
 
 
 class DFlyHiddenCorrection(nn.Module):
@@ -151,12 +273,11 @@ class DFlyHiddenCorrection(nn.Module):
             2 * hidden, [width, width], bias=False, prefix=f"{prefix}.gate_up_proj"
         )
         self.down_proj = RowParallelLinear(width, hidden, bias=False, prefix=f"{prefix}.down_proj")
-        self.act = SiluAndMul()
 
     def forward(self, hidden, previous_embed):
-        combined = torch.cat((self.hidden_norm(hidden), self.embed_norm(previous_embed)), dim=-1)
+        combined = dual_rms_concat(hidden, previous_embed, self.hidden_norm, self.embed_norm)
         gate_up, _ = self.gate_up_proj(combined)
-        correction, _ = self.down_proj(self.act(gate_up))
+        correction, _ = self.down_proj(torch_npu.npu_swiglu(gate_up, dim=-1))
         return hidden + correction
 
 
@@ -173,6 +294,7 @@ class FlashDFlyDraft(nn.Module):
         self.config = config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.layers = nn.ModuleList(DFlyLayer(vllm_config, config, i) for i in range(config.num_hidden_layers))
+        logger.info("HYV4 DFly always uses residual AddRMSNorm for %d layers and final norm", len(self.layers))
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mtp_fusion = DFlyFusion(config)
         self.hidden_correction = DFlyHiddenCorrection(config)
@@ -180,8 +302,7 @@ class FlashDFlyDraft(nn.Module):
         self.logits_processor.use_all_gather = True
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            transfer is not None and transfer.kv_role == "kv_consumer"
-            and is_950()
+            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
         )
         self.ffn_width = None
 
@@ -189,7 +310,7 @@ class FlashDFlyDraft(nn.Module):
         hidden, residual = embeddings, None
         for layer in self.layers:
             hidden, residual = layer(positions, hidden, residual)
-        return self.norm(hidden + residual)
+        return draft_add_rms_norm(hidden, residual, self.norm)[0]
 
     @staticmethod
     def is_unused_checkpoint_weight(name):

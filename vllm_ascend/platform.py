@@ -29,6 +29,10 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend.target_prep_masks import (
+    try_write_prefix_mask,
+)
+
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -805,8 +809,9 @@ class NPUPlatform(Platform):
             reserved_mc2_mask = get_mc2_mask()
             if mc2_mask is None and reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
-                mc2_mask[:num_actual_tokens] = True
-                mc2_mask[num_actual_tokens:] = False
+                if not try_write_prefix_mask(mc2_mask, num_actual_tokens, True, capturing=capturing):
+                    mc2_mask[:num_actual_tokens] = True
+                    mc2_mask[num_actual_tokens:] = False
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,

@@ -9,19 +9,25 @@ from typing import ClassVar
 
 import torch
 import torch_npu
-from vllm_ascend.device.device_config import is_950
 from torch import nn
 from vllm import envs
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend, CacheOnlyAttentionImpl
+from vllm.model_executor.models.extract_hidden_states import (
+    CacheOnlyAttentionBackend,
+    CacheOnlyAttentionImpl,
+)
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 from vllm.models.hy_v4_flash.reference import (
     INDEX_DIM,
@@ -36,9 +42,12 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuild
 from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, MLAAttentionSpec, SlidingWindowMLASpec
 
 from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
-from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.device_config import get_ascend_device_type, is_950
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows, pack_c8_components
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.hy_v4_flash.cache_layout import PACKED_CACHE_FORMAT
@@ -48,8 +57,18 @@ from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 from vllm_ascend.utils import attention_calculation_stream, npu_stream_switch
 
 from . import triton_ops
+from .attention_fusions import fused_output_gate
 from .c8_kvqsfa import attend_c8_v2, attend_c8_window
 from .c8_read import supports_c8_qk_heads
+from .decode_fusions import (
+    is_decode_batch,
+    native_indexpool_rope,
+    native_indexpool_select,
+    native_mla_context,
+    native_rms_norm,
+    prepare_indexpool_selection,
+    uses_decode_fusions,
+)
 from .index_pool_select import select_pool_candidates, write_pool_scores
 from .mla_prolog import CANNBotBf16MlaProlog
 from .pd_role import uses_prefill_ops
@@ -107,6 +126,8 @@ class FlashAttentionMetadata:
 
 
 def get_flash_attention_metadata(layer_name: str | None = None) -> FlashAttentionMetadata | None:
+    if not is_forward_context_available():
+        return None
     metadata = get_forward_context().attn_metadata
     if not isinstance(metadata, dict):
         return None
@@ -119,9 +140,7 @@ class FlashMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.precise_decode = vllm_config.additional_config.get(
-            "hy4flash_precise_decode", vllm_config.speculative_config is not None
-        )
+        self.precise_decode = vllm_config.speculative_config is not None
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         meta = common_attn_metadata
@@ -153,6 +172,7 @@ class FlashAttentionImpl(CacheOnlyAttentionImpl):
 
 
 class FlashAttentionBackend(CacheOnlyAttentionBackend):
+    supports_updatable_graph = True
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16", "fp8"]
 
     @staticmethod
@@ -223,10 +243,16 @@ class FlashIndexPool(nn.Module):
                 self,
                 name,
                 ReplicatedLinear(
-                    input_size, output_size, bias=False, quant_config=quant_config, prefix=f"{prefix}.{name}"
+                    input_size,
+                    output_size,
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.{name}",
                 ),
             )
         self.token_key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps)
+        self.register_buffer("_decode_inverse_frequency", None, persistent=False)
+        self.register_buffer("_decode_rope_axis", None, persistent=False)
         self.key_value_projection = nn.Linear(INDEX_DIM, INDEX_DIM, bias=False, dtype=torch.float32)
         self.key_gate_projection = nn.Linear(INDEX_DIM, INDEX_DIM, bias=False, dtype=torch.float32)
         self.key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps, dtype=torch.float32)
@@ -272,6 +298,7 @@ class FlashIndexPool(nn.Module):
             if group_map is not None:
                 history_factors = None
                 if positions.shape[-1]:
+
                     def make_history_factors():
                         return make_factors(positions, self.theta, self.rope_dim, sections, self.interleaved, stream)
 
@@ -282,7 +309,10 @@ class FlashIndexPool(nn.Module):
                             vectors.device, ("index_pool_history_rope", key, history_context_key), make_history_factors
                         )
                 return apply_factors(
-                    vectors, cache[key][1], group_map=group_map, history_factors=history_factors,
+                    vectors,
+                    cache[key][1],
+                    group_map=group_map,
+                    history_factors=history_factors,
                     normalization=normalization,
                 )
             return apply_factors(vectors, cache[key][1], position_start, position_step, normalization=normalization)
@@ -290,13 +320,29 @@ class FlashIndexPool(nn.Module):
         if normalization is not None:
             weight, multiplier = normalization
             vectors = ((vectors * multiplier[:, None]) * weight).bfloat16()
-        inverse = self.theta ** (
-            -torch.arange(0, self.rope_dim, 2, device=vectors.device, dtype=torch.float32) / self.rope_dim
-        )
+        decode = is_decode_batch(get_flash_attention_metadata())
+        inverse = self._decode_inverse_frequency if decode else None
+        if inverse is None:
+            inverse = self.theta ** (
+                -torch.arange(0, self.rope_dim, 2, device=vectors.device, dtype=torch.float32) / self.rope_dim
+            )
+            if decode:
+                self._decode_inverse_frequency = inverse
         phase = positions.float().unsqueeze(-1) * inverse
         if positions.ndim == 2:
-            if self.interleaved:
-                from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
+            if self.interleaved and decode:
+                axis = self._decode_rope_axis
+                if axis is None:
+                    dims = torch.arange(self.rope_dim // 2, device=vectors.device)
+                    axis = torch.zeros_like(dims)
+                    axis = torch.where((dims % 3 == 1) & (dims < 3 * self.sections[1]), 1, axis)
+                    axis = torch.where((dims % 3 == 2) & (dims < 3 * self.sections[2]), 2, axis)
+                    self._decode_rope_axis = axis
+                phase = torch.gather(phase, 0, axis.view(1, 1, -1).expand(1, phase.shape[1], -1)).squeeze(0)
+            elif self.interleaved:
+                from vllm.model_executor.layers.rotary_embedding.mrope import (
+                    apply_interleaved_rope,
+                )
 
                 phase = apply_interleaved_rope(phase, self.sections)
             else:
@@ -305,13 +351,25 @@ class FlashIndexPool(nn.Module):
         if vectors.ndim == 3:
             phase = phase.unsqueeze(1)
         nope, rotary = vectors.split((INDEX_DIM - self.rope_dim, self.rope_dim), dim=-1)
-        even, odd = rotary.float()[..., ::2], rotary.float()[..., 1::2]
+        rotary_fp32 = rotary.float()
+        even, odd = rotary_fp32[..., ::2], rotary_fp32[..., 1::2]
         cos, sin = phase.cos(), phase.sin()
+        if is_decode_batch(get_flash_attention_metadata()) and vectors.device.type == "npu" and is_950():
+            return native_indexpool_rope(nope, even, odd, cos, sin, vectors.dtype)
         return torch.cat(
-            (nope, (even * cos - odd * sin).to(vectors.dtype), (odd * cos + even * sin).to(vectors.dtype)), dim=-1
+            (
+                nope,
+                (even * cos - odd * sin).to(vectors.dtype),
+                (odd * cos + even * sin).to(vectors.dtype),
+            ),
+            dim=-1,
         )
 
     def _encode_fp8(self, vectors, *, full_graph, output_dtype=torch.float32):
+        if is_decode_batch(get_flash_attention_metadata()):
+            from .index_pool_fp8 import encode_indexpool_fp8_fused
+
+            return encode_indexpool_fp8_fused(vectors)
         if (
             self.use_eager_fp8_encoding
             and not full_graph
@@ -359,6 +417,22 @@ class FlashIndexPool(nn.Module):
         raw = raw[: groups * self.ratio].reshape(groups, self.ratio, INDEX_DIM)
         if not groups:
             return raw.new_empty((0, INDEX_DIM), dtype=torch.float32)
+        if is_decode_batch(get_flash_attention_metadata()):
+            from .index_pool_fusions import pool_norm
+
+            if not hasattr(self, "_decode_pool_projection"):
+                self._decode_pool_projection = torch.cat(
+                    (self.key_value_projection.weight, self.key_gate_projection.weight),
+                    0,
+                ).contiguous()
+            pooled = pool_norm(
+                raw,
+                self._decode_pool_projection,
+                self.intra_group_ape,
+                self.key_norm.weight,
+                self.eps,
+            )
+            return self._encode_fp8(pooled, full_graph=full_graph)
         normalization = None
         if (
             HAS_TRITON
@@ -416,9 +490,10 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.use_cann_prefill = uses_prefill_ops(vllm_config) and not reuse_target
         transfer = vllm_config.kv_transfer_config
         self.use_pd_decode = transfer is not None and transfer.kv_role == "kv_consumer"
-        self.bulk_c8_decode_reads = vllm_config.additional_config.get("hy4flash_bulk_c8_decode_reads", False)
-        if not isinstance(self.bulk_c8_decode_reads, bool):
-            raise ValueError("hy4flash_bulk_c8_decode_reads must be a boolean")
+        self._short_indexpool_capture = False
+        self.native_decode_attention = not reuse_target and uses_decode_fusions(vllm_config)
+        self.decode_data_fusions = self.native_decode_attention and HAS_TRITON
+        self.bulk_c8_decode_reads = True
         self.ops = triton_ops
         if self.use_cann_prefill:
             from . import li_prefill_p0, prefill_ops
@@ -439,11 +514,8 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.scale = (self.nope_dim + self.rope_dim) ** -0.5
         self.kv_width = self.latent_dim + self.rope_dim
         self.use_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8"
-        self.use_gpu_c8_scale = vllm_config.additional_config.get("hy4flash_gpu_c8_scale", False)
-        if not isinstance(self.use_gpu_c8_scale, bool):
-            raise ValueError("hy4flash_gpu_c8_scale must be a boolean")
-        if self.use_gpu_c8_scale and not self.use_fp8_cache:
-            raise ValueError("hy4flash_gpu_c8_scale requires --kv-cache-dtype fp8")
+        # Preserve the checkpoint's established C8 scaling contract.
+        self.use_gpu_c8_scale = False
         has_fused_ops = self.use_cann_prefill or HAS_TRITON
         use_a5_c8 = has_fused_ops and self.use_fp8_cache and get_ascend_device_type() is AscendDeviceType.A5
         self.shard_prefill_li = (
@@ -477,19 +549,14 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             not reuse_target and has_fused_ops and get_ascend_device_type() is AscendDeviceType.A5
         )
         self.overlap_attn_output_gate = not reuse_target and get_ascend_device_type() is AscendDeviceType.A5
-        self.use_cannbot_prolog = not reuse_target and vllm_config.additional_config.get(
-            "hy4flash_cannbot_mla_prolog", False
-        )
-        self._cannbot_prolog = None
+        self.use_cannbot_prolog = False
         self.use_eager_prefill_rotary = (
             self.use_cann_prefill
             and use_a5_c8
             and vllm_config.model_config.enforce_eager
             and hasattr(torch_npu, "npu_apply_rotary_pos_emb")
         )
-        self.use_triton_mla_logits = has_fused_ops and vllm_config.additional_config.get(
-            "hy4flash_triton_mla_logits", False
-        )
+        self.use_triton_mla_logits = False
         self.batch_verify_attention = use_a5_c8 and not self.use_triton_mla_logits
         self.kv_storage_width = C8_ROW_BYTES if self.use_fp8_cache else self.kv_width
         # Indexer keys and position lanes remain BF16 in either layout.
@@ -515,10 +582,18 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         quant = vllm_config.quant_config
         hidden = config.hidden_size
         self.q_a_proj = ReplicatedLinear(
-            hidden, config.q_lora_rank, bias=False, quant_config=quant, prefix=f"{prefix}.q_a_proj"
+            hidden,
+            config.q_lora_rank,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.q_a_proj",
         )
         self.kv_a_proj_with_mqa = ReplicatedLinear(
-            hidden, self.kv_width, bias=False, quant_config=quant, prefix=f"{prefix}.kv_a_proj_with_mqa"
+            hidden,
+            self.kv_width,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
         self.q_a_layernorm = RMSNorm(config.q_lora_rank, config.rms_norm_eps)
         self.kv_a_layernorm = RMSNorm(self.latent_dim, config.rms_norm_eps)
@@ -544,10 +619,18 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.register_buffer("_decode_key_projection", None, persistent=False)
         self.register_buffer("_decode_value_projection", None, persistent=False)
         self.linear_gate = ColumnParallelLinear(
-            hidden, heads * self.v_dim, bias=False, quant_config=quant, prefix=f"{prefix}.linear_gate"
+            hidden,
+            heads * self.v_dim,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.linear_gate",
         )
         self.o_proj = RowParallelLinear(
-            heads * self.v_dim, hidden, bias=False, quant_config=quant, prefix=f"{prefix}.o_proj"
+            heads * self.v_dim,
+            hidden,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.o_proj",
         )
         self.sequence_parallel_output = False
         rope_parameters = config.rope_for_layer(layer_idx)
@@ -557,12 +640,9 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             rope_parameters=rope_parameters,
             is_neox_style=False,
         )
+        self._cannbot_prolog = None
         self._mrope_channel_bits = None
-        if (
-            self.use_eager_prefill_rotary
-            and HAS_TRITON
-            and getattr(self.rotary_emb, "mrope_interleaved", False)
-        ):
+        if self.use_eager_prefill_rotary and HAS_TRITON and getattr(self.rotary_emb, "mrope_interleaved", False):
             from .prefill_ops.small_aiv import mrope_channel_bits
 
             self._mrope_channel_bits = mrope_channel_bits(self.rotary_emb.mrope_section)
@@ -596,11 +676,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             head_size=self.cache_width,
             dtype=torch.uint8 if self.use_fp8_cache else torch.bfloat16,
         )
-        if (
-            not envs.VLLM_USE_V2_MODEL_RUNNER
-            or vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            or not vllm_config.additional_config.get("hy4flash_swa_cache", True)
-        ):
+        if not envs.VLLM_USE_V2_MODEL_RUNNER or vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             return HiddenStateCacheSpec(**geometry)
         if self.is_window_layer:
             return SlidingWindowMLASpec(
@@ -614,6 +690,36 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
 
     def _project_query(self, hidden_states):
         q_a = self.q_a_proj(hidden_states)[0]
+        scheme = getattr(self.q_b_proj.quant_method, "quant_method", None)
+        if (
+            is_decode_batch(get_flash_attention_metadata())
+            and is_950()
+            and q_a.device.type == "npu"
+            and q_a.dtype == self.q_a_layernorm.weight.dtype == torch.bfloat16
+            and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
+            and isinstance(scheme, AscendFp8BlockLinearMethod)
+            and scheme.use_mxfp8
+            and scheme.mxfp8_method.group_size == 32
+            and not any(getattr(self.q_b_proj, "mxfp8_tp_padding", (0, 0)))
+        ):
+            norm = self.q_a_layernorm
+            quantized, scale, _ = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+                q_a,
+                norm.weight,
+                epsilon=norm.variance_epsilon,
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=scheme.mxfp8_method.dynamic_mx_quant_scale_alg,
+            )
+            q_c = (
+                torch_npu.npu_rms_norm(q_a, norm.weight, norm.variance_epsilon)[0]
+                if (
+                    self.indexer is not None
+                    and not self._short_indexpool_capture
+                    and self.max_model_len > (self.indexer.budget + 1) * self.indexer.ratio
+                )
+                else None
+            )
+            return self.q_b_proj(PreparedLinearInput(quantized, scale, q_a.dtype))[0], q_c
         if self.fuse_swa_q_norm:
             norm = self.q_a_layernorm
             scheme = getattr(self.q_b_proj.quant_method, "quant_method", None)
@@ -721,6 +827,81 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         return rope(positions, q_pe, k_pe)
 
     def forward(self, positions, hidden_states):
+        if self.native_decode_attention and is_decode_batch(get_flash_attention_metadata()):
+            return self._forward_native_decode(positions, hidden_states)
+        return self._forward_existing(positions, hidden_states)
+
+    def _forward_native_decode(self, positions, hidden_states):
+        absorbed = False
+        q, q_c = self._project_query(hidden_states)
+        q = q.reshape(-1, self.local_heads, self.nope_dim + self.rope_dim)
+        kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split((self.latent_dim, self.rope_dim), -1)
+        kv_c = self.kv_a_layernorm(kv_c)
+        q_nope, q_pe = q.split((self.nope_dim, self.rope_dim), dim=-1)
+        q_pe, k_pe = self._rotate_qk(positions, q_pe.reshape(q.shape[0], -1).contiguous(), k_pe.contiguous())
+        q_pe = q_pe.reshape(-1, self.local_heads, self.rope_dim)
+        needs_meta = self.use_cann_prefill or self.fuse_attn_output_gate or self.overlap_attn_output_gate
+        meta = get_flash_attention_metadata() if needs_meta else None
+        full_decode = meta is not None and meta.decode_seq_lens is not None
+        full_prefill = (
+            self.use_cann_prefill
+            and meta is not None
+            and not full_decode
+            and bool(meta.prefill_reqs)
+            and all(meta.prefill_reqs)
+            and meta.query_start_loc[0] == 0
+            and meta.query_start_loc[-1] == q.shape[0] > 0
+        )
+        out_shape = (q.shape[0], self.local_heads * self.v_dim)
+        out = hidden_states.new_empty(out_shape) if full_prefill else hidden_states.new_zeros(out_shape)
+        fuse_gate = self.fuse_attn_output_gate and full_decode and self._can_fuse_output_gate(out)
+        overlap_gate = self.overlap_attn_output_gate and full_decode and not self.sequence_parallel_output
+        if overlap_gate:
+            logger.info_once("HYV4 Flash overlaps the output gate projection with paged decode attention.")
+            main_stream = torch.npu.current_stream()
+            gate_stream = attention_calculation_stream()
+            gate_stream.wait_stream(main_stream)
+            with npu_stream_switch(gate_stream, enabled=True):
+                hidden_states.record_stream(gate_stream)
+                gate = self._project_output_gate(hidden_states, fuse_gate)
+
+        self._forward_paged(
+            hidden_states,
+            q_c,
+            q_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            positions,
+            out,
+            absorbed=absorbed,
+        )
+        if overlap_gate:
+            main_stream.wait_stream(gate_stream)
+            gate.record_stream(main_stream)
+        else:
+            gate = self._project_output_gate(hidden_states, fuse_gate)
+
+        if fuse_gate:
+            gate = torch_npu.npu_format_cast(gate, ACL_FORMAT_ND).contiguous()
+            scheme = getattr(self.o_proj.quant_method, "quant_method", None)
+            if (
+                isinstance(scheme, AscendFp8BlockLinearMethod)
+                and scheme.use_mxfp8
+                and scheme.mxfp8_method.group_size == 32
+                and not any(getattr(self.o_proj, "mxfp8_tp_padding", (0, 0)))
+            ):
+                quantized, scale = triton_ops.gate_dynamic_mx_quant(out, gate)
+                output = self.o_proj(PreparedLinearInput(quantized, scale, out.dtype))[0]
+            else:
+                output = self.o_proj(fused_output_gate(out, gate))[0]
+        else:
+            output = self.o_proj(out * gate)[0]
+        if self.sequence_parallel_output:
+            output = sp_reduce_scatter(output)
+        return self.post_proj_norm(output) if self.post_proj_norm is not None else output
+
+    def _forward_existing(self, positions, hidden_states):
         needs_meta = self.use_cann_prefill or self.fuse_attn_output_gate or self.overlap_attn_output_gate
         meta = get_flash_attention_metadata(self.layer_name) if needs_meta else None
         full_decode = meta is not None and meta.decode_seq_lens is not None
@@ -798,12 +979,28 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
 
         if full_prefill:
             out = self._forward_paged(
-                hidden_states, q_c, q_nope, q_pe, kv_c, k_pe, positions, out,
-                absorbed=absorbed, reuse_prefill_output=True,
+                hidden_states,
+                q_c,
+                q_nope,
+                q_pe,
+                kv_c,
+                k_pe,
+                positions,
+                out,
+                absorbed=absorbed,
+                reuse_prefill_output=True,
             )
         else:
             self._forward_paged(
-                hidden_states, q_c, q_nope, q_pe, kv_c, k_pe, positions, out, absorbed=absorbed,
+                hidden_states,
+                q_c,
+                q_nope,
+                q_pe,
+                kv_c,
+                k_pe,
+                positions,
+                out,
+                absorbed=absorbed,
             )
         if overlap_gate:
             main_stream.wait_stream(gate_stream)
@@ -832,8 +1029,18 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         return self.post_proj_norm(output) if self.post_proj_norm is not None else output
 
     def _forward_paged(
-        self, hidden, q_c, q_nope, q_pe, kv_c, k_pe, positions, out, *,
-        absorbed=False, reuse_prefill_output=False,
+        self,
+        hidden,
+        q_c,
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        positions,
+        out,
+        *,
+        absorbed=False,
+        reuse_prefill_output=False,
     ):
         metadata = get_forward_context().attn_metadata
         if not isinstance(metadata, dict) or self.layer_name not in metadata:
@@ -848,7 +1055,16 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         if snapshot is not None:
             snapshot[:num_tokens].fill_(-1)
         full_graph = meta.decode_seq_lens is not None
-        keys = self._write_cache_rows(cache, meta, hidden, kv_c, k_pe, positions, num_tokens, full_graph=full_graph)
+        keys = self._write_cache_rows(
+            cache,
+            meta,
+            hidden,
+            kv_c,
+            k_pe,
+            positions,
+            num_tokens,
+            full_graph=full_graph,
+        )
         query, wv = self._absorb_query(q_nope[:num_tokens], q_pe[:num_tokens], absorbed=absorbed)
         if full_graph:
             self._forward_decode_graph(meta, cache, block_size, hidden, q_c, positions, query, wv, out)
@@ -857,7 +1073,15 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         if keys is not None and self.incremental_index_pool:
             self._update_index_pool(cache, block_size, meta, keys, positions)
         return self._attend_eager(
-            meta, cache, block_size, hidden, q_c, positions, query, wv, out,
+            meta,
+            cache,
+            block_size,
+            hidden,
+            q_c,
+            positions,
+            query,
+            wv,
+            out,
             reuse_output=reuse_prefill_output,
         )
 
@@ -892,12 +1116,18 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
 
                 index_norm = (norm.weight, token_key_norm_inverse(keys, norm.eps))
             else:
-                keys = norm(keys).bfloat16()
+                keys = (native_rms_norm(keys, norm) if is_decode_batch(meta) else norm(keys)).bfloat16()
         if use_fused_write:
             payload, scales = self._quantize_c8(kv_c[:num_tokens], gpu_scale=self.use_gpu_c8_scale)
             if index_norm is not None:
                 return self.ops.write_c8_rows(
-                    cache, slots, payload, k_pe[:num_tokens], scales, keys, positions[..., :num_tokens],
+                    cache,
+                    slots,
+                    payload,
+                    k_pe[:num_tokens],
+                    scales,
+                    keys,
+                    positions[..., :num_tokens],
                     index_norm=index_norm,
                 )
             self.ops.write_c8_rows(cache, slots, payload, k_pe[:num_tokens], scales, keys, positions[..., :num_tokens])
@@ -918,6 +1148,65 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             cache.index_copy_(0, slots.long().clamp_min(0), rows)
         return keys
 
+    def _attend_decode_request(
+        self,
+        meta,
+        request,
+        seq_len,
+        cache,
+        block_size,
+        query,
+        wv,
+        out,
+        index_query,
+        index_weight,
+    ):
+        start, stop = meta.query_start_loc[request : request + 2]
+        count = stop - start
+        visible = torch.arange(seq_len - count, seq_len, device=query.device)
+        table = meta.block_table[request]
+        if self.indexer is None:
+            selected = window_candidates(visible, min(self.window, self.max_model_len))
+        elif (seq_len - 1) // self.indexer.ratio > self.indexer.budget:
+            ratio = self.indexer.ratio
+            groups = seq_len // ratio
+            pool = torch.empty(
+                (groups, INDEX_DIM),
+                dtype=torch.bfloat16 if self.decode_data_fusions else torch.float32,
+                device=query.device,
+            )
+            self.ops.copy_pool_keys(cache, table, pool, 0, block_size, ratio, write=False)
+            selected = native_indexpool_select(
+                index_query[start:stop],
+                index_weight[start:stop],
+                pool,
+                visible,
+                fuse_postprocess=self.decode_data_fusions,
+            )
+            dense = self._dense_decode_candidates(visible, selected.shape[-1])
+            selected = torch.where((visible // ratio > self.indexer.budget)[:, None], selected, dense)
+        else:
+            width = min(seq_len, (self.indexer.budget + 1) * self.indexer.ratio)
+            selected = self._dense_decode_candidates(visible, width)
+        if self.topk_snapshot is not None:
+            self.topk_snapshot[start:stop, : selected.shape[-1]].copy_(selected)
+        if self._can_gather_decode_fia_rows(cache, query.dtype):
+            from .c8_read import gather_compact_c8_fia_rows as gather_c8_fia_rows
+
+            rows = gather_c8_fia_rows(cache, table, block_size, selected)
+        else:
+            rows = self._gather_attention_rows(cache, table, block_size, selected, mask_padding=True)
+        context = native_mla_context(
+            query[start:stop],
+            selected,
+            rows,
+            self.learnable_sink_param,
+            self.scale,
+            length_provider=self._fia_length_provider(selected, start),
+            metadata=meta,
+        )
+        out[start:stop].copy_(_head_bmm(context, wv).reshape_as(out[start:stop]))
+
     def _attend_eager(self, meta, cache, block_size, hidden, q_c, positions, query, wv, out, *, reuse_output=False):
         parts = [] if reuse_output else None
 
@@ -933,6 +1222,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         uses_indexpool = self.indexer is not None and any(
             (length - 1) // self.indexer.ratio > self.indexer.budget for length in meta.seq_lens
         )
+        index_query = index_weight = None
         all_prefill = uses_indexpool and self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
         if uses_indexpool:
             # Whole indexer chunks can store the FP8 bins in the dtype consumed by LI.
@@ -960,6 +1250,20 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         for i, seq_len in enumerate(meta.seq_lens):
             start, stop = meta.query_start_loc[i : i + 2]
             if start == stop:
+                continue
+            if getattr(self, "native_decode_attention", False) and meta.prefill_reqs and not meta.prefill_reqs[i]:
+                self._attend_decode_request(
+                    meta,
+                    i,
+                    seq_len,
+                    cache,
+                    block_size,
+                    query,
+                    wv,
+                    out,
+                    index_query,
+                    index_weight,
+                )
                 continue
             num_queries = stop - start
             verify = num_queries > 1 and bool(meta.precise_decode_reqs and meta.precise_decode_reqs[i])
@@ -1102,7 +1406,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 kv_selected = shared_kv.unfold(0, self.window, 1).transpose(1, 2)
                 if snapshot is not None:
                     snapshot[start:stop, : self.window].copy_(selected)
-                value = self._attend_decoded(query[start:stop], selected, kv_selected, wv)
+                value = self._attend_decoded(query[start:stop], selected, kv_selected, wv, token_start=start)
                 write_output(start, stop, value)
                 continue
             batch_sparse = (
@@ -1123,8 +1427,16 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 from .prefill_ops.swa_early import attend_window_chunks
 
                 early_contexts = attend_window_chunks(
-                    prefill_query, shared_kv, first_position, history_start, min(self.window, seq_len),
-                    self.learnable_sink_param, self.scale, self.latent_dim, QUERY_CHUNK, query.dtype,
+                    prefill_query,
+                    shared_kv,
+                    first_position,
+                    history_start,
+                    min(self.window, seq_len),
+                    self.learnable_sink_param,
+                    self.scale,
+                    self.latent_dim,
+                    QUERY_CHUNK,
+                    query.dtype,
                 )
                 for offset, context in early_contexts:
                     lo = start + offset
@@ -1154,8 +1466,17 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                     selected = reuse_prefill_metadata(
                         query.device,
                         ("full_recall", first, full_recall_rows, history_budget, ratio, dtype),
-                        lambda: build_full_recall_rows(
-                            first, full_recall_rows, history_budget, ratio, query.device, dtype,
+                        lambda first=first,
+                        full_recall_rows=full_recall_rows,
+                        history_budget=history_budget,
+                        ratio=ratio,
+                        dtype=dtype: build_full_recall_rows(
+                            first,
+                            full_recall_rows,
+                            history_budget,
+                            ratio,
+                            query.device,
+                            dtype,
                         ),
                     )
                     prefill_c8_v2_rows.append(selected)
@@ -1206,10 +1527,15 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                                 li_tail = reuse_prefill_metadata(
                                     hidden.device,
                                     ("li_tail", first_position, end_position),
-                                    lambda: self.li_prefill.prepare_tail(prefill_logical),
+                                    lambda prefill_logical=prefill_logical: self.li_prefill.prepare_tail(
+                                        prefill_logical
+                                    ),
                                 )
                             # Full Prefill chunks share the same key pool. Only their causal lengths vary.
-                            rows = min(self.li_prefill.BATCH_ROWS, (loop_stop - lo) // chunk * chunk)
+                            rows = min(
+                                self.li_prefill.BATCH_ROWS,
+                                (loop_stop - lo) // chunk * chunk,
+                            )
                             if rows > chunk:
                                 end = lo + rows
                                 selected = self.li_prefill.select_many(
@@ -1250,10 +1576,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                                 self.indexer.ratio,
                                 self.indexer.budget,
                             )
-                            if (
-                                use_cann_sparse
-                                and seq_len - num_queries >= self.indexer.budget * self.indexer.ratio
-                            ):
+                            if use_cann_sparse and seq_len - num_queries >= self.indexer.budget * self.indexer.ratio:
                                 # LightningIndexer emits int32. Cast just the fallback rows so
                                 # the mixed batch stays int32 through concatenation and CANN.
                                 selected = selected.to(torch.int32)
@@ -1284,6 +1607,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                     kv_selected,
                     wv,
                     scores=scores,
+                    token_start=lo,
                     query_fp32=prefill_query[lo - start : hi - start] if reuse_window else None,
                     fuse_prefill_logits=early_fusion and reuse_window,
                 )
@@ -1325,7 +1649,11 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                     self.learnable_sink_param,
                     self.scale,
                     compact_prefix=max(
-                        0, min(num_queries, self.indexer.budget * self.indexer.ratio - (seq_len - num_queries))
+                        0,
+                        min(
+                            num_queries,
+                            self.indexer.budget * self.indexer.ratio - (seq_len - num_queries),
+                        ),
                     ),
                 )
                 if snapshot is not None:
@@ -1347,7 +1675,9 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                     kv_selected = shared_kv.index_select(0, valid_indices.flatten()).view(*selected.shape, -1)
                 if snapshot is not None:
                     snapshot[start:stop, : selected.shape[-1]].copy_(selected)
-                value = self._attend_decoded(query[start:stop], selected, kv_selected, wv, split_pv=True)
+                value = self._attend_decoded(
+                    query[start:stop], selected, kv_selected, wv, split_pv=True, token_start=start
+                )
                 write_output(start, stop, value)
 
         if parts:
@@ -1431,29 +1761,70 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             selected, window_rows = selection
             if snapshot is not None:
                 snapshot[:num_tokens, :window].copy_(selected)
-            rows = torch.empty((num_tokens, window, query.shape[-1]), dtype=torch.float32, device=query.device)
-            for request in range(batch_size):
-                history = self._gather_attention_rows(
-                    cache, meta.block_table[request], block_size, shared_positions[request], mask_padding=True
+            direct_fia = self._can_gather_decode_fia_rows(cache, query.dtype)
+            if direct_fia:
+                from .c8_read import (
+                    empty_compact_c8_fia_rows as empty_c8_fia_rows,
                 )
-                start = request * num_queries
-                target = rows[start : start + num_queries].view(-1, rows.shape[-1])
-                torch.index_select(history, 0, window_rows, out=target)
-            self._attend_decoded(query, selected, rows, wv, out[:num_tokens])
+                from .c8_read import (
+                    gather_compact_c8_fia_rows as gather_c8_fia_rows,
+                )
+
+                rows = empty_c8_fia_rows(num_tokens, window, query.device)
+                for request in range(batch_size):
+                    start = request * num_queries
+                    stop = start + num_queries
+                    gather_c8_fia_rows(
+                        cache,
+                        meta.block_table[request],
+                        block_size,
+                        selected[start:stop],
+                        output=tuple(tensor[start:stop] for tensor in rows),
+                    )
+            else:
+                rows = torch.empty(
+                    (num_tokens, window, query.shape[-1]),
+                    dtype=torch.float32,
+                    device=query.device,
+                )
+                for request in range(batch_size):
+                    history = self._gather_attention_rows(
+                        cache,
+                        meta.block_table[request],
+                        block_size,
+                        shared_positions[request],
+                        mask_padding=True,
+                    )
+                    start = request * num_queries
+                    target = rows[start : start + num_queries].view(-1, rows.shape[-1])
+                    torch.index_select(history, 0, window_rows, out=target)
+            self._attend_decoded(query, selected, rows, wv, out[:num_tokens], graph_queries=num_queries)
             out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
             return
 
-        score_groups = self.indexer is not None and self.max_model_len > (self.indexer.budget + 1) * self.indexer.ratio
+        score_groups = (
+            self.indexer is not None
+            and not self._short_indexpool_capture
+            and self.max_model_len > (self.indexer.budget + 1) * self.indexer.ratio
+        )
         use_paged_pool = False
         if score_groups:
             index_query, index_weight = self.indexer.encode_queries(
-                hidden[:num_tokens], q_c[:num_tokens], positions[..., :num_tokens], full_graph=True
+                hidden[:num_tokens],
+                q_c[:num_tokens],
+                positions[..., :num_tokens],
+                full_graph=True,
             )
             use_paged_pool = (
                 self.fuse_indexpool_select
                 and self.incremental_index_pool
                 and (self.use_pd_decode or self.local_heads == BATCH_VERIFY_SPARSE_SHAPE[0])
-                and (num_queries, self.indexer.num_heads, self.indexer.ratio, self.indexer.budget)
+                and (
+                    num_queries,
+                    self.indexer.num_heads,
+                    self.indexer.ratio,
+                    self.indexer.budget,
+                )
                 == PAGED_POOL_DECODE_SHAPE
                 and cache.device.type == "npu"
                 and meta.block_table.stride(-1) == 1
@@ -1509,83 +1880,136 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             table = meta.block_table[request]
             visible = logical[request]
             if self.indexer is None:
-                selected = window_candidates(visible, window)
+                candidate_key = ("window_candidates", window)
+                candidates = geometry.get(candidate_key)
+                if candidates is None:
+                    candidates = window_candidates(logical.flatten(), window).view(batch_size, num_queries, -1)
+                    geometry[candidate_key] = candidates
+                selected = candidates[request]
             else:
                 if self.incremental_index_pool and batched_selected is None:
-                    self._update_decode_pool(cache, table, block_size, seq_lens[request], num_queries, positions.ndim)
-                if score_groups:
+                    self._update_decode_pool(
+                        cache,
+                        table,
+                        block_size,
+                        seq_lens[request],
+                        num_queries,
+                        positions.ndim,
+                    )
+                if batched_selected is not None:
+                    selected = batched_selected[request]
+                elif score_groups:
                     ratio = self.indexer.ratio
-                    if batched_selected is not None:
-                        selected = batched_selected[request]
-                    elif use_paged_pool:
-                        logger.info_once("HYV4 Flash uses paged IndexPool scoring for six verification queries.")
-                        selected = self.ops.select_paged_pool(
-                            index_query[start:stop],
-                            index_weight[start:stop],
-                            cache,
-                            table,
-                            visible,
-                            block_size,
-                            self.max_model_len // ratio,
-                            ratio,
-                            self.indexer.budget,
+                    pool = self._read_decode_pool(cache, table, block_size, seq_lens[request], positions.ndim)
+                    selection_key = (
+                        "indexpool_selection",
+                        request,
+                        num_queries,
+                        pool.shape[0],
+                    )
+                    selection_state = geometry.get(selection_key)
+                    if selection_state is None:
+                        selection_state = prepare_indexpool_selection(visible, num_queries, pool.shape[0])
+                        geometry[selection_key] = selection_state
+                    selected = native_indexpool_select(
+                        index_query[start:stop],
+                        index_weight[start:stop],
+                        pool,
+                        visible,
+                        selection_state,
+                        fuse_postprocess=self.decode_data_fusions,
+                    )
+                    candidate_key = ("dense_candidates", selected.shape[-1])
+                    dense = geometry.get(candidate_key)
+                    if dense is None:
+                        dense = self._dense_decode_candidates(logical.flatten(), selected.shape[-1]).view(
+                            batch_size, num_queries, -1
                         )
-                    else:
-                        pool = self._read_decode_pool(cache, table, block_size, seq_lens[request], positions.ndim)
-                        selected = sparse_candidates(
-                            index_query[start:stop], index_weight[start:stop], pool, visible, ratio, self.indexer.budget
-                        )
-                    dense = self._dense_decode_candidates(visible, selected.shape[-1])
-                    selected = torch.where((visible // ratio > self.indexer.budget)[:, None], selected, dense)
+                        geometry[candidate_key] = dense
+                    mask_key = ("sparse_candidate_rows", ratio, self.indexer.budget)
+                    sparse_rows = geometry.get(mask_key)
+                    if sparse_rows is None:
+                        sparse_rows = logical // ratio > self.indexer.budget
+                        geometry[mask_key] = sparse_rows
+                    selected = torch.where(sparse_rows[request, :, None], selected, dense[request])
                 else:
-                    selected = self._dense_decode_candidates(visible, self.max_model_len)
+                    width = min(
+                        self.max_model_len,
+                        (self.indexer.budget + 1) * self.indexer.ratio,
+                    )
+                    candidate_key = ("dense_candidates", width)
+                    candidates = geometry.get(candidate_key)
+                    if candidates is None:
+                        candidates = self._dense_decode_candidates(logical.flatten(), width).view(
+                            batch_size, num_queries, -1
+                        )
+                        geometry[candidate_key] = candidates
+                    selected = candidates[request]
             if snapshot is not None:
                 snapshot[start:stop, : selected.shape[-1]].copy_(selected)
             if batch_sparse:
                 sparse_selected.append(selected)
                 continue
-            split_pv = (
-                self.batch_verify_attention
-                and num_queries > 1
-                and (self.local_heads, selected.shape[-1]) == BATCH_VERIFY_SPARSE_SHAPE
-            )
             q = query[start:stop]
-            scores = None
-            if (
-                self.indexer is not None
-                and self.fuse_c8_qk
-                and split_pv
-                and num_queries == BATCH_VERIFY_MAX_QUERIES
-                and q.dtype == torch.bfloat16
-                and q.is_contiguous()
-                and cache.device.type == "npu"
-                and cache.shape[-1] % 4 == 0
-                and table.is_contiguous()
-            ):
-                if self.use_cann_prefill:
-                    logger.info_once("HYV4 Flash uses CANN paged C8 reads and FP32 QK for sparse verification.")
-                else:
-                    logger.info_once("HYV4 Flash fuses paged C8 reads and FP32 QK for sparse verification.")
-                scores, rows = self.ops.gather_c8_qk(q, cache, table, block_size, selected)
+            if self._can_gather_decode_fia_rows(cache, q.dtype):
+                from .c8_read import gather_compact_c8_fia_rows as gather_c8_fia_rows
+
+                rows = gather_c8_fia_rows(cache, table, block_size, selected)
             elif shared_positions is None:
                 rows = self._gather_attention_rows(cache, table, block_size, selected, mask_padding=True)
             else:
                 history = self._gather_attention_rows(
-                    cache, table, block_size, shared_positions[request], mask_padding=True
+                    cache,
+                    table,
+                    block_size,
+                    shared_positions[request],
+                    mask_padding=True,
                 )
                 rows = history.unfold(0, window, 1).transpose(1, 2)
-            self._attend_decoded(q, selected, rows, wv, out[start:stop], split_pv=split_pv, scores=scores)
+            self._attend_decoded(
+                q,
+                selected,
+                rows,
+                wv,
+                out[start:stop],
+                token_start=start,
+                graph_queries=num_queries,
+            )
         if batch_sparse:
             logger.info_once("HYV4 Flash gathers sparse Decode C8 cache rows for the whole rank with CANN.")
             selected = torch.stack(sparse_selected)
-            logical = selected.clamp_min(0).flatten(1)
-            packed = self._gather(
-                cache, meta.block_table[:batch_size], block_size, logical, slice(self.kv_storage_width)
-            )
             selected = selected.flatten(0, 1)
-            rows = dequantize_c8_rows(packed).view(num_tokens, selected.shape[-1], query.shape[-1])
-            rows = rows.masked_fill(selected[..., None] < 0, 0)
-            self._attend_decoded(query, selected, rows, wv, out[:num_tokens])
+            if self._can_gather_decode_fia_rows(cache, query.dtype):
+                from .c8_read import (
+                    empty_compact_c8_fia_rows as empty_c8_fia_rows,
+                )
+                from .c8_read import (
+                    gather_compact_c8_fia_rows as gather_c8_fia_rows,
+                )
+
+                rows = empty_c8_fia_rows(num_tokens, selected.shape[-1], query.device)
+                for request in range(batch_size):
+                    start = request * num_queries
+                    stop = start + num_queries
+                    gather_c8_fia_rows(
+                        cache,
+                        meta.block_table[request],
+                        block_size,
+                        selected[start:stop],
+                        output=tuple(tensor[start:stop] for tensor in rows),
+                    )
+            else:
+                logical = selected.view(batch_size, -1).clamp_min(0)
+                packed = self._gather(
+                    cache,
+                    meta.block_table[:batch_size],
+                    block_size,
+                    logical,
+                    slice(self.kv_storage_width),
+                )
+                rows = dequantize_c8_rows(packed).view(num_tokens, selected.shape[-1], query.shape[-1])
+                rows = rows.masked_fill(selected[..., None] < 0, 0)
+            self._attend_decoded(query, selected, rows, wv, out[:num_tokens], graph_queries=num_queries)
         if shared_positions is not None:
             # Inactive queries may overlap live KV rows in the unfolded view.
             out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
@@ -1612,13 +2036,27 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         groups = self.max_model_len // ratio
         end = seq_len // ratio
         if self.incremental_index_pool:
-            keys = torch.empty((groups, INDEX_DIM), dtype=torch.float32, device=cache.device)
+            keys = torch.empty(
+                (groups, INDEX_DIM),
+                dtype=torch.bfloat16 if self.decode_data_fusions else torch.float32,
+                device=cache.device,
+            )
             self.ops.copy_pool_keys(cache, table, keys, 0, block_size, ratio, write=False, end_group=end)
             return keys
         history = torch.arange(groups * ratio, device=cache.device)
         history = history.masked_fill(history >= end * ratio, 0)
         raw, key_pos = self._read_index_rows(cache, table, block_size, history, position_ndim)
         return self.indexer.encode_keys(raw, key_pos, full_graph=True)
+
+    def _can_gather_decode_fia_rows(self, cache, output_dtype):
+        return (
+            getattr(self, "decode_data_fusions", False)
+            and self.fuse_c8_qk
+            and output_dtype == torch.bfloat16
+            and cache.is_contiguous()
+            and cache.shape[-1] % torch.int32.itemsize == 0
+            and cache.storage_offset() % torch.int32.itemsize == 0
+        )
 
     def _gather_attention_rows(self, cache, block_table, block_size, positions, *, mask_padding=False):
         # Keep small reads fused, including shared sliding-window histories.
@@ -1866,10 +2304,50 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             kv_selected = dequantize_c8_rows(kv_selected)
         self._attend_decoded(query, selected, kv_selected, wv, out)
 
+    def _fia_length_provider(self, selected, token_start, graph_queries=None):
+        from .fia_lengths import FIALengthProvider
+
+        return FIALengthProvider(
+            self.layer_name,
+            token_start,
+            selected.shape[0],
+            selected.shape[1],
+            min(self.window, self.max_model_len) if self.indexer is None else None,
+            self.indexer.ratio if self.indexer is not None else 4,
+            self.indexer.budget if self.indexer is not None else 511,
+            graph_queries,
+        )
+
     def _attend_decoded(
-        self, query, selected, kv_selected, wv, out=None, *, split_pv=False, scores=None, query_fp32=None,
+        self,
+        query,
+        selected,
+        kv_selected,
+        wv,
+        out=None,
+        *,
+        split_pv=False,
+        scores=None,
+        query_fp32=None,
+        token_start=0,
+        graph_queries=None,
         fuse_prefill_logits=False,
     ):
+        if getattr(self, "native_decode_attention", False) and is_decode_batch(get_flash_attention_metadata()):
+            context = native_mla_context(
+                query,
+                selected,
+                kv_selected,
+                self.learnable_sink_param,
+                self.scale,
+                length_provider=self._fia_length_provider(selected, token_start, graph_queries),
+                metadata=get_flash_attention_metadata(),
+            )
+            value = _head_bmm(context, wv)
+            if out is None:
+                return value
+            out.copy_(value.reshape_as(out))
+            return
         attention_query = query if query_fp32 is None else query_fp32
         if fuse_prefill_logits:
             from .attention_logits import build_mla_logits
@@ -1891,7 +2369,13 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             # Use the reference FP32 softmax reduction before discarding the sink.
             probs = logits.softmax(dim=-1)[..., :-1]
         else:
-            probs = mla_attention_probs(attention_query, kv_selected, selected, self.learnable_sink_param, self.scale)
+            probs = mla_attention_probs(
+                attention_query,
+                kv_selected,
+                selected,
+                self.learnable_sink_param,
+                self.scale,
+            )
         values = kv_selected[..., : self.latent_dim].float()
         if split_pv:
             # The batched FP32 PV kernel changes the 2048-wide reduction order.

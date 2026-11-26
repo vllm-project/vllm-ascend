@@ -1,6 +1,36 @@
 import threading
 
 
+def _configure_local_comm_res(resource_dir):
+    """Use the connector's per-device descriptor when visibility hides peers."""
+    import json
+    import os
+    from pathlib import Path
+
+    if not resource_dir:
+        return
+    import torch
+    from vllm.platforms import current_platform
+
+    physical_id = current_platform.visible_device_id_to_physical_device_id(torch.npu.current_device())
+    config_path = Path(resource_dir) / f"{physical_id}.json"
+    config = json.loads(config_path.read_text())
+    endpoints = config.get("endpoint_list")
+    if config.get("version") != "1.3" or not isinstance(endpoints, list) or not endpoints:
+        raise ValueError(f"Invalid per-device Mooncake resource descriptor: {config_path}")
+    if any(endpoint.get("protocol") != "ub_ctp" or endpoint.get("placement") != "device" for endpoint in endpoints):
+        raise ValueError(f"Expected original device ub_ctp endpoints: {config_path}")
+    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(config)
+    import logging
+
+    logging.getLogger(__name__).info(
+        "Using complete Mooncake device resources: physical_device=%s endpoints=%s path=%s",
+        physical_id,
+        len(endpoints),
+        config_path,
+    )
+
+
 class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
@@ -10,7 +40,7 @@ class GlobalTE:
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
-    def get_transfer_engine(self, hostname: str, device_name: str | None):
+    def get_transfer_engine(self, hostname: str, device_name: str | None, *, local_comm_res_path: str | None = None):
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
@@ -34,6 +64,7 @@ class GlobalTE:
                     # retries once the minimum supported version includes that
                     # fix and repeated-failure resource cleanup is verified.
                     self._initialization_attempted = True
+                    _configure_local_comm_res(local_comm_res_path)
                     engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
                     ret_value = engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)

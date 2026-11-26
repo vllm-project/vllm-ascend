@@ -104,6 +104,10 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.target_prep_masks import (
+    mask_write_host_scope,
+    try_prepare_positions_with_padding,
+)
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -298,12 +302,8 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # These views are read-only. Keep the no-padding mask separate
             # from the input buffer that padded batches overwrite.
-            self._hy4_prefill_logit_offsets = torch.arange(
-                self.max_num_reqs + 1, device=self.device, dtype=torch.int32
-            )
-            self._hy4_prefill_local_positions = torch.zeros(
-                self.max_num_reqs, device=self.device, dtype=torch.int32
-            )
+            self._hy4_prefill_logit_offsets = torch.arange(self.max_num_reqs + 1, device=self.device, dtype=torch.int32)
+            self._hy4_prefill_local_positions = torch.zeros(self.max_num_reqs, device=self.device, dtype=torch.int32)
             self._hy4_prefill_no_padding = torch.zeros_like(self.input_buffers.is_padding)
 
         # Pinned D2H staging for corrected device state after spec rejection.
@@ -903,6 +903,7 @@ class NPUModelRunner(GPUModelRunner):
         mask[num_tokens:].fill_(True)
         return mask
 
+    @mask_write_host_scope
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -1094,6 +1095,7 @@ class NPUModelRunner(GPUModelRunner):
         hy4_attention_inputs = None
         hy4_rope_positions = None
         hy4_vocab_indices = None
+        padding_mask_prepared = False
         if hy4_pure_prefill and os.getenv("HY4_PREFILL_FUSED_INPUTS") == "1":
             from vllm_ascend.worker.v2.hy4_prefill_inputs import prepare_hy4_prefill_inputs
 
@@ -1113,7 +1115,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             vocab = self.model_state.prefill_vocab_parameters() if fuse_cache_mapping else None
             logits_indices, hy4_lookback, hy4_attention_inputs, hy4_vocab_indices = prepare_hy4_prefill_inputs(
-                self.input_buffers, self.req_states, idx_mapping, query_start_loc,
+                self.input_buffers,
+                self.req_states,
+                idx_mapping,
+                query_start_loc,
                 lookback_depth=lookback_depth if self.pcp_manager is None else 0,
                 tables=self.block_tables if fuse_cache_mapping else None,
                 num_tokens=num_tokens,
@@ -1139,13 +1144,24 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            padding_mask_prepared = try_prepare_positions_with_padding(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
+                self.input_buffers.is_padding,
+                num_tokens,
+                num_tokens_after_padding,
             )
+            if not padding_mask_prepared:
+                prepare_pos_seq_lens(
+                    idx_mapping,
+                    query_start_loc,
+                    self.req_states.num_computed_tokens.gpu,
+                    self.input_buffers.positions,
+                    self.input_buffers.seq_lens,
+                )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
         if adaptive_verification_active and self.use_fia:
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
@@ -1219,7 +1235,11 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
+            is_padding=(
+                self.input_buffers.is_padding[:num_tokens_after_padding]
+                if padding_mask_prepared
+                else self.prepare_padding_mask(num_tokens, num_tokens_after_padding)
+            ),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

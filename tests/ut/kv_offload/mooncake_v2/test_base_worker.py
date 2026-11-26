@@ -431,6 +431,7 @@ def make_worker_config(
             is_kv_producer=is_producer,
             kv_role="kv_consumer" if is_consumer else "kv_producer",
             kv_port=6000,
+            get_from_extra_config=lambda key, default: default,
         ),
         cache_config=SimpleNamespace(block_size=16),
         parallel_config=SimpleNamespace(
@@ -492,10 +493,15 @@ def test_dp_workers_publish_distinct_handshake_ports(monkeypatch, independent_dp
     assert len(set(ports)) == 2
 
 
+@pytest.mark.parametrize("resource_path", [None, "/resources"])
 def test_base_worker_initializes_parallel_ranks_and_handshake_port(
     monkeypatch: pytest.MonkeyPatch,
+    resource_path,
 ) -> None:
     config = make_worker_config()
+    config.kv_transfer_config.get_from_extra_config = lambda key, default: (
+        resource_path if key == "ascend_local_comm_res_path" else default
+    )
     kv_cache_config = SimpleNamespace(num_blocks=32)
     global_te, tp_group = patch_worker_runtime(monkeypatch)
 
@@ -522,7 +528,9 @@ def test_base_worker_initializes_parallel_ranks_and_handshake_port(
     assert worker.te_rpc_port == 9000
     assert worker.xfer_handshake_metadata is None
     assert worker.xfer_stats.is_empty()
-    global_te.get_transfer_engine.assert_called_once_with("10.0.0.2", device_name="7")
+    global_te.get_transfer_engine.assert_called_once_with(
+        "10.0.0.2", device_name="7", local_comm_res_path=resource_path
+    )
 
 
 @pytest.mark.parametrize(("is_consumer", "is_producer"), [(False, False), (True, True)])

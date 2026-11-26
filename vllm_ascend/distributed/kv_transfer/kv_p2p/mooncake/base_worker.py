@@ -367,6 +367,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
             device_name=device_name,
+            local_comm_res_path=self.kv_transfer_config.get_from_extra_config("ascend_local_comm_res_path", None),
         )
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None

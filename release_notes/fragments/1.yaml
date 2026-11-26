@@ -2,10 +2,7 @@ pr: 1
 entries:
   - category: feature
     text: >-
-      HY4 Flash adds opt-in CANN Engram RMS, precise decode iHC gate fusion,
-      bulk C8 reads and local TP1/DP draft graph capture. Enable them through
-      hy4flash_cann_engram_rms, hy4flash_fused_ihc_pre_tail,
-      hy4flash_bulk_c8_decode_reads and hy4flash_dfly_dp_graph in additional-config;
-      all four default to false. Real-checkpoint draft graph performance remains
-      unvalidated. hy4flash_fused_ihc_post retains the existing default path and
-      allows explicit fallback for comparisons.
+      HY4 Flash selects supported CANN Engram RMS, Decode fusion and bulk C8
+      reads automatically. Only hy4flash_dfly_dp_graph remains in
+      additional-config for local TP1/DP Draft graph capture and defaults to
+      false. Per-operator enable and rollback switches are removed.
