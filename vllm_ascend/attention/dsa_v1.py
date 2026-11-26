@@ -2773,20 +2773,19 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             if self.multistream_dsv4_dsa_overlap:
                 torch.npu.super_kernel_scope_begin(None)
-            try:
-                return self.indexer(
-                    hidden_states=hidden_states,
-                    qr=qr,
-                    kv_cache=kv_cache,
-                    metadata=layer_metadata.indexer,
-                    overlap_plan=overlap_plan,
-                    layer_name=layer_name,
-                    qr_pertoken_scale=qr_pertoken_scale,
-                    write_cache=write_cache,
-                )
-            finally:
-                if self.multistream_dsv4_dsa_overlap:
-                    torch.npu.super_kernel_scope_end(None)
+            indexer_output = self.indexer(
+                hidden_states=hidden_states,
+                qr=qr,
+                kv_cache=kv_cache,
+                metadata=layer_metadata.indexer,
+                overlap_plan=overlap_plan,
+                layer_name=layer_name,
+                qr_pertoken_scale=qr_pertoken_scale,
+                write_cache=write_cache,
+            )
+            if self.multistream_dsv4_dsa_overlap:
+                torch.npu.super_kernel_scope_end(None)
+            return indexer_output
 
         if not write_cache:
             return None
@@ -2862,18 +2861,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if self.multistream_dsv4_dsa_overlap:
             torch.npu.super_kernel_scope_begin(None)
-            try:
-                q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
-                    hidden_states,
-                    cos,
-                    sin,
-                    swa_kv_cache,
-                    swa_req_metadata.slot_mapping,
-                    is_prefill=has_prefill,
-                    tail_overlap_fn=compressor_tail_fn,
-                )
-            finally:
-                torch.npu.super_kernel_scope_end(None)
+            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_req_metadata.slot_mapping,
+                is_prefill=has_prefill,
+                tail_overlap_fn=compressor_tail_fn,
+            )
+            torch.npu.super_kernel_scope_end(None)
         else:
             compressor_overlap_output = None
             q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(

@@ -450,10 +450,8 @@ class AscendDSAV41Impl:
         )
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
             torch.npu.super_kernel_scope_begin(None)
-            try:
-                q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
-            finally:
-                torch.npu.super_kernel_scope_end(None)
+            q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
+            torch.npu.super_kernel_scope_end(None)
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
