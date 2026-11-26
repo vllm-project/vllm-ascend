@@ -295,6 +295,17 @@ Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO m
 
     Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.5.
 
+### 4.4 Verify the GBSA interface
+
+Qwen3.8-Flash-Next uses the `cann_ops_transformer` Python interface for standard GBSA Decode
+and Union GBSA Prefill. After installing the CANN ops package for your device and initializing
+the CANN and ATB environments, run this check in the same shell you will use to start
+`vllm serve`. For Docker installations, run it inside the serving container.
+
+```bash
+python -c "from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention"
+```
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment

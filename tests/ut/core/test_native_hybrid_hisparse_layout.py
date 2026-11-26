@@ -8,6 +8,7 @@ import pytest
 import torch
 
 pytest.importorskip("vllm.v1.hisparse.backend")
+from vllm.config import KVTransferConfig
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     _max_memory_usage_bytes_from_groups,
@@ -27,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, register_ascend_kv_cache_specs
 from vllm_ascend.hisparse import supports_hybrid_hisparse_core
 from vllm_ascend.hisparse.layout import get_hybrid_sfa_hisparse_groups, has_hybrid_sfa_hisparse_groups
@@ -92,6 +94,17 @@ def make_specs():
     }
 
 
+@pytest.mark.parametrize("pooled", [False, True])
+def test_ascendstore_rejects_new_hybrid_layouts(pooled):
+    runtime = make_runtime()
+    runtime.kv_transfer_config = KVTransferConfig(kv_connector="AscendStoreConnector", kv_role="kv_both")
+    if pooled:
+        runtime.model_config.hf_text_config = SimpleNamespace(index_kpool=4)
+    specs = {} if pooled else make_specs()
+    with pytest.raises(ValueError, match="AscendStore does not support pooled or recurrent HiSparse"):
+        AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
+
+
 @pytest.mark.parametrize("model_type", ["kimi_k31", "unregistered_sparse_model"])
 @requires_hybrid_core
 def test_native_hybrid_retains_separate_cache_geometry(model_type):
@@ -150,8 +163,9 @@ def test_ascend_builder_routes_native_hybrid_to_core_placement(model_type, monke
     from vllm_ascend.core import kv_cache_config_builder as builder_module
 
     runtime = make_runtime(model_type, layout=KVCacheLayout.BLHNC)
-    runtime.kv_transfer_config = SimpleNamespace(
+    runtime.kv_transfer_config = KVTransferConfig(
         kv_connector="HiSparseConnector",
+        kv_role="kv_both",
         kv_connector_extra_config={"host_pool_gib": 1},
     )
 

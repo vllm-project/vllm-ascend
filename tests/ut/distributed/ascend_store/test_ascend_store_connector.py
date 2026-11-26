@@ -17,6 +17,7 @@
 
 import types
 import unittest
+from itertools import product
 from unittest.mock import MagicMock, patch
 
 # isort: off
@@ -152,6 +153,52 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 
 class TestLookupKeyServer(unittest.TestCase):
+    def test_structured_response_and_reset(self):
+        from msgspec import ValidationError
+        from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+        for result in (StoreLookupResult(0), StoreLookupResult(32, (TailKeyBoundary(0, 36), TailKeyBoundary(1, 32)))):
+            with (
+                self.subTest(result=result),
+                patch(module + ".threading.Thread") as thread,
+                patch(module + ".zmq.Poller") as poller,
+                patch(module + ".make_zmq_socket") as make_socket,
+                patch(module + ".zmq.Context"),
+            ):
+                config = MagicMock()
+                config.kv_transfer_config.kv_connector_extra_config = {}
+                worker = MagicMock()
+                worker.lookup_scheduler.return_value = result
+                socket = make_socket.return_value
+                encoder = MsgpackEncoder()
+                socket.recv_multipart.side_effect = [
+                    [b"lookup", (48).to_bytes(4, "big"), *encoder.encode([0, 1]), bytes(4), *encoder.encode(["hash"])],
+                    [b"reset"],
+                    ZMQError("receive failed"),
+                ]
+                poller.return_value.poll.return_value = [(socket, 1)]
+                LookupKeyServer(worker, config)
+                thread.call_args.kwargs["target"]()
+                response = socket.send_multipart.call_args_list[0].args[0]
+                self.assertEqual(
+                    MsgpackDecoder().decode(response),
+                    [result.hit_length, [list(b) for b in result.tail_key_boundaries]],
+                )
+                socket.send_multipart.assert_called_with([b"\x01"])
+                worker.reset_store.assert_called_once_with()
+                client = LookupKeyClient(config)
+                socket.recv_multipart.side_effect = None
+                socket.recv_multipart.return_value = response
+                self.assertEqual(client.lookup(48, [b"hash"], [0, 1]), result)
+                socket.recv_multipart.return_value = [b"\x00"]
+                with self.assertRaises(ValidationError):
+                    client.lookup(48, [b"hash"])
+                client.close()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.threading.Thread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Poller")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
@@ -196,7 +243,7 @@ class TestLookupKeyServer(unittest.TestCase):
 
         target()
 
-        mock_socket.send.assert_called_once_with(b"\x00")
+        mock_socket.send_multipart.assert_called_once_with([b"\x00"])
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -235,7 +282,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                     connector.get_transfer_results(set())
                 results.assert_called_once_with(
                     finished_sending=set(),
-                    finished_recving=set() if layerwise else {"r1"},
+                    finished_recving=set(),
                     failed_recving={"r1"},
                 )
 
@@ -271,6 +318,23 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         config.parallel_config.tensor_parallel_size = 1
         return config
+
+    def test_mooncake_composite_callbacks_require_shared_source_layerwise(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        for use_layerwise, sources, expected in (
+            (True, [2, 8, 14, 20], True),
+            (False, [2, 8, 14, 20], False),
+            (True, list(range(40)), False),
+        ):
+            with self.subTest(use_layerwise=use_layerwise, sources=sources):
+                config = self._make_vllm_config(extra_config={"backend": "mooncake", "use_layerwise": use_layerwise})
+                config.model_config.hf_text_config = types.SimpleNamespace(
+                    num_hidden_layers=40, kv_source_layer_ids=sources
+                )
+                with patch(f"{module}.create_kv_pool_worker"), patch(f"{module}.LookupKeyServer"):
+                    connector = AscendStoreConnector(config, KVConnectorRole.WORKER, None)
+                self.assertEqual(connector.supports_composite_kv_loads, expected)
+                self.assertEqual(connector.supports_composite_kv_saves, expected)
 
     def test_parallel_validation_allows_replicas_and_state_shards(self):
         attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
@@ -729,6 +793,24 @@ class TestAscendStoreConnector(unittest.TestCase):
         worker.get_kv_events.return_value = [stored]
         result = connector.get_kv_connector_kv_cache_events()
         self.assertEqual(result.get_all_events(), [stored])
+
+    def test_shutdown_closes_scheduler_backend_even_when_lookup_close_fails(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+        for layerwise, fail in product((False, True), (False, True)):
+            with self.subTest(layerwise=layerwise, fail=fail), patch.object(KVConnectorBase_V1, "shutdown"):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = layerwise
+                connector.connector_scheduler = MagicMock()
+                connector.connector_worker = None
+                scheduler = connector.connector_scheduler
+                if fail:
+                    scheduler.client.close.side_effect = RuntimeError("lookup close failed")
+                    with self.assertRaisesRegex(RuntimeError, "lookup close failed"):
+                        connector.shutdown()
+                else:
+                    connector.shutdown()
+                scheduler.store_scheduler.close.assert_called_once_with()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")

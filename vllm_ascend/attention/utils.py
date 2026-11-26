@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_prefetch_start
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
@@ -664,6 +665,12 @@ def _kv_layer_transfer_connectors(
         yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
 
 
+def _supports_attention_prefetch_gate(connector: Any) -> bool:
+    return getattr(connector, "supports_attention_prefetch_gate", False) is True or any(
+        _supports_attention_prefetch_gate(child) for child in getattr(connector, "sub_connectors", ())
+    )
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -675,8 +682,12 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
+    prefetch_gate_ready = False
     for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
         layer_connector.wait_for_layer_load(layer_name)
+        prefetch_gate_ready |= _supports_attention_prefetch_gate(layer_connector)
+    if prefetch_gate_ready:
+        record_attention_prefetch_start()
 
 
 def maybe_save_kv_layer_to_connector(
