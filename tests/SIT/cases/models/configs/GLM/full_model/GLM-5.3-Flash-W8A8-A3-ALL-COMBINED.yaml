@@ -7,9 +7,13 @@
 # TTFT/TPOT are reported, with no absolute latency gate.
 # Initial RP3 references are not measurements of this newer serving recipe.
 # P/out1 and warmed-prefix D/out1024 both still use the PD proxy.
-# Cold P/PD use per-request cache salts on both sides; decode reuses one prefix.
-# Reproducible public-data-derived prompts are prepared locally, not downloaded
-# from the private RP3 filesystem. See the emitted manifest for hashes/counts.
+# Reuse public datasets and the standard AISBench streaming request config.
+# Reset both proxy backends before P/PD measurement and each decode warmup;
+# keep the warmed prefix between each decode warmup and its measurement.
+# Public data is approximately 16K content tokens, not exact RP3 input bytes.
+# The prefix0 dataset has 500 unique rows; prefix100 has 1000 identical rows.
+# Cap PD/high-load D requests at those counts; AISBench does not extend slices.
+# RP3 references remain provisional and need calibration for these datasets.
 # Retain existing Flash AIME2025 accuracy settings (not an RP3 accuracy claim).
 test_name: GLM-5.3-Flash-W8A8-A3-ALL-COMBINED
 model: Eco-Tech/GLM-5.3-Flash-w8a8
@@ -196,23 +200,27 @@ templates:
   - --kv-transfer-config
   - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
 benchmarks:
-  prepare_rp3_workloads:
+  reset_before_prefill_16k_warmup:
     case_type: curl_cmd
     cmds:
-    - python3 -m tools.prepare_glm53_flash_rp3
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   prefill_16k_warmup:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/prefill_warmup
-    request_conf: vllm_api_stream_chat_rp3_cold
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 8
     max_out_len: 1
     batch_size: 56
     request_rate: 0.8
+  reset_before_prefill_16k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   prefill_16k:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/prefill
-    request_conf: vllm_api_stream_chat_rp3_cold
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 280
     max_out_len: 1
@@ -220,30 +228,42 @@ benchmarks:
     request_rate: 0.8
     input_throughput_baseline: 13095.38
     input_throughput_threshold: 0.95
+  reset_before_pd_16k_warmup:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   pd_16k_warmup:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/pd_warmup
-    request_conf: vllm_api_stream_chat_rp3_cold
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 8
     max_out_len: 1024
     batch_size: 56
     request_rate: 0.8
+  reset_before_pd_16k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   pd_16k:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/pd
-    request_conf: vllm_api_stream_chat_rp3_cold
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 560
+    num_prompts: 500
     max_out_len: 1024
     batch_size: 56
     request_rate: 0.8
     baseline: 802.5278
     threshold: 0.95
+  reset_before_decode_16k_low_latency_warmup:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   decode_16k_low_latency_warmup:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/decode
-    request_conf: vllm_api_stream_chat_rp3_low
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 224
     max_out_len: 32
@@ -251,8 +271,8 @@ benchmarks:
     request_rate: 0
   decode_16k_low_latency:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/decode
-    request_conf: vllm_api_stream_chat_rp3_low
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 448
     max_out_len: 1024
@@ -260,26 +280,34 @@ benchmarks:
     request_rate: 0
     baseline: 2434.936
     threshold: 0.95
+  reset_before_decode_16k_high_throughput_warmup:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   decode_16k_high_throughput_warmup:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/decode
-    request_conf: vllm_api_stream_chat_rp3_high
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1168
+    num_prompts: 1000
     max_out_len: 32
     batch_size: 292
     request_rate: 0
   decode_16k_high_throughput:
     case_type: performance
-    dataset_path_local: /tmp/glm53_flash_rp3/decode
-    request_conf: vllm_api_stream_chat_rp3_high
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1168
+    num_prompts: 1000
     max_out_len: 1024
     batch_size: 292
     request_rate: 0
     baseline: 6728.6846
     threshold: 0.95
+  reset_before_acc_aime2025:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:$SERVER_PORT/reset_prefix_cache
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
