@@ -19,6 +19,7 @@
 import math
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,6 +60,7 @@ from tests.e2e.pull_request.one_card.attention_utils import (  # noqa: E402
     create_vllm_config,
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl  # noqa: E402
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
 
 SPARSE_COUNT = 2048  # indexer_select_post_process (sfa_v1)
 
@@ -489,3 +491,46 @@ def test_sfa_sparse_flash_attention_precision(
         vllm_config,
         tensor_parallel_size=tensor_parallel_size,
     )
+
+
+def test_split_sfa_page_strided_writer_matches_dense_fused_writer():
+    init_device_properties_triton()
+    blocks, block_size, latent_dim, rope_dim = 3, 128, 512, 64
+    written = [257, 127, 255, 0, 128]
+    rows = len(written)
+    generator = torch.Generator().manual_seed(21083)
+    dtype = torch.bfloat16
+    # Match the strided input produced by splitting the fused Q/KV projection.
+    projection = torch.randn(rows, 2048 + latent_dim + rope_dim, generator=generator).to("npu", dtype)
+    kv = projection[:, 2048:]
+    angles = torch.randn(rows, 1, 1, rope_dim // 2, generator=generator).repeat(1, 1, 1, 2)
+    cos, sin = angles.cos().to("npu", dtype), angles.sin().to("npu", dtype)
+    slots = torch.tensor(written, dtype=torch.int64, device="npu")
+    gamma = torch.randn(latent_dim, generator=generator).to("npu", dtype)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.kv_a_layernorm = SimpleNamespace(weight=gamma, variance_epsilon=1e-5)
+    impl.num_kv_heads, impl.kv_lora_rank, impl.qk_rope_head_dim = 1, latent_dim, rope_dim
+    impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.use_rope = True
+
+    sentinel = -32.0
+    dense = tuple(
+        torch.full((blocks, block_size, 1, w), sentinel, device="npu", dtype=dtype) for w in (latent_dim, rope_dim)
+    )
+    backing = torch.full((blocks, block_size * (latent_dim + rope_dim)), sentinel, device="npu", dtype=dtype)
+    strided = tuple(
+        part.view(blocks, block_size, 1, width)
+        for part, width in zip(
+            backing.split((block_size * latent_dim, block_size * rope_dim), dim=1), (latent_dim, rope_dim)
+        )
+    )
+    for cache in (dense, strided):
+        impl._exec_kv_local(kv, cos, sin, cache, slots, None)
+
+    untouched = torch.ones(blocks * block_size, dtype=torch.bool)
+    untouched[written] = False
+    for actual, reference in zip(strided, dense):
+        actual, reference = actual.cpu().flatten(0, 1), reference.cpu().flatten(0, 1)
+        assert (reference[written] != sentinel).any(dim=-1).all()
+        torch.testing.assert_close(actual[written], reference[written], rtol=0.02, atol=0.02)
+        assert (actual[untouched] == sentinel).all()

@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
@@ -442,6 +443,21 @@ class AscendSFABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe the main SFA cache as [kernel blocks, heads, tokens, bytes]."""
+        tokens = kernel_block_size or spec.num_states
+        blocks = num_blocks * (spec.num_states // tokens)
+        prefix = (blocks, spec.num_kv_heads, tokens)
+        widths = (spec.head_size - spec.rope_cache_dim, spec.rope_cache_dim)
+        return tuple((*prefix, width * get_dtype_size(spec.dtype)) for width in widths if width)
 
     @staticmethod
     def prepare_layerwise_cache_view(
@@ -1581,6 +1597,21 @@ class AscendSFAImpl(MLAAttentionImpl):
                 tile_size=self.sfa_qsfa_tile_size,
                 use_rope=self.use_rope,
             )
+
+        if not kv_cache[0].is_contiguous():
+            # KvRmsNormRopeCache requests contiguous outputs. Transform just
+            # the current rows and scatter them with the physical page strides.
+            nope, rope = kv_no_split.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
+            nope, _ = torch_npu.npu_rms_norm(
+                nope.view(-1, self.kv_lora_rank),
+                self.kv_a_layernorm.weight,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+            )
+            rope = self.rope_single(rope.view(B, N, self.qk_rope_head_dim), cos, sin)
+            write_slots = slots[:B]
+            write_dsa_cache(kv_cache[0], nope, write_slots)
+            write_dsa_cache(kv_cache[1], rope, write_slots)
+            return None, None
 
         torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,

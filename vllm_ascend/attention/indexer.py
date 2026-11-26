@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapes,
     has_requests_to_run_as_prefill,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
@@ -384,6 +385,25 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_runtime_shapes(
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe K and scale bytes for each page in the indexer's block table."""
+        block = kernel_block_size or spec.block_size
+        pages = num_blocks * (spec.block_size // block) * spec.sfa_dcp_replicated_indexer_size
+        prefix = (pages, spec.num_kv_heads, block)
+        key_shape = (*prefix, spec.head_size * get_dtype_size(spec.dtype))
+        if not spec.scale_dim:
+            return (key_shape,)
+        if spec.cache_sparse_li_c4:
+            # CANN's MXFP4 selector takes a pair of E8M0 bytes per 64 features.
+            return key_shape, (*prefix, spec.scale_dim // 2, 2)
+        return key_shape, (*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype))
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
@@ -1046,12 +1066,16 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             )
         elif fuse_store:
             assert k_li_scale is not None
+            key_cache, scale_cache = self.k_cache.kv_cache
             store_indexer_key_scale(
                 k_li,
                 k_li_scale,
                 slot_mapping,
-                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                key_cache,
+                scale_cache,
+                block_size=key_cache.shape[1],
+                key_block_stride=key_cache.stride(0),
+                scale_block_stride=scale_cache.stride(0),
             )
         else:
             self.write_cache(k_li, k_li_scale, slot_mapping, indexer_metadata.cache_scatter_indices)

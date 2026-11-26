@@ -71,7 +71,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -82,6 +83,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
+    is_glm_dsa_cache_model,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -1434,6 +1436,21 @@ def create_cache_component_views(
     return views
 
 
+def create_contiguous_cache_component_views(
+    raw_tensor: torch.Tensor,
+    cache_shapes: Sequence[tuple[int, ...]],
+    cache_dtypes: Sequence[torch.dtype],
+) -> list[torch.Tensor]:
+    """Place all blocks of each component together in the layer's byte region."""
+    offset = 0
+    views = []
+    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
+        size = math.prod(shape) * get_dtype_size(dtype)
+        views.append(raw_tensor.narrow(0, offset, size).view(dtype).view(shape))
+        offset += size
+    return views
+
+
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1441,6 +1458,8 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
+    *,
+    contiguous_main_cache: bool = False,
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
     placements = {
@@ -1453,6 +1472,7 @@ def create_kv_cache_runtime_views(
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
         spec = group.kv_cache_spec
+        kernel_block_size = group.kernel_block_size or kernel_block_sizes[group.kv_cache_group_id]
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
@@ -1464,25 +1484,30 @@ def create_kv_cache_runtime_views(
                 spec,
                 num_blocks,
                 layout,
-                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                kernel_block_size=kernel_block_size,
             )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
+            dtypes = [spec.dtype] * len(shapes)
             if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
+                dtypes[1] = spec.scale_dtype
             # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
             # views with the content dimension expressed in dtype elements.
             cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
+                (blocks, tokens, heads, *inner, content_bytes // get_dtype_size(dtype))
+                for (blocks, heads, tokens, *inner, content_bytes), dtype in zip(shapes, dtypes, strict=True)
             ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
+            raw = backing[start : start + span]
+            if contiguous_main_cache and not isinstance(spec, AscendSFAIndexerCacheSpec):
+                components = create_contiguous_cache_component_views(raw, cache_shapes, dtypes)
+            else:
+                # Indexer replicas and kernel sub-blocks each own one K/scale page.
+                pages_per_block = shapes[0][0] // num_blocks
+                components = create_cache_component_views(
+                    raw, cache_shapes, dtypes, descriptor.block_stride // pages_per_block
+                )
             if issubclass(group.backend, DeepseekV41CacheBackend):
                 caches[name] = components[0] if len(components) == 1 else tuple(components)
+            elif issubclass(group.backend, (AscendSFABackend, AscendSFAIndexerBackend)):
+                caches[name] = tuple(components)
             else:
                 caches[name] = components
     for name, target in shared_layers.items():
@@ -1495,6 +1520,10 @@ def unified_allocate_kv_cache(
     device: torch.device,
     layout: Any,
     kernel_block_sizes: list[int],
+    attn_groups: Sequence[AttentionGroup],
+    shared_layers: Mapping[str, str],
+    *,
+    contiguous_main_cache: bool = False,
 ) -> dict[str, Any]:
     """Materialize the shared pool described by upstream byte placements.
 
@@ -1506,9 +1535,6 @@ def unified_allocate_kv_cache(
     sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
     if len(sizes) != 1:
         raise ValueError("Unified KV cache descriptors must share one backing allocation.")
-    vllm_config = get_current_vllm_config()
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = get_shared_kv_cache_layers(vllm_config)
     backing_size = sizes.pop()
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
@@ -1518,10 +1544,22 @@ def unified_allocate_kv_cache(
     return create_kv_cache_runtime_views(
         kv_cache_config,
         buf,
-        _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
+        attn_groups,
         kernel_block_sizes,
         shared_layers,
         layout,
+        contiguous_main_cache=contiguous_main_cache,
+    )
+
+
+def _uses_specialized_cache_allocation(kv_cache_config: KVCacheConfig) -> bool:
+    """KVPP and offload allocate rank-local, host or reused layer storage."""
+    config = get_ascend_config()
+    return (
+        config.kvpp_config.size > 1
+        or config.sparse_kv_offload_config.enabled
+        or bool(kv_cache_config.host_group_ids)
+        or get_layerwise_reuse_layout(kv_cache_config) is not None
     )
 
 
@@ -1544,22 +1582,43 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
-        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+        shared_layers = get_shared_kv_cache_layers(vllm_config)
+        groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers)
+        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes, groups, shared_layers)
     shared_layers = {
         layer_name: target_layer
         for layer_name, layer in attn_layers.items()
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
 
+    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+    # GLM's full/shared indexers normally share one scheduler group. A separately
+    # replicated draft can introduce overlapping groups or a different backend.
+    # Only layer-private placements can store an entire component contiguously.
+    if (
+        is_glm_dsa_cache_model(vllm_config)
+        and not _uses_specialized_cache_allocation(kv_cache_config)
+        and layout.is_layer_compact
+        and len(kv_cache_config.kv_cache_groups) == 1
+        and all(issubclass(group.backend, (AscendSFABackend, AscendSFAIndexerBackend)) for group in attn_groups)
+    ):
+        return unified_allocate_kv_cache(
+            kv_cache_config,
+            device,
+            layout,
+            kernel_block_sizes,
+            attn_groups,
+            shared_layers,
+            contiguous_main_cache=get_ascend_config().sfa_cache_layout == "contiguous",
+        )
+
     raw_tensors = _allocate_kv_cache(
         kv_cache_config,
         shared_layers=shared_layers,
         device=device,
     )
-
-    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
     # Different KV groups can share a slot by using separate block pages.
     # Splitting the whole slot by component can put data in another group's page.
