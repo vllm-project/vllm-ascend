@@ -115,7 +115,9 @@ class BaseKVPoolScheduler(ABC):
             use_eagle_fn = getattr(speculative_config, "use_eagle", None)
             self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
             use_eagle_block_drop_fn = getattr(speculative_config, "use_eagle_block_drop", None)
-            self.use_eagle_block_drop = use_eagle_block_drop_fn() is True if callable(use_eagle_block_drop_fn) else False
+            self.use_eagle_block_drop = (
+                use_eagle_block_drop_fn() is True if callable(use_eagle_block_drop_fn) else False
+            )
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.swa_group_ids: set[int] = set()

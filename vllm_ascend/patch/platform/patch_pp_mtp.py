@@ -27,7 +27,6 @@ from functools import wraps
 
 from vllm.logger import logger
 
-
 _PATCHED = False
 
 

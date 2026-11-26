@@ -91,10 +91,13 @@ class ExternalCachedBlockPool:
         self,
         hash_block_size: int,
         exists: set[tuple[int, bytes]] | None = None,
+        *,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
@@ -219,16 +222,20 @@ class AscendStoreCoordinator:
         self.eagle_reachable_group_ids: set[int] = {
             group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
         }
-        self.eagle_proof_margin_by_group: dict[int, int] = {
-            group_id: eagle_proof_margin(
-                spec.block_size,
-                self.hash_block_size,
-                self.enable_partial_hash_hits and getattr(manager_cls, "supports_fine_grained_hash_lookup", False),
-            )
-            for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups)
-            if index in self.eagle_attn_group_indices and not isinstance(spec, MambaSpec)
-            for group_id in group_ids
-        } if vllm_version_is("0.34.0") else {}
+        self.eagle_proof_margin_by_group: dict[int, int] = (
+            {
+                group_id: eagle_proof_margin(
+                    spec.block_size,
+                    self.hash_block_size,
+                    self.enable_partial_hash_hits and getattr(manager_cls, "supports_fine_grained_hash_lookup", False),
+                )
+                for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups)
+                if index in self.eagle_attn_group_indices and not isinstance(spec, MambaSpec)
+                for group_id in group_ids
+            }
+            if vllm_version_is("0.34.0")
+            else {}
+        )
 
     def find_longest_cache_hit(
         self,
@@ -274,7 +281,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size),
+            ExternalCachedBlockPool(self.hash_block_size, num_hash_lookahead_tokens=self.num_hash_lookahead_tokens),
             apply_eagle=False,
         )
         return masks
@@ -411,7 +418,9 @@ class AscendStoreCoordinator:
         _, hit_length = self.find_longest_cache_hit(
             hit_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size, exists),
+            ExternalCachedBlockPool(
+                self.hash_block_size, exists, num_hash_lookahead_tokens=self.num_hash_lookahead_tokens
+            ),
             apply_eagle=False,
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)

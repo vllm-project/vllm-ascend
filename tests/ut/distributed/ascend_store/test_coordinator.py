@@ -131,7 +131,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         groups = [
             KVCacheGroupSpec(["attention"], _full_spec(32)),
             KVCacheGroupSpec(
-                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+                ["state"],
+                LegacyMambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align"),
             ),
         ]
         hashes = _hashes(4)
@@ -156,7 +157,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         groups = [
             KVCacheGroupSpec(["attention"], _full_spec(32)),
             KVCacheGroupSpec(
-                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+                ["state"],
+                LegacyMambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align"),
             ),
         ]
         coord = AscendStoreCoordinator(

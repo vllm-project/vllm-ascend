@@ -78,6 +78,7 @@ from vllm_ascend.core.kv_cache_compat import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
     get_group_layer_layouts,
     get_group_layout,
 )

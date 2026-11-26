@@ -46,13 +46,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
-from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
+from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedIpcChunk
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 

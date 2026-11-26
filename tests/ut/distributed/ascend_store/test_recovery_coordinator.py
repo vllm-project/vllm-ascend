@@ -7,13 +7,8 @@ from math import lcm
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, LegacyMambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import coordinator as coordinator_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator as StoreCoordinator,
@@ -31,7 +26,7 @@ def chunk_hashes_for_block_size(hashes, hash_size, block_size):
 
 
 def _mamba_align(block_size=32):
-    return MambaSpec(
+    return LegacyMambaSpec(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -560,7 +555,7 @@ def test_load_mask_without_eagle_unchanged():
 
 
 def _mamba(block_size=16):
-    return MambaSpec(
+    return LegacyMambaSpec(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),

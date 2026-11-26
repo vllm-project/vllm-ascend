@@ -314,7 +314,15 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[in
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
     if not kv_cache_groups:
         return [0]
-    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(get_group_layout(group))]
+    group_ids = [
+        i
+        for i, group in enumerate(kv_cache_groups)
+        if (
+            group.prefix_cacheable
+            if not vllm_version_is("0.34.0") and isinstance(group, KVCacheGroup)
+            else is_prefix_cacheable(get_group_layout(group))
+        )
+    ]
     assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
     return group_ids
 

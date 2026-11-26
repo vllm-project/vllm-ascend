@@ -34,10 +34,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedIpcChunk,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,

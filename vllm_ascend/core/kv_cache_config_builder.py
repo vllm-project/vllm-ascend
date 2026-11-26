@@ -148,28 +148,13 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return kimi_k3_groups
 
         groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
-        if vllm_config.attention_config.hisparse_config is None:
-            return groups
-        transfer_config = vllm_config.kv_transfer_config
-        if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
-            return groups
-
-        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
-            AscendStoreHiSparseResidentSpec,
-        )
-
-        for i, group in enumerate(groups):
-            spec = group.kv_cache_spec
-            if isinstance(spec, HiSparseResidentSpec):
-                resident_spec = AscendStoreHiSparseResidentSpec(
-                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
-                )
-                groups[i] = replace(group, kv_cache_spec=resident_spec)
-        return groups
+        return _apply_hisparse_ascendstore_admission(vllm_config, groups)
 
     def _get_native_groups(self, vllm_config, configs):
+        attention = getattr(vllm_config, "attention_config", None)
+        if getattr(attention, "hisparse_config", None) is not None:
+            groups = super().get_kv_cache_groups(vllm_config, configs)
+            return _apply_hisparse_ascendstore_admission(vllm_config, groups)
         specs = {name: config.spec for name, config in configs.items()}
         if is_deepseek_v41_cache(specs):
             return group_layer_configs(configs)
@@ -300,6 +285,47 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         ):
             return _deepseek_v4_pool_bytes_per_block(kv_cache_groups)
         return super()._get_pool_bytes_per_block(vllm_config, native_groups)
+
+
+def _apply_hisparse_ascendstore_admission(vllm_config, groups):
+    if vllm_config.attention_config.hisparse_config is None:
+        return groups
+    transfer_config = vllm_config.kv_transfer_config
+    if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
+        return groups
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
+        AscendStoreHiSparseResidentManager,
+        AscendStoreHiSparseResidentSpec,
+    )
+
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+
+        for i, group in enumerate(groups):
+            spec = group.kv_cache_spec
+            if isinstance(spec, HiSparseResidentSpec):
+                resident_spec = AscendStoreHiSparseResidentSpec(
+                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                )
+                groups[i] = replace(group, kv_cache_spec=resident_spec)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseResidentManager
+
+        for i, group in enumerate(groups):
+            if group.manager_cls is HiSparseResidentManager:
+                resident_specs = {
+                    name: AscendStoreHiSparseResidentSpec(
+                        **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                    )
+                    for name, spec in group.kv_cache_specs.items()
+                }
+                groups[i] = replace(
+                    group,
+                    kv_cache_specs=resident_specs,
+                    manager_config=AscendStoreHiSparseResidentManager.config(),
+                )
+    return groups
 
 
 def _annotate_dspark_groups(groups, layer_configs):

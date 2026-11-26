@@ -19,8 +19,8 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import FullAttentionSpec, RSWASpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, RSWASpec, get_group_layer_layouts
 from vllm_ascend.core.kv_cache_interface import supports_bounded_replay
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.base import (
     LayerwiseDataPlane,
@@ -65,8 +65,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         ):
             return False
         for group_id in worker.cacheable_group_ids:
-            spec = worker.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+            specs = get_group_layer_layouts(worker.kv_cache_config.kv_cache_groups[group_id]).values()
             if not all(
                 isinstance(layer_spec, FullAttentionSpec) and not isinstance(layer_spec, RSWASpec)
                 for layer_spec in specs
