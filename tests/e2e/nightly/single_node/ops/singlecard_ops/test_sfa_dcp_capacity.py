@@ -18,6 +18,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBu
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
 )
+from vllm_ascend.attention.context_parallel.sfa_split_kv import run_qsfa_split_kv
 
 
 @pytest.mark.parametrize("batch", [2, 30])
@@ -138,4 +139,71 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
     check(result, selected)
     eager = run()
     torch.testing.assert_close(result[0], eager[0])
+    graph.reset()
+
+
+@pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
+@pytest.mark.parametrize("heads", [12, 96])
+@torch.inference_mode()
+def test_a5_nope_qsfa_split_kv_graph(heads):
+    if "950" not in torch.npu.get_device_name():
+        pytest.skip("Requires the A5 FP8 QSFA kernel")
+    importlib.import_module("vllm_ascend.vllm_ascend_C")
+    torch.manual_seed(42)
+    page_size, width, rows = 128, 512, 4
+    q = torch.randn(rows, heads, width, dtype=torch.bfloat16).npu()
+    k = torch.randn(4, page_size, 1, width).to(torch.float8_e4m3fn)
+    scale = torch.ones(4, page_size, 1, 4, dtype=torch.float32)
+    kv = torch.cat((k.view(torch.uint8), scale.view(torch.uint8)), dim=-1).view(torch.float8_e4m3fn).npu()
+    table = torch.arange(4, dtype=torch.int32).view(1, 4).npu()
+    seq_kv = torch.tensor([512], dtype=torch.int32).npu()
+    cu_q = torch.tensor([rows], dtype=torch.int32).npu()
+    all_indices = torch.arange(512, dtype=torch.int32).view(1, 1, 512).expand(rows, 1, 512).npu()
+    positions = torch.arange(512, dtype=torch.int32).view(1, 1, 512).npu()
+
+    def candidates(counts):
+        return torch.where(positions < torch.tensor(counts, dtype=torch.int32).view(rows, 1, 1).npu(), all_indices, -1)
+
+    def attend(query, indices, cu_seqlens):
+        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+            query,
+            kv,
+            kv,
+            indices,
+            width**-0.5,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            block_table=table,
+            actual_seq_lengths_query=cu_seqlens,
+            actual_seq_lengths_kv=seq_kv,
+            sparse_block_size=1,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=0,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            rope_head_dim=0,
+            return_softmax_lse=True,
+        )
+
+    initial = candidates([0, 128, 129, 512])
+
+    def compare(actual, ref):
+        for split_tensor, ref_tensor in zip(actual, ref):
+            torch.testing.assert_close(split_tensor.float().cpu(), ref_tensor.float().cpu(), atol=0.02, rtol=0.01)
+        assert torch.count_nonzero(actual[0][0]).item() == 0
+
+    # Warm up all participating kernels before capture.
+    for _ in range(3):
+        compare(run_qsfa_split_kv(q, initial, cu_q, attend), attend(q, initial, cu_q))
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = run_qsfa_split_kv(q, initial, cu_q, attend)
+    for counts, active_rows in (([0, 31, 128, 2], 3), ([0, 257, 255, 511], 4), ([0, 3, 4, 5], 2)):
+        initial.copy_(candidates(counts))
+        cu_q.fill_(active_rows)
+        graph.replay()
+        torch.npu.synchronize()
+        compare(result, attend(q, initial, cu_q))
     graph.reset()
