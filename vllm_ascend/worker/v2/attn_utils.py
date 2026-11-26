@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
+from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec, select_common_block_size
 
