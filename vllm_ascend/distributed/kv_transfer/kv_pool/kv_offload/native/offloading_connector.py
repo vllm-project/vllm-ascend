@@ -273,13 +273,10 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                         if group.role is KVCacheGroupRole.HISPARSE_INDEXER and isinstance(
                             layer_spec, AscendSFAIndexerCacheSpec
                         ):
+                            from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
+
                             layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
-                            block_stride = getattr(layer, "hisparse_block_stride", 1)
-                            if block_stride > 1:
-                                # Attention addresses the dense alias with scaled block IDs.
-                                # Offloading receives logical block IDs, so restore the slab stride.
-                                (dense_cache,) = layer_cache
-                                layer_cache = (dense_cache[::block_stride],)
+                            layer_cache = hisparse_indexer_transfer_views(layer_cache, layer)
                         views = _canonicalize_split_cache(
                             layer_cache,
                             num_blocks,

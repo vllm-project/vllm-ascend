@@ -24,6 +24,8 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    apply_prefill_as_decode_mask,
+    has_requests_to_run_as_prefill,
     uses_pcp_sharded_layout,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -256,7 +258,11 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             positions=global_batch.positions,
             attn_state=global_batch.attn_state,
             num_input_tokens=global_batch.num_tokens_after_padding,
-            is_prefilling=torch.from_numpy(global_batch.is_prefilling_np),
+            is_prefilling=torch.from_numpy(
+                apply_prefill_as_decode_mask(
+                    global_batch.is_prefilling_np, getattr(global_batch, "prefill_runs_as_decode_np", None)
+                )
+            ),
         )
 
     def _build_local_common_attn_metadata(
@@ -355,7 +361,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             )
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
-        has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+        has_prefill = has_requests_to_run_as_prefill(pcp_context.global_batch)
         # Replicated decode stays on the local metadata path. Sharded decode
         # owns different requests per rank, so it still needs global metadata.
         needs_global_metadata = has_prefill or self._is_decode_sharded

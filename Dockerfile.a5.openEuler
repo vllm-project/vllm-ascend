@@ -106,7 +106,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     FLASH_ATTN_BUILD_NPU=950 python3 -m pip install --no-build-isolation --no-deps \
         "flash-attn-npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
-    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
+    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH

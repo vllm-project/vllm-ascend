@@ -557,6 +557,9 @@ def test_shutdown_retry_after_model_deletion_releases_tcp_lease(pool_module, own
     ns = dict(Parent=Parent, C8KVBlockZeroer=type("C8KVBlockZeroer", (), {}))
     exec(compile(tree, str(path), "exec"), ns)
     runner = ns["Runner"]()
+    runner.ascend_config = types.SimpleNamespace(
+        ascend_compilation_config=types.SimpleNamespace(enable_static_kernel=False)
+    )
     runner.model = types.SimpleNamespace(modules=lambda: [embedding])
     with pytest.raises(RuntimeError, match="empty cache failed"):
         runner.shutdown()
@@ -724,6 +727,9 @@ def test_v2_shutdown_finds_shared_embedding_inside_vl_wrapper(pool_module, owner
     ns = dict(Parent=Parent, C8KVBlockZeroer=type("C8KVBlockZeroer", (), {}))
     exec(compile(tree, str(path), "exec"), ns)
     runner = ns["Runner"]()
+    runner.ascend_config = types.SimpleNamespace(
+        ascend_compilation_config=types.SimpleNamespace(enable_static_kernel=False)
+    )
     runner.model = wrapper
     runner.shutdown()
     assert client.closed and embedding._shared_pool_client is None

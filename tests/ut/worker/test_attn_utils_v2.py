@@ -53,7 +53,6 @@ from vllm_ascend.core.kv_cache_config_builder import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
-    get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -100,16 +99,13 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0)
 
 
 def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttentionSpec:
-    """Build a DSV4 AscendMLAAttentionSpec; #51718 moved compress_ratio ->
-    tokens_per_state on main."""
-    ratio_kwargs = {"tokens_per_state": compress_ratio}
     return AscendMLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        tokens_per_state=compress_ratio,
     )
 
 
@@ -1485,10 +1481,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
-    assert get_storage_block_size(spec) == cache_config.block_size
+    assert spec.num_states == cache_config.block_size
     merged_spec = spec.merge([spec])
     assert merged_spec.tokens_per_state == cache_layer.compress_ratio
-    assert get_storage_block_size(merged_spec) == cache_config.block_size
+    assert merged_spec.num_states == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -1553,7 +1549,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
-        (num_blocks, get_storage_block_size(spec), 1, dim) for dim in component_dims
+        (num_blocks, spec.num_states, 1, dim) for dim in component_dims
     ]
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
@@ -1765,6 +1761,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         req_ids=["request-1"],
         num_computed_tokens_np=np.array([128], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        prefill_runs_as_decode_np=None,
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
         max_query_len=None,
         seq_lens=torch.tensor([129], dtype=torch.int32),
@@ -1895,7 +1892,7 @@ def test_tq_batched_slots_use_builder_config_without_global_context(monkeypatch,
     get_current.assert_not_called()
     get_plan.assert_called_once_with(config, 4)
     for call, spec, row in zip(calls, specs, slots):
-        expected = plan.format_dsa_slot_mapping(row[:3], get_storage_block_size(spec))
+        expected = plan.format_dsa_slot_mapping(row[:3], spec.num_states)
         torch.testing.assert_close(call["formatted_slot_mapping"], expected, rtol=0, atol=0)
         assert call["for_cudagraph_capture"] == for_capture
     cached_sizes = attn_groups[0][0].get_metadata_builder(0).tq_group_block_sizes
@@ -1903,7 +1900,7 @@ def test_tq_batched_slots_use_builder_config_without_global_context(monkeypatch,
     attn_utils.build_attn_metadata(**metadata_args)
     assert attn_groups[0][0].get_metadata_builder(0).tq_group_block_sizes is cached_sizes
     for call, spec, row in zip(calls[2:], specs, slots):
-        expected = plan.format_dsa_slot_mapping(row[:3], get_storage_block_size(spec))
+        expected = plan.format_dsa_slot_mapping(row[:3], spec.num_states)
         torch.testing.assert_close(call["formatted_slot_mapping"], expected, rtol=0, atol=0)
     get_current.assert_not_called()
 
@@ -1931,7 +1928,7 @@ def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
         ],
     )
 
-    assert get_storage_block_size(spec) == 32
+    assert spec.num_states == 32
     assert upstream_attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
 
 
@@ -2114,6 +2111,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
             is_prefilling_np=np.array([True, True, False, False]),
+            prefill_runs_as_decode_np=None,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,

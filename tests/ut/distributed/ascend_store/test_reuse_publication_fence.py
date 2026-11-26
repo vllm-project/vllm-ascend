@@ -46,7 +46,7 @@ class TestReusePublicationFence(unittest.TestCase):
                     group = SimpleNamespace(barrier=lambda calls=calls: calls.append("barrier"))
                     with (
                         patch.object(module, "get_tp_group", return_value=group),
-                        patch.object(module, "reset_attention_compute_start_gate"),
+                        patch.object(module, "reset_attention_gates"),
                     ):
                         worker.prepare_layerwise_step(SimpleNamespace(requests=requests))
                     self.assertEqual(calls, ["drain", "barrier", "prepare"] if sync else ["drain", "prepare"])

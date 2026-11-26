@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
@@ -61,14 +61,13 @@ def _make_full_manager(
     compress_ratio: int = 4,
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
-    ratio_kwargs = {"tokens_per_state": compress_ratio}
     spec = AscendMLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        tokens_per_state=compress_ratio,
     )
     block_pool = BlockPool(
         num_gpu_blocks=8,
@@ -111,7 +110,7 @@ def test_compressed_spec_separates_logical_and_storage_blocks(
     logical_block_size = physical_block_size * compress_ratio
 
     assert spec.block_size == logical_block_size
-    assert get_storage_block_size(spec) == physical_block_size
+    assert spec.num_states == physical_block_size
     assert spec.page_size_bytes == physical_block_size * torch.tensor([], dtype=torch.float32).element_size()
     assert isinstance(manager, FullAttentionManager)
 
@@ -244,14 +243,13 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
-    ratio_kwargs = {"tokens_per_state": 4}
     compressed_spec = MLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        tokens_per_state=4,
     )
     full_spec = FullAttentionSpec(
         block_size=physical_block_size,

@@ -97,10 +97,22 @@ class DecoderReplayState:
             & ~self.keeps_rows[global_batch.idx_mapping_np[:num_global_reqs]]
         )
         global_kept = np.where(trim, np.minimum(global_lens, self.layers.window), global_lens)
-        if not (global_kept < global_lens).any():
+        trimmed = global_kept < global_lens
+        if not trimmed.any():
             return None
         num_padded = int(global_kept.sum())
-        if num_padded >= batch.num_tokens_after_padding:
+        # A prefix hit re-indexes the replay window across ranks, so the PCP
+        # branch must compact even when the global window is wider than one
+        # rank's shard. Without cached context the ordinary replay already
+        # covers the window; keep the cheaper path when compacting would only
+        # pad every rank up to a wider window. Compare against the global
+        # shard width, not this rank's padded extent, so all PCP ranks reach
+        # the same decision.
+        has_cached_context = bool((trimmed & (global_batch.seq_lens_np[:num_global_reqs] > global_lens)).any())
+        global_extent = int(global_batch.query_start_loc_np[num_global_reqs])
+        pcp_size = max(getattr(self.config.parallel_config, "prefill_context_parallel_size", 1), 1)
+        rank_shard = -(-global_extent // pcp_size)
+        if num_padded >= rank_shard and not has_cached_context:
             return None
 
         starts = np.zeros(self.keeps_rows.size, dtype=np.int32)
