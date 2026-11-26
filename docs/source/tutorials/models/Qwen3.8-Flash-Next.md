@@ -728,7 +728,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --mamba-cache-mode align \
         --mamba-ssm-cache-dtype bfloat16 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-        --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32,36,40,44,48,64,80,96,112,128],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
@@ -809,8 +809,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -874,8 +876,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
     unset VLLM_USE_FASTOKENS
