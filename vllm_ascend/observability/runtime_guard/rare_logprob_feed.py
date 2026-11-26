@@ -161,8 +161,8 @@ def get_rare_logprob_feed_queue() -> RareLogprobFeedQueue:
         return _FEED_QUEUE
 
 
-def reset_rare_logprob_feed_queue_for_tests() -> None:
-    """Drop singleton (unit tests only)."""
+def shutdown_rare_logprob_feed_queue() -> None:
+    """Stop the singleton feed worker and drop it (process teardown / tests)."""
     global _FEED_QUEUE
     with _FEED_QUEUE_LOCK:
         if _FEED_QUEUE is not None:

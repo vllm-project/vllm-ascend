@@ -26,7 +26,7 @@ from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProces
 from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
     RareLogprobBatch,
     get_rare_logprob_feed_queue,
-    reset_rare_logprob_feed_queue_for_tests,
+    shutdown_rare_logprob_feed_queue,
 )
 from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
@@ -134,7 +134,7 @@ def _make_feed_processor():
 
 def test_feed_rare_logprobs_async_submits_and_releases_pin():
     RequestGuardStore.reset_for_tests()
-    reset_rare_logprob_feed_queue_for_tests()
+    shutdown_rare_logprob_feed_queue()
     try:
         p, fed, materialized = _make_feed_processor()
         store = RequestGuardStore.get()
@@ -154,14 +154,14 @@ def test_feed_rare_logprobs_async_submits_and_releases_pin():
         assert store.get_state("a") is not None
         assert store.get_state("a").rare_feed_jobs == 0
     finally:
-        reset_rare_logprob_feed_queue_for_tests()
+        shutdown_rare_logprob_feed_queue()
         RequestGuardStore.reset_for_tests()
 
 
 def test_feed_rare_logprobs_sync_runs_inline(monkeypatch):
     """VLLM_ASCEND_RG_RARE_SYNC_FEED=1 skips the queue (debug short path)."""
     RequestGuardStore.reset_for_tests()
-    reset_rare_logprob_feed_queue_for_tests()
+    shutdown_rare_logprob_feed_queue()
     monkeypatch.setenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", "1")
     try:
         p, fed, materialized = _make_feed_processor()
@@ -183,7 +183,7 @@ def test_feed_rare_logprobs_sync_runs_inline(monkeypatch):
         assert store.get_state("a").rare_feed_jobs == 0
     finally:
         monkeypatch.delenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", raising=False)
-        reset_rare_logprob_feed_queue_for_tests()
+        shutdown_rare_logprob_feed_queue()
         RequestGuardStore.reset_for_tests()
 
 

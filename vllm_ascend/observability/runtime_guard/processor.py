@@ -228,12 +228,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             logger.debug("[runtime_guard] action worker stop failed", exc_info=True)
         try:
             from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
-                reset_rare_logprob_feed_queue_for_tests,
+                shutdown_rare_logprob_feed_queue,
             )
 
-            # Production teardown: stop the singleton feed worker (same helper
-            # the UTs use to drop it). Avoid leaving a daemon thread after exit.
-            reset_rare_logprob_feed_queue_for_tests()
+            shutdown_rare_logprob_feed_queue()
         except Exception:
             logger.debug("[runtime_guard] rare feed queue stop failed", exc_info=True)
 

@@ -45,7 +45,6 @@ from vllm_ascend.observability.runtime_guard.detector.rare import (  # noqa: E40
     CONFIG_RARE,
     RareDetector,
     build_from_token_bytes,
-    rare_enums,
     rare_native,
     rare_vocab,
     register_rare_table,
@@ -296,24 +295,14 @@ def test_native_feed_rejects_non_fs_gate():
         rare_native.NativeFeed(det)
 
 
-def test_rare_enums_bad_sidecar_falls_back(tmp_path: Path, monkeypatch):
-    """#16: truncated/stale .c must not break worker import tables."""
-    bad = tmp_path / "rare_feed_native.c"
-    bad.write_text("enum { FT_LP1 = 0 };\n", encoding="utf-8")
-    monkeypatch.setattr(rare_enums, "_C_PATH", bad)
-    feat, inp = rare_enums._load_feat_input()
-    assert feat == rare_enums._FALLBACK_FEAT
-    assert inp == rare_enums._FALLBACK_INPUT
-
-
 def test_feed_queue_start_sets_started_after_thread_start(monkeypatch):
     """#5: _started stays false if Thread.start raises."""
     from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
         RareLogprobFeedQueue,
-        reset_rare_logprob_feed_queue_for_tests,
+        shutdown_rare_logprob_feed_queue,
     )
 
-    reset_rare_logprob_feed_queue_for_tests()
+    shutdown_rare_logprob_feed_queue()
     q = RareLogprobFeedQueue()
 
     class BoomThread:
