@@ -851,7 +851,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.num_spec + 1,
                     decay_cache=records.decay_cache,
                     normalized_key_cache=records.normalized_key_cache,
-                    store_raw_gate=attn_metadata_narrowed.recoverssm_context.decay_base_addrs is None,
+                    store_raw_gate=records.decay_cache is None,
                 )
             else:
                 spec_output = recurrent_kda(

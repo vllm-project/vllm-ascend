@@ -664,7 +664,6 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
     )
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
-        recoverssm_context=SimpleNamespace(decay_base_addrs=None),
         num_prefills=0,
         num_decodes=int(mixed),
         num_decode_tokens=2 if mixed else 0,
@@ -918,7 +917,6 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
     ids = torch.tensor([0]) if mode == "mixed" else torch.tensor([0, 1])
     metadata = SimpleNamespace(
         num_actual_tokens=0 if mode == "idle" else 2,
-        recoverssm_context=SimpleNamespace(decay_base_addrs=torch.empty(1, dtype=torch.int64)) if speculative else None,
         num_prefills=0,
         num_decodes=int(mode in ("decode", "mixed")),
         num_decode_tokens=int(mode == "mixed") or 2,

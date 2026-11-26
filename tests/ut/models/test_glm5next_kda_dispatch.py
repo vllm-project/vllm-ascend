@@ -371,8 +371,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         values.update(num_prefills=0, non_spec_token_indx=None)
         if recover:
             values.update(spec_sequence_masks=None, spec_token_indx=None)
-    if recover:
-        values["recoverssm_context"] = SimpleNamespace(decay_base_addrs=None)
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
