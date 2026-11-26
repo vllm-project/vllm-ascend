@@ -359,12 +359,26 @@ vLLM Ascend revision.
     Use the 950DT runtime from [Section 4.1](#41-docker-image-installation)
     on both nodes. Prefill requires native SWA bounded replay with the PD connector.
 
-    Both roles use DSpark with five speculative tokens and enable shared-expert
-    multistream overlap. Prefill runs the target and draft models in eager mode
-    and sets `multistream_engram_overlap: false`. Decode uses
-    `FULL_DECODE_ONLY` for the target model and the default draft graph execution,
-    with `combine_quant_mode: 4` and the recompute scheduler. The examples use
-    the 950DT defaults for CPU binding, DSA overlap, and Decode Engram overlap.
+    Both roles use DSpark with five speculative tokens and
+    `enable_fused_mc2: 3` for MegaMoE with shared-expert fusion. This mode requires
+    `cann_ops_transformer` in both containers. The shared expert runs inside
+    MegaMoE, so set `multistream_overlap_shared_expert: false`.
+    Prefill runs the target and draft models in eager mode and keeps
+    `multistream_engram_overlap: false`. Decode uses `FULL_DECODE_ONLY` for the
+    target model and the default draft graph execution, with
+    `combine_quant_mode: 4` and the recompute scheduler. The examples use the
+    950DT defaults for CPU binding, DSA overlap, and Decode Engram overlap.
+
+    Both roles enable `VLLM_USE_FASTOKENS=1` and require `fastokens>=0.3.5`.
+    `--renderer-num-workers 4` starts four input-rendering workers per API
+    server; it does not configure the PD proxy's worker count.
+    `MooncakeConnectorV2` uses its default non-layerwise pull mode.
+
+    Prefill enables EPLB with the `stair` policy and 16 redundant experts across
+    the EP group. The `64`-step load window and `128`-step rearrangement interval
+    suit short benchmarks. For production, use `window_size: 1000` and
+    `step_interval: 3000` as described in the
+    [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
     `multistream_engram_overlap` uses an auxiliary NPU stream to overlap Engram
     preparation (hash calculation, table lookups, and DP/TP exchanges) with
@@ -488,6 +502,8 @@ vLLM Ascend revision.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="$local_ip"
     export HCCL_IF_IP="$local_ip"
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -516,7 +532,7 @@ vLLM Ascend revision.
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 1024 \
+        --max-num-batched-tokens 384 \
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --block-size 128 \
@@ -527,31 +543,23 @@ vLLM Ascend revision.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --enable-prefix-caching \
+        --renderer-num-workers 4 \
+        --no-enable-prefix-caching \
         --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
-            "multistream_overlap_shared_expert": true,
+            "multistream_overlap_shared_expert": false,
+            "enable_fused_mc2": 3,
             "combine_quant_mode": 4,
             "scheduler_config": {
                 "recompute_scheduler_enable": true
             }
         }' \
         --kv-transfer-config '{
-            "kv_connector": "MooncakeHybridConnector",
+            "kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_consumer",
-            "kv_port": 27010,
-            "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 8,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 8,
-                    "tp_size": 1
-                }
-            }
+            "kv_port": 27010
         }'
     ```
 
@@ -601,6 +609,8 @@ vLLM Ascend revision.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="$local_ip"
     export HCCL_IF_IP="$local_ip"
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -628,6 +638,8 @@ vLLM Ascend revision.
         --data-parallel-rpc-port "$6" \
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{"window_size":64,"step_interval":128,"policy":"stair","num_redundant_experts":16}' \
         --max-model-len 1048576 \
         --max-num-batched-tokens 5120 \
         --max-num-seqs 16 \
@@ -640,28 +652,20 @@ vLLM Ascend revision.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
+        --renderer-num-workers 4 \
         --enable-prefix-caching \
         --swa-bounded-replay \
         --enforce-eager \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
         --additional-config '{
             "multistream_engram_overlap": false,
-            "multistream_overlap_shared_expert": true
+            "multistream_overlap_shared_expert": false,
+            "enable_fused_mc2": 3
         }' \
         --kv-transfer-config '{
-            "kv_connector": "MooncakeHybridConnector",
+            "kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_producer",
-            "kv_port": 26010,
-            "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 8,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 8,
-                    "tp_size": 1
-                }
-            }
+            "kv_port": 26010
         }'
     ```
 
@@ -672,8 +676,8 @@ vLLM Ascend revision.
     the TP size (`1`).
 
     `kv_port` is a base port; the connector adds the DP/TP/PCP rank offsets.
-    Keep the same base port on every rank of the same role. The `prefill`
-    and `decode` topology values must match on both nodes.
+    Keep the same base port on every rank of the same role. The V2 connector
+    discovers the peer topology during its handshake.
 
     Start the eight Prefill engines from their working directory:
 
@@ -697,7 +701,7 @@ vLLM Ascend revision.
     its terminal when startup is complete. Once all engines are ready, start
     the proxy inside the 950DT container in a separate terminal on a node that
     can reach both servers. The image contains the non-layerwise proxy used
-    by the Hybrid Connector. Register all eight endpoints from each role:
+    by MooncakeConnectorV2. Register all eight endpoints from each role:
 
     ```bash
     P_IP="<PREFILL_IP>"
@@ -733,10 +737,10 @@ vLLM Ascend revision.
     - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
       After a prefix hit, the engine reuses cached non-SWA blocks and
       recomputes the trailing SWA window.
-    - On Decode, enable local prefix caching and set
+    - On Decode, disable local prefix caching and set
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
-    - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
+    - Set `--max-num-batched-tokens` to `5120` on Prefill and `384` on Decode.
     - Each launcher child starts one local DP engine. The templates therefore
       pass `--data-parallel-size-local 1`, while the launcher starts eight
       children with `--dp-size-local 8`.
@@ -759,9 +763,8 @@ vLLM Ascend revision.
     | `--max-num-batched-tokens` | 5120 | 16384 |
     | Visible devices per process | One NPU | All eight NPUs |
     | Prefill API endpoints | 7100-7107 | 7100 |
-    | Connector `prefill.dp_size` on both roles | 8 | 1 |
 
-    Replace Prefill's `--additional-config` with the following configuration.
+    Merge the following entry into Prefill's existing `--additional-config`.
     Keep eager execution and `--max-num-seqs 16` unchanged.
 
     ```json
@@ -778,11 +781,12 @@ vLLM Ascend revision.
     ```
 
     Register only Prefill port `7100` in the proxy. Decode keeps DP8 and its
-    existing startup command. Update its connector's `prefill.dp_size` to `1`.
+    existing startup command. MooncakeConnectorV2 discovers the changed topology.
     For Memcache pooling, start from the pooled Prefill template in
-    [Section 5.3.1](#531-memcache-kv-cache-pool), increase its
-    batch limit from `5120` to `16384`, and set `prefill.dp_size` to `1` in
-    the nested `MooncakeHybridConnector` on both roles. Keep `use_layerwise=false`. See the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
+    [Section 5.3.1](#531-memcache-kv-cache-pool) and increase its batch limit
+    from `5120` to `16384`. For this experimental PCP variant, set
+    `use_layerwise: false` in the `AscendStoreConnector` child on both roles.
+    See the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
     for PCP details.
 
     ###### 950DT Decode with Wide Expert Parallelism
@@ -812,10 +816,9 @@ vLLM Ascend revision.
         --vllm-start-port 7100
     ```
 
-    Set `decode.dp_size` to `16` in the connector configuration on both
-    Prefill and Decode. Keep `prefill.dp_size=8` and `tp_size=1`. For Memcache,
-    change the same values in the nested `MooncakeHybridConnector`. Keep the
-    Decode KV base port at `27010`. Global DP ranks use `27010-27025`.
+    MooncakeConnectorV2 discovers the DP16 Decode topology during its handshake,
+    including when used inside the Memcache `MultiConnector`. Keep the Decode
+    KV base port at `27010`. Global DP ranks use `27010-27025`.
     Register ports `7100-7107` from each Decode server in the proxy, for 16
     Decode endpoints in total. Start both servers before waiting for readiness.
     Recheck Decode latency and throughput for the target workload before
@@ -1540,16 +1543,20 @@ Select the tab for the target hardware.
     Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
     the same as ordinary PD deployment.
 
-    `MultiConnector` combines `MooncakeHybridConnector` for P-to-D transfer with
+    `MultiConnector` combines `MooncakeConnectorV2` for P-to-D transfer with
     `AscendStoreConnector` for Memcache access. Prefill looks up, loads, and
-    stores reusable prefixes; Decode receives KV from Prefill. DeepSeek-V4.1-Flash
-    uses bulk pool access: set `use_layerwise` to `false` on both roles.
+    stores reusable prefixes; Decode receives KV from Prefill. Set
+    `use_layerwise: true` in the Prefill `AscendStoreConnector` child and
+    `use_layerwise: false` in the Decode child. The MooncakeConnectorV2 children
+    continue to use their default non-layerwise pull mode.
 
-    On Prefill, set `--max-num-batched-tokens` to `5120` and enable
-    `--swa-bounded-replay`. Disable local prefix caching so that repeated-prefix
-    requests exercise the external pool. On Decode, use `1024` batch tokens,
-    enable local prefix caching, and disable SWA bounded replay for the
-    recompute scheduler.
+    Both roles retain the MegaMoE, fastokens, and renderer settings from ordinary
+    PD deployment. Prefill uses the same EPLB settings. Keep its batch-token
+    budget at `5120`, enable local prefix caching and `--swa-bounded-replay`,
+    and keep `multistream_engram_overlap: false`. On Decode, use `384` batch
+    tokens, disable local prefix caching, and disable SWA bounded replay for
+    the recompute scheduler. Local Prefill hits can bypass the external pool;
+    use the verification procedure below to distinguish them.
 
     ##### 5.3.1.1 Prepare Memcache
 
@@ -1587,8 +1594,8 @@ Select the tab for the target hardware.
     ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
     ock.mmc.local_service.world_size = 256
     ock.mmc.local_service.protocol = device_urma
-    ock.mmc.local_service.dram.size = 25GB
-    ock.mmc.local_service.max.dram.size = 25GB
+    ock.mmc.local_service.dram.size = 2GB
+    ock.mmc.local_service.max.dram.size = 1TB
     ock.mmc.local_service.hbm.size = 0GB
     ock.mmc.local_service.max.hbm.size = 0GB
     ock.mmc.local_service.storage.enabled = false
@@ -1596,13 +1603,32 @@ Select the tab for the target hardware.
     ```
 
     Each vLLM worker starts an embedded LocalService. `dram.size` is the DRAM
-    contributed by each LocalService. With eight workers per node, `25GB`
-    reserves about 200 GiB per node, or 400 GiB across the two servers.
+    contributed by each LocalService. With eight workers per node, `2GB`
+    reserves about 16 GiB per node, or 32 GiB across the two servers.
     `max.dram.size` must be at least the largest `dram.size` contributed by any
     LocalService; it does not limit the total pool capacity. Adjust both values
     to the host memory available after Engram offloading and model loading.
     `world_size` is the maximum number of LocalServices in the pool, not the DP
     size. No standalone LocalService is needed for this configuration.
+
+    For optional SSD caching, replace the `storage.enabled` entry above and
+    add the following settings to each node's `mmc-local.conf`:
+
+    ```ini
+    ock.mmc.local_service.storage.enabled = true
+    ubsio.disk.path = <DEDICATED_NVME_DEVICE>
+    ubsio.mem.size_in_gb = 5
+    ubsio.standalone.device_count = 8
+    ubsio.standalone.force_new_disk = true
+    ```
+
+    Use a dedicated cache device: `force_new_disk: true` clears its contents
+    whenever the service starts. The eight LocalServices allocate another
+    40 GiB per node for UBS IO in addition to the 16 GiB DRAM pool. Check node
+    memory and disk capacity before enabling this tier. See the
+    [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
+    for supported limits; `max.dram.size: 1TB` is an upper bound, not a pool
+    allocation.
 
     Start one MetaService before starting vLLM:
 
@@ -1642,6 +1668,8 @@ Select the tab for the target hardware.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="$local_ip"
     export HCCL_IF_IP="$local_ip"
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1675,7 +1703,7 @@ Select the tab for the target hardware.
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 1024 \
+        --max-num-batched-tokens 384 \
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --block-size 128 \
@@ -1686,12 +1714,14 @@ Select the tab for the target hardware.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --enable-prefix-caching \
+        --renderer-num-workers 4 \
+        --no-enable-prefix-caching \
         --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
-            "multistream_overlap_shared_expert": true,
+            "multistream_overlap_shared_expert": false,
+            "enable_fused_mc2": 3,
             "combine_quant_mode": 4,
             "scheduler_config": {
                 "recompute_scheduler_enable": true
@@ -1704,19 +1734,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config": {
                 "connectors": [
                     {
-                        "kv_connector": "MooncakeHybridConnector",
+                        "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_consumer",
-                        "kv_port": 27010,
-                        "kv_connector_extra_config": {
-                            "prefill": {
-                                "dp_size": 8,
-                                "tp_size": 1
-                            },
-                            "decode": {
-                                "dp_size": 8,
-                                "tp_size": 1
-                            }
-                        }
+                        "kv_port": 27010
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
@@ -1779,6 +1799,8 @@ Select the tab for the target hardware.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="$local_ip"
     export HCCL_IF_IP="$local_ip"
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1811,6 +1833,8 @@ Select the tab for the target hardware.
         --data-parallel-rpc-port "$6" \
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{"window_size":64,"step_interval":128,"policy":"stair","num_redundant_experts":16}' \
         --max-model-len 1048576 \
         --max-num-batched-tokens 5120 \
         --max-num-seqs 16 \
@@ -1823,13 +1847,15 @@ Select the tab for the target hardware.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --no-enable-prefix-caching \
+        --renderer-num-workers 4 \
+        --enable-prefix-caching \
         --swa-bounded-replay \
         --enforce-eager \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
         --additional-config '{
             "multistream_engram_overlap": false,
-            "multistream_overlap_shared_expert": true
+            "multistream_overlap_shared_expert": false,
+            "enable_fused_mc2": 3
         }' \
         --kv-transfer-config '{
             "kv_connector": "MultiConnector",
@@ -1838,19 +1864,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config": {
                 "connectors": [
                     {
-                        "kv_connector": "MooncakeHybridConnector",
+                        "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_producer",
-                        "kv_port": 26010,
-                        "kv_connector_extra_config": {
-                            "prefill": {
-                                "dp_size": 8,
-                                "tp_size": 1
-                            },
-                            "decode": {
-                                "dp_size": 8,
-                                "tp_size": 1
-                            }
-                        }
+                        "kv_port": 26010
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
@@ -1858,7 +1874,7 @@ Select the tab for the target hardware.
                         "kv_connector_extra_config": {
                             "backend": "memcache",
                             "lookup_rpc_port": "0",
-                            "use_layerwise": false
+                            "use_layerwise": true
                         }
                     }
                 ]
@@ -1895,7 +1911,11 @@ Select the tab for the target hardware.
     the proxy from [Deploy the 950DT PD Proxy](#deploy-the-950dt-pd-proxy) with the same
     endpoints. Verify the service using [Section 5.6](#56-service-verification).
     Send a long prompt to populate the pool, then reuse its prefix with a
-    different suffix.
+    different suffix. Local prefix caching is enabled in this recipe, so an
+    HBM cache hit alone does not demonstrate Memcache reuse. For an external-pool
+    validation run, start all Prefill ranks with `--no-enable-prefix-caching`,
+    populate the pool, and then repeat the prefix. Restore
+    `--enable-prefix-caching` for the serving configuration after validation.
 
     Check Prefill external prefix-cache hits and MetaService DRAM get hits:
 
@@ -2836,5 +2856,5 @@ For common environment, installation, and parameter issues, refer to the
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
 - The 950DT pooling example uses Memcache for storage and
-  `MooncakeHybridConnector` for P-to-D KV transfer. Verify external pool
+  `MooncakeConnectorV2` for P-to-D KV transfer. Verify external pool
   hits as described in [Section 5.3.1.4](#5314-start-the-proxy-and-verify-pooling).
