@@ -74,6 +74,7 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
         num_scheduled_tokens=torch.tensor(capture_lengths),
         max_query_len=max_query_len,
         is_prefilling_np=np.zeros(requests, dtype=bool),
+        prefill_runs_as_decode_np=None,
         seq_lens=torch.tensor(
             [121 + capture_lengths[0], 255 + capture_lengths[1], 999, 999], dtype=torch.int32, device=device
         ),

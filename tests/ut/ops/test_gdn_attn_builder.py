@@ -287,10 +287,9 @@ def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
     assert builder.decode_cudagraph_max_bs == (16 if capture_limit is None else capture_limit)
 
 
-@pytest.mark.parametrize("excluded", ["mrv1", "pcp1", "dcp", "eager", "unbounded"])
+@pytest.mark.parametrize("excluded", ["pcp1", "dcp", "eager", "unbounded"])
 def test_glm_global_capture_capacity_respects_configuration(excluded):
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = excluded != "mrv1"
     config.cache_config.use_kda_recoverssm = True
     config.model_config.hf_text_config.index_kpool = 4
     config.parallel_config.prefill_context_parallel_size = 1 if excluded == "pcp1" else 8

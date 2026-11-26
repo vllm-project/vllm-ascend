@@ -167,6 +167,28 @@ This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `s
 
 > **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
 
+### `/download`
+
+Download the models and datasets added by a PR to the CI model caches. Use it for PRs that change `.github/workflows/misc/model_dataset_list.json`: an NPU test cannot run a model that is not on the cluster disk yet, and the download itself is network bound, so it is delegated to the dedicated model-library pipeline instead of an NPU runner.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/download` | Download the models and datasets added by this PR |
+
+The command takes no arguments. It compares `.github/workflows/misc/model_dataset_list.json` at the PR head with `main`, flattens the `models` groups, and requests only the entries that `main` does not list yet. Requests are sent per cluster and only for clusters that receive something, so a PR adding a model to `models.a2` produces a single request and does not touch `a3` or `a5`. Datasets are not per cluster, so a new dataset is requested for every cluster. The pipeline is idempotent, so running the command again is cheap.
+
+The clusters and the `model_dataset_list.json` groups they carry are `a2` → `models.a2`; `a3` (800T disk) → `models.a3` + `models.310p`; `a3-560t` (560T disk used by the accuracy E2E tests) → `models.a3` + `models.310p`; `a5` → `models.a5`. The 310p tests mount the a3 volume, which is why `models.310p` travels with both a3 disks.
+
+The requests are dispatched to `ascend-gha-runners/sync-tools`, which routes each one to the right cluster disks. The workflow itself runs on a CPU runner, so no Ascend runner is occupied, and no repository secret is needed on the PR branch — the command also works for PRs from forks. The run waits up to 3 hours for the dispatched downloads, then comments the per-cluster result with a link to the workflow run.
+
+Adding the `model-dataset-download` label to a PR still triggers the same download. The command is only needed when that run cannot do the work, for example on a PR from a fork (the label-triggered run cannot read the repository secrets), or to retry after the list changed.
+
+**Manual download:** run the **model downloader** workflow from the Actions UI (`workflow_dispatch`). Its inputs are `models` and `datasets` (`org/name` ids, comma or newline separated) and `cluster` (`all`, `a2`, `a3`, `a3-560t` or `a5`). Only the selected clusters are requested, and the items are taken verbatim instead of being diffed against `main`, which makes this the way to repair a cache whose ledger drifted from `model_dataset_list.json`.
+
+> **Note**: unlike most other commands, `/download` does not accept a PR author exception. Only users with triage+ permission can trigger it, because the request is forwarded into another repository's workflow.
+
 ### /cherry-pick
 
 Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.
@@ -259,7 +281,7 @@ Only jobs that did not complete successfully are re-run (failed, cancelled, time
 
 ### /cancel
 
-Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
+Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/download`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
 
 **Scope:**
 
@@ -269,7 +291,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |
 | `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
 | `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
-| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
+| `pr_download_command.yml` | `/download` command runs |
 
 **Examples:**
 
@@ -282,15 +304,26 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 
 ### `/ai-review` family
 
-Trigger and manage the AI review agent on a pull request (requires the `ai-review` label and an allowlisted PR author — see [AI Code Review](ai-review.md)):
+Trigger and manage the AI review agent on a pull request. An allowlisted
+maintainer starts review by applying `ai-review`; the PR author does not
+need to be allowlisted. See [AI Code Review](ai-review.md).
 
 | Command | Effect |
 |---|---|
-| `/ai-review` | Trigger the next review round; also works as a reply inside one of the agent's inline finding threads |
-| `/ai-review-waive` | Waive findings: in a top-level comment waives all open findings (then one re-evaluation round runs); as a reply inside a finding's thread waives only that finding (reviewer only) |
-| `/ai-review-stop` | Stop the review entirely; the agent stays silent until the label is re-applied (reviewer only) |
+| `/ai-review explanation` | Request one review of the latest code, using the supplied explanation and existing findings |
+| `/ai-review-waive F003 reason` or `/ai-review-waive all reason` | Waive the selected open findings for the reviewed commit, update their inline annotations and recalculate the result without calling the model (maintainer only) |
+| `/ai-review-stop` | Stop review and remove the review labels; reapply `ai-review` to restart (maintainer only) |
+
+Use new top-level PR comments; inline replies do not trigger these commands.
+The bot appends feedback and the Actions link directly to your command
+comment. Rejections explain the reason there, including permissions and
+round limits. These messages do not count as review rounds. Review results
+update the bot's separate summary comment.
 
 ## Behavior
+
+The AI review family uses the feedback flow described above. Other commands
+use the general dispatcher flow:
 
 1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received.
 2. The corresponding CI workflow is triggered asynchronously.
@@ -310,6 +343,7 @@ Trigger and manage the AI review agent on a pull request (requires the `ai-revie
 | `/ai-review` | ✅ | ❌ |
 | `/ai-review-waive` | ✅ | ❌ |
 | `/ai-review-stop` | ✅ | ❌ |
+| `/download` | ✅ | ❌ |
 
 ## Permission
 
@@ -322,7 +356,8 @@ Trigger and manage the AI review agent on a pull request (requires the `ai-revie
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
-| `/ai-review` | PR author (once the PR is allowlisted and labeled) |
+| `/download` | Users with triage+ permission on the repository only |
+| `/ai-review` | PR author or users with write permission, while `ai-review` is enabled |
 | `/ai-review-waive` | Users with write permission on the repository |
 | `/ai-review-stop` | Users with write permission on the repository |
 

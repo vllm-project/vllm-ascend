@@ -520,7 +520,6 @@ def run_pd_disaggregation(
     prefill_pcp_size: int,
     decode_tp_size: int,
     async_scheduling: bool,
-    use_model_runner_v2: bool,
 ) -> str:
     """Run one 1P1D request through the disaggregated proxy."""
     prefiller_port = [get_open_port()]
@@ -534,8 +533,6 @@ def run_pd_disaggregation(
     # A5 UB requires the v1.3 HIXL resource format; preserve explicit transport configuration.
     if is_950() and not any(name in os.environ for name in ("ASCEND_LOCAL_COMM_RES", "ASCEND_GLOBAL_RESOURCE_CONFIG")):
         env_dict["ASCEND_LOCAL_COMM_RES"] = '{"version":"1.3"}'
-    if use_model_runner_v2:
-        env_dict["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     vllm_server_args = [
         [

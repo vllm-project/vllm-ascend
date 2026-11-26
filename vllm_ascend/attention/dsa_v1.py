@@ -47,7 +47,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -802,13 +802,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # DSpark target and draft builders must not overwrite module-global RoPE.
         self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
-        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-        self.compressor_ratio = getattr(
-            kv_cache_spec,
-            "compress_ratio",
-            getattr(kv_cache_spec, "tokens_per_state", 0),
-        )
+        self.storage_block_size = kv_cache_spec.num_states
+        self.compressor_ratio = kv_cache_spec.tokens_per_state
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
@@ -2387,15 +2382,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Prepare cache updates and report whether local writes can be skipped."""
-        return False
+    def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare caches and optionally return invocation-local Q intermediates."""
+        return False, None
 
     def _get_o_proj_input_shape(
         self,
@@ -2447,11 +2436,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
+        cache_is_prepared, prepared_query = self._prepare_caches_and_query(
             layer_name,
             hidden_states,
             kv_cache,
             attn_metadata,
+            layer_metadata,
         )
         if actual_tokens == 0:
             output.zero_()
@@ -2473,6 +2463,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv_cache,
             layer_metadata,
             cache_is_prepared,
+            prepared_query=prepared_query,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -2809,6 +2800,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
@@ -2854,7 +2846,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        if prepared_query is not None:
+            assert cache_is_prepared
+            q, qr, qr_pertoken_scale = prepared_query
+            compressor_overlap_output = None
+        elif self.multistream_dsv4_dsa_overlap:
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,

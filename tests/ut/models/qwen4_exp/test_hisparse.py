@@ -85,6 +85,7 @@ def test_physical_attention_reads_selected_rows_per_kv_head(ops, kv_heads):
         assert positions.tolist() == [2, -1]
         assert lengths.tolist() == [3, 0]
         assert requests.tolist() == [0, 1]
+        assert compact.is_contiguous()
         assert compact[:, 0].tolist() == [0, 0]
         for head in range(heads):
             kv_head = head * kv_heads // heads

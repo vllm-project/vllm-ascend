@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
+    worker_rank_to_dcp_rank,
     zmq_ctx,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -580,10 +581,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 layer_name, remote, tuple(params["consumer_rank"])
             )
             local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
-            # Pull uses the same TP-major/PCP-minor ordering: DCP=PCP
-            # shards within each TP rank; DCP=TP*PCP spans all workers.
-            remote_rank = params["consumer_rank"][2] * remote.pcp_size + params["consumer_rank"][1]
-            remote_dcp_rank = remote_rank % remote_dcp_size
+            _, remote_pcp_rank, remote_tp_rank = params["consumer_rank"]
+            remote_worker_rank = remote_tp_rank * remote.pcp_size + remote_pcp_rank
+            remote_dcp_rank = worker_rank_to_dcp_rank(remote_worker_rank, remote.pcp_size, remote_dcp_size)
             local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
             remote_interleave = pp.cp_kv_cache_interleave_size
             for side, size, interleave, page_size in (

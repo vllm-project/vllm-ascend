@@ -160,8 +160,9 @@ def attend_physical(query, packed, physical, num_kv_heads, output):
     pages = (width + GBSA_PAGE_SIZE - 1) // GBSA_PAGE_SIZE
     valid = physical >= 0
     lengths = valid.sum(dim=1, dtype=torch.int32)
+    # These small lane positions are exact in float32, which keeps argsort on AiCore.
     positions = torch.arange(width, device=query.device, dtype=torch.float32)
-    order = (positions + (~valid) * width).argsort(dim=-1)
+    order = torch.where(valid, positions, positions + width).argsort(dim=-1)
     indices = physical.gather(1, order)
     indices = torch.nn.functional.pad(indices, (0, pages * GBSA_PAGE_SIZE - width), value=-1)
     rows = packed.view(-1, num_kv_heads, 2 * dim)
@@ -169,7 +170,9 @@ def attend_physical(query, packed, physical, num_kv_heads, output):
     selected.masked_fill_(indices.reshape(-1, 1, 1) < 0, 0)
     key, value = selected.reshape(n * pages, GBSA_PAGE_SIZE, num_kv_heads, 2 * dim).split(dim, dim=-1)
     groups = (width + GBSA_COMPRESS_RATIO - 1) // GBSA_COMPRESS_RATIO
-    compact = torch.arange(groups + GBSA_RESIDUAL_TOKENS, device=query.device, dtype=torch.int32).expand(n, -1)
+    compact = (
+        torch.arange(groups + GBSA_RESIDUAL_TOKENS, device=query.device, dtype=torch.int32).expand(n, -1).contiguous()
+    )
     table = torch.arange(n * pages, device=query.device, dtype=torch.int32).reshape(n, pages)
     requests = torch.arange(n, device=query.device, dtype=torch.int32)
     qsa_gbsa_attention(
@@ -184,8 +187,10 @@ def prepare_resolver_indices(compact, visible, logical):
     tokens = expand_qsa_selected_tokens(compact, visible.to(dtype=logical.dtype))
     # The last partial group can follow holes in LI-v2 output. Keep its
     # valid tokens within the resolver's fixed token_topk budget.
-    lanes = torch.arange(tokens.shape[1], device=tokens.device, dtype=torch.float32)
-    order = (lanes + (tokens < 0) * tokens.shape[1]).argsort(dim=-1)
+    # As in attend_physical, use float32 sort keys to avoid an AiCPU fallback.
+    width = tokens.shape[1]
+    lanes = torch.arange(width, device=tokens.device, dtype=torch.float32)
+    order = torch.where(tokens >= 0, lanes, lanes + width).argsort(dim=-1)
     torch.gather(tokens, 1, order[:, : logical.shape[1]], out=logical)
 
 

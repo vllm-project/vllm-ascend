@@ -186,7 +186,6 @@ def _leg(use_pool: bool, case_name: str):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "HCCL_BUFFSIZE": "2048",
