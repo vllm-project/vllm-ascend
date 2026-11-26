@@ -30,7 +30,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
-from vllm_ascend.attention.context_parallel.sfa_dcp_utils import project_pcp_prefill_flags
 from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import (
@@ -53,6 +52,7 @@ from vllm_ascend.attention.utils import (
     has_requests_to_run_as_prefill,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    project_pcp_prefill_flags,
     split_decodes_and_prefills,
     trans_rope_weight,
     transdata,

@@ -4,15 +4,10 @@ These helpers encode SFA cache transport and the replicated indexer-cache
 layout without depending on the attention implementation or metadata builders.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
-
-from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
-
-if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
@@ -77,21 +72,6 @@ def build_sfa_dcp_compact_kv_metadata(
     # without mapping a stale ID into another rank's segment or gathering it.
     block_table.masked_fill_(~allocated[:, local_columns], 0)
     return valid_block_ids, block_table.to(torch.int32)
-
-
-def project_pcp_prefill_flags(pcp_context: "AscendPCPAttentionContext | None") -> torch.Tensor | None:
-    """Project global prefill flags into local request order for SFA cache gathering."""
-    if pcp_context is None or (local_rows := getattr(pcp_context, "local_to_global_req_indices", None)) is None:
-        return None
-    global_batch = pcp_context.global_batch
-    global_flags = apply_prefill_as_decode_mask(
-        global_batch.is_prefilling_np, getattr(global_batch, "prefill_runs_as_decode_np", None)
-    )
-    if not global_flags.any():
-        return None
-
-    # One request can occupy multiple local rows. The split handles padding.
-    return torch.from_numpy(global_flags[list(local_rows)])
 
 
 def get_sfa_pcp_global_metadata(

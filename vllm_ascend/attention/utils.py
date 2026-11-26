@@ -68,6 +68,21 @@ def has_requests_to_run_as_prefill(batch: "InputBatch") -> bool:
     return bool(flags.any())
 
 
+def project_pcp_prefill_flags(pcp_context: "AscendPCPAttentionContext | None") -> torch.Tensor | None:
+    """Project global prefill flags into local request order for SFA cache gathering."""
+    if pcp_context is None or (local_rows := getattr(pcp_context, "local_to_global_req_indices", None)) is None:
+        return None
+    global_batch = pcp_context.global_batch
+    global_flags = apply_prefill_as_decode_mask(
+        global_batch.is_prefilling_np, getattr(global_batch, "prefill_runs_as_decode_np", None)
+    )
+    if not global_flags.any():
+        return None
+
+    # One request can occupy multiple local rows. The split handles padding.
+    return torch.from_numpy(global_flags[list(local_rows)])
+
+
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
