@@ -1,0 +1,53 @@
+# Minimal single-node PD smoke case for the pd_server_cmds path.
+# One prefiller and one decoder, one NPU each, launched on the runner host.
+test_cases:
+  - name: "Qwen3-0.6B-A5-PD-Smoke"
+    model: "Qwen/Qwen3-0.6B"
+    service_mode: "pd"
+    envs:
+      # RemotePDServer slices this list across the PD instances in order:
+      # instance 0 (prefill) -> 0, instance 1 (decode) -> 1.
+      ASCEND_RT_VISIBLE_DEVICES: "0,1"
+      PREFILL_PORT: "DEFAULT_PORT"
+      DECODE_PORT: "DEFAULT_PORT"
+      PROXY_PORT: "DEFAULT_PORT"
+      HCCL_BUFFSIZE: "512"
+    pd_server_cmds:
+      - - "Qwen/Qwen3-0.6B"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "$PREFILL_PORT"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--max-model-len"
+        - "4096"
+        - "--max-num-batched-tokens"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.5"
+        - "--trust-remote-code"
+        - "--no-enable-prefix-caching"
+        - "--seed"
+        - "1024"
+        - "--kv-transfer-config"
+        - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}}}'
+      - - "Qwen/Qwen3-0.6B"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "$DECODE_PORT"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--max-model-len"
+        - "4096"
+        - "--max-num-batched-tokens"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.5"
+        - "--trust-remote-code"
+        - "--no-enable-prefix-caching"
+        - "--seed"
+        - "1024"
+        - "--kv-transfer-config"
+        - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}}}'

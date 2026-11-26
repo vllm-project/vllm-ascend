@@ -350,6 +350,11 @@ a5:
 #        size: 2
   single_node:
     test_config:
+      # Minimal PD (pd_server_cmds) smoke case, 1 prefiller + 1 decoder on 1 NPU each.
+      - name: Qwen3-0.6B-A5-PD-Smoke
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3-0.6B-A5-PD-Smoke.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: Kimi-K3-W4A8-E256-A5-GSM8K-First100
         os: linux-aarch64-a5-8
         config_file_path: Kimi-K3-W4A8-E256-A5.yaml
