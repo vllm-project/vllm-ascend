@@ -431,12 +431,12 @@ From a checkout of `flashserve/flash-linear-attention-npu`:
 
 ```bash
 git fetch origin refs/pull/1375/head
-git checkout --detach 5e86ddecc5be0c3d593cf9c1fea3c00fdccfbe92
+git checkout --detach 20ec2bf3ceb70460eac038c57ae00649f751f9bd
 # Atlas A2 example. Select the build target from the table above.
 FLA_NPU_SOC=ascend910b FLA_NPU_BUILD_OFFLINE_BUNDLE=1 python scripts/build_wheel.py
 ```
 
-See the [operator integration guide for this revision](https://github.com/flashserve/flash-linear-attention-npu/blob/5e86ddecc5be0c3d593cf9c1fea3c00fdccfbe92/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+See the [operator integration guide for this revision](https://github.com/flashserve/flash-linear-attention-npu/blob/20ec2bf3ceb70460eac038c57ae00649f751f9bd/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
 Install the wheel and expose its OPP before starting workers:
 
 ```bash
