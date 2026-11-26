@@ -489,6 +489,44 @@ class ExpertOffloadConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class GDNRecoverSSMExecutionConfig:
+    """Opt-in post-sampling GDN recovery scheduling; kernels are unchanged."""
+
+    async_commit: bool = False
+    capture_commit: bool = False
+    merge_groups: bool = True
+
+    @property
+    def enabled(self) -> bool:
+        return self.async_commit or self.capture_commit
+
+    @staticmethod
+    def is_draft_config(vllm_config: VllmConfig) -> bool:
+        speculative = vllm_config.speculative_config
+        return speculative is not None and vllm_config.model_config is getattr(speculative, "draft_model_config", None)
+
+    def validate(self, vllm_config: VllmConfig) -> None:
+        # MTP constructs an internal VllmConfig with its draft ModelConfig.
+        # These switches govern target-state recovery, not that QSA-only model.
+        if not self.enabled or self.is_draft_config(vllm_config):
+            return
+        parallel = vllm_config.parallel_config
+        if any(
+            getattr(parallel, name, 1) != 1
+            for name in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size")
+        ):
+            raise ValueError("GDN recovery execution optimization currently requires PP=PCP=DCP=1")
+        if not vllm_config.cache_config.use_replayssm:
+            raise ValueError("GDN recovery execution optimization requires --use-replayssm")
+        if self.async_commit:
+            if vllm_config.model_config.architecture not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"):
+                raise ValueError("Async GDN recovery currently supports Qwen4Exp MTP only")
+            speculative = vllm_config.speculative_config
+            if speculative is None or speculative.method != "mtp":
+                raise ValueError("Async GDN recovery requires the Qwen4Exp MTP drafter")
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -715,6 +753,9 @@ class AscendConfig:
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
+    gdn_recoverssm_execution_config: GDNRecoverSSMExecutionConfig = dataclasses.field(
+        default_factory=GDNRecoverSSMExecutionConfig
+    )
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
@@ -791,6 +832,7 @@ class AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         vc = vllm_config
+        self.gdn_recoverssm_execution_config.validate(vc)
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

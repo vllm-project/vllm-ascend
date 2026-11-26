@@ -75,6 +75,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
+from vllm_ascend.attention.gdn_recoverssm_execution import AscendGDNRecoverSSMState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
@@ -376,6 +377,8 @@ class NPUModelRunner(GPUModelRunner):
             join_nz_warm_thread()
 
         expert_offload.initialize(self)
+        if (executor := self._gdn_recovery_executor()) is not None:
+            executor.configure_draft(self.get_draft_model())
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -404,7 +407,10 @@ class NPUModelRunner(GPUModelRunner):
 
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-        output = super().sample_tokens(grammar_output)
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            self._wait_gdn_recovery()
         d2h_record_source_ready(self)
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
@@ -413,6 +419,24 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
             mirror.join_pending()
         return output
+
+    def _gdn_recovery_executor(self):
+        state = getattr(getattr(self, "model_state", None), "recoverssm", None)
+        return state.executor if isinstance(state, AscendGDNRecoverSSMState) else None
+
+    def _wait_gdn_recovery(self) -> None:
+        if (executor := self._gdn_recovery_executor()) is not None:
+            executor.wait()
+
+    @contextmanager
+    def draft_context(self):
+        with super().draft_context():
+            try:
+                yield
+            finally:
+                # Join after draft work, before upstream KV finalize/save.
+                # A next-target-only fence would be too late for connectors.
+                self._wait_gdn_recovery()
 
     def pool(self):
         output = super().pool()
@@ -625,6 +649,8 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+        if (executor := self._gdn_recovery_executor()) is not None:
+            executor.configure_draft(self.get_draft_model())
 
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
@@ -649,6 +675,8 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if (executor := self._gdn_recovery_executor()) is not None:
+            executor.close()
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 
         expert_offload.shutdown(self)
@@ -772,6 +800,9 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
+        # Protect request preemption, cache reuse and metadata writes, not just
+        # the next target graph's first GDN kernel.
+        self._wait_gdn_recovery()
         if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
             mirror.begin_execution(not dummy_run and not is_profile)
 

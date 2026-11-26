@@ -41,6 +41,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
+| `gdn_recoverssm_execution_config`   | dict | `{}`    | Opt-in GDN recovery scheduling: `async_commit=false`, `capture_commit=false`, `merge_groups=true`. See [GDN recovery execution](../../developer_guide/Design_Documents/gdn_recoverssm_execution.md). |
 | `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |

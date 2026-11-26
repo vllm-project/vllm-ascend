@@ -39,7 +39,9 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
+from vllm_ascend.attention.gdn_recoverssm_execution import AscendGDNRecoverSSMState, GDNCommitExecutor
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -117,6 +119,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        execution_config = get_ascend_config().gdn_recoverssm_execution_config
+        if (
+            self.recoverssm is not None
+            and execution_config.enabled
+            and not execution_config.is_draft_config(self.vllm_config)
+        ):
+            self.recoverssm = AscendGDNRecoverSSMState(GDNCommitExecutor(execution_config, self.max_num_reqs))
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
