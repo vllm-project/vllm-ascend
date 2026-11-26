@@ -87,13 +87,15 @@ class RuntimeGuardDumpMixin:
         return True
 
     def _refund_dropped_dump_arms(self, jobs: list[dict[str, Any]]) -> None:
-        """TP0: give back one quota unit per dropped arm that never D2H'd.
+        """TP0: give back one quota unit per arm dropped before a dump tree exists.
 
         One arm = one ``try_consume`` at ``DumpKvAction.prepare`` time (all jobs
-        of an arm share ``arm_id``); mirrors the end-of-wave refund in
-        ``_run_kv_dumps`` for arms that produced no snapshot. Quota lives on
-        the arming rank (action leader = last-PP TP0), so other ranks must not
-        refund. Also releases ``dump_jobs`` pins for dropped reqs.
+        of an arm share ``arm_id``). Used when jobs are discarded before drain
+        (hot-disable / bus failure) so no dump directory was created. Once drain
+        creates the dump tree (or a skip marker), ``_run_kv_dumps`` keeps the
+        consume even if D2H fails. Quota lives on the arming rank (action
+        leader = last-PP TP0), so other ranks must not refund. Also releases
+        ``dump_jobs`` pins for dropped reqs.
         """
         from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
@@ -184,8 +186,10 @@ class RuntimeGuardDumpMixin:
         except Exception:
             is_tp0 = True
         # One prepare may queue N jobs after a single try_consume (arm_id).
-        # Refund once per arm if that arm produced no D2H snapshot. Later async
-        # torch.save failure does not refund (see ops docs).
+        # Refund only when the arm never created a dump tree (dropped before
+        # drain). Once the dump directory / skip marker exists, auto_max_times
+        # stays consumed even if D2H fails mid-way (partial .pt + dump_skipped).
+        # Later async torch.save failure also does not refund (see ops docs).
         arms: dict[str, dict[str, bool]] = defaultdict(lambda: {"debited": False, "ok": False})
         seen_req: set[str] = set()
         drained_ids: list[str] = []
@@ -213,8 +217,9 @@ class RuntimeGuardDumpMixin:
                     _req_id: str = req_id,
                     _incident_type: str = incident_type,
                     _wave_i: int | None = wave_i,
+                    _arm_id: str = arm_id,
                 ) -> None:
-                    write_kv_dump_skipped(
+                    path = write_kv_dump_skipped(
                         dump_root,
                         req_id=_req_id,
                         incident_type=_incident_type,
@@ -224,6 +229,9 @@ class RuntimeGuardDumpMixin:
                         wave=_wave_i,
                         detail=detail,
                     )
+                    # Skip marker mkdir's the dump tree → counts as one dump.
+                    if path is not None:
+                        arms[_arm_id]["ok"] = True
 
                 # Armed jobs always attempt D2H (①). Prefer frozen arm-time
                 # block_ids; fall back to live tables. Stamp finished caveat.
@@ -242,6 +250,20 @@ class RuntimeGuardDumpMixin:
                     _skip("empty_block_ids")
                     continue
                 out_dir = dump_root / incident_type / req_id / wave_dir / rank_tag
+                # Creating the dump directory consumes the arm's auto_max_times
+                # unit even if subsequent D2H / save fails.
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    arms[arm_id]["ok"] = True
+                except OSError as exc:
+                    logger.warning(
+                        "[runtime_guard dump_kv] mkdir failed req_id=%s dir=%s: %s",
+                        req_id,
+                        out_dir,
+                        exc,
+                    )
+                    _skip("mkdir_failed", detail={"error": f"{type(exc).__name__}: {exc}"})
+                    continue
                 produced = 0
                 try:
                     for snap in reader.iter_request_snapshots(
@@ -286,7 +308,6 @@ class RuntimeGuardDumpMixin:
                     )
                     _skip("no_tensors")
                     continue
-                arms[arm_id]["ok"] = True
                 logger.info(
                     "[runtime_guard dump_kv] dumped req_id=%s wave=%s rank=%s tensors=%d "
                     "dir=%s request_finished_at_dump=%s",
