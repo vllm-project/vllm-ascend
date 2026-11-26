@@ -366,6 +366,18 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Verify the A5 device for HiSparse DMA tests
+        if: matrix.group.npu_type == 'a5' && contains(matrix.group.tests, 'test_hisparse_integration.py')
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 - <<'PY'
+          import torch
+          import torch_npu
+
+          if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
+              raise SystemExit("HiSparse DMA tests require a visible Ascend 950 NPU")
+          PY
+
       - name: Run selected tests with device
         id: tests-with-device
         if: ${{ matrix.group.npu_type != 'cpu' }}

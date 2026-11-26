@@ -113,8 +113,9 @@ def test_private_host_pool_retains_pinned_storage_for_dma_writeback(descriptor_c
 def test_restore_mirrored_host_pages_in_both_dma_batch_paths(count):
     backend = AscendHiSparseBackend()
     host = allocate_mapped_host((count, 576), torch.bfloat16)
-    source = (torch.arange(count, device="npu") % 97).to(torch.bfloat16)[:, None].expand(count, 576).contiguous()
-    restored = torch.empty_like(source)
+    source = ((torch.arange(count, device="npu") % 97) + 1).to(torch.bfloat16)[:, None].expand(count, 576).contiguous()
+    host.zero_()
+    restored = torch.zeros_like(source)
     row_bytes = source.size(1) * source.element_size()
     offsets = torch.arange(count, dtype=torch.int64) * row_bytes
     source_ptrs = offsets + source.data_ptr()

@@ -267,7 +267,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         if self._failed_dma_batches:
             raise RuntimeError("HiSparse DMA submission previously failed; restart this worker.")
         limit = self._DMA_BATCH_LIMIT
-        count = src.size(0)
+        count = src.numel()
         if any(
             t.ndim != 1
             or t.size(0) != count

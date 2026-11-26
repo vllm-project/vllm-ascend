@@ -679,18 +679,27 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        # Temporarily keep A5 allocation opt-in while runner capacity is limited.
-        if: contains(github.event.pull_request.labels.*.name, 'ready-a5') && needs.pre-commit.outputs.src == 'true'
+        # Core upgrades exercise the DMA contract on the candidate Core pin.
+        # The larger A5 suite remains opt-in while runner capacity is limited.
+        if: >-
+          (contains(github.event.pull_request.labels.*.name, 'main2main') && needs.pre-commit.outputs.target == 'main') ||
+          (contains(github.event.pull_request.labels.*.name, 'ready-a5') && needs.pre-commit.outputs.src == 'true')
+        env:
+          FULL_A5_SUITE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') && needs.pre-commit.outputs.src == 'true' }}
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
+          targets=(--explicit-e2e-tests tests/e2e/pull_request/one_card/test_hisparse_integration.py::test_restore_mirrored_host_pages_in_both_dma_batch_paths)
+          if [ "${FULL_A5_SUITE}" = "true" ]; then
+            targets=(--curated a5)
+          fi
           python3 .github/workflows/scripts/select_tests.py \
-            --curated a5 \
+            "${targets[@]}" \
             --runner-label-override linux-aarch64-a5-4
 
-      - name: Set no-tests output for A5 when not requested or source paths unchanged
+      - name: Set no-tests output when A5 selection was skipped
         id: noop-a5
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-a5') || needs.pre-commit.outputs.src != 'true' }}
+        if: steps.scope-a5.outcome == 'skipped'
         run: |
           {
             echo "has_tests=false"
@@ -819,8 +828,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         needs.cpu-ut.result == 'success' &&
         needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_tests_a5 == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready-a5')
+        needs.select-tests.outputs.has_tests_a5 == 'true'
       }}
     name: run-selected-tests-a5 (vllm@${{ matrix.vllm_version }})
     strategy:
@@ -1070,15 +1078,13 @@ jobs:
                 fi
               fi
 
-              if [ "${HAS_TESTS_A5}" = "true" ]; then
+              if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ] && [ "${{ needs.pre-commit.outputs.target }}" = "main" ] && [ "${HAS_TESTS_A5}" != "true" ]; then
+                add "No A5 DMA regression was selected for the Core upgrade."
+              elif [ "${HAS_TESTS_A5}" = "true" ]; then
                 TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
                 echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-                if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-                  echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
-                elif [ "${TESTS_A5_RESULT}" = "failure" ]; then
-                  add "The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
-                elif [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" = "true" ]; then
-                  add "run-selected-tests-a5 was skipped although the ready-a5 label is set. Open the run-selected-tests-a5 job above for why it was skipped."
+                if [ "${TESTS_A5_RESULT}" != "success" ]; then
+                  add "The selected A5 tests did not pass (result: ${TESTS_A5_RESULT}). See run-selected-tests-a5 for details."
                 fi
               fi
             fi

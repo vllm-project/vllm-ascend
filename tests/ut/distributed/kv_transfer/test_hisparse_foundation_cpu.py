@@ -86,6 +86,11 @@ def test_batch_dma_rejects_failed_memory_query(monkeypatch):
         AscendHiSparseBackend().swap_blocks_batch(src, dst, sizes)
 
 
+def test_batch_dma_rejects_scalar_source_descriptor():
+    with pytest.raises(ValueError, match="descriptor arrays"):
+        AscendHiSparseBackend().swap_blocks_batch(torch.tensor(1024), torch.tensor([4096]), torch.tensor([128]))
+
+
 @pytest.mark.parametrize(
     "invalid_attributes", [None, {}, {"location": None}, {"location": {}}, {"location": {"type": False}}]
 )
