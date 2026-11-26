@@ -675,6 +675,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --pipeline-parallel-size 4 \
         --data-parallel-size 1 \
+        --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 19345 \
+        --master-addr "${local_ip}" \
+        --master-port 29450 \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -730,6 +734,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
+        --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 19346 \
+        --master-addr "${local_ip}" \
+        --master-port 29460 \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -861,6 +869,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
+        --master-addr "${local_ip}" \
+        --master-port 29450 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
@@ -933,6 +943,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
+        --master-addr "${local_ip}" \
+        --master-port 29460 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
