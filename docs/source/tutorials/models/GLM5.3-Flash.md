@@ -1573,15 +1573,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     - Set `num_speculative_tokens` to `3` on both roles, remove `--use-replayssm`,
       and set `--limit-mm-per-prompt` to `'{"image":1}'`.
     - On Prefill, set EPLB `window_size` and `step_interval` to `3000`,
-      keep `num_redundant_experts` at `0`, and set `--max-num-seqs 32`.
-      Remove `--api-server-count 1`.
+      keep `num_redundant_experts` at `0`, and remove `--api-server-count 1`.
     - On Decode, set `multistream_overlap_shared_expert` to `true` and
       keep `enable_flashcomm1` at `false` for TP1.
       Remove `enable_fused_mc2`, `finegrained_tp_config`, and
       `ascend_compilation_config` from `--additional-config`.
 
     Keep `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache, BF16 SSM state,
-    and prefix caching. Prefill uses 32 sequences and 16384 batched tokens.
+    and prefix caching. Prefill uses 64 sequences and 16384 batched tokens.
     Decode uses 40 sequences and 240 batched tokens. Add the Memcache
     environment settings and replace the connectors as described below.
 
