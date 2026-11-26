@@ -2891,17 +2891,6 @@ keep `--gpu-memory-utilization` at `0.9`: each 64GB device already reports
 about 61.4 GiB of HBM in use at that setting, so higher values leave no
 headroom for the KV cache.
 
-### 9.1 Tool-Assisted Tuning with msmodeling
-
-The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
-parameters together, combining measured results with knowledge-base experience
-to determine a better parameter set in one run and push performance toward the
-hardware limit.
-For the complete, step-by-step usage guide please refer to
-**[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
-
-### 9.2 LM Head Tensor Parallelism
-
 For peak-performance benchmarking on the A3 Decode node, use four-way tensor
 parallelism for `lm_head`. Merge the following entry into the existing
 `--additional-config` JSON object:
@@ -2923,6 +2912,15 @@ Use these Decode scheduling limits with the configuration above:
 
 See [Fine-Grained Tensor Parallelism](../../user_guide/feature_guide/Fine_grained_TP.md)
 for parameter details.
+
+### 9.1 Tool-Assisted Tuning with msmodeling
+
+The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
+parameters together, combining measured results with knowledge-base experience
+to determine a better parameter set in one run and push performance toward the
+hardware limit.
+For the complete, step-by-step usage guide please refer to
+**[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
 ## 10 FAQ
 
