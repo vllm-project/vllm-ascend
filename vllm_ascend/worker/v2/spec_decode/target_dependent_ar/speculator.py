@@ -40,6 +40,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
@@ -63,6 +64,29 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_draft_decode_graph_mode(
+    cudagraph_mode: CUDAGraphMode,
+    num_speculative_steps: int,
+    enforce_eager: bool,
+) -> CUDAGraphMode:
+    """Pick the graph mode the draft decode loop runs with.
+
+    Upstream captures draft decode graphs only when the target model itself
+    replays FULL decode graphs. Ascend targets normally replay PIECEWISE decode
+    graphs, so every draft decode step stays eager even though the draft prefill
+    is already captured. ``VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE`` opts into
+    per-step PIECEWISE draft decode graphs for that case.
+    """
+    if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        return CUDAGraphMode.FULL_DECODE_ONLY
+    env_mode = envs.VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE
+    if env_mode not in ("none", "piecewise"):
+        raise ValueError(f"VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE must be 'none' or 'piecewise', got {env_mode!r}.")
+    if env_mode == "none" or num_speculative_steps <= 1 or enforce_eager:
+        return CUDAGraphMode.NONE
+    return CUDAGraphMode.PIECEWISE
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -109,7 +133,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
         # add more attributes for `input_buffers` in graph mode
         cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        self.draft_decode_graph_mode = resolve_draft_decode_graph_mode(
+            cudagraph_mode,
+            self.num_speculative_steps,
+            self.speculative_config.enforce_eager,
+        )
+        if self.draft_decode_graph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             self.input_buffers.draft_seq_lens_cpus = [
                 torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu")
                 for _ in range(self.num_speculative_steps - 1)
@@ -216,6 +245,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
+        self._maybe_rebuild_decode_cudagraph_manager()
         assert self.prefill_cudagraph_manager is not None
         assert self.decode_cudagraph_manager is not None
         # The Ascend graph managers are patched onto the upstream module and
@@ -225,6 +255,30 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.decode_cudagraph_manager.speculator = self
         self.prefill_cudagraph_manager.update_stream = self.update_stream
         self.decode_cudagraph_manager.update_stream = self.update_stream
+
+    def _maybe_rebuild_decode_cudagraph_manager(self) -> None:
+        """Recreate the draft decode graph manager with the resolved mode.
+
+        Upstream builds it from the target's decode mode, which silently
+        downgrades it to NONE for PIECEWISE targets.
+        """
+        manager = self.decode_cudagraph_manager
+        target_mode = self.draft_decode_graph_mode
+        if manager is None or manager.cudagraph_mode == target_mode:
+            return
+        if target_mode != CUDAGraphMode.PIECEWISE:
+            return
+        from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
+            AutoRegressiveAclGraphManager,
+        )
+
+        self.decode_cudagraph_manager = AutoRegressiveAclGraphManager(
+            self.vllm_config,
+            self.device,
+            target_mode,
+            decode_query_lens={1: self.max_num_reqs},
+            decode_request_sizes=(self.vllm_config.get_draft_decode_cudagraph_request_sizes()),
+        )
 
     def set_eplb_state(self, eplb_state: Any) -> None:
         super().set_eplb_state(eplb_state)

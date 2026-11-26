@@ -167,7 +167,11 @@ class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraph
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(
                     num_reqs,
-                    cg_mode == CUDAGraphMode.PIECEWISE,
+                    # Keep attention metadata during capture: for PIECEWISE the
+                    # attention op is a split point that runs eagerly on every
+                    # replay, so the captured run needs the same metadata a real
+                    # step passes instead of None.
+                    False,
                     BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                     num_tokens_across_dp,
                     seq_lens_cpu_upper_bound,
