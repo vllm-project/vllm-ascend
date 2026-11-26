@@ -242,18 +242,15 @@ class AscendMLAAttention(MLAAttention):
             and not getattr(self.impl, "use_flashmla", False)
             and not (use_sfa_turboquant or use_sfa_c8)
         ):
-            is_draft = spec.is_draft or self.is_draft_layer
-            if (
-                model_type == "kimi_linear"
-                and not is_draft
-                and not enable_sfa(vllm_config)
-                and enable_fa_quant(vllm_config)
-            ):
-                _, rope_dtype = vllm_config.quant_config.get_kv_quant_dtype(
+            if not enable_sfa(vllm_config) and enable_fa_quant(vllm_config):
+                k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                     self.impl.layer_name, dtype, vllm_config.model_config
                 )
+                dtype, rope_dtype = k_dtype, v_dtype
             else:
-                model_config = draft_config if is_draft and draft_config is not None else vllm_config.model_config
+                model_config = vllm_config.model_config
+                if (spec.is_draft or self.is_draft_layer) and draft_config is not None:
+                    model_config = draft_config
                 rope_dtype = model_config.dtype
 
         # Preserve upstream metadata and apply all owner fields together.

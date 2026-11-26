@@ -1537,6 +1537,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
         ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
+            use_mla=False,
             hf_text_config=SimpleNamespace(model_type="kimi_linear"),
         ),
         parallel_config=SimpleNamespace(
