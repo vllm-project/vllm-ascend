@@ -875,8 +875,6 @@ def _commit_kda_state_kernel(
 
 
 def allocate_kda_decay_cache(key_gate: torch.Tensor) -> torch.Tensor | None:
-    if not is_950():
-        return None
     return torch.empty((*key_gate.shape[:-1], key_gate.size(-1) // 2), device=key_gate.device, dtype=torch.float32)
 
 
@@ -1045,7 +1043,7 @@ def kda_recoverssm_verify(
         USE_LOWER_BOUND=lower_bound is not None,
         USE_NORM_EPS=not is_a5,
         SPEC_QUERY_LEN=spec_query_len,
-        STORE_RAW_GATE=store_raw_gate or decay_cache is None or not is_a5,
+        STORE_RAW_GATE=store_raw_gate or decay_cache is None,
         decay_cache_ptr=decay_cache,
         normalized_key_cache_ptr=normalized_key_cache,
         num_warps=4,
