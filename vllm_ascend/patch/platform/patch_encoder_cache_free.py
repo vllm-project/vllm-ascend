@@ -34,8 +34,8 @@ def _patch_update_after_schedule() -> None:
         # steps in order, so freeing before the step is dispatched is safe.
         # This mirrors the placement of upstream vLLM PR #68799.
         for req_id in scheduler_output.num_scheduled_tokens:
-            request = self.requests[req_id]
-            if request.has_encoder_inputs:
+            request = self.requests.get(req_id)
+            if request is not None and getattr(request, "has_encoder_inputs", False):
                 self._free_encoder_inputs(request)
 
     setattr(update_after_schedule, _ENCODER_FREE_PATCH_MARKER, True)

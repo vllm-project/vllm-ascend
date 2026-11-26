@@ -117,6 +117,10 @@ def test_balance_scheduler_inherits_base_class_patch():
 
     from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 
-    base_scheduler = BalanceScheduler.__mro__[1]
-    assert "_update_after_schedule" not in BalanceScheduler.__dict__
-    assert getattr(base_scheduler._update_after_schedule, "_vllm_ascend_encoder_free_patch", False)
+    defining_class = next(
+        (cls for cls in BalanceScheduler.__mro__ if "_update_after_schedule" in cls.__dict__),
+        None,
+    )
+    assert defining_class is not None, "Could not find class defining _update_after_schedule in MRO"
+    assert defining_class is not BalanceScheduler, "BalanceScheduler should not override _update_after_schedule"
+    assert getattr(defining_class._update_after_schedule, "_vllm_ascend_encoder_free_patch", False)
