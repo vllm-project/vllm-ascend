@@ -22,7 +22,7 @@
 # limitations under the License.
 
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 import torch_npu
@@ -30,8 +30,9 @@ import torch_npu
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEAllGatherCombineMetadata, MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput, TokenDispatcherWithAllGather
 
-# A single zero row avoids clearing an entire expanded tile at prefill sizes.
-_SINGLE_ZERO_ROW_MIN_ROUTES = 4096
+# Cache row indices only for small decode shapes to avoid holding large dynamic
+# prefill buffers across variable sequence lengths.
+_MAX_CACHED_ROW_INDICES = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,8 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
         return encoded
 
     def _get_row_indices(self, num_rows: int, device: torch.device) -> torch.Tensor:
+        if num_rows >= _MAX_CACHED_ROW_INDICES:
+            return torch.arange(num_rows, device=device, dtype=torch.int32)
         key = (num_rows, device)
         rows = self._row_indices_cache.get(key)
         if rows is None:
@@ -129,16 +132,10 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         if combine_metadata.local_row_count is not None:
             # The grouped matmuls leave rows beyond the final group unwritten.
+            # Keep the original unique permutation for npu_moe_token_unpermute
+            # and zero out the unwritten remote rows in place.
             local_rows = combine_metadata.local_row_count
             num_rows = hidden_states.shape[0]
-            if num_rows >= _SINGLE_ZERO_ROW_MIN_ROUTES:
-                # Redirect remote routes to the last row and clear it only
-                # when at least one route is remote.
-                indices = combine_metadata.expanded_row_idx
-                indices = indices.masked_fill(indices >= local_rows, num_rows - 1)
-                combine_metadata = replace(combine_metadata, expanded_row_idx=indices)
-                hidden_states[-1].masked_fill_(local_rows < num_rows, 0)
-            else:
-                rows = self._get_row_indices(num_rows, hidden_states.device)
-                hidden_states.masked_fill_((rows >= local_rows).unsqueeze(1), 0)
+            rows = self._get_row_indices(num_rows, hidden_states.device)
+            hidden_states.masked_fill_((rows >= local_rows).unsqueeze(1), 0)
         return super().token_combine(hidden_states, combine_metadata, bias)

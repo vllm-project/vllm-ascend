@@ -53,8 +53,8 @@ def test_route_and_combine_local_experts(global_to_local, topk_ids, local_ids, c
 
 
 @pytest.mark.parametrize("local_rows", [0, 2, 4])
-def test_large_combine_redirects_only_remote_rows(monkeypatch, local_rows):
-    monkeypatch.setattr(token_dispatcher_module, "_SINGLE_ZERO_ROW_MIN_ROUTES", 4)
+def test_combine_preserves_unique_permutation_and_zeros_remote_rows(monkeypatch, local_rows):
+    monkeypatch.setattr(token_dispatcher_module, "_MAX_CACHED_ROW_INDICES", 4)
     dispatcher = TokenDispatcherWithAllGather310(top_k=2, num_experts=4, num_local_experts=2)
     permutation = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
     output = torch.arange(4, dtype=torch.float32).view(-1, 1).expand(-1, 16).contiguous() + 1
@@ -69,4 +69,6 @@ def test_large_combine_redirects_only_remote_rows(monkeypatch, local_rows):
     with patch.object(TokenDispatcherWithAllGather, "token_combine") as combine:
         dispatcher.token_combine(output, metadata)
     rows, new_metadata, _ = combine.call_args.args
+    assert new_metadata.expanded_row_idx is permutation
+    assert not dispatcher._row_indices_cache
     torch.testing.assert_close(rows[new_metadata.expanded_row_idx], expected)
