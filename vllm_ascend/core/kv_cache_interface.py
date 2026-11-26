@@ -252,11 +252,16 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        return (
-            get_storage_block_size(self)
-            * self.num_kv_heads
-            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
-        )
+        if self.rope_dtype is None:
+            row_bytes = self.head_size * get_dtype_size(self.dtype)
+        else:
+            if self.kv_lora_rank is None or self.qk_rope_head_dim is None:
+                raise ValueError("Split MLA cache with a RoPE dtype requires both component widths.")
+            row_bytes = self.kv_lora_rank * get_dtype_size(self.dtype) + self.qk_rope_head_dim * get_dtype_size(
+                self.rope_dtype
+            )
+        scale_bytes = self.scale_dim * get_dtype_size(self.scale_dtype)
+        return get_storage_block_size(self) * self.num_kv_heads * (row_bytes + scale_bytes)
 
     @property
     def unpadded_page_size_bytes(self) -> int:

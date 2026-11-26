@@ -1577,7 +1577,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
         assert spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
     assert not spec.cache_sparse_sfa_c8
     assert not spec.store_on_host
-    assert spec.page_size_bytes == 1536 * 576 * torch.empty((), dtype=spec.dtype).element_size()
+    assert spec.page_size_bytes == 1536 * (640 if quantized else 576 * spec.dtype.itemsize)
     assert spec.non_causal_multi_token_decode
 
 
