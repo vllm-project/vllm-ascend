@@ -32,7 +32,7 @@ See [supported features](../../user_guide/support_matrix/supported_features.md) 
 | `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8) |
 | `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 950DT products | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp) |
 
-The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint. The A3 and 950DT deployment configurations in Sections 5.1 and 5.2 follow the November 24 scripts, using W4A8 ALL-INT shared-expert AWQ weights on A3 and W4A8 ALL-MXFP shared-expert AWQ weights on 950DT. If using local weights, replace the model ID with the matching checkpoint directory; validate the quantization format before reusing these settings.
+The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
 
 ## 4 Installation
 
@@ -627,8 +627,6 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 === "A3 series"
 
     This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
-
-    Both roles use a maximum context length of 143360 tokens. Prefill uses a 4096 MB HCCL buffer and expert-parallel buffer; Decode uses a 1024 MB HCCL buffer and explicit graph capture sizes.
 
     Before starting:
 
