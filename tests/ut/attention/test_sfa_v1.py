@@ -719,6 +719,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer._dsa_cp_active = False
         indexer._use_fused_cache_store = False
         indexer._sharded_dcp = False
+        indexer._use_bf16_li_v2 = False
         indexer._local_topk = False
         indexer.write_cache = MagicMock()
 

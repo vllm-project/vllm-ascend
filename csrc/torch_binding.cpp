@@ -1196,6 +1196,102 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+namespace {
+constexpr int64_t LI_HEAD_DIM = 128;
+constexpr int64_t LI_METADATA_SIZE = 2048;
+constexpr int64_t LI_KV_HEADS = 1;
+constexpr int64_t LI_CMP_RATIO = 1;
+constexpr int64_t LI_DYNAMIC_LENGTH = -1;
+
+void check_lightning_indexer_rows(const at::Tensor& starts, const at::Tensor& lengths,
+                                 int64_t heads, int64_t topk)
+{
+    TORCH_CHECK(starts.device().type() == c10::DeviceType::PrivateUse1 && starts.device() == lengths.device(),
+                "Lightning Indexer row metadata must be on the same NPU");
+    TORCH_CHECK(starts.scalar_type() == at::kInt && lengths.scalar_type() == at::kInt &&
+                starts.dim() == 1 && lengths.dim() == 1 && lengths.numel() > 0 &&
+                starts.size(0) == lengths.size(0) + 1 && starts.is_contiguous() && lengths.is_contiguous(),
+                "Expected contiguous INT32 cumulative query starts [B+1] and KV lengths [B]");
+    TORCH_CHECK(heads >= 1 && heads <= 64 && topk >= 1 && topk <= 8192,
+                "Ascend 950 Lightning Indexer V2 requires 1..64 query heads and Top-K in 1..8192");
+}
+}  // namespace
+
+bool is_lightning_indexer_v2_available()
+{
+    static const bool available = GetOpApiFuncAddr("aclnnLightningIndexerV2GetWorkspaceSize") != nullptr &&
+                                  GetOpApiFuncAddr("aclnnLightningIndexerV2") != nullptr &&
+                                  GetOpApiFuncAddr("aclnnLightningIndexerV2MetadataGetWorkspaceSize") != nullptr &&
+                                  GetOpApiFuncAddr("aclnnLightningIndexerV2Metadata") != nullptr;
+    return available;
+}
+
+at::Tensor npu_lightning_indexer_v2_metadata(
+    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal)
+{
+    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, num_heads_q, topk);
+    const c10_npu::NPUGuard guard(cu_seqlens_q.device());
+    auto metadata = at::empty({LI_METADATA_SIZE}, cu_seqlens_q.options());
+    // CANN's metadata wrapper represents omitted length tensors by empty INT32 tensors.
+    auto unused = at::empty({0}, cu_seqlens_q.options());
+    const int64_t batch_size = seqused_k.size(0);
+    const int64_t mask_mode = causal ? 3 : 0;
+    char* layout_q = const_cast<char*>("TND");
+    char* layout_k = const_cast<char*>("PA_BBND");
+    EXEC_NPU_CMD(aclnnLightningIndexerV2Metadata, cu_seqlens_q, unused, unused, seqused_k, unused,
+                 num_heads_q, LI_KV_HEADS, LI_HEAD_DIM, topk, batch_size, LI_DYNAMIC_LENGTH, LI_DYNAMIC_LENGTH,
+                 layout_q, layout_k, mask_mode, LI_CMP_RATIO, metadata);
+    return metadata;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& weights,
+    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, const at::Tensor& block_table,
+    const at::Tensor& metadata, int64_t topk, bool causal, bool return_values)
+{
+    TORCH_CHECK(query.dim() == 3 && key.dim() == 4 && query.scalar_type() == at::kBFloat16 &&
+                key.scalar_type() == at::kBFloat16 && query.size(2) == LI_HEAD_DIM &&
+                key.size(0) > 0 && key.size(1) == 128 && key.size(2) == 1 && key.size(3) == LI_HEAD_DIM,
+                "Expected BF16 query [T,H,128] and paged BF16 key [blocks,128,1,128]");
+    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, query.size(1), topk);
+    const int64_t rows = query.size(0);
+    TORCH_CHECK(query.device() == cu_seqlens_q.device() && query.device() == key.device() &&
+                query.device() == weights.device() && query.device() == block_table.device() &&
+                query.device() == metadata.device(), "Lightning Indexer tensors must be on the same NPU");
+    TORCH_CHECK(query.is_contiguous() && key.stride(3) == 1 && key.stride(1) == LI_HEAD_DIM &&
+                key.stride(0) >= key.size(1) * LI_HEAD_DIM,
+                "Expected contiguous TND query and dense rows within each physical key page");
+    TORCH_CHECK(weights.scalar_type() == at::kFloat && weights.dim() == 2 &&
+                weights.size(0) == rows && weights.size(1) == query.size(1) && weights.is_contiguous(),
+                "Lightning Indexer weights must be contiguous FP32 [T,H]");
+    // The DCP producer provides one already-cropped owner-local sequence per
+    // query. Ordinary prefill passes one full KV length per request.
+    TORCH_CHECK(rows > 0 && (causal || seqused_k.size(0) == rows),
+                "Non-causal Lightning Indexer requires one KV length per query row");
+    TORCH_CHECK(block_table.scalar_type() == at::kInt && block_table.dim() == 2 &&
+                block_table.size(0) == seqused_k.size(0) && block_table.size(1) > 0 && block_table.is_contiguous(),
+                "Expected a contiguous INT32 page table [B, pages]");
+    TORCH_CHECK(metadata.scalar_type() == at::kInt && metadata.dim() == 1 &&
+                metadata.size(0) == LI_METADATA_SIZE && metadata.is_contiguous(),
+                "Lightning Indexer V2 metadata must be contiguous INT32 [2048]");
+    const c10_npu::NPUGuard guard(query.device());
+    // A TND plan can contain no work at all on a DCP owner. Unwritten
+    // rows (including any graph tail) must be empty when candidates merge.
+    auto indices = at::full({rows, 1, topk}, -1, query.options().dtype(at::kInt));
+    const auto score_options = query.options().dtype(at::kFloat);
+    auto scores = return_values ? at::full({rows, 1, topk}, -std::numeric_limits<float>::infinity(), score_options)
+                                : at::empty({0}, score_options);
+    const c10::optional<at::Tensor> absent = c10::nullopt;
+    char* layout_q = const_cast<char*>("TND");
+    char* layout_k = const_cast<char*>("PA_BBND");
+    const int64_t mask_mode = causal ? 3 : 0;
+    const int64_t return_value = return_values;
+    EXEC_NPU_CMD(aclnnLightningIndexerV2, query, key, weights, cu_seqlens_q, absent, absent, seqused_k,
+                 absent, block_table, absent, metadata, topk, LI_DYNAMIC_LENGTH, layout_q, layout_k, mask_mode,
+                 LI_CMP_RATIO, return_value, indices, scores);
+    return {indices, scores};
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -2956,6 +3052,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           ) -> Tensor "
     );
     ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
+
+    ops.def("is_lightning_indexer_v2_available() -> bool");
+    ops.impl("is_lightning_indexer_v2_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_lightning_indexer_v2_available);
+    ops.def("npu_lightning_indexer_v2_metadata(Tensor cu_seqlens_q, Tensor seqused_k, "
+            "int num_heads_q, int topk, bool causal=False) -> Tensor");
+    ops.impl("npu_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2_metadata);
+    ops.def("npu_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, Tensor cu_seqlens_q, "
+            "Tensor seqused_k, Tensor block_table, Tensor metadata, int topk, "
+            "bool causal=False, bool return_values=True) -> (Tensor, Tensor)");
+    ops.impl("npu_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2);
 
     ops.def("is_minimax_sparse_attention_split_kv_available() -> bool");
     ops.impl("is_minimax_sparse_attention_split_kv_available", c10::DispatchKey::CompositeExplicitAutograd,

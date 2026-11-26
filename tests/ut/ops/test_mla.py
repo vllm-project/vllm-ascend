@@ -5,6 +5,7 @@ import pytest
 import torch
 from torch import nn
 from vllm.config import CacheConfig, CompilationConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
 
@@ -24,7 +25,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         sharded.start()
         self.addCleanup(sharded.stop)
 
-    def _make_vllm_indexer(self):
+    @staticmethod
+    def _make_vllm_indexer():
         mock_indexer = MagicMock()
         mock_indexer.config = SimpleNamespace()
         mock_indexer.n_head = 64
@@ -131,6 +133,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.use_torch_npu_lightning_indexer = False
         indexer._use_fused_cache_store = False
         indexer._sharded_dcp = False
+        indexer._use_bf16_li_v2 = False
         indexer._local_topk = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
@@ -142,7 +145,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))
         return indexer
 
-    def _make_indexer_metadata(self):
+    @staticmethod
+    def _make_indexer_metadata():
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
             cache_scatter_indices=MagicMock(name="cache_scatter_indices"),
@@ -329,6 +333,91 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(mock_scatter.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
         self.assertEqual(mock_scatter.call_args.args[2].data_ptr(), k_li.data_ptr())
         self.assertEqual(len(mock_scatter.call_args.args), 3)
+
+
+@pytest.mark.parametrize(
+    "dcp,scenario,expected",
+    [
+        (1, "bf16", "causal"),
+        (8, "bf16", "window"),
+        (1, "missing-symbol", "postprocess"),
+        (8, "missing-symbol", "paged"),
+        (1, "quantized", "postprocess"),
+        (8, "custom", "custom"),
+        (1, "full-graph", "postprocess"),
+        (1, "padded", "postprocess"),
+        (8, "A3", "paged"),
+    ],
+)
+def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, expected):
+    from vllm_ascend.attention import indexer as module
+    from vllm_ascend.attention.context_parallel import sharded_indexer
+
+    quantized = scenario == "quantized"
+    graph = dcp > 1 or scenario == "full-graph"
+    cfg = MagicMock()
+    cfg.model_config.hf_config.model_type = "kimi_k31"
+    cfg.model_config.dtype = torch.bfloat16
+    cfg.model_config.max_model_len = 8192
+    cfg.model_config.hf_text_config.index_n_heads = 64
+    cfg.parallel_config.prefill_context_parallel_size = 1
+    cfg.parallel_config.decode_context_parallel_size = dcp
+    cfg.parallel_config.cp_kv_cache_interleave_size = 768
+    cfg.attention_config.indexer_kv_dtype = "int8" if quantized else "bf16"
+    cfg.additional_config = {}
+    ascend = MagicMock()
+    ascend.is_sparse_li_c8_layer.return_value = quantized
+    ascend.is_sparse_li_c4_layer.return_value = False
+    monkeypatch.setattr(module, "get_current_vllm_config", lambda: cfg)
+    monkeypatch.setattr(module, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(module, "enable_sfa_dcp_sharded_indexer", lambda: dcp > 1)
+    monkeypatch.setattr(module, "has_lightning_indexer_v2", lambda: scenario != "missing-symbol")
+    monkeypatch.setattr(module, "is_950", lambda: scenario != "A3")
+    monkeypatch.setattr(module, "enable_dsa_cp", lambda: False)
+    monkeypatch.setattr(module, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(module, "get_dcp_group", lambda: SimpleNamespace(world_size=dcp))
+    context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL if graph else CUDAGraphMode.NONE)
+    monkeypatch.setattr(module, "get_forward_context", lambda: context)
+
+    backend = AscendSFAIndexerBackend(TestAscendSFAIndexerBackend._make_vllm_indexer(), qk_rope_head_dim=64)
+    dtype = torch.int8 if quantized else torch.bfloat16
+    key = torch.empty(3, 128, 1, 128, dtype=dtype)
+    backend.k_cache.kv_cache = (key, torch.empty(3, 128, 1, 1)) if quantized else (key,)
+    query = torch.zeros(2, 64, 128, dtype=dtype)
+    weights = torch.ones(2, 64)
+    monkeypatch.setattr(backend, "forward_k", MagicMock(return_value=(query[:, 0], None, weights)))
+    monkeypatch.setattr(backend, "_forward_q", MagicMock(return_value=(query, None, query.shape)))
+    monkeypatch.setattr(backend, "write_cache", MagicMock())
+    metadata = TestAscendSFAIndexerBackend._make_indexer_metadata()
+    metadata.block_table = torch.tensor([[1, 2]], dtype=torch.int32)
+    metadata.query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    metadata.actual_seq_lengths_query = metadata.query_start_loc[1:]
+    metadata.actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
+    metadata.local_visible_lengths = torch.tensor([3, 4], dtype=torch.int32)
+    metadata.request_rows = torch.zeros(2, dtype=torch.int32)
+    metadata.num_actual_tokens = 1 if scenario == "padded" else 2
+    metadata.max_local_indexer_pages = 2
+    metadata.first_valid_indexer_page = 1
+    metadata.full_graph_mode = graph
+    selectors = {name: MagicMock() for name in ("causal", "window", "paged", "postprocess", "custom")}
+    ids = torch.empty(2, 1, 2048, dtype=torch.int32)
+    scores = torch.empty_like(ids, dtype=torch.float32)
+    for name, selector in selectors.items():
+        selector.return_value = (ids, scores) if name in ("causal", "window", "paged") else ids
+    metadata.topk_selector = selectors["custom"] if scenario == "custom" else None
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", MagicMock(), raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2", selectors["causal"], raising=False)
+    monkeypatch.setattr(module, "lightning_indexer_v2_candidates", selectors["window"])
+    monkeypatch.setattr(module, "bf16_paged_indexer_candidates", selectors["paged"])
+    monkeypatch.setattr(module.DeviceOperator, "indexer_select_post_process", selectors["postprocess"])
+    merge = MagicMock(return_value=ids)
+    monkeypatch.setattr(sharded_indexer, "distributed_topk", merge)
+    assert backend(query, query, query, metadata) is ids
+    assert [name for name, selector in selectors.items() if selector.called] == [expected]
+    assert merge.called == (expected in ("window", "paged"))
+    if merge.called:
+        assert merge.call_args.args[:2] == (ids, scores)
+        assert merge.call_args.kwargs["input_sorted"]
 
 
 class TestIndexerWrapper(TestBase):

@@ -2171,6 +2171,20 @@ The following accuracy results were reported for Kimi K3.1 Pro with PD separatio
 
 ## 8 Performance Evaluation {#8-performance-evaluation}
 
+On Ascend 950, rebuild the vllm-ascend native extension from this checkout with
+a CANN installation that provides `LightningIndexerV2` and
+`LightningIndexerV2Metadata`. The BF16 K3.1 indexer detects these operators
+automatically. Unpadded DCP1 prefill uses causal retrieval. TP8/DCP8 decode
+scores each query's visible local KV in windows of up to 2048 tokens and
+merges the candidates across ranks. The startup log reports operator
+availability and selection. A device trace containing `LightningIndexerV2`
+confirms execution for the profiled batch.
+
+To compare rank-local BF16 scoring on the same inputs, run
+`python benchmarks/bf16_sharded_indexer.py --requests 16 --local-tokens 16384`
+from the repository root. The timings cover graph replay through local Top-K.
+Shared metadata preparation and the DCP collective are outside the timed region.
+
 ### 8.1 Using AISBench {#81-using-aisbench}
 
 Refer to the [AISBench performance evaluation guide](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) to prepare the environment and test configuration.

@@ -17,6 +17,50 @@ MIN_GROUPED_MERGE_SAVING_PERCENT = 10
 MIN_FUSED_SORT_ROW_PERCENT = 75
 
 
+@triton.jit
+def _restore_li_v2_scores(
+    ids,
+    scores,
+    pages,
+    lengths,
+    dense,
+    offset,
+    dense_stride,
+    page_stride,
+    WIDTH: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    idx = tl.load(ids + row * WIDTH + col, col < WIDTH, -1)
+    score = tl.load(scores + row * WIDTH + col, col < WIDTH, 0.0)
+    visible = tl.load(lengths + row)
+    valid = (idx >= 0) & (idx < WIDTH) & (idx < visible)
+    safe_idx = tl.where(valid, idx, 0)
+    valid_page = tl.load(pages + row * page_stride + safe_idx // PAGE_SIZE)
+    # Native IDs within a window are unique. Masked slots keep their -inf
+    # initializer, including holes that used physical page zero for safety.
+    tl.store(dense + row * dense_stride + offset + safe_idx, score, valid & valid_page)
+
+
+def restore_li_v2_scores(ids, scores, valid_pages, lengths, dense, offset, page_size):
+    rows, _, width = ids.shape
+    _restore_li_v2_scores[(rows, triton.cdiv(width, 256))](
+        ids,
+        scores,
+        valid_pages,
+        lengths,
+        dense,
+        offset,
+        dense.stride(0),
+        valid_pages.stride(0),
+        width,
+        page_size,
+        256,
+    )
+
+
 @triton.jit(do_not_specialize=["ROWS"])
 def _pack_candidates(
     indices,

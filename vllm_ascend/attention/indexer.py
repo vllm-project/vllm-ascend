@@ -13,6 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -44,10 +45,20 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.bf16_sharded_indexer import DEFAULT_QUERY_ROWS_PER_TILE, bf16_paged_indexer_candidates
+from vllm_ascend.ops.bf16_sharded_indexer import (
+    DEFAULT_QUERY_ROWS_PER_TILE,
+    bf16_paged_indexer_candidates,
+)
+from vllm_ascend.ops.lightning_indexer_v2 import (
+    LightningIndexerV2Plan,
+    build_lightning_indexer_v2_plan,
+    has_lightning_indexer_v2,
+    lightning_indexer_v2_candidates,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -82,6 +93,10 @@ def _indexer_qk_stream() -> torch.npu.Stream:
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+
+# Full-score storage and stable sort outputs (FP32 + FP32 + INT64).
+# Large eager batches retain the row-tiled scorer's bounded scratch space.
+_BF16_LI_V2_MAX_SORT_ELEMENTS = (256 << 20) // (4 + 4 + 8)
 
 
 def _uses_kimi_k31_bf16_indexer(vllm_config: VllmConfig) -> bool:
@@ -287,6 +302,23 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._pcp_active = self.use_pcp
         self._sharded_dcp = enable_sfa_dcp_sharded_indexer()
         self._sharded_bf16 = self._sharded_dcp and _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
+        self._use_bf16_li_v2 = (
+            _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
+            and not self.enable_sparse_li_quant
+            and not self.use_pcp
+            and not self._dsa_cp_active
+            and 1 <= self.n_head <= 64
+            and self.head_dim == 128
+            and self.topk_tokens == 2048
+            and (self._sharded_bf16 or parallel_config.decode_context_parallel_size == 1)
+            and is_950()
+            and has_lightning_indexer_v2()
+        )
+        if self._use_bf16_li_v2:
+            logger.info_once(
+                "Kimi K3.1 BF16 indexer selected CANN LightningIndexerV2 (DCP=%s).",
+                parallel_config.decode_context_parallel_size,
+            )
         if self._sharded_bf16:
             options = get_current_vllm_config().additional_config or {}
             rows = options.get("bf16_indexer_query_rows_per_tile", DEFAULT_QUERY_ROWS_PER_TILE)
@@ -606,6 +638,68 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 scale_handle.wait()
         return k_li, k_li_scale, slot_mapping
 
+    @staticmethod
+    def _get_bf16_li_v2_cache() -> dict:
+        context = get_forward_context()
+        cache = getattr(context, "bf16_li_v2_plans", None)
+        if cache is None:
+            cache = context.bf16_li_v2_plans = {}
+        return cache
+
+    def _get_bf16_li_v2_causal_metadata(self, indexer_metadata: AscendSFAIndexerMetadata) -> torch.Tensor:
+        cu_query = indexer_metadata.query_start_loc
+        lengths = indexer_metadata.actual_seq_lengths_key
+        assert cu_query is not None and lengths is not None
+        cache = AscendSFAIndexerBackend._get_bf16_li_v2_cache()
+        key = ("causal", id(indexer_metadata), id(cu_query), id(lengths), self.n_head, self.topk_tokens)
+        owner = self.k_cache.prefix
+        cached = cache.get(key)
+        if cached is None or cached[0] == owner:
+            metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+                cu_query, lengths, self.n_head, self.topk_tokens, True
+            )
+            cached = (owner, metadata)
+            cache[key] = cached
+        return cached[1]
+
+    def _get_bf16_li_v2_plan(
+        self, indexer_metadata: AscendSFAIndexerMetadata, key_cache: torch.Tensor
+    ) -> LightningIndexerV2Plan:
+        request_rows = indexer_metadata.request_rows
+        lengths = indexer_metadata.local_visible_lengths
+        assert request_rows is not None and lengths is not None
+        table = indexer_metadata.block_table
+        num_pages, page_size = key_cache.shape[:2]
+        cache = AscendSFAIndexerBackend._get_bf16_li_v2_cache()
+        key = (
+            id(indexer_metadata),
+            id(table),
+            id(request_rows),
+            id(lengths),
+            indexer_metadata.max_local_indexer_pages,
+            indexer_metadata.first_valid_indexer_page,
+            num_pages,
+            page_size,
+            self.n_head,
+        )
+        owner = self.k_cache.prefix
+        cached = cache.get(key)
+        # Warmup and capture can share a forward context. The first consuming
+        # layer must record the metadata operations again during capture.
+        if cached is None or cached[0] == owner:
+            plan = build_lightning_indexer_v2_plan(
+                table[:, : indexer_metadata.max_local_indexer_pages],
+                request_rows,
+                lengths,
+                num_pages,
+                page_size,
+                indexer_metadata.first_valid_indexer_page,
+                self.n_head,
+            )
+            cached = (owner, plan)
+            cache[key] = cached
+        return cached[1]
+
     def _get_local_qli_inputs(
         self, indexer_metadata: AscendSFAIndexerMetadata
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -886,24 +980,46 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
+        key_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
+        use_li_v2 = (
+            self._use_bf16_li_v2
+            and q_li.shape[0] > 0
+            and q_li.dtype == key_cache.dtype == torch.bfloat16
+            and key_cache.shape[0] > 0
+            and key_cache.shape[1:] == (128, 1, 128)
+            and key_cache.stride(-1) == 1
+            and key_cache.stride(1) == 128
+            and key_cache.stride(0) >= 128 * 128
+            and indexer_metadata.block_table.numel() > 0
+        )
         if self._sharded_dcp:
             from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
 
             if self._sharded_bf16:
                 assert indexer_metadata.local_visible_lengths is not None
-                indices, scores = bf16_paged_indexer_candidates(
-                    q_li,
-                    weights,
-                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                    indexer_metadata.block_table[:, : indexer_metadata.max_local_indexer_pages],
-                    indexer_metadata.actual_seq_lengths_query,
-                    indexer_metadata.local_visible_lengths,
-                    self.topk_tokens,
-                    first_valid_page=indexer_metadata.first_valid_indexer_page,
-                    full_graph=indexer_metadata.full_graph_mode,
-                    query_rows_per_tile=self._query_rows_per_tile,
-                    request_rows=indexer_metadata.request_rows,
-                )
+                table = indexer_metadata.block_table[:, : indexer_metadata.max_local_indexer_pages]
+                width = max(self.topk_tokens, table.shape[1] * key_cache.shape[1])
+                if (
+                    use_li_v2
+                    and indexer_metadata.request_rows is not None
+                    and q_li.shape[0] * width <= _BF16_LI_V2_MAX_SORT_ELEMENTS
+                ):
+                    plan = self._get_bf16_li_v2_plan(indexer_metadata, key_cache)
+                    indices, scores = lightning_indexer_v2_candidates(q_li, weights, key_cache, plan, self.topk_tokens)
+                else:
+                    indices, scores = bf16_paged_indexer_candidates(
+                        q_li,
+                        weights,
+                        key_cache,
+                        table,
+                        indexer_metadata.actual_seq_lengths_query,
+                        indexer_metadata.local_visible_lengths,
+                        self.topk_tokens,
+                        first_valid_page=indexer_metadata.first_valid_indexer_page,
+                        full_graph=indexer_metadata.full_graph_mode,
+                        query_rows_per_tile=self._query_rows_per_tile,
+                        request_rows=indexer_metadata.request_rows,
+                    )
                 return distributed_topk(
                     indices,
                     scores,
@@ -969,6 +1085,29 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self._dcp_interleave,
                 return_local=self._local_topk,
             )
+        # In the direct TND ABI every storage row must belong to a request.
+        # FULL replay can shorten the active prefix after capture. The DCP
+        # adapter above represents its padded rows as zero-length KV requests.
+        if (
+            use_li_v2
+            and q_li.shape[0] == indexer_metadata.num_actual_tokens
+            and not indexer_metadata.full_graph_mode
+            and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+        ):
+            tiling = self._get_bf16_li_v2_causal_metadata(indexer_metadata)
+            indices, _ = torch.ops._C_ascend.npu_lightning_indexer_v2(
+                q_li.contiguous(),
+                key_cache,
+                weights.float().contiguous(),
+                indexer_metadata.query_start_loc,
+                indexer_metadata.actual_seq_lengths_key,
+                indexer_metadata.block_table.contiguous(),
+                tiling,
+                self.topk_tokens,
+                causal=True,
+                return_values=False,
+            )
+            return indices
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,

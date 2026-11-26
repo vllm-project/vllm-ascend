@@ -25,6 +25,71 @@ from vllm_ascend.device.device_op import A5DeviceAdaptor
 _KERNEL_BLOCK_SIZE = 128
 
 
+def test_bf16_li_v2_causal_metadata_uses_request_prefix_and_shares_across_layers(monkeypatch):
+    context = SimpleNamespace()
+    monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
+    op = Mock(side_effect=lambda cu_q, lengths, heads, k, causal: lengths.clone())
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", op, raising=False)
+    first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048)
+    other = SimpleNamespace(k_cache=SimpleNamespace(prefix="other"), n_head=32, topk_tokens=2048)
+    cu_query = torch.tensor([0, 2, 6], dtype=torch.int32)
+    lengths = torch.tensor([10, 14], dtype=torch.int32)
+    meta = SimpleNamespace(query_start_loc=cu_query, actual_seq_lengths_key=lengths)
+    get_metadata = AscendSFAIndexerBackend._get_bf16_li_v2_causal_metadata
+    result = get_metadata(first, meta)
+    assert get_metadata(other, meta) is result
+    op.assert_called_once_with(cu_query, lengths, 32, 2048, True)
+    lengths.fill_(17)
+    torch.testing.assert_close(get_metadata(first, meta), lengths)
+    assert op.call_count == 2
+
+
+def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch):
+    context = SimpleNamespace()
+    monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
+    metadata_op = Mock(side_effect=lambda cu_q, lengths, heads, k: lengths.clone())
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", metadata_op, raising=False)
+    first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32)
+    next_layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="next"), n_head=32)
+    table = torch.arange(36, dtype=torch.int32).reshape(2, 18)
+    table[1, 1] = -1
+    owners = torch.tensor([1, 1, 0, 1], dtype=torch.int32)
+    lengths = torch.tensor([[2177], [130], [0], [4096]], dtype=torch.int32)
+    meta = SimpleNamespace(
+        block_table=table,
+        request_rows=owners,
+        local_visible_lengths=lengths,
+        first_valid_indexer_page=2,
+        max_local_indexer_pages=None,
+    )
+    key_cache = torch.empty((34, 128, 1, 128), dtype=torch.bfloat16)
+    get_plan = AscendSFAIndexerBackend._get_bf16_li_v2_plan
+    plan = get_plan(first, meta, key_cache)
+    assert get_plan(next_layer, meta, key_cache) is plan
+    assert metadata_op.call_count == 2
+    torch.testing.assert_close(plan.cu_query, torch.arange(5, dtype=torch.int32))
+    assert [call.args[-2:] for call in metadata_op.call_args_list] == [(32, 2048), (32, 256)]
+    for window, start, stop in zip(plan.windows, (0, 16), (16, 18)):
+        pages = table[owners.long(), start:stop]
+        expected_valid = (pages >= 2) & (pages < 34)
+        torch.testing.assert_close(window.valid_pages, expected_valid)
+        torch.testing.assert_close(window.block_table, torch.where(expected_valid, pages, 0))
+        assert window.block_table.is_contiguous()
+        expected_lengths = (lengths.flatten() - start * 128).clamp(0, (stop - start) * 128)
+        torch.testing.assert_close(window.visible_lengths, expected_lengths)
+        torch.testing.assert_close(window.metadata, expected_lengths)
+    # Warmup and capture can use the same Python context and stable input storage.
+    table.fill_(3)
+    lengths.zero_()
+    new_plan = get_plan(first, meta, key_cache)
+    assert get_plan(next_layer, meta, key_cache) is new_plan
+    assert new_plan is not plan
+    assert metadata_op.call_count == 4
+    for window in new_plan.windows:
+        assert (window.block_table == 3).all()
+        assert (window.visible_lengths == 0).all()
+
+
 def _make_builder(
     pcp_size: int = 1,
     dcp_size: int = 1,

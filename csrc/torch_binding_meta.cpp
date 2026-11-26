@@ -1034,6 +1034,24 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
     return output;
 }
 
+at::Tensor npu_lightning_indexer_v2_metadata_meta(
+    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal)
+{
+    return at::empty({2048}, cu_seqlens_q.options().dtype(at::kInt));
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& weights, const at::Tensor& cu_seqlens_q,
+    const at::Tensor& seqused_k, const at::Tensor& block_table, const at::Tensor& metadata,
+    int64_t topk, bool causal, bool return_values)
+{
+    const auto shape = std::vector<c10::SymInt>{query.sym_size(0), 1, topk};
+    auto indices = at::empty_symint(shape, query.options().dtype(at::kInt));
+    const auto score_options = query.options().dtype(at::kFloat);
+    auto scores = return_values ? at::empty_symint(shape, score_options) : at::empty({0}, score_options);
+    return {indices, scores};
+}
+
 at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
@@ -1899,6 +1917,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
+    ops.impl("npu_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_lightning_indexer_v2_metadata_meta);
+    ops.impl("npu_lightning_indexer_v2", &vllm_ascend::meta::npu_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
