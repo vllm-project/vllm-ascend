@@ -1,0 +1,10 @@
+pr: 23440
+entries:
+  - category: bugfix
+    text: >-
+      Fixed loading of Qwen3.5 MoE checkpoints that store the MoE shared-expert gate as a
+      quantized tensor (for example msmodelslim W8A8 exports). Such checkpoints previously
+      failed to start with a missing shared_expert_gate weight_scale/weight_offset error; the
+      gate is now built with the MoE block quantization config, while checkpoints that keep
+      the gate unquantized are unaffected.
+    hardware: [A3]

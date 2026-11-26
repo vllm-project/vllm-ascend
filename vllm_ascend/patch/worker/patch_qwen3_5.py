@@ -399,23 +399,22 @@ def _qwen3_next_moe_init_with_quantized_gate(self, vllm_config, prefix: str = ""
     shared_expert_gate.weight_offset``.  The gate instance is captured by the
     shared experts, so it has to be *built* through the block's ``quant_config``
     instead of being replaced afterwards; the shim below only redirects that one
-    prefix, leaving every other linear untouched.
+    prefix, leaving every other linear untouched.  Without a quant config (an
+    unquantized model) the gate keeps upstream's quant_config=None.
     """
     import vllm.model_executor.models.qwen3_next as qwen3_next_module
 
     original_replicated_linear = qwen3_next_module.ReplicatedLinear
-    quant_config = vllm_config.quant_config
+    quant_config = getattr(vllm_config, "quant_config", None)
 
     def _replicated_linear_with_quantized_gate(*args, **kwargs):
-        if str(kwargs.get("prefix", "")).endswith(".shared_expert_gate"):
+        if quant_config is not None and str(kwargs.get("prefix", "")).endswith(".shared_expert_gate"):
             kwargs["quant_config"] = quant_config
         return original_replicated_linear(*args, **kwargs)
 
     qwen3_next_module.ReplicatedLinear = _replicated_linear_with_quantized_gate
     try:
-        _QWEN3_NEXT_MOE_ORIGINAL_INIT(
-            self, vllm_config, prefix=prefix, reduce_results=reduce_results
-        )
+        _QWEN3_NEXT_MOE_ORIGINAL_INIT(self, vllm_config, prefix=prefix, reduce_results=reduce_results)
     finally:
         qwen3_next_module.ReplicatedLinear = original_replicated_linear
 
