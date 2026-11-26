@@ -64,8 +64,8 @@ def validate_dsa_config(vllm_config: VllmConfig) -> None:
         if sparse.enabled:
             raise ValueError("Mooncake DSA Prefill requires sparse KV offload disabled")
         return
-    if not sparse.enabled or sparse.host_backend != "mooncake" or not sparse.use_fused_overlap:
-        raise ValueError("Mooncake DSA Decode requires enabled Mooncake Host offload with fused overlap")
+    if not sparse.enabled or sparse.host_backend != "mooncake":
+        raise ValueError("Mooncake DSA Decode requires enabled Mooncake Host offload (fused overlap or Copy-SFA)")
     if transfer.kv_load_failure_policy != "fail":
         raise ValueError("Mooncake DSA Host offload requires kv_load_failure_policy='fail'")
     parallel = vllm_config.parallel_config

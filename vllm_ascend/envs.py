@@ -97,6 +97,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
     # Non-sensitive V1 fused-overlap hot-buffer scatter: 1 (default) combines
     # K/RoPE writes; 0 uses two native scatters. Unsupported layouts fall back.
+    "VLLM_ASCEND_FSA_ASYNC_PLAN": lambda: bool(int(os.getenv("VLLM_ASCEND_FSA_ASYNC_PLAN", "1"))),
+    # Non-sensitive FSA layout reuse within a graph capture: 1 (default); 0 disables it.
+    "VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT", "1"))
+    ),
+    # Non-sensitive runtime descriptor fusion: 1 (default); 0 disables it. Preserves MemFabric copy.
+    "VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS", "1"))
+    ),
     "VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER", "1"))
     ),
