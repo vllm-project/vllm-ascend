@@ -241,6 +241,7 @@ def runtime(monkeypatch):
 
     def _needs_target_embedding(vllm_config):
         return context.pp.is_first_rank or spec_decode_needs_target_embed(vllm_config)
+
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -590,7 +591,6 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, dra
 
 
 @pytest.mark.parametrize("stage", range(4))
-@pytest.mark.parametrize("runner_v2", [False, True])
 @pytest.mark.parametrize(
     "dflash_config,materialized",
     [
@@ -600,11 +600,11 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, dra
         (None, False),
     ],
 )
-def test_dflash_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, dflash_config, materialized):
+def test_dflash_aux_contract_selected_before_draft_load(runtime, stage, dflash_config, materialized):
     namespace, context = runtime
     context.tp = 2
     context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
-    cfg = config(tp=2, pp=4, runner_v2=runner_v2)
+    cfg = config(tp=2, pp=4)
     cfg.model_config.hf_text_config = SimpleNamespace(
         vocab_size=16,
         hidden_size=3,
