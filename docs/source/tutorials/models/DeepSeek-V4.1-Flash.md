@@ -2900,6 +2900,30 @@ hardware limit.
 For the complete, step-by-step usage guide please refer to
 **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
+### 9.2 LM Head Tensor Parallelism
+
+For peak-performance benchmarking on the A3 Decode node, use four-way tensor
+parallelism for `lm_head`. Merge the following entry into the existing
+`--additional-config` JSON object:
+
+```json
+{
+    "finegrained_tp_config": {
+        "lmhead_tensor_parallel_size": 4
+    }
+}
+```
+
+Use these Decode scheduling limits with the configuration above:
+
+```shell
+--max-num-seqs 24 \
+--max-num-batched-tokens 168
+```
+
+See [Fine-Grained Tensor Parallelism](../../user_guide/feature_guide/Fine_grained_TP.md)
+for parameter details.
+
 ## 10 FAQ
 
 ### 10.1 How do I enable tool calling and reasoning parsing?
