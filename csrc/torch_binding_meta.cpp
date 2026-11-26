@@ -723,14 +723,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
 
     TORCH_CHECK(group_select_mode == 0 || group_select_mode == 1,
                 "group_select_mode must be 0 or 1, but got ", group_select_mode);
-    TORCH_CHECK(renorm == 0,
-                "renorm can only be 0 currently, but got ", renorm);
+    TORCH_CHECK(renorm == 0 || (renorm == 1 && (norm_type == 0 || norm_type == 1)),
+                "renorm must be 0, or 1 for softmax/sigmoid, but got ", renorm);
     TORCH_CHECK(norm_type == 0 || norm_type == 1 || norm_type ==2,
                 "norm_type must be 0 (softmax) or 1 (sigmoid) or 2 (softplus), but got ", norm_type);
 
-    if (expert_replica_routing_table_opt.has_value() && expert_replica_routing_table_opt->defined()) {
+    const bool has_routing_table = expert_replica_routing_table_opt.has_value() &&
+                                   expert_replica_routing_table_opt->defined();
+    if ((norm_type == 0 || norm_type == 1) && (renorm == 1 || has_routing_table)) {
+        TORCH_CHECK((!input_ids_opt.has_value() || !input_ids_opt->defined()) &&
+                        (!tid2eid_opt.has_value() || !tid2eid_opt->defined()) &&
+                        (!bias_vl_opt.has_value() || !bias_vl_opt->defined()),
+                    "Softmax/sigmoid renorm=1 or fused mapping does not support hash/vision inputs");
+    }
+
+    if (has_routing_table) {
         const auto& table = *expert_replica_routing_table_opt;
-        TORCH_CHECK(group_count == 1 && norm_type == 2,
+        TORCH_CHECK(norm_type != 2 || group_count == 1,
                     "Fused EPLB mapping requires ungrouped sqrtsoftplus routing");
         TORCH_CHECK(table.dim() == 2 && table.sym_size(0) > 0 && table.sym_size(1) == x.sym_size(1),
                     "EPLB table must have shape [period, logical_experts]");

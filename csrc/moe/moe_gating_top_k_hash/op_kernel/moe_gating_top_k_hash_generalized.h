@@ -14,6 +14,7 @@
  */
 #ifndef MOE_GATING_TOP_K_E_K_GENERALIZED_H
 #define MOE_GATING_TOP_K_E_K_GENERALIZED_H
+#include "moe_gating_top_k_hash_eplb_map.h"
 #include "kernel_operator.h"
 #include "common.h"
 #include "kernel_utils.h"
@@ -24,7 +25,7 @@ template <typename T>
 class MoeGatingTopKHashGenerlized {
 public:
     __aicore__ inline MoeGatingTopKHashGenerlized(){};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR routingTable, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                 const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -42,6 +43,7 @@ private:
 
 private:
     TPipe *pipe_;
+    MoeGatingTopKHash::EplbMap eplbMap_;
     TQue<QuePosition::VECIN, 1> xInQueue_;
     TQue<QuePosition::VECOUT, 1> yOutQueue_;
     TQue<QuePosition::VECOUT, 1> expertIdxOutQueue_;
@@ -526,7 +528,9 @@ __aicore__ inline void MoeGatingTopKHashGenerlized<T>::SelectTopKExpertScore()
     Gather(yOutTensor, xNormTensor, topKExpertIdWithByte.template ReinterpretCast<uint32_t>(), static_cast<uint32_t>(0),
            k_);
 
-    if (tilingData_->normType == 1) {
+    // Sigmoid always normalizes selected scores; softmax does so only with renorm=1.
+    if (tilingData_->normType == NORM_TYPE_SIGMOID ||
+        (tilingData_->normType == NORM_TYPE_SOFTMAX && tilingData_->renorm == 1)) {
         LocalTensor<float> maxValueTensor = calcTmpBuf_.Get<float>();
         LocalTensor<float> tmpTensor = calcTmpBuf_.Get<float>()[32];
         PipeBarrier<PIPE_V>();
@@ -581,18 +585,21 @@ __aicore__ inline void MoeGatingTopKHashGenerlized<T>::CopyOut(int64_t row)
     DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(k_ * sizeof(T)), 0, 0, 0};
     DataCopyPad(yGm_[row * k_], yOutTensor, dataCopyParams);
     dataCopyParams.blockLen = k_ * sizeof(int32_t);
+    eplbMap_.Apply(expertIdxOut, row + perCoreRowCount_ * blockIdx_);
     DataCopyPad(expertIdxGm_[row * k_], expertIdxOut, dataCopyParams);
     yOutQueue_.FreeTensor(yOutTensor);
     expertIdxOutQueue_.FreeTensor(expertIdxOut);
 }
 
 template <typename T>
-__aicore__ inline void MoeGatingTopKHashGenerlized<T>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR expertIdx,
+__aicore__ inline void MoeGatingTopKHashGenerlized<T>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR routingTable, GM_ADDR y, GM_ADDR expertIdx,
                                                         GM_ADDR out, GM_ADDR workspace,
                                                         const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe)
 {
     tilingData_ = tilingData;
     pipe_ = tPipe;
+    eplbMap_.Init(routingTable, tilingData_->routingTableRows,
+                  tilingData_->expertCount, tilingData_->k, pipe_);
     blockIdx_ = GetBlockIdx();
     perCoreRowCount_ = tilingData_->perCoreRowCount;
     if (blockIdx_ == GetBlockNum() - 1) {

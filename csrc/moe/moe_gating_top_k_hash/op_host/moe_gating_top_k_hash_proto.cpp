@@ -41,8 +41,8 @@ namespace ge {
    * @li k_group: An optional attribute of type int. It can not be less than 1, and can not be greater than group_count, indicating the topk group value. The default value is 1.
    * @li group_count: An optional attribute of type int. It can not be less than 1, indicating the group count. The group_count * align_32(expert_num / group_count) can not be greater than 2048. The default value is 1.
    * @li group_select_mode: An optional attribute of type int. 0 indicating that sort group by max values, 1 indicating that sort group by sum of top-2 values. The default value is 0.
-   * @li renorm: An optional attribute of type int. It can only be 0 now, indicating that norm firstly and then topk. The default value is 0.
-   * @li norm_type: An optional attribute of type int. 0 indicating that the softmax function is used, 1 indicating that the sigmoid function is used. The default value is 0.
+   * @li renorm: An optional attribute of type int. For softmax, 1 additionally normalizes selected TopK scores. Sigmoid and sqrtsoftplus always normalize selected scores regardless of renorm; sqrtsoftplus accepts only 0. The default value is 0.
+   * @li norm_type: An optional attribute of type int. 0 uses softmax, 1 uses sigmoid, and 2 uses sqrtsoftplus. Softmax/sigmoid renorm=1 or fused mapping does not accept hash/vision inputs. The default value is 0.
    * @li out_flag: An optional attribute of type bool. true indicating that has renorm output, false indicating that does not have renorm output. The default value is false.
    * @li routed_scaling_factor: An optional attribute of type float, indicating the routed_scaling_factor coefficient in use. The default value is 1.0.
    * @li eps: An optional attribute of type float, indicating the eps coefficient in use. The default value is 1e-20.

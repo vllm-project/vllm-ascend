@@ -1,0 +1,4 @@
+pr: 22911
+entries:
+  - category: feature
+    text: EPLB routing with softmax or renormalized sigmoid can now map selected expert IDs within the gating operation for eligible configurations.

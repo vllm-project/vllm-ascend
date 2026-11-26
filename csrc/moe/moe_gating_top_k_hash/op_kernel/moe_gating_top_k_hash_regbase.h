@@ -48,6 +48,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __aicore__ inline void CopyInX(int64_t progress);
         __aicore__ inline void ComputeX(int64_t row);
         __aicore__ inline void ComputeSoftmax();
+        __aicore__ inline void ComputeOrdinarySoftmax(LocalTensor<float> dst, LocalTensor<float> src);
         __aicore__ inline void ComputeSigmoid();
         __aicore__ inline void ComputeSoftplus();
         __aicore__ inline void CopyOutXNorm(int64_t progress);
@@ -209,6 +210,62 @@ namespace MoeGatingTopKHashRegbaseNS
         }
     }
 
+    template <typename T, typename U1, typename U2>
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeOrdinarySoftmax(
+        LocalTensor<float> dst, LocalTensor<float> src)
+    {
+        // Match CANN ops-transformer 66881f9a's ordinary without-group softmax:
+        // max, exp sum, then division.
+        // The input's padded expert slots have already been filled with -inf.
+        uint32_t size = expertCountAlign_;
+        uint16_t loops = static_cast<uint16_t>(CeilDiv(size, VL_FLOAT_SIZE));
+        __local_mem__ float *srcAddr = (__local_mem__ float *)src.GetPhyAddr();
+        __local_mem__ float *dstAddr = (__local_mem__ float *)dst.GetPhyAddr();
+        __VEC_SCOPE__
+        {
+            RegTensor<float> x, acc, maxVal, maxBcast, expVal, sumVal, sumBcast, negInf;
+            MicroAPI::MaskReg mask = MicroAPI::CreateMask<float>();
+            MicroAPI::MaskReg all = MicroAPI::CreateMask<float>();
+            MicroAPI::Duplicate(acc, *((float *)&MIN_FP32), all);
+            MicroAPI::Duplicate(negInf, *((float *)&MIN_FP32), all);
+            uint32_t remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                LoadOneTensorForDtypeT<float>(srcAddr, x, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Select<float>(x, x, negInf, mask);
+                MicroAPI::Max(acc, acc, x, all);
+            }
+            MicroAPI::Reduce<MicroAPI::ReduceType::MAX, float, float, MicroAPI::MaskMergeMode::ZEROING>(
+                maxVal, acc, all);
+            MicroAPI::Duplicate(maxBcast, maxVal, all);
+
+            MicroAPI::Duplicate(acc, 0.0f, all);
+            remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                MicroAPI::Duplicate(expVal, 0.0f, all);
+                LoadOneTensorForDtypeT<float>(srcAddr, x, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Sub(expVal, x, maxBcast, mask);
+                MicroAPI::Exp(expVal, expVal, mask);
+                MicroAPI::Add(acc, acc, expVal, all);
+            }
+            MicroAPI::Reduce<MicroAPI::ReduceType::SUM, float, float, MicroAPI::MaskMergeMode::ZEROING>(
+                sumVal, acc, all);
+            MicroAPI::Duplicate(sumBcast, sumVal, all);
+
+            remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                LoadOneTensorForDtypeT<float>(srcAddr, x, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Sub(expVal, x, maxBcast, mask);
+                MicroAPI::Exp(expVal, expVal, mask);
+                MicroAPI::Div(expVal, expVal, sumBcast, mask);
+                MicroAPI::DataCopy(dstAddr + i * VL_FLOAT_SIZE, expVal, mask);
+            }
+        }
+        PipeBarrier<PIPE_V>();
+    }
+
     template <typename T, typename  U1, typename U2>
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeSoftmax()
     {
@@ -239,12 +296,17 @@ namespace MoeGatingTopKHashRegbaseNS
                       (perGroupExpertCountAlign_ * sizeof(float)) / BLOCK_BYTES);
         }
 
-        SoftMaxShapeInfo softmaxShapeInfo;
-        softmaxShapeInfo.srcM = 1;
-        softmaxShapeInfo.srcK = groupCount_ * perGroupExpertCountAlign_;
-        softmaxShapeInfo.oriSrcM = 1;
-        softmaxShapeInfo.oriSrcK = groupCount_ * perGroupExpertCountAlign_;
-        SoftMax<float, true, false>(xSoftmaxTensor, xInLocalTensor, tilingData_->softmaxTilingData, softmaxShapeInfo);
+        if (groupCount_ == 1 && tilingData_->routingTableRows > 0) {
+            PipeBarrier<PIPE_V>();
+            ComputeOrdinarySoftmax(xSoftmaxTensor, xInLocalTensor);
+        } else {
+            SoftMaxShapeInfo softmaxShapeInfo;
+            softmaxShapeInfo.srcM = 1;
+            softmaxShapeInfo.srcK = groupCount_ * perGroupExpertCountAlign_;
+            softmaxShapeInfo.oriSrcM = 1;
+            softmaxShapeInfo.oriSrcK = groupCount_ * perGroupExpertCountAlign_;
+            SoftMax<float, true, false>(xSoftmaxTensor, xInLocalTensor, tilingData_->softmaxTilingData, softmaxShapeInfo);
+        }
 
         __local_mem__ float *softmaxOutAddr = (__local_mem__ float *)xSoftmaxTensor.GetPhyAddr();
         __local_mem__ int32_t *indexOutAddr = (__local_mem__ int32_t *)indexTensor.GetPhyAddr();
@@ -1116,7 +1178,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1168,7 +1230,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1261,7 +1323,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1334,7 +1396,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
