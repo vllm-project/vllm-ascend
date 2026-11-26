@@ -36,6 +36,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.kimi_k31 import checkpoint_shapes as kimi_k31_checkpoint_shapes
 
 
 def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
@@ -157,6 +158,17 @@ class FixedRandomWeightSource(WeightSource):
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
+        parameters = self._checkpoint_parameters(case, meta_config)
+        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
+        assert parameters, f"{case.id}: reduced model contains no parameters"
+        names = [name for name, _, _ in parameters]
+        assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
+        self._parameters = parameters
+        self._device = device
+
+    def _checkpoint_parameters(
+        self, case: WeightUpdateModelCase, meta_config: Any
+    ) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
         with torch.device("meta"):
             meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
 
@@ -192,14 +204,7 @@ class FixedRandomWeightSource(WeightSource):
         if case.extra_param_builder is not None:
             assert case.checkpoint_model_prefix is None, "Extra parameter names must already use checkpoint namespaces"
             parameters += case.extra_param_builder(meta_config)
-        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
-        del meta_model
-
-        assert parameters, f"{case.id}: reduced meta model contains no parameters"
-        names = [name for name, _, _ in parameters]
-        assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
-        self._parameters = parameters
-        self._device = device
+        return parameters
 
     @staticmethod
     def _checkpoint_name(name: str, case: WeightUpdateModelCase) -> str:
@@ -272,6 +277,33 @@ class FixedRandomWeightSource(WeightSource):
         shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+
+
+class KimiK31WeightSource(FixedRandomWeightSource):
+    def _checkpoint_parameters(
+        self, case: WeightUpdateModelCase, meta_config: Any
+    ) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
+        return [(name, shape, torch.bfloat16) for name, shape in kimi_k31_checkpoint_shapes(meta_config)]
+
+    def write_checkpoint(self, directory: str | Path) -> None:
+        from huggingface_hub import hf_hub_download
+
+        super().write_checkpoint(directory)
+        # The native multimodal wrapper resolves the image processor against
+        # the local model directory even when the requests only contain text.
+        for filename in (
+            "configuration_kimi_k3.py",
+            "generation_config.json",
+            "preprocessor_config.json",
+            "kimi_k3_processor.py",
+            "kimi_k3_vision_processing.py",
+            "media_utils.py",
+            "tokenizer_config.json",
+            "tokenization_kimi.py",
+            "encoding_k3.py",
+            "tiktoken.model",
+        ):
+            shutil.copyfile(hf_hub_download(self._case.model, filename), Path(directory) / filename)
 
 
 # ---------------------------------------------------------------------------
