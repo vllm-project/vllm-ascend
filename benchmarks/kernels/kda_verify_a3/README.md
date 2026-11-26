@@ -76,20 +76,26 @@ paths. Use `--tokens 1:16` to repeat the sweep at other verify lengths.
 `--baseline torch` uses the portable reference when developing without the
 native KDA dependencies.
 
-### A5-style FP32 recurrence and parallel frontend
+### Fused FP32 recurrence and gated RMSNorm
 
-The [`a5-style` path](full_a5_middle.py) follows the A5
-[synthetic small-batch replay](https://github.com/Biuapha/vllm-ascend/blob/26cbec39d8d66b71f351681d32fd36877c1fa2f3/benchmarks/kernels/kda_verify/small_batch.py)
-by reading each head's FP32 checkpoint directly and running its candidate
-tokens in order. On A3, the kernel keeps the checkpoint copy in Vector UB,
-writes the correction and key/gate records, and applies sigmoid-gated RMSNorm
-after rounding the core output to BF16. AscendC repeat-strided FP32 multiplies
-reuse the decay, key, and query vectors across matrix rows directly in UB.
-The outer update reuses the packed correction across each row, and the final
-token only projects the decayed state and adds the correction contribution.
-Multi-row DMA loads the head's token inputs before the recurrence and stores
-the correction, key/gate records, and normalized output after it. This keeps
-the same FP32 multiply/add order and BF16 rounding point.
+The [TileLang Vector kernel](full_a5_middle.py) reads each head's FP32
+checkpoint into UB and processes its candidate tokens in order. Repeat-strided
+operations reuse decay, key and query rows. The FP32 state update uses
+`MulAddDst` to accumulate the key/correction outer product directly into the
+state. The last token projects the decayed state and adds its correction
+contribution without materializing a speculative state.
+
+For multiple tokens, the kernel rounds each core output to BF16 at the same
+point as the Native path. It then reuses UB space from the recurrence to
+batch the output sigmoid and gated RMSNorm across token rows. Multi-row DMA
+loads token inputs in advance and writes correction, key/gate records and
+normalized output after processing the head. A single token uses the original
+normalization schedule.
+
+### Historical parallel frontend experiment
+
+The profiling data below comes from the [earlier kernel revision](https://github.com/dogeByte/vllm-ascend/tree/39a2db66d00d141eccc1c3218b86206cfb720098/benchmarks/kernels/kda_verify_a3).
+Run the reproduction command at that revision.
 
 `a5-style` serializes the frontend. `a5-style-parallel` uses an event after the
 merged input projection to fork the two gate projections onto an auxiliary
@@ -205,6 +211,22 @@ python profile_full.py extract --profile a3-cv-profile \
 
 ## Standalone verification with 1–16 tokens per request
 
+The [PR benchmark results](https://github.com/vllm-project/vllm-ascend/pull/23231#standalone-verification-with-116-tokens-per-request)
+cover the current fused Vector kernel against Native on the full B1–80 and
+T1–16 grid. Run from the benchmark directory to reproduce the comparison.
+
+```bash
+for tokens in $(seq 1 16); do
+    python compare_full.py --baseline native --variant a5-style \
+        --batches 1:80 --tokens "$tokens" --core-count 20 --protocol both \
+        --warmup 5 --repeat 3 --samples 7 --seed 724311 \
+        --out "$(printf 't%02d.json' "$tokens")"
+done
+```
+
+### Historical parallel frontend sweep
+
+The data and commands below use the [earlier kernel revision](https://github.com/dogeByte/vllm-ascend/tree/39a2db66d00d141eccc1c3218b86206cfb720098/benchmarks/kernels/kda_verify_a3).
 This sweep uses the same synthetic single-layer boundary as the
 [A5 length sweep](https://github.com/vllm-project/vllm-ascend/pull/22370#standalone-verification-with-116-tokens-per-request).
 It covers each integer batch from 1 through 80 and each request length from 1
