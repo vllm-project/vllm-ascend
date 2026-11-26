@@ -1305,13 +1305,15 @@ class TestBindingSwitch(unittest.TestCase):
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType.A2),
+        return_value=get_hardware_profile(AscendDeviceType.A3),
     )
     @patch("vllm_ascend.cpu_binding.CpuAlloc")
     @patch("vllm_ascend.cpu_binding.is_arm_cpu")
     def test_bind_cpus_skip_non_arm(self, mock_is_arm_cpu, mock_cpu_alloc, _mock_hardware_profile):
         mock_is_arm_cpu.return_value = False
-        bind_cpus(0, npu_id=0)
+        with patch("vllm_ascend.cpu_binding.logger.warning_once") as mock_warning_once:
+            bind_cpus(0, npu_id=0)
+        mock_warning_once.assert_not_called()
         mock_cpu_alloc.assert_not_called()
 
     @patch(
