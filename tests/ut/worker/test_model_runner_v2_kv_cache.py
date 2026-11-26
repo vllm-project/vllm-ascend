@@ -2,15 +2,181 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
+
+
+def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
+    pytest.importorskip("vllm.v1.hisparse.backend")
+    pytest.importorskip("vllm.v1.hisparse.binding")
+    from vllm.v1.hisparse import binding
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, KVCacheTensor, SparseCacheRole
+
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+    alignment = 2 * 1024 * 1024
+    page = 128 * 128 * torch.bfloat16.itemsize
+    stride = 3 * page
+    size = 2 * stride
+    source = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, cache_role=SparseCacheRole.INDEXER
+    )
+    groups = [
+        KVCacheGroupSpec(["source"], source, host_resident=True),
+        KVCacheGroupSpec(["indexer"], indexer),
+    ]
+    tensors = [
+        KVCacheTensor(3 * page, ["source"], page, page, host_resident=True),
+        KVCacheTensor(size, ["indexer"], page, stride, offset=page),
+    ]
+    config = KVCacheConfig(2, tensors, groups, hisparse_host_num_blocks=3)
+    context = {"indexer": SimpleNamespace()}
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.speculator = runner.pcp_manager = None
+    runner.is_encoder_decoder = runner.is_last_pp_rank = False
+    runner.max_model_len = 256
+    runner.vocab_size = 16
+    runner.cache_config.kv_sharing_fast_prefill = False
+    runner.jit_warmup_registry.activate.side_effect = nullcontext
+    runner.compilation_config.static_forward_context = context
+    runner.vllm_config.compilation_config = runner.compilation_config
+    runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.BLHNC
+    runner.vllm_config.aux_output_config.enabled = False
+    runner.vllm_config.attention_config.hisparse_config = None
+    runner.vllm_config.kv_transfer_config.has_connector = lambda name: name == "AscendStoreConnector"
+    runner.ascend_config.sparse_kv_offload_config.enabled = False
+    runner._kv_trace = None
+    host = torch.empty(3 * page, dtype=torch.int8)
+    backing = torch.empty(size + alignment - 1, dtype=torch.int8)
+    host_pool = SimpleNamespace(allocate=MagicMock(return_value=host))
+    allocate = MagicMock(return_value=backing)
+
+    def init_cache(
+        forward_context, core_config, device, kernel_block_sizes, vllm_config, *_args, block_tables, **_kwargs
+    ):
+        assert core_config is runner.kv_cache_config
+        assert core_config is not config and core_config.kv_cache_tensors is not tensors
+        assert [tensor.size for tensor in core_config.kv_cache_tensors] == [3 * page, size + alignment - 1]
+        return binding.init_hisparse_kv_cache(
+            core_config, device, kernel_block_sizes, vllm_config, forward_context, block_tables, allocate=allocate
+        )
+
+    def bind_caches(*, kv_caches, **_kwargs):
+        (indexer_view,) = kv_caches["indexer"]
+        assert indexer_view.untyped_storage().data_ptr() % alignment == 0
+        return []
+
+    def initialize_upstream(runner_config, allocation_context):
+        assert runner_config is not config
+        patch_model_runner.initialize_kv_cache(runner, runner_config, kv_cache_allocation_context=allocation_context)
+        assert runner.kv_cache_config is not runner_config
+
+    runner._initialize_kv_cache_upstream.side_effect = initialize_upstream
+    with (
+        patch.object(binding, "get_hisparse_backend", return_value=AscendHiSparseBackend()),
+        patch.object(binding, "get_hisparse_host_pool", return_value=host_pool),
+        patch.object(binding, "bind_hisparse_kv_caches", side_effect=bind_caches) as bind,
+        patch.object(binding, "initialize_hisparse_runtime_buffers"),
+        patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [128, 128])),
+        patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
+        patch.object(upstream, "BlockTables"),
+        patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
+        patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
+        patch.object(upstream, "initialize_mamba_ssu_backend"),
+        patch.object(upstream, "has_compiled_submodule", return_value=False),
+        patch.object(upstream, "check_attention_cp_compatibility"),
+        patch.object(upstream, "init_kv_cache", side_effect=init_cache),
+        patch.object(upstream, "get_replayssm_block_copy_tensors", create=True),
+        patch.object(upstream, "get_kv_connector") as register,
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_v41_source_rope"),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache"),
+        patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy"),
+    ):
+        NPUModelRunner.initialize_kv_cache(runner, config)
+
+    allocate.assert_called_once_with(size + alignment - 1)
+    bind.assert_called_once()
+    host_pool.allocate.assert_called_once_with(3 * page)
+    assert config.kv_cache_tensors is tensors
+    assert [tensor.size for tensor in runner.kv_cache_config.kv_cache_tensors] == [3 * page, size]
+    views = register.call_args.args[1]
+    assert views["source"].data_ptr() == host.data_ptr()
+    assert views["source"].shape == (3, 1, 128, 128)
+    (view,) = views["indexer"]
+    base = backing.data_ptr() + (-backing.data_ptr() % alignment)
+    assert view.untyped_storage().data_ptr() == base
+    assert view.data_ptr() == base + page
+    assert view.storage_offset() == page // view.element_size()
+    assert view.shape == (4, 128, 1, 128) and view.stride() == (128 * 128, 128, 128, 1)
+    assert context["indexer"].hisparse_block_stride == 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "pcp_size", "expected_num_tokens"),
+    [
+        (CUDAGraphMode.NONE, 1, 8),
+        (CUDAGraphMode.PIECEWISE, 1, 5),
+        (CUDAGraphMode.NONE, 2, 5),
+    ],
+)
+def test_dispatch_pads_only_non_pcp_eager(mode, pcp_size, expected_num_tokens):
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        parallel_config=SimpleNamespace(
+            pcp_shard_decode_requests=False,
+            prefill_context_parallel_size=pcp_size,
+        ),
+    )
+    manager = SimpleNamespace(vllm_config=config)
+    with (
+        patch.object(patch_model_runner, "pad_num_tokens", return_value=8) as pad,
+        patch.object(
+            patch_model_runner,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_shared_expert_dp=True),
+        ),
+        patch.object(patch_model_runner, "_dispatch_cg_and_sync_dp", return_value=("desc", None)) as parent,
+    ):
+        assert patch_model_runner.dispatch_cg_and_sync_dp(manager, 2, 5, None, 1, 0) == ("desc", None)
+
+    assert parent.call_args.args[:4] == (manager, 2, expected_num_tokens, None)
+    if mode == CUDAGraphMode.NONE and pcp_size == 1:
+        pad.assert_called_once_with(5, config, True)
+    else:
+        pad.assert_not_called()
+
+
+def test_dispatch_preserves_sharded_pcp_request_count():
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        parallel_config=SimpleNamespace(
+            pcp_shard_decode_requests=True,
+            prefill_context_parallel_size=2,
+        ),
+    )
+    manager = SimpleNamespace(vllm_config=config)
+    with (
+        patch.object(patch_model_runner, "pad_num_tokens") as pad,
+        patch.object(patch_model_runner, "_dispatch_cg_and_sync_dp", return_value=("desc", None)) as parent,
+    ):
+        patch_model_runner.dispatch_cg_and_sync_dp(manager, 16, 6, 2, 1, 0)
+
+    assert parent.call_args.args[:4] == (manager, 3, 6, 2)
+    pad.assert_not_called()
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])

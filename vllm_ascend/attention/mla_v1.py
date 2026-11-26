@@ -85,6 +85,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    HIF8_C8_KV_CACHE_DTYPE,
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
@@ -171,19 +172,23 @@ class AscendMLAAttention(MLAAttention):
         if model_type == "kimi_linear":
             # Preserve the existing Kimi Linear cache head-count contract.
             storage_heads = spec.num_heads
-        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
+            spec
+        )
         speculative_config = getattr(vllm_config, "speculative_config", None)
         draft_config = getattr(speculative_config, "draft_model_config", None)
         if (
             (spec.is_draft or self.is_draft_layer)
             and getattr(speculative_config, "method", None) == "dspark"
             and getattr(getattr(draft_config, "hf_config", None), "model_type", None) == "k3_dspark"
-            and not (use_sfa_turboquant or use_sfa_c8 or getattr(self.impl, "fa_quant_layer", False))
+            and not (use_sfa_turboquant or use_sfa_c8 or use_sfa_hif8 or getattr(self.impl, "fa_quant_layer", False))
             and self.impl.dtype in (torch.bfloat16, torch.float16)
         ):
             # The target may request FP8 while the draft is unquantized. Keep
             # the layer's floating format before the backend customizes pages.
             dtype, cache_dtype_str = self.impl.dtype, None
+            values["kv_quant_mode"] = KVQuantMode.NONE
+        if spec.cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE and not use_sfa_hif8:
             values["kv_quant_mode"] = KVQuantMode.NONE
 
         # Preserve upstream metadata and apply all owner fields together.
@@ -196,6 +201,7 @@ class AscendMLAAttention(MLAAttention):
             ),
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
+            cache_sparse_sfa_hif8=use_sfa_hif8,
             store_on_host=(
                 # Only draft layers owned by the DSpark resident protocol stay
                 # device-resident; an MTP head under another method has no
@@ -210,13 +216,18 @@ class AscendMLAAttention(MLAAttention):
         )
         return AscendMLAAttentionSpec(**values)
 
-    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
+    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool, bool]:
         """Resolve cache dimensions, dtype and SFA flags from the execution format."""
         # Keep TurboQuant's existing precedence when both SFA switches are set.
         use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
         use_sfa_c8 = not use_sfa_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
         use_packed_sfa = use_sfa_turboquant or use_sfa_c8
         use_fa_quant = getattr(self.impl, "fa_quant_layer", False)
+        # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe) and never
+        # coexists with the packed C8/TurboQuant layouts or dense FA quant.
+        use_sfa_hif8 = (
+            not use_packed_sfa and not use_fa_quant and bool(getattr(self.impl, "enable_sparse_sfa_hif8", False))
+        )
         head_size = spec.head_size
         dtype = spec.dtype
         cache_dtype_str = spec.cache_dtype_str
@@ -233,8 +244,14 @@ class AscendMLAAttention(MLAAttention):
             head_size = self.impl.head_size + self.qk_rope_head_dim
             dtype = self.impl.dtype
             cache_dtype_str = None
+        elif use_sfa_hif8:
+            dtype = torch.uint8
+        elif cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE:
+            # The global dtype does not select layers without a ModelSlim recipe.
+            dtype = self.impl.vllm_config.model_config.dtype
+            cache_dtype_str = "auto"
 
-        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8
+        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8
 
 
 @dataclass
@@ -732,10 +749,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             prefill_metadata = metadata.prefill
             assert prefill_metadata is not None
             prefill_metadata.pcp_local_num_input_tokens = local_num_input_tokens
-            # PCP partitions prefill tokens into rank-local chunks, including
-            # continued prefills whose uncached suffix contains only one token.
-            # Keep decode-only batches on their graph path, but route every batch
-            # containing prefill work through the chunked-prefill implementation.
+            # Batches with genuine prefill work use chunked prefill.
             metadata.attn_state = AscendAttentionState.ChunkedPrefill
 
     def build_chunked_metadata(
@@ -1148,8 +1162,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _supports_flashmla(self, supported_q_heads: frozenset[int]) -> bool:
         return (
-            bool(getattr(self.vllm_config, "use_v2_model_runner", False))
-            and get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
             and self.num_heads in supported_q_heads
             and self.num_kv_heads == FLASHMLA_NUM_KV_HEADS
             and self.kv_lora_rank == FLASHMLA_V_DIM
@@ -1384,13 +1397,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         config = self.vllm_config
         # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
         if enable_sfa(config) and not self.use_flashmla:
-            return
-        if not config.use_v2_model_runner and (
-            hasattr(config.model_config.hf_config, "compress_ratios")
-            or get_ascend_config().sparse_kv_offload_config.enabled
-        ):
-            # V1 keeps these global cache modes on their legacy writer layout,
-            # including draft layers constructed from the target model config.
             return
         attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
         if not isinstance(attn_module, MLAAttention):
@@ -3012,8 +3018,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dequant_scale_value": self.fak_descale_float,
             }
             common_kwargs.update(extra_fa_args)
-        # Release subsequent layer prefetches at the decode attention boundary,
-        # just as prefill and external FlashMLA do.
+        # Record the save boundary and release prefetches if the earlier
+        # connector wait did not open their load gate.
         record_attention_compute_start()
         if _EXTRA_CTX.capturing:
             workspace = get_capture_resource(

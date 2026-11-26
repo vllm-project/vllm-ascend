@@ -16,27 +16,12 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     get_pcp_profile_num_tokens,
     has_layer_idx,
     is_moe_model,
 )
-
-# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
-# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
-_USE_V2_EXTRA_KWARGS = False
-
-
-def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
-    """Cache whether Ascend extras belong in ``additional_kwargs``.
-
-    Call this from eager config / forward-context setup, not from compiled
-    attention. Require an actual bool: MagicMock configs can be truthy.
-    """
-    global _USE_V2_EXTRA_KWARGS
-    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -142,7 +127,6 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
-    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -482,7 +466,7 @@ def select_moe_comm_method(
 
 
 class _ExtraForwardContextProxy:
-    """Unified forward-context access for v1/v2 model runners."""
+    """Unified forward-context access for the Model Runner V2 pipeline."""
 
     extra_attrs = (
         "capturing",
@@ -525,19 +509,14 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
-        return getattr(ctx, name, None)
+        # Unset known extras default to None so optional flags (e.g. `sinks`)
+        # can be read with truthiness checks before the V2 path populates them.
+        return ctx.additional_kwargs.get(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            ctx.additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        ctx.additional_kwargs[name] = value
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX

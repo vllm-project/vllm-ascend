@@ -199,34 +199,23 @@ def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamesp
     )
 
 
-def _make_kv_cache_spec(
-    compressor_ratio: int,
-    *,
-    use_tokens_per_state: bool = False,
-) -> SimpleNamespace:
+def _make_kv_cache_spec(compressor_ratio: int) -> SimpleNamespace:
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
-    # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-    ratio_kwargs = (
-        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
-    )
-    kv_cache_spec = SimpleNamespace(
+    return SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
-        storage_block_size=physical_block_size,
-        **ratio_kwargs,
+        num_states=physical_block_size,
+        tokens_per_state=compressor_ratio,
     )
-    return kv_cache_spec
 
 
 def _make_builder(
     compressor_ratio: int = 4,
     num_speculative_tokens: int | None = None,
-    *,
-    use_tokens_per_state: bool = False,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
     builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio, use_tokens_per_state=use_tokens_per_state),
+        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
         layer_names=["model.layers.0.self_attn.attn"],
         vllm_config=vllm_config,
         device=torch.device("cpu"),
@@ -248,17 +237,15 @@ def _make_builder(
         (mixed_quant_sparse_flash_mla_metadata_turboquant, 2048),
     ],
 )
-@pytest.mark.parametrize("use_tokens_per_state", [False, True])
 def test_sas_metadata_buffers_match_selected_operator(
     metadata_op,
     expected_sas_size: int,
-    use_tokens_per_state: bool,
 ):
     plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_metadata_op=metadata_op)
     plan.requires_block_offset_slots = False
     plan.uses_sparse_flash_mla = False
     with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
-        builder = _make_builder(4, num_speculative_tokens=3, use_tokens_per_state=use_tokens_per_state)
+        builder = _make_builder(4, num_speculative_tokens=3)
 
     assert builder.compressor_ratio == 4
     assert builder.sas_metadata_buffer.numel() == expected_sas_size
@@ -294,13 +281,11 @@ def _build_draft_req_metadata(
     )
 
 
-@pytest.mark.parametrize("use_tokens_per_state", [False, True])
-def test_metadata_builder_accepts_compression_ratio_aliases(
-    use_tokens_per_state: bool,
-):
-    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+def test_metadata_builder_reads_tokens_per_state_and_num_states():
+    builder = _make_builder(4)
 
     assert builder.compressor_ratio == 4
+    assert builder.storage_block_size == 128
 
 
 @pytest.mark.parametrize(
@@ -1096,7 +1081,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     with (
         patch(
             "vllm_ascend.ascend_forward_context.get_forward_context",
-            return_value=SimpleNamespace(num_tokens=5),
+            return_value=SimpleNamespace(num_tokens=5, additional_kwargs={"num_tokens": 5}),
         ),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),

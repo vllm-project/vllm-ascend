@@ -32,11 +32,10 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_requests_to_run_as_prefill
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
@@ -200,7 +199,7 @@ def _get_kpool_pcp_global_metadata(
     global_batch = pcp_context.global_batch
     num_reqs = global_batch.num_reqs
     num_tokens = global_batch.num_tokens
-    if decode_sharded and not global_batch.has_prefill:
+    if decode_sharded and not has_requests_to_run_as_prefill(global_batch):
         # Capture and replay must compress the same global extent even when
         # fewer requests are scheduled. Padding has zero lengths and -1 slots.
         num_reqs = global_batch.num_reqs_after_padding
@@ -299,9 +298,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # AttentionGroup.create_metadata_builders() passes a copied spec whose
         # block_size is the final per-group kernel block size.
         self.kernel_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
-        if self.storage_block_size <= 0:
-            raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
@@ -485,7 +481,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
         metadata.indexer_row_shard = self._build_indexer_row_shard(common_attn_metadata, graph_capture)
         pcp_context = common_attn_metadata.pcp_context
-        if pcp_context is not None and (self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill):
+        if pcp_context is not None and (
+            self.is_pcp_decode_sharded or has_requests_to_run_as_prefill(pcp_context.global_batch)
+        ):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool PCP metadata requires the PCP cache-group index.")
@@ -697,7 +695,9 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         pcp_context = common_attn_metadata.pcp_context
         write_common = common_attn_metadata
-        if pcp_context is not None and (self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill):
+        if pcp_context is not None and (
+            self.is_pcp_decode_sharded or has_requests_to_run_as_prefill(pcp_context.global_batch)
+        ):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool tail PCP metadata requires the PCP cache-group index.")

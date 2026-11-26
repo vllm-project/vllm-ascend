@@ -48,7 +48,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     declared_kwarg,
-    get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
@@ -153,7 +152,6 @@ def runtime(config):
         ),
         speculative_config=None,
         kv_transfer_config=None,
-        use_v2_model_runner=False,
         # vLLM main reads attention_config.hisparse_config in the KV cache
         # config helpers; Ascend does not enable HiSparse.
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -192,8 +190,8 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
     assert topology.kv_consumers(20) == tuple(range(20, 40))
     assert topology.layer(26).kv_source_layer == 20
     assert topology.layer(26).index_source_layer == 24
-    assert get_storage_block_size(specs["model.layers.20.self_attn.long_kv_cache"]) == 64
-    assert get_storage_block_size(specs["model.layers.2.self_attn.long_kv_cache"]) == 32
+    assert specs["model.layers.20.self_attn.long_kv_cache"].num_states == 64
+    assert specs["model.layers.2.self_attn.long_kv_cache"].num_states == 32
     assert "model.layers.20.self_attn.compressor.state_cache" not in specs
     assert type(specs["model.layers.2.self_attn.long_kv_cache"]) is AscendMLAAttentionSpec
     assert type(specs["model.layers.2.self_attn.indexer.k_cache"]) is AscendMLAAttentionSpec
@@ -268,8 +266,8 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
             spec = specs[name]
             cache = caches[name]
             views = cache if isinstance(cache, tuple) else (cache,)
-            storage_block_size = get_storage_block_size(spec)
-            assert views[0].shape == (blocks, storage_block_size, 1, spec.head_size)
+            num_states = spec.num_states
+            assert views[0].shape == (blocks, num_states, 1, spec.head_size)
             is_index = isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
             expected_offset = slot_offset + (specs[layer_tuple[0]].unpadded_page_size_bytes if is_index else 0)
             assert placements[name].offset == expected_offset
@@ -279,8 +277,8 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
             if is_index:
                 key, scale = cache
                 assert key.dtype == torch.int8 and scale.dtype == torch.float16
-                assert scale.data_ptr() - key.data_ptr() == storage_block_size * spec.head_size
-                assert scale.shape == (blocks, storage_block_size, 1, 1)
+                assert scale.data_ptr() - key.data_ptr() == num_states * spec.head_size
+                assert scale.shape == (blocks, num_states, 1, 1)
         slot_offset += blocks * page_size
 
 
@@ -527,7 +525,7 @@ def test_model_registration_and_binding(runtime):
     state = context["language_model.model.layers.2.self_attn.compressor.state_cache"]
     assert state is context["language_model.model.layers.2.self_attn.compressor.state_cache"]
     assert not state.spec.prefix_cacheable
-    assert get_storage_block_size(state.spec) == 32
+    assert state.spec.num_states == 32
     owned_names = [name for name, module in modules.named_modules() if hasattr(module, "kv_cache")]
     assert len(owned_names) == 51
 
@@ -907,9 +905,9 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
 
 def test_builder_restores_v41_logical_block_size(runtime):
     spec = collect_specs(runtime)["model.layers.2.self_attn.indexer.k_cache"]
-    expected_storage_block_size = get_storage_block_size(spec)
-    physical_spec = spec.copy_with_new_block_size(expected_storage_block_size)
-    assert get_storage_block_size(physical_spec) < expected_storage_block_size
+    expected_num_states = spec.num_states
+    physical_spec = spec.copy_with_new_block_size(expected_num_states)
+    assert physical_spec.num_states < expected_num_states
 
     builder = AscendDSAV41MetadataBuilder(
         physical_spec,
@@ -919,7 +917,7 @@ def test_builder_restores_v41_logical_block_size(runtime):
     )
 
     assert builder.kv_cache_spec.block_size == runtime.cache_config.block_size
-    assert get_storage_block_size(builder.kv_cache_spec) == expected_storage_block_size
+    assert builder.kv_cache_spec.num_states == expected_num_states
 
 
 def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runtime):
@@ -1222,7 +1220,7 @@ def test_merged_metadata_preserves_nonconsecutive_block_ids(runtime, end):
         valid = expected >= 0
         physical = expected.clamp_min(0)
         expected_2d = torch.stack(
-            (physical // get_storage_block_size(spec), physical % get_storage_block_size(spec)),
+            (physical // spec.num_states, physical % spec.num_states),
             dim=-1,
         ).to(torch.int32)
         expected_2d[~valid] = -1
@@ -1381,7 +1379,7 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
     assert isinstance(spec, CircularBufferSpec)
     assert spec.tokens_per_state == 1 and not spec.prefix_cacheable
-    assert get_storage_block_size(spec) == 32
+    assert spec.num_states == 32
     assert spec.page_size_bytes == 32 * 16 * 4
     assert spec.max_num_blocks_per_req(runtime, 1024) == 1
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
@@ -1692,8 +1690,6 @@ def test_only_the_sliding_window_group_carries_the_length(runtime):
             dtype=torch.bfloat16,
             tokens_per_state=2,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
         ),
         [],
         runtime,

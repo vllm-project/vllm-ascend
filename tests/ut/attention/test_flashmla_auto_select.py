@@ -71,7 +71,6 @@ def test_flashmla_module_precheck_skips_absent_cann_import(monkeypatch):
 
 def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
@@ -102,10 +101,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
-    config.use_v2_model_runner = False
-    assert not AscendMLAImpl._can_use_flashmla(impl)
+    assert AscendMLAImpl._can_use_flashmla(impl)
 
-    config.use_v2_model_runner = True
     impl.num_heads = 48
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
@@ -121,9 +118,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
-def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
+def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_linear")),
@@ -152,9 +148,6 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
     config.speculative_config = SimpleNamespace(method="dspark")
     impl._is_k3_dspark_draft = True
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = False
-    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = True
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
@@ -170,7 +163,6 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
 
 def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
@@ -214,7 +206,6 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
 )
 def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, model_type, expected_flashmla):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(
@@ -252,7 +243,8 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
 
 @pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])
 @pytest.mark.parametrize("graph_eligible", [None, True, False])
-def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible):
+@pytest.mark.parametrize("override", [False, True])
+def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible, override):
     fields = [
         "req_ids",
         "num_scheduled_tokens",
@@ -275,10 +267,16 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
     ]
     if graph_eligible is not None:
         fields += ["num_draft_tokens_np", "prefill_runs_as_decode_np", "max_seq_len_np", "decode_graph_eligible"]
-        values += [np.array([0, 1, 0]), np.array(prefilling), np.array([100, 200, 300]), graph_eligible]
+        values += [
+            np.array([0, 1, 0]),
+            np.array(prefilling) & override,
+            np.array([100, 200, 300]),
+            graph_eligible,
+        ]
     state = cast(Any, namedtuple("BatchReqState", fields))(*values)
     result, uniform = prepare_flashmla_batch_req_state(state, 1)
-    order = [1, 0, 2] if state.has_prefill else [0, 1, 2]
+    has_prefill = state.has_prefill and not (override and graph_eligible is not None)
+    order = [1, 0, 2] if has_prefill else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
     for field in state._fields:
         expected = getattr(state, field)
@@ -286,18 +284,22 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
         elif field == "decode_graph_eligible":
-            assert actual is (expected and not state.has_prefill)
+            assert actual is (expected and not has_prefill)
         elif field != "req_ids":
             assert actual == expected
-    assert uniform == (None if state.has_prefill or graph_eligible is False else 1)
+    assert uniform == (None if has_prefill or graph_eligible is False else 1)
+    prefill_runs_as_decode = getattr(result, "prefill_runs_as_decode_np", None)
     common = SimpleNamespace(
-        is_prefilling=torch.from_numpy(result.is_prefilling_np),
+        is_prefilling=torch.from_numpy(
+            flashmla.apply_prefill_as_decode_mask(result.is_prefilling_np, prefill_runs_as_decode)
+        ),
         query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
         num_reqs=4,
         num_actual_tokens=3,
     )
-    # A one-token prompt stays FIA prefill; trailing empty graph rows are ignored.
-    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if state.has_prefill else (3, 0, 3, 0))
+    # Fresh prompts stay FIA prefill; explicit overrides use decode. Trailing
+    # empty graph rows are ignored in either case.
+    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if has_prefill else (3, 0, 3, 0))
 
 
 def test_request_split_rejects_decode_after_real_prefill():
@@ -308,4 +310,15 @@ def test_request_split_rejects_decode_after_real_prefill():
         num_actual_tokens=2,
     )
     with pytest.raises(RuntimeError, match="decode requests before prefill"):
+        split_flashmla_requests(common)
+
+
+def test_request_split_requires_phase_for_each_active_row():
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False]),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+    )
+    with pytest.raises(RuntimeError, match="is_prefilling does not cover the active request batch"):
         split_flashmla_requests(common)

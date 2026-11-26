@@ -52,6 +52,7 @@ def state(monkeypatch):
         "AscendW8A8DynamicLinearMethod": dynamic,
         "AscendW8A8MXFP8DynamicLinearMethod": mx,
         "AscendW8A8LinearMethod": type("AscendW8A8LinearMethod", (), {}),
+        "OProjRowParallelOp": type("OProjRowParallelOp", (), {}),
         "logger": Mock(),
         "get_current_hardware_profile": lambda: profile,
     }
@@ -67,6 +68,7 @@ def state(monkeypatch):
         local_num_heads=2,
         fused_qkv_a_proj=SimpleNamespace(quant_method=SimpleNamespace(quant_method=dynamic())),
         q_proj=SimpleNamespace(_chunk_size=0),
+        o_proj=Mock(custom_op=None),
         enable_sparse_sfa_c8=True,
         enable_sparse_sfa_turboquant=False,
         c8_cache_dtype=torch.int8,
@@ -96,6 +98,7 @@ def state(monkeypatch):
         "_try_enable_type",
         "forward",
         "_forward_impl",
+        "_forward_dummy",
     ):
         fn = _load("vllm_ascend/attention/sfa_v1.py", name, scope, "AscendSFAImpl")
         setattr(impl, name, fn.__get__(impl))
@@ -331,3 +334,4 @@ def test_nope_empty_eager_batch_does_not_call_prolog(state):
     assert result is output
     assert output.count_nonzero() == 0
     state.op.assert_not_called()
+    state.impl.o_proj.assert_not_called()

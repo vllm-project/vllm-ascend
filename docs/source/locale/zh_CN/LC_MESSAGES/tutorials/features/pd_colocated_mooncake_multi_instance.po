@@ -75,9 +75,6 @@ msgstr "4. 跨节点 PING 测试："
 msgid "## Run with Docker"
 msgstr "## 使用 Docker 运行"
 
-msgid "Start a Docker container on each node."
-msgstr "在每个节点上启动一个 Docker 容器。"
-
 msgid "## (Optional) Install Mooncake"
 msgstr "## （可选）安装 Mooncake"
 
@@ -344,3 +341,13 @@ msgstr ""
 
 msgid "| Requests | Concurrency | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |"
 msgstr "| 请求数 | 并发数 | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |"
+
+msgid ""
+"Start a Docker container on each node. The command needs [Ascend Docker "
+"Runtime](../../getting_started/installation.md#installation-ascend-docker-"
+"runtime) on the host and selects four NPUs with "
+"`ASCEND_VISIBLE_DEVICES=0-3`."
+msgstr ""
+"在每个节点上启动 Docker 容器。该命令需要宿主机上安装 [Ascend Docker "
+"Runtime](../../getting_started/installation.md#installation-ascend-docker-"
+"runtime)，并通过 `ASCEND_VISIBLE_DEVICES=0-3` 选择四个 NPU。"
