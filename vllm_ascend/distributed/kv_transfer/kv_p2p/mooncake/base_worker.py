@@ -624,9 +624,13 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                # KVPP and layerwise reuse can store indexer K and scales in
+                # separate buffers on the peer. Always advertise per-component
+                # indexer addresses even when packed into one local page.
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    and not isinstance(spec, AscendSFAIndexerCacheSpec)
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):

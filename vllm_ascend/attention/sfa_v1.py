@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
@@ -400,6 +401,39 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
 
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # Current Ascend SFA preprocess and attention kernels require each main
+    # cache component (NoPE / RoPE, or packed rows) to stay contiguous across
+    # blocks within its layer slice.
+    uses_contiguous_cache_components: ClassVar[bool] = True
+
+    @staticmethod
+    def wrap_kv_cache_views(components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
+
+    @staticmethod
+    def get_runtime_shapes(
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe the main SFA cache as [kernel_blocks, heads, tokens, bytes]."""
+        tokens = kernel_block_size or spec.num_states
+        blocks = num_blocks * (spec.num_states // tokens)
+        if spec.uses_packed_sfa_main_cache:
+            widths: tuple[int, ...] = (spec.head_size,)
+        else:
+            if spec.qk_rope_head_dim is None:
+                raise ValueError("Unpacked SFA runtime views require qk_rope_head_dim on AscendMLAAttentionSpec.")
+            rope_dim = spec.qk_rope_head_dim
+            nope_dim = spec.kv_lora_rank if spec.kv_lora_rank is not None else spec.head_size - rope_dim
+            if nope_dim < 0 or nope_dim + rope_dim != spec.head_size:
+                raise ValueError(
+                    f"Invalid split SFA cache widths: nope={nope_dim}, rope={rope_dim}, head_size={spec.head_size}."
+                )
+            widths = (nope_dim, rope_dim)
+        elem_size = get_dtype_size(spec.dtype)
+        return tuple((blocks, spec.num_kv_heads, tokens, width * elem_size) for width in widths)
 
     @staticmethod
     def get_name() -> str:

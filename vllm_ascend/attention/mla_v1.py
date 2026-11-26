@@ -168,10 +168,10 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
-        storage_heads = self.num_heads
+        query_heads = self.num_heads
         if model_type == "kimi_linear":
             # Preserve the existing Kimi Linear cache head-count contract.
-            storage_heads = spec.num_heads
+            query_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
             spec
         )
@@ -194,7 +194,9 @@ class AscendMLAAttention(MLAAttention):
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
         values.update(
-            num_heads=storage_heads,
+            num_query_heads=query_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)

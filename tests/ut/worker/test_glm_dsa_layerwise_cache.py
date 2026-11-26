@@ -74,6 +74,8 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
         num_kv_heads=1,
         head_size=656 if packed else 576,
         dtype=dtype,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
         cache_sparse_sfa_c8=packed,
     )
     indexer = AscendSFAIndexerCacheSpec(
