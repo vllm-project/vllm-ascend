@@ -382,6 +382,19 @@ class NPUModelRunner(GPUModelRunner):
             # memory profiling.
             join_nz_warm_thread()
 
+        if self.is_pooling_model and not vllm_version_is("0.34.0"):
+            from vllm.model_executor.models.transformers.pooling import (
+                ClassifierWithReshape,
+                SequenceClassificationMixin,
+            )
+
+            if isinstance(self.model, SequenceClassificationMixin):
+                classifier = self.model.classifier
+                if isinstance(classifier, torch.nn.Linear) and not isinstance(classifier, ClassifierWithReshape):
+                    # vLLM #69196 bypasses the reshape for linear heads. Keep
+                    # Ascend's verified GEMM input rank and the new 2D logits.
+                    classifier.__class__ = type("ClassifierWithReshape", (ClassifierWithReshape, type(classifier)), {})
+
         expert_offload.initialize(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
