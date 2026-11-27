@@ -158,7 +158,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
             and key is not None
         ):
             return fused_norm_quant(key, self, hidden_states, residual, linear)
-        return self.forward_oot(hidden_states, residual)
+        return None, self.forward_oot(hidden_states, residual)
 
 
 class LayerNormFn(torch.autograd.Function):

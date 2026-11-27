@@ -88,4 +88,4 @@ def fused_norm_quant(
     producer = _FUSED_NORM_QUANT.get(registry_key)
     if producer is not None:
         return producer(norm, hidden_states, residual, linear)
-    return norm(hidden_states, residual)
+    return None, norm(hidden_states, residual)
