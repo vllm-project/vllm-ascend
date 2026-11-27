@@ -185,32 +185,78 @@ class TargetDeviceMetadata:
         self.full_graph_only = full_graph_only
         self._tasks: tuple[DeviceMetadataTask, ...] = ()
         self._failed = False
+        self._capturing_target = False
+        self._replaying_target = False
+
+    @contextmanager
+    def capture_target(self):
+        previous = self._capturing_target
+        self._capturing_target = True
+        try:
+            yield
+        finally:
+            self._capturing_target = previous
+
+    @contextmanager
+    def replay_target(self):
+        previous = self._replaying_target
+        self._replaying_target = True
+        try:
+            yield
+        finally:
+            self._replaying_target = previous
 
     def run_build(self, build_fn, **kwargs):
         full_graph = kwargs.get("full_graph_mode", False) or kwargs.get("for_cudagraph_capture", False)
-        if self.full_graph_only and not full_graph:
-            # Eager/piecewise metadata is already produced on the model stream;
-            # do not attach an executor whose frontiers were never submitted.
-            return build_fn(**kwargs)
+        if self.full_graph_only:
+            if not full_graph:
+                return build_fn(**kwargs)
+            if self._replaying_target:
+                # FULL replay (including dummy replay with the capture flag)
+                # only refreshes inputs. The draft may consume these resources
+                # later; do not attach an executor that was never submitted.
+                with self.prepare_replay(kwargs["attn_groups"]):
+                    return build_fn(**kwargs)
+            if not self._capturing_target:
+                # Draft prefill shares the state and the target groups, but its
+                # wrapper never submits target producer tasks.
+                return build_fn(**kwargs)
         with self.build(kwargs["attn_groups"], full_graph):
             metadata = build_fn(**kwargs)
             for resource in metadata.values():
                 resource.device_metadata_executor = self.executor
             return metadata
 
-    @contextmanager
-    def build(self, attn_groups, full_graph: bool):
+    def _check_can_build(self) -> None:
         if self._failed:
             raise RuntimeError("Metadata producer failed; recreate the target model state before retrying")
         if self.executor.submission_in_flight or self._tasks:
             raise RuntimeError("Target metadata was not retired before rebuilding inputs")
-        providers = {
+
+    @staticmethod
+    def _providers(attn_groups):
+        return {
             id(builder): builder
             for groups in attn_groups
             for group in groups
             for builder in (group.get_metadata_builder(0),)
             if hasattr(builder, "defer_device_metadata")
         }
+
+    @contextmanager
+    def prepare_replay(self, attn_groups):
+        self._check_can_build()
+        with ExitStack() as stack:
+            for provider in self._providers(attn_groups).values():
+                refresh = getattr(provider, "prepare_device_metadata_replay", None)
+                if refresh is not None:
+                    stack.enter_context(refresh())
+            yield
+
+    @contextmanager
+    def build(self, attn_groups, full_graph: bool):
+        self._check_can_build()
+        providers = self._providers(attn_groups)
         with ExitStack() as stack:
             for provider in providers.values():
                 stack.enter_context(provider.defer_device_metadata(in_graph=full_graph))

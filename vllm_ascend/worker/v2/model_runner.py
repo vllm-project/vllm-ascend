@@ -781,7 +781,11 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with dp_coordination_context:
+        metadata = getattr(self.model_state, "device_metadata", None)
+        target_scope = (
+            metadata.replay_target() if getattr(metadata, "full_graph_only", False) is True else nullcontext()
+        )
+        with dp_coordination_context, target_scope:
             d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
                 output = super().execute_model(

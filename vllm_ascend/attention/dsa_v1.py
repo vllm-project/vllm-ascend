@@ -769,6 +769,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     _request_capacity_factor: ClassVar[int] = 1
     _device_metadata_in_graph: bool = False
+    _device_metadata_replay: bool = False
+
+    @contextmanager
+    def prepare_device_metadata_replay(self):
+        was_replaying = self._device_metadata_replay
+        self._device_metadata_replay = True
+        try:
+            with self.defer_device_metadata(in_graph=True):
+                yield
+        finally:
+            self._device_metadata_replay = was_replaying
 
     @contextmanager
     def defer_device_metadata(self, *, in_graph: bool = False):
@@ -1754,6 +1765,10 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
+        if self._device_metadata_replay:
+            metadata_cache[output_key] = output
+            return output
+
         sas_metadata = metadata_cache.get(key)
         if sas_metadata is None:
             tp_size = get_tensor_model_parallel_world_size()
@@ -2053,6 +2068,9 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
         num_reqs = seq_lens.shape[0]
         qli_seqused_k = self.qli_seqused_k[:num_reqs]
         qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+        if self._device_metadata_replay:
+            metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
+            return self.qli_metadata_buffer
 
         def build_qli():
             seq_lens_i32 = seq_lens.to(torch.int32)

@@ -481,9 +481,58 @@ def test_full_graph_only_leaves_eager_metadata_synchronous(state):
     assert state.executor.calls == []
 
 
-def test_full_graph_only_capture_still_attaches_executor(state):
+def test_full_graph_only_target_capture_excludes_shared_draft_prefill(state):
     state.full_graph_only = True
-    test_executor_belongs_to_built_metadata(state)
+    builder = Builder()
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _: builder)]]
+
+    def build(**kwargs):
+        if builder.enabled:
+            builder.tasks = (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 1),)
+        return {"cache": SimpleNamespace()}
+
+    # MTP draft prefill shares the state and the attention groups with target.
+    # Both builds request FULL graph capture, including the warmup forward.
+    def prepare_capture():
+        return state.run_build(build, attn_groups=groups, full_graph_mode=True, for_cudagraph_capture=True)["cache"]
+
+    with state.capture_target():
+        for _ in range(2):
+            assert prepare_capture().device_metadata_executor is state.executor
+            state.begin_forward()
+            state.finish()
+    draft = prepare_capture()
+    assert not hasattr(draft, "device_metadata_executor")
+    assert builder.tasks == () and state._tasks == ()
+    assert state.executor.calls == ["submit", "wait", "release"] * 2
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_full_graph_only_replay_refreshes_inputs_without_tasks(state, for_capture):
+    state.full_graph_only = True
+    builder = Builder()
+    steps = []
+
+    @contextmanager
+    def refresh():
+        steps.append("refresh")
+        yield
+
+    builder.prepare_device_metadata_replay = refresh
+
+    def build(**kwargs):
+        assert not builder.enabled
+        steps.append("build")
+        return {"cache": SimpleNamespace()}
+
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _: builder)]]
+    with state.replay_target():
+        metadata = state.run_build(build, attn_groups=groups, full_graph_mode=True, for_cudagraph_capture=for_capture)
+    assert not hasattr(metadata["cache"], "device_metadata_executor")
+    assert steps == ["refresh", "build"]
+    assert builder.tasks == () and state._tasks == ()
+    state.finish_replay()
+    assert state.executor.calls == []
 
 
 def test_wait_uses_forward_metadata_without_leaking_into_draft(monkeypatch):

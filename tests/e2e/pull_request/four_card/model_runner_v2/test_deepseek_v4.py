@@ -50,8 +50,9 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
     },
 )
 @wait_until_npu_memory_free()
-def test_deepseek_v4_mtp_full_decode_only():
-    """Verify DeepSeek V4 MTP acceptance with ModelRunner V2."""
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3], ids=["one_step", "three_steps"])
+def test_deepseek_v4_mtp_full_decode_only(num_speculative_tokens: int):
+    """Verify DeepSeek V4 draft prefill capture and MTP acceptance with ModelRunner V2."""
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -59,9 +60,14 @@ def test_deepseek_v4_mtp_full_decode_only():
         "The future of AI is",
         "What is the meaning of life?",
     ]
-    max_tokens = 1024
-    num_speculative_tokens = 3
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0, seed=0)
+    one_step = num_speculative_tokens == 1
+    max_tokens = 32 if one_step else 1024
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0, seed=0, ignore_eos=one_step)
+    compilation_config: dict = {"cudagraph_mode": "FULL_DECODE_ONLY"}
+    if one_step:
+        # Capture the uniform two-query target batch and the draft prefill
+        # for the five prompts above without capturing every default size.
+        compilation_config["cudagraph_capture_sizes"] = [2, 4, 8, 16]
 
     with VllmRunner(
         MODEL,
@@ -76,7 +82,7 @@ def test_deepseek_v4_mtp_full_decode_only():
         tokenizer_mode="deepseek_v4",
         block_size=128,
         enforce_eager=False,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        compilation_config=compilation_config,
         disable_log_stats=False,
         async_scheduling=True,
         speculative_config={
@@ -85,8 +91,19 @@ def test_deepseek_v4_mtp_full_decode_only():
         },
         attention_config={"indexer_kv_dtype": "int8"},
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
+
+    if one_step:
+        assert len(outputs) == len(prompts)
+        assert all(len(output.outputs[0].token_ids) == max_tokens for output in outputs)
+        # A successful generate alone could silently bypass speculation.
+        assert any(
+            metric.name == "vllm:spec_decode_num_drafts" and metric.value > 0
+            for metric in metrics
+            if isinstance(metric, Counter)
+        )
+        return
 
     acceptance_per_pos = calculate_acceptance_per_pos(
         metrics,

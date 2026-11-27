@@ -214,10 +214,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
+        from contextlib import nullcontext
+
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
+        target_scope = metadata.capture_target() if metadata is not None else nullcontext()
         try:
-            with communicator_switch():
+            with communicator_switch(), target_scope:
                 return super().capture(
                     model,
                     model_state,

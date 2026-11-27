@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
-from time import perf_counter
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +26,6 @@ enable_custom_op()
 # SAS and QLI ABI: 36 FA/LI rows, then 72 FD/LD rows, eight int32s per row.
 _METADATA_AIC_CAPACITY = 36
 _METADATA_ROW_WIDTH = 8
-_BENCHMARK_ITERATIONS = 100
 
 
 def _assert_metadata_equal(actual, expected):
@@ -65,12 +63,8 @@ def _builder(kind, num_reqs):
     return builder
 
 
-@pytest.mark.parametrize("num_reqs", [1, 4, 16, 32])
-@pytest.mark.parametrize("kind", [0, 4, 128, "qli"])
-@torch.inference_mode()
-def test_dsa_metadata_graph_dynamic_lengths(kind, num_reqs, monkeypatch, record_property):
-    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-        pytest.skip("requires the custom PA_ND SAS/QLI metadata backend")
+@contextmanager
+def _capture_metadata_graph(kind, num_reqs, monkeypatch):
     torch.npu.set_device(0)
     init_device_properties_triton()
     monkeypatch.setattr(dsa_v1, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -110,6 +104,18 @@ def test_dsa_metadata_graph_dynamic_lengths(kind, num_reqs, monkeypatch, record_
         stream.synchronize()
         with torch.npu.graph(graph, stream=stream):
             forward()
+        yield builder, build, query_offsets, lengths, metadata, consumed, graph, stream
+
+
+@pytest.mark.parametrize("num_reqs", [1, 4, 16, 32])
+@pytest.mark.parametrize("kind", [0, 4, 128, "qli"])
+@torch.inference_mode()
+def test_dsa_metadata_graph_dynamic_lengths(kind, num_reqs, monkeypatch):
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        pytest.skip("requires the custom PA_ND SAS/QLI metadata backend")
+
+    with _capture_metadata_graph(kind, num_reqs, monkeypatch) as case:
+        builder, build, query_offsets, lengths, metadata, consumed, graph, stream = case
         snapshots = []
         # Cross compressed-length boundaries, grow/shrink, pad requests, then
         # reactivate an entirely empty DP rank. Shape/address stay unchanged.
@@ -128,6 +134,10 @@ def test_dsa_metadata_graph_dynamic_lengths(kind, num_reqs, monkeypatch, record_
             query_offsets.copy_(q_cpu)
             lengths.copy_(kv_cpu)
             expected = build(False, query_len, kv_len).clone()
+            with builder.prepare_device_metadata_replay():
+                replay_metadata = build(True, 0, 0)
+            assert replay_metadata.data_ptr() == metadata.data_ptr()
+            assert not builder.take_device_metadata_tasks()
             # The reference must not write the captured output/length buffers:
             # otherwise a graph that failed to run its producer could pass.
             metadata.fill_(-1)
@@ -143,14 +153,3 @@ def test_dsa_metadata_graph_dynamic_lengths(kind, num_reqs, monkeypatch, record_
             if qli_lengths is not None:
                 torch.testing.assert_close(qli_lengths[0].cpu(), expected_lengths // 4, rtol=0, atol=0)
                 torch.testing.assert_close(qli_lengths[1].cpu(), expected_lengths % 4, rtol=0, atol=0)
-
-        # Diagnostic benchmark, without a hardware-dependent CI speed assertion.
-        # Synchronization is outside host-submission timing for both paths.
-        for name, submit in (("eager", lambda: build(False, 1, 128)), ("graph", graph.replay)):
-            stream.synchronize()
-            started = perf_counter()
-            for _ in range(_BENCHMARK_ITERATIONS):
-                submit()
-            elapsed = perf_counter() - started
-            stream.synchronize()
-            record_property(f"{name}_submission_us", elapsed * 1e6 / _BENCHMARK_ITERATIONS)
