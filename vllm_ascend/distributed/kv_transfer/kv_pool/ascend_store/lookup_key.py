@@ -302,8 +302,8 @@ class LookupKeyClient:
         self.socket = None  # type: ignore[assignment]
         try:
             retiring.close(linger=0)
-        except Exception:  # pragma: no cover - retirement must not mask the fail-open
-            logger.debug("KV pool lookup REQ retirement raised", exc_info=True)
+        except Exception as exc:  # pragma: no cover - retirement must not mask the fail-open
+            logger.debug("KV pool lookup REQ retirement raised: %s", _sanitize(exc))
         try:
             self.socket = self._open_socket()
         except Exception as exc:
@@ -375,7 +375,7 @@ class LookupKeyClient:
             result = decode_lookup_result(payload, token_len, groups)
         except ProtocolViolation as viol:
             return self._fail(viol.code, detail)
-        except Exception as exc:  # pragma: no cover - decoder faults stay fail-open
+        except Exception as exc:  # decoder faults stay fail-open (M34 guards the redaction)
             logger.debug("KV pool lookup response decode raised: %s", _sanitize(exc))
             return self._fail("decode:decode_error", detail)
 
@@ -507,12 +507,12 @@ class LookupKeyServer:
         # loop polling a dead endpoint forever.
         try:
             poller.unregister(retiring)
-        except Exception:  # pragma: no cover - best effort on a broken handle
-            logger.debug("KV pool lookup REP unregister raised", exc_info=True)
+        except Exception as exc:  # pragma: no cover - best effort on a broken handle
+            logger.debug("KV pool lookup REP unregister raised: %s", _sanitize(exc))
         try:
             retiring.close(linger=0)
-        except Exception:  # pragma: no cover - rebuild stays bounded
-            logger.debug("KV pool lookup REP retirement raised", exc_info=True)
+        except Exception as exc:  # pragma: no cover - rebuild stays bounded
+            logger.debug("KV pool lookup REP retirement raised: %s", _sanitize(exc))
         try:
             self.socket = self._open_socket()
         except Exception as exc:
@@ -638,7 +638,7 @@ class LookupKeyServer:
             # polling a dead endpoint and the server goes permanently deaf while
             # its thread stays alive -- the contract's "unrecoverable REP" case.
             self._note_failure(classify_zmq_error(exc, "server"), "op=poll")
-            logger.debug("KV pool lookup poll failed; rebuilding REP handle", exc_info=True)
+            logger.debug("KV pool lookup poll failed; rebuilding REP handle: %s", _sanitize(exc))
             self._rebuild_socket(poller)
             return
         if not readable:
@@ -654,7 +654,7 @@ class LookupKeyServer:
                 # same REP handle.
                 return
             self._note_failure("server:transport", "op=recv")
-            logger.debug("Failed to receive KV pool lookup request", exc_info=True)
+            logger.debug("Failed to receive KV pool lookup request: %s", _sanitize(exc))
             self._rebuild_socket(poller)
             return
 
@@ -689,10 +689,10 @@ class LookupKeyServer:
 
         try:
             self.socket.send_multipart(response, copy=False)
-        except zmq.ZMQError:  # type: ignore[attr-defined]
+        except zmq.ZMQError as exc:  # type: ignore[attr-defined]
             if self.running:
                 self._note_failure("server:transport", "op=send")
-                logger.debug("Failed to send KV pool lookup response", exc_info=True)
+                logger.debug("Failed to send KV pool lookup response: %s", _sanitize(exc))
                 self._rebuild_socket(poller)
 
     def _serve(self) -> None:
@@ -709,8 +709,8 @@ class LookupKeyServer:
             if self.socket is not None:
                 try:
                     poller.unregister(self.socket)
-                except Exception:  # pragma: no cover - shutdown is best effort
-                    logger.debug("KV pool lookup server unregister raised", exc_info=True)
+                except Exception as exc:  # pragma: no cover - shutdown is best effort
+                    logger.debug("KV pool lookup server unregister raised: %s", _sanitize(exc))
                 self.socket.close(linger=0)
             self.ctx.term()
 
