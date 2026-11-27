@@ -39,7 +39,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 | v0.17.0rc1  | v0.17.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       | N/A                               | N/A                        |
 | v0.16.0rc1  | v0.16.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       | N/A                               | N/A                        |
 | v0.15.0rc1  | v0.15.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       | N/A                               | N/A                        |
-| v0.14.0rc1  | v0.14.1           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       | N/A                               | N/A                        |
+| v0.14.0rc1  | v0.14.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       | N/A                               | N/A                        |
 | v0.13.0rc3  | v0.13.0           | >= 3.10, < 3.12 | 8.5.1       | 2.8.0  / 2.8.0.post2            | 3.2.0             |    N/A       | N/A                               | N/A                        |
 | v0.13.0     | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post2            | 3.2.0             |    N/A       | N/A                               | N/A                        |
 | v0.13.0rc2  | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post1            | 3.2.0             |    N/A       | N/A                               | N/A                        |
@@ -143,7 +143,7 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 ## Branch policy
 
-vLLM Ascend includes two branches: main and dev.
+vLLM Ascend includes two branches: main and `releases/vX.Y.Z`.
 
 - **main**: corresponds to the vLLM main branch and latest 1 or 2 release version. It is continuously monitored for quality through Ascend CI.
 - **releases/vX.Y.Z**: development branch, created with part of new releases of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM `v0.13.0` version.

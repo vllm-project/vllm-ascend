@@ -223,6 +223,8 @@ jobs:
               # ready-precise is not escalated to the full suite.
               - '.github/workflows/scripts/test_selector.py'
               - '!**/*.md'
+              # Comment-only patch catalog; editing it does not affect runtime code.
+              - '!vllm_ascend/patch/__init__.py'
               # CI pipeline files: a PR that touches the test selection or
               # execution pipeline itself must run the full suite, because
               # the precise-selection result can no longer be trusted.
