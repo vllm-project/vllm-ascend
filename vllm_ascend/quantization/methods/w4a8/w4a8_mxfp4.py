@@ -33,6 +33,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,  # noqa: F401
     EplbExpertTensorList,
 )
+from vllm_ascend.ops.situ_mx_quant import situ_mx_quant
 from vllm_ascend.quantization.nz import NzCastSpec, fp4_packed_nz, fp4_semantic_nz
 from vllm_ascend.utils import FP8_METHOD, dispose_tensor
 
@@ -474,7 +475,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with MXFP output quantization (Kimi K3 SITU activation).
 
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+            hidden_states, swiglu_out_scale = situ_mx_quant(
                 x=hidden_states,
                 beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,

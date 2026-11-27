@@ -209,12 +209,12 @@ class TestSharedActivationOverlap(unittest.TestCase):
         shared._can_fuse_w8a8_mxfp_activation = Mock(return_value=False)
         quantized = ("shared_quantized", "shared_scale")
         shared_ops = SimpleNamespace(
-            situ_mx_quant=Mock(return_value=quantized),
             dequant_situ_quant=Mock(return_value=quantized),
             npu_dequant_swiglu_quant=Mock(return_value=quantized),
             npu_swiglu_group_quant=Mock(return_value=(*quantized, None)),
         )
         self.namespace["torch"].ops = SimpleNamespace(_C_ascend=shared_ops)
+        self.namespace["situ_mx_quant"] = Mock(return_value=quantized)
         self.namespace["torch_npu"] = SimpleNamespace(npu_quant_matmul=Mock(return_value="shared_down_output"))
         self.namespace["SITU_MX_DST_TYPE_E4M3FN"] = 1
         self.namespace["SWIGLU_MX_QUANT_MODE"] = 2
@@ -223,6 +223,7 @@ class TestSharedActivationOverlap(unittest.TestCase):
         self.namespace["HardwareCapability"] = SimpleNamespace(FUSED_SWIGLU_TUNING_ARGS=object())
         for name, operation in vars(shared_ops).items():
             self.order.attach_mock(operation, name)
+        self.order.attach_mock(self.namespace["situ_mx_quant"], "situ_mx_quant")
         self.order.attach_mock(self.namespace["torch_npu"].npu_quant_matmul, "quant_down")
         self.order.attach_mock(shared.part2, "down")
         self.order.attach_mock(shared._apply_output_gate, "output_gate")
@@ -286,7 +287,7 @@ class TestSharedActivationOverlap(unittest.TestCase):
                     )
                     shared.part2.assert_called_once_with(submitted.hidden_states, ("shared_quantized", "shared_scale"))
                     if situ:
-                        self.namespace["torch"].ops._C_ascend.situ_mx_quant.assert_called_once_with(
+                        self.namespace["situ_mx_quant"].assert_called_once_with(
                             x=submitted.gate_up, beta=1.0, linear_beta=0.0, activate_left=True, dst_type=1
                         )
 

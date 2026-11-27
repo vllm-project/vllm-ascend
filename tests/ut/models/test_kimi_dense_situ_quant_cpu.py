@@ -93,9 +93,10 @@ def runtime(monkeypatch):
     ]:
         load_nodes(f"vllm_ascend/quantization/methods/w8a8/{file}.py", [cls], scope)
     kernels = {}
-    for name in ("situ_mx_quant", "dequant_situ_quant"):
-        kernels[name] = Mock(side_effect=AssertionError("dense MLP must retain the upstream SiTU path"))
-        monkeypatch.setattr(torch.ops._C_ascend, name, kernels[name], raising=False)
+    kernels["situ_mx_quant"] = Mock(side_effect=AssertionError("dense MLP must retain the upstream SiTU path"))
+    scope["situ_mx_quant"] = kernels["situ_mx_quant"]
+    kernels["dequant_situ_quant"] = Mock(side_effect=AssertionError("dense MLP must retain the upstream SiTU path"))
+    monkeypatch.setattr(torch.ops._C_ascend, "dequant_situ_quant", kernels["dequant_situ_quant"], raising=False)
     load_nodes("vllm_ascend/models/kimi_k3/kimi_k3.py", ["AscendKimiMLP"], scope)
     return SimpleNamespace(scope=scope, npu=npu, kernels=kernels, calls=calls)
 

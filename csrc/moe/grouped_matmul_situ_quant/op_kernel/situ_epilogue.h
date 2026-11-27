@@ -1,6 +1,6 @@
 /*
  * SiTU + MXQuant epilogue numerics — VERBATIM adaptation of the production
- * situ_mx_quant arch35 regbase implementation (vllm-ascend csrc/moe/situ_mx_quant,
+ * situ_mx_quant arch35 regbase implementation (formerly vllm-ascend csrc/moe/situ_mx_quant,
  * CANN Open Software License). Bit-exactness with the production kernel requires
  * the identical MicroAPI instruction sequence; do not "optimize" op order here.
  *

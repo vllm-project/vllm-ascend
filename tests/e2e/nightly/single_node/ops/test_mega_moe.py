@@ -29,6 +29,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_expert
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
 from vllm_ascend.ops.fused_moe.moe_utils import load_cann_mega_moe_ops, select_mega_moe_activation_kwargs
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
+from vllm_ascend.ops.situ_mx_quant import situ_mx_quant
 from vllm_ascend.quantization.methods.w4a8 import w4a8_mxfp4
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import bootstrap_custom_op_env
@@ -183,9 +184,7 @@ def main():
             output_dtype=torch.bfloat16,
         )[0]
         if a.activation == "situ":
-            activated, act_scale = torch.ops._C_ascend.situ_mx_quant(
-                x=mm1, beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36
-            )
+            activated, act_scale = situ_mx_quant(x=mm1, beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36)
         else:
             activated, act_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
                 mm1, topk_weight=None, group_index=counts, dst_type=torch.float8_e4m3fn, quant_mode=2, clamp_value=0.0
