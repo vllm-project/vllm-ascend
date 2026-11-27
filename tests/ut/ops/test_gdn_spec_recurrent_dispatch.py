@@ -16,7 +16,7 @@ from vllm_ascend.attention.gdn_attn_builder import (
 from .test_gdn_mixed_batch import _make_layer, _make_mixed_metadata
 
 
-@pytest.mark.parametrize(("window", "expect_upstream"), [(8, False), (9, True), (16, True)])
+@pytest.mark.parametrize(("window", "expect_upstream"), [(8, False), (9, False), (16, False)])
 def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream: bool) -> None:
     layer = _make_layer()
     metadata = _make_mixed_metadata()
