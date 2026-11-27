@@ -1302,12 +1302,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             dtype=torch.int32,
             device=device,
         )
-        if self.use_sharded_dcp:
-            group = get_dcp_group()
-            collective_ranks = sorted(group.ranks)
-            self.dcp_collective_rank_order = torch.tensor(
-                [collective_ranks.index(rank) for rank in group.ranks], dtype=torch.int32, device=device
-            )
         if self.use_pcp:
             self._pcp_indexer_slot_capacity = (
                 max_num_input_tokens * vllm_config.parallel_config.prefill_context_parallel_size
@@ -1757,7 +1751,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             kv_gather_block_ids, block_table = build_sfa_dcp_compact_kv_metadata(
                 block_table,
                 self.replicated_col_idx_buf,
-                self.dcp_collective_rank_order,
+                self.dcp_size,
                 self.kernel_block_size,
                 self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                 global_dcp_block_table=global_table,

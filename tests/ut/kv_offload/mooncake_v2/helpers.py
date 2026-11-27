@@ -25,15 +25,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def vllm_dcp_ranks_by_worker(tp_size: int, pcp_size: int, dcp_size: int) -> tuple[int, ...]:
     """Return each Mooncake worker's expected rank in its vLLM DCP group."""
-    # TODO: Remove this branch once the release tag and verified main both include vllm-project/vllm#64534.
-    if not vllm_version_is("0.34.0"):
-        return tuple(range(dcp_size)) * (tp_size * pcp_size // dcp_size)
-
     global_ranks = [pcp * tp_size + tp for tp in range(tp_size) for pcp in range(pcp_size)]
     dcp_ranks = {}
     for start in range(0, len(global_ranks), dcp_size):

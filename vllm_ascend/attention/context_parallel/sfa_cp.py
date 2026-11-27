@@ -4,7 +4,7 @@ from typing import Any, NamedTuple, TypeVar
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -164,22 +164,6 @@ class AscendSFADCPMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
-        dcp_group = get_dcp_group()
-        collective_ranks = sorted(dcp_group.ranks)
-        # ``dcp_group.ranks`` is in logical PCP-first DCP order, but
-        # ``torch.distributed.new_group`` sorts its global ranks and AllGather
-        # writes payload segments in that ProcessGroup order. For example,
-        # with PCP=2, TP=4, and DCP=8:
-        #   logical DCP ranks:       [0, 4, 1, 5, 2, 6, 3, 7]
-        #   AllGather segment ranks: [0, 1, 2, 3, 4, 5, 6, 7]
-        # Logical DCP rank positions therefore address gathered segments
-        # [0, 4, 1, 5, 2, 6, 3, 7]. Store this permutation for block-table
-        # offsets so the large gathered KV tensor can stay in HCCL order.
-        self.dcp_collective_rank_order = torch.tensor(
-            [collective_ranks.index(rank) for rank in dcp_group.ranks],
-            dtype=torch.int32,
-            device=device,
-        )
         self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
             (max_num_input_tokens,),
             dtype=torch.int32,
@@ -300,7 +284,7 @@ class AscendSFADCPMetadataBuilder(
         return build_sfa_dcp_compact_kv_metadata(
             dcp_block_table,
             self.arange_buffer,
-            self.dcp_collective_rank_order,
+            self.dcp_size,
             self.kernel_block_size,
             self.cp_kv_cache_interleave_size,
             global_dcp_block_table=global_dcp_block_table,

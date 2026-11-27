@@ -70,10 +70,6 @@ def _make_builder(
             return_value=_KERNEL_BLOCK_SIZE,
         ),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=sharded_dcp),
-        patch(
-            "vllm_ascend.attention.indexer.get_dcp_group",
-            return_value=SimpleNamespace(ranks=[0, 4, 1, 5, 2, 6, 3, 7] if dcp_size == 8 else list(range(dcp_size))),
-        ),
     ):
         return AscendSFAIndexerMetadataBuilder(
             kv_cache_spec,
