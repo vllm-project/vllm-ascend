@@ -47,6 +47,10 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.device.triton_gate import (
+    install_model_registry_gate,
+    validate_model_triton_compatibility,
+)
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
@@ -522,6 +526,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
+        # ModelConfig can inspect vLLM's lazy registry before
+        # check_and_update_config. Install the gate at the earliest platform
+        # hook so a Triton-only module cannot be imported on 310P.
+        from vllm import ModelRegistry
+
+        install_model_registry_gate(ModelRegistry)
+
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
@@ -778,6 +789,9 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        # Also validate pre-built configs. Cold ModelConfig construction is
+        # protected earlier by the model-registry gate.
+        validate_model_triton_compatibility(vllm_config.model_config)
         _normalize_sleep_backend(vllm_config.model_config)
 
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.

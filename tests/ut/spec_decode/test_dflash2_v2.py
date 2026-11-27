@@ -697,3 +697,23 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert speculator._context_slot_mappings.shape == (2, 8)
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
+
+
+@pytest.mark.parametrize("release", [True, False])
+@pytest.mark.parametrize("block_stride", [384, 1536])
+def test_dflash_input_preparation_preserves_manager_block_addressing(monkeypatch, release, block_stride):
+    kernel = MagicMock()
+    monkeypatch.setattr("vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs.prepare_dflash_inputs_triton", kernel)
+    monkeypatch.setattr(dflash_module, "vllm_version_is", lambda _: release)
+    monkeypatch.setattr(dflash_module.dflash_speculator, "prepare_dflash_inputs", None)
+    inputs = [object() for _ in range(28)]
+    inputs[17] = 384  # Manager block size; preserve upstream's addressing contract.
+    inputs[-1] = True
+    native_inputs = inputs if release else [*inputs[:18], block_stride, *inputs[18:]]
+
+    dflash_module.install_ascend_dflash_input_preparation()
+    dflash_module.dflash_speculator.prepare_dflash_inputs(*native_inputs, num_reqs_override=5)
+
+    assert kernel.call_args.args[:18] == tuple(inputs[:18])
+    assert kernel.call_args.args[18:] == tuple(inputs[18:])
+    assert kernel.call_args.kwargs == {"num_reqs_override": 5, "block_stride": None if release else block_stride}

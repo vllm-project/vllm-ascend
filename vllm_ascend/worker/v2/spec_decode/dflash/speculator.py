@@ -23,7 +23,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
-from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
@@ -97,7 +96,7 @@ def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool, 
 def install_ascend_dflash_input_preparation() -> None:
     # DFlash and DSpark share the input-preparation symbol in the upstream module.
     if vllm_version_is("0.34.0"):
-        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_triton
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs
     else:
         dflash_speculator.prepare_dflash_inputs = _prepare_dflash_inputs_with_block_stride
 

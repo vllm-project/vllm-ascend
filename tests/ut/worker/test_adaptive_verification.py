@@ -140,11 +140,15 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
     # Inspect final launcher arguments after the main-only block_stride adapter.
-    prepare_inputs_signature = signature(dflash_module.prepare_dflash_inputs_triton)
+    from vllm_ascend.ops.triton.spec_decode import prepare_dflash_inputs as kernel_module
+
+    prepare_inputs_signature = signature(kernel_module.prepare_dflash_inputs_triton)
     prepare_inputs = Mock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", prepare_inputs)
+    monkeypatch.setattr(kernel_module, "prepare_dflash_inputs_triton", prepare_inputs)
     prepare_entry = (
-        prepare_inputs if vllm_version_is("0.34.0") else dflash_module._prepare_dflash_inputs_with_block_stride
+        dflash_module.prepare_dflash_inputs
+        if vllm_version_is("0.34.0")
+        else dflash_module._prepare_dflash_inputs_with_block_stride
     )
     monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_entry)
 

@@ -19,9 +19,22 @@ import importlib.util
 import sys
 from types import ModuleType
 
-_triton_available = importlib.util.find_spec("triton") is not None
+# Build metadata is generated during installation and absent in source-only CI.
+_build_info = importlib.import_module("vllm_ascend._build_info")
+
+
+def _build_supports_triton() -> bool:
+    device_type = getattr(_build_info, "__device_type__", None)
+    if device_type is not None:
+        return device_type != "_310P"
+    return "310P" not in str(getattr(_build_info, "__soc_version__", "")).upper()
+
+
+_triton_available = _build_supports_triton() and importlib.util.find_spec("triton") is not None
 
 try:
+    if not _triton_available:
+        raise ModuleNotFoundError("Triton is disabled for this hardware build")
     import triton.experimental.gluon  # type: ignore[import-untyped]  # noqa: F401
 except (ImportError, ModuleNotFoundError):
     # fallback: create stubs for old triton-ascend

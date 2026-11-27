@@ -12,7 +12,6 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -68,6 +67,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    supports_triton,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -82,7 +82,7 @@ if TYPE_CHECKING:
     )
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms
 
-if HAS_TRITON:
+if supports_triton():
     from vllm_ascend.ops.triton.dspark_swa_indices import (  # noqa: F811
         build_dspark_swa_slot_indices_triton,
         dspark_swa_indices_supported,

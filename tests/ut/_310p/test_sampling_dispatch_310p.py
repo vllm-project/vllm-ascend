@@ -41,7 +41,7 @@ def test_no_triton_registration_replaces_incompatible_existing_host_helper():
     with pytest.raises(TypeError):
         incompatible_next_power(3)
     with (
-        patch.object(dispatch_module, "HAS_TRITON", False),
+        patch.object(dispatch_module, "supports_triton", return_value=False),
         patch.object(dispatch_module.triton, "next_power_of_2", incompatible_next_power, create=True),
         patch.object(dispatch_module, "register_kernels"),
     ):
@@ -60,7 +60,7 @@ def test_real_triton_registration_preserves_existing_host_helper():
         return value
 
     with (
-        patch.object(dispatch_module, "HAS_TRITON", True),
+        patch.object(dispatch_module, "supports_triton", return_value=True),
         patch.object(dispatch_module.triton, "next_power_of_2", existing_next_power, create=True),
         patch.object(dispatch_module, "register_kernels"),
     ):

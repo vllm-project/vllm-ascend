@@ -228,7 +228,7 @@ def test_no_rope_indexer_preserves_layernorm_keys_and_head_weights(has_triton):
     backend.enable_sparse_li_c4 = False
     x = torch.randn(4, 6)
     projected = backend.wk_weights_proj(x)[0]
-    with patch("vllm_ascend.attention.indexer.HAS_TRITON", has_triton):
+    with patch("vllm_ascend.attention.indexer.supports_triton", return_value=has_triton):
         keys, scales, weights = backend.forward_k(x, None, None)
     torch.testing.assert_close(keys[:, 0], backend.k_norm(projected[:, :8]))
     torch.testing.assert_close(weights, projected[:, 8:])

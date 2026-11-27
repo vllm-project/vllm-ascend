@@ -64,7 +64,7 @@ class TestFLALazyImports(unittest.TestCase):
         self._module("vllm_ascend.ops.triton.kda", __path__=[])
         self.kernel = Mock(return_value=object())
         self._module("vllm_ascend.ops.triton.kda.kda", rms_norm_gated=self.kernel)
-        utils = self._module("vllm_ascend.utils", REGISTERED_ASCEND_OPS={})
+        utils = self._module("vllm_ascend.utils", REGISTERED_ASCEND_OPS={}, supports_triton=lambda: True)
         self.register = _load_function("vllm_ascend/utils.py", "register_ascend_fla_customop", utils.__dict__)
         self.layernorm = self._module("vllm_ascend.ops.layernorm")
         _load_function("vllm_ascend/ops/layernorm.py", "__getattr__", self.layernorm.__dict__)

@@ -43,6 +43,7 @@ def load_reader(copy, fmt=2, function="try_load_strided_mla_cache"):
         "torch": cpu_torch,
         "torch_npu": SimpleNamespace(get_npu_format=lambda cache: fmt),
         "copy_pcp_kv_cache": copy,
+        "supports_triton": lambda: True,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(source), "exec"), namespace)
     return namespace[function]

@@ -275,7 +275,14 @@ def test_bf16_schema_still_rejects_invalid_checkpoints(adapter_modules, checkpoi
 
 
 def test_native_architecture_is_registered_by_the_standard_plugin(adapter_modules, monkeypatch):
-    registry = SimpleNamespace(register_model=Mock())
+    class Registry:
+        def __init__(self):
+            self.register_model = Mock()
+
+        def inspect_model_cls(self, architectures, model_config):
+            raise AssertionError("Model registration must not inspect a model")
+
+    registry = Registry()
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(ModelRegistry=registry))
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/models/__init__.py"
     spec = importlib.util.spec_from_file_location("ascend_model_registration", path)

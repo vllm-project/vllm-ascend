@@ -550,7 +550,8 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
 
 @pytest.mark.parametrize("method", [None, "eagle3", "dspark"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
+@pytest.mark.parametrize("triton_supported", [False, True])
+def test_graph_fusion_pass_registration(monkeypatch, method, enabled, triton_supported):
     path = ROOT / "vllm_ascend/compilation/graph_fusion_pass_manager.py"
     cls = next(
         n
@@ -570,6 +571,8 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
         "__package__": "vllm_ascend.compilation",
         "enable_sp": lambda _: False,
         "get_current_hardware_profile": lambda: NS(supports=lambda _: False),
+        "supports_triton": lambda: triton_supported,
+        "logger": Mock(),
     }
     exec(
         compile(
@@ -580,7 +583,8 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
     config = NS(speculative_config=NS(use_dspark=lambda: method == "dspark") if method else None)
     manager = NS(passes=[])
     namespace["configure"](manager, config)
-    assert fusion.call_count == len(manager.passes) == int(enabled)
+    assert fusion.call_count == len(manager.passes) == int(enabled and triton_supported)
+    assert namespace["logger"].warning_once.call_count == int(enabled and not triton_supported)
 
 
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):

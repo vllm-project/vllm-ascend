@@ -134,7 +134,7 @@ def test_int8_owner_registers_only_eligible_bound_cache(enabled, pcp, bound):
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "register_k_cache_warmup")
     register = Mock()
     namespace = {
-        "HAS_TRITON": True,
+        "supports_triton": lambda: True,
         "indexer_quant_cache_int8": int8_ops.indexer_quant_cache_int8,
         "register_indexer_quant_cache_int8_warmup": register,
     }

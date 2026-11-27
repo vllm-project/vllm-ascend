@@ -18,6 +18,7 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.kda_state_copy_plan import KDAStateCopyPlan, initialize_kda_state_copy
 from vllm_ascend.ops.triton import kda_state_copy_kernel as lowlevel
+from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
 
 def _prepare_plan(plan_type, state, max_selected):
@@ -318,7 +319,7 @@ def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride
     def forbidden(*args, **kwargs):
         raise AssertionError("fallback serving entered JIT")
 
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", forbidden)
+    monkeypatch.setattr(batch_memcpy_kernel, "run", forbidden)
     for count in (0, 1, 4, 8, 16):
         backing.copy_(initial)
         ids = torch.arange(count, device="npu", dtype=index_dtype) - 1
@@ -361,7 +362,7 @@ def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype,
     plan.seal()
     torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    monkeypatch.setattr(batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
     ids = torch.tensor([3, -1, 4, 0], dtype=index_dtype, device="npu")
     if to_cache:
         packed = torch.full((4, 1, 1, payload), 17, dtype=dtype, device="npu")
@@ -526,7 +527,7 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
         def forbidden(*args, **kwargs):
             raise AssertionError("fallback entered JIT after seal")
 
-        monkeypatch.setattr(production.batch_memcpy_kernel, "run", forbidden)
+        monkeypatch.setattr(batch_memcpy_kernel, "run", forbidden)
 
     def copy_roundtrip(cache, indices, flags):
         packed = plan.gather(cache, indices, flags)
@@ -593,7 +594,7 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
     assert plans[0] is not plans[1]
     assert plans[0]._kernel is plans[1]._kernel
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    monkeypatch.setattr(batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
     indices = torch.tensor([0, 2], dtype=torch.int32, device="npu")
     flags = torch.tensor([True, False], device="npu")
     for value, (name, layer) in enumerate(layers.items(), 3):
@@ -659,7 +660,6 @@ def test_compile_metadata_matches_cache_alignment(dtype, state_offset, monkeypat
 @torch.inference_mode()
 def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     """Exercise real prefill dispatch and copies; only chunk math is substituted."""
-    from vllm_ascend.ops import kda_state_copy_plan as production
     from vllm_ascend.ops import kimi_kda as kimi
 
     attention = kimi.AscendKimiK3DeltaAttention.__new__(kimi.AscendKimiK3DeltaAttention)
@@ -680,7 +680,7 @@ def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     chunk = Mock(return_value=("output", final))
     monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    monkeypatch.setattr(batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
     metadata = SimpleNamespace(
         cu_seqlens_host=tuple(range(7)), cu_seqlens_kern=None, keep_meta=None, chunk_indices_chunk64_host=()
     )
