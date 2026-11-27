@@ -30,10 +30,9 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
 from vllm_ascend.attention.dsa_v1 import (
+    _WO_A_SMALL_M_LIMIT,
     QLI_METADATA_BUFFER_SIZE,
     SAS_METADATA_BUFFER_SIZE,
-    _WO_A_SMALL_M_LIMIT,
-    DSA_METADATA_BUFFER_SIZE,
     AscendDSABackend,
     AscendDSAImpl,
     AscendDSALayerMetadata,
