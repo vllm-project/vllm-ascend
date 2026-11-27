@@ -271,12 +271,22 @@ class MooncakePushConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        transfer_config = vllm_config.kv_transfer_config
+        assert transfer_config is not None
+        self.is_producer = transfer_config.is_kv_producer
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    @property
+    def supports_layerwise_buffer_reuse(self) -> bool:
+        return (
+            isinstance(self.connector_worker, MooncakePushConnectorWorker)
+            and self.connector_worker.supports_layerwise_buffer_reuse
+        )
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
@@ -287,6 +297,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
     def wait_for_save(self) -> None:
         assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
         self.connector_worker.wait_for_save()
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

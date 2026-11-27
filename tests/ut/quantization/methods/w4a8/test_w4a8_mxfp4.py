@@ -5,7 +5,7 @@ import torch.nn as nn
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
@@ -151,10 +151,8 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
         mx_profile.start().return_value.supports_weight_format.return_value = True
         self.addCleanup(mx_profile.stop)
@@ -170,16 +168,11 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
     def test_v2_eplb_uses_expert_weight_list(self):
         vllm_config = create_mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
         with (
             patch(
                 "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config",
                 return_value=vllm_config,
-            ),
-            patch(
-                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
-                return_value=create_mock_ascend_config(),
             ),
             patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
         ):
@@ -227,6 +220,36 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_process_weights_pads_odd_tp_scale_groups(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
+        # A TP shard can leave intermediate_size_per_partition // group_size odd
+        # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 144), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(1, 255, (8, 128, 9), dtype=torch.uint8), requires_grad=False)
+        original_scale = layer.w2_weight_scale.data.clone()
+
+        self.scheme.process_weights_after_loading(layer)
+
+        # (g, n, k // 2, 2) after padding k=9 -> 10, then transposed to (g, k // 2, n, 2).
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 5, 128, 2))
+        restored = layer.w2_weight_scale.data.transpose(-3, -2).reshape(8, 128, 10)
+        torch.testing.assert_close(restored[..., :9], original_scale)
+        torch.testing.assert_close(restored[..., 9], torch.zeros(8, 128, dtype=torch.uint8))
+
+        # restore_weights_for_rl_loading must drop the padding, not crash trying to
+        # reshape the padded (now even) tensor straight back to the odd original shape.
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 128, 9))
+        torch.testing.assert_close(layer.w2_weight_scale.data, original_scale)
 
     @staticmethod
     def _make_moe_layer():
@@ -503,7 +526,6 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = None
         layer.swiglu_alpha = 1.0
         layer.swiglu_beta = 0.0

@@ -143,7 +143,7 @@ Both sources are supported configuration inputs. The environment route suits dep
 
 ## Example Commands & Placeholders
 
-> Replace parts in `<...>` before running.
+> Replace placeholders such as `<planner_port>` with your own values before running the commands.
 
 ### 1. Install YuanRong Datasystem
 
@@ -355,7 +355,6 @@ Performance depends on model size, shard topology, NPU tensor layout, TransferEn
     - **Sleep mode** (`enable_sleep_mode` on either the model config or `vllm_config.model_config`), because sleeping discards and reallocates weight storage.
     - **Online weight transfer** (`weight_transfer_config` is set), because weights can be replaced after loading.
     - **EPLB** (`--enable-eplb`), because asynchronous expert rearrangement rewrites expert weights and placement maps in place after the seed service starts.
-- The static, recording, and legacy dynamic EPLB modes configured through `additional_config.eplb_config` (`expert_map_path`, `expert_map_record_path`, `dynamic_eplb`) belonged to Model Runner V1 and have been removed. They no longer take effect, so they neither enable EPLB nor bypass RFork.
 - Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork makes at most two cleanup attempts (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2), with a short backoff before the second attempt, and only then reclaims memory and reruns the default loader. A pending legacy `/put_seed` for an unpublished receiver does not block native finalization, but if required local cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol. Its unauthenticated `GET /debug/snapshot` endpoint lists every registered `seed_key` and every active lease `USER_ID`; those IDs authorize lease renewal and release, so anything that can reach the mock planner can learn cluster keys and disrupt active allocations. Keep it reachable only inside the trusted network segment (see the [FAQ](#faq)).
 - The planner protocol headers `SEED_REFCNT` and `SEED_RANK` carry no scheduling meaning, but they are not optional on the wire today:

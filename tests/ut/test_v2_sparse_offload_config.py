@@ -8,7 +8,7 @@ from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.attention.sfa_kv_offload import _validate_fused_copy_sfa_config
 
 
-def make_config(v2, mtp):
+def make_config(mtp):
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
         parallel_config=SimpleNamespace(
@@ -17,7 +17,6 @@ def make_config(v2, mtp):
             pipeline_parallel_size=1,
         ),
         kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
-        use_v2_model_runner=v2,
         speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=mtp) if mtp else None,
     )
 
@@ -32,39 +31,35 @@ def make_fused_config(vllm_config, hot_tokens):
     return config
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("mtp", [0, 1, 3, 13])
-def test_auto_buffer_satisfies_copy_sfa_bounds(v2, mtp):
-    config = make_fused_config(make_config(v2, mtp), -1)
+def test_auto_buffer_satisfies_copy_sfa_bounds(mtp):
+    config = make_fused_config(make_config(mtp), -1)
     assert config.topk_buffer_size == (1 + mtp) * 2048
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("mtp", [0, 1, 2, 3])
-def test_both_runners_accept_sparse_fused_mtp(v2, mtp):
-    config = make_fused_config(make_config(v2, mtp), 8192)
+def test_both_runners_accept_sparse_fused_mtp(mtp):
+    config = make_fused_config(make_config(mtp), 8192)
     assert config.enabled
     assert config.use_fused_copy_sfa
 
 
-@pytest.mark.parametrize("v2", [False, True])
-def test_decode_pp_remains_rejected(v2):
-    config = make_config(v2, 2)
+def test_decode_pp_remains_rejected():
+    config = make_config(2)
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError):
         SparseKVOffloadConfig.from_additional_config(config, {"enabled": True})
 
 
-@pytest.mark.parametrize("v2", [False, True])
-def test_producer_offload_remains_rejected(v2):
-    config = make_config(v2, 2)
+def test_producer_offload_remains_rejected():
+    config = make_config(2)
     config.kv_transfer_config.kv_role = "kv_producer"
     with pytest.raises(AssertionError):
         SparseKVOffloadConfig.from_additional_config(config, {"enabled": True})
 
 
 def make_dspark_config():
-    config = make_config(True, 0)
+    config = make_config(0)
     config.speculative_config = SimpleNamespace(
         method="dspark",
         num_speculative_tokens=8,
@@ -121,10 +116,9 @@ def test_dspark_fused_budget_uses_configured_draft_width(draft_tokens):
     assert offload.use_fused_copy_sfa
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("draft_tokens", [6, 7, 8, 13])
-def test_mtp_fused_config_uses_same_kernel_limits(v2, draft_tokens):
-    offload = make_fused_config(make_config(v2, draft_tokens), 32512)
+def test_mtp_fused_config_uses_same_kernel_limits(draft_tokens):
+    offload = make_fused_config(make_config(draft_tokens), 32512)
     assert offload.use_fused_copy_sfa
 
 
@@ -145,19 +139,8 @@ def test_dspark_rejects_hot_budget_below_configured_width():
         make_fused_config(config, 26624)
 
 
-@pytest.mark.parametrize("use_fused_overlap", [False, True])
-def test_remote_dspark_requires_v2_context_initialization(use_fused_overlap):
-    config = make_dspark_config()
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="V2 remote prompt-context initialization"):
-        SparseKVOffloadConfig.from_additional_config(
-            config, {"enabled": True, "use_fused_overlap": use_fused_overlap, "topk_buffer_size": 18432}
-        )
-
-
-@pytest.mark.parametrize("v2", [False, True])
-def test_overlap_does_not_apply_copy_sfa_kernel_limits(v2):
-    vllm_config = make_config(v2, 0)
+def test_overlap_does_not_apply_copy_sfa_kernel_limits():
+    vllm_config = make_config(0)
     vllm_config.model_config.hf_text_config.index_topk = 128
     config = SparseKVOffloadConfig.from_additional_config(
         vllm_config, {"enabled": True, "use_fused_overlap": True, "topk_buffer_size": 256}
@@ -167,15 +150,13 @@ def test_overlap_does_not_apply_copy_sfa_kernel_limits(v2):
 
 
 def test_store_port_base_defaults_to_the_historical_value():
-    config = SparseKVOffloadConfig.from_additional_config(make_config(False, 0), {"enabled": True})
+    config = SparseKVOffloadConfig.from_additional_config(make_config(0), {"enabled": True})
 
     assert config.store_port_base == 8500
 
 
 def test_store_port_base_can_be_overridden():
-    config = SparseKVOffloadConfig.from_additional_config(
-        make_config(False, 0), {"enabled": True, "store_port_base": 9500}
-    )
+    config = SparseKVOffloadConfig.from_additional_config(make_config(0), {"enabled": True, "store_port_base": 9500})
 
     assert config.store_port_base == 9500
 
@@ -184,5 +165,5 @@ def test_store_port_base_can_be_overridden():
 def test_store_port_base_out_of_range_is_rejected(store_port_base):
     with pytest.raises(ValueError, match="store_port_base"):
         SparseKVOffloadConfig.from_additional_config(
-            make_config(False, 0), {"enabled": True, "store_port_base": store_port_base}
+            make_config(0), {"enabled": True, "store_port_base": store_port_base}
         )

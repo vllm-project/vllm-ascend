@@ -24,28 +24,29 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
-from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.worker.v2.aclgraph_utils import (
+    AscendGraphManagerMixin,
+    collect_sorted_captured_token_sizes,
+    model_capture_wrapper,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class DFlashAclGraphManager(DFlashCudaGraphManager):
+class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int | Mapping[int, int] | None = None,
+        decode_query_lens: Mapping[int, int],
         speculator: Any = None,
-        *,
-        decode_query_lens: Mapping[int, int] | None = None,
     ):
-        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
-            query_shapes,
+            decode_query_lens,
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
