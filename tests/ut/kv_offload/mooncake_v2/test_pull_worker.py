@@ -72,6 +72,8 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.invalid_block_ids_lock = threading.Lock()
     thread.finished_requests = queue.SimpleQueue()
     thread.request_queue = queue.Queue()
+    thread._request_submit_lock = threading.Lock()
+    thread._stopping = False
     for name, value in overrides.items():
         setattr(thread, name, value)
     thread._process_next = (

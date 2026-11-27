@@ -57,6 +57,8 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
     global_memfabric_te,
 )
 
+SHUTDOWN_WARNING_INTERVAL_S = 30.0
+
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     """D-side execution thread for Mooncake pull requests.
@@ -150,7 +152,11 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         # engine_id -> remote_pp_rank
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
+        self._request_submit_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._stopping = False
+        self._executor_closed = False
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -158,7 +164,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
 
     def add_not_transfer_request(self, request_id: str) -> None:
         """Complete a health probe without reading producer KV cache."""
-        self.finished_requests.put((request_id, False))
+        with self._request_submit_lock:
+            if self._stopping:
+                raise RuntimeError("Mooncake pull receiver is shutting down")
+            self.finished_requests.put((request_id, False))
 
     @staticmethod
     def _get_pull_transfer_mode(vllm_config: VllmConfig) -> str:
@@ -175,7 +184,42 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     ) -> None:
         """Queue requests for one remote engine."""
         if requests:
-            self.request_queue.put((remote_engine_id, requests))
+            with self._request_submit_lock:
+                if self._stopping:
+                    raise RuntimeError("Mooncake pull receiver is shutting down")
+                self.request_queue.put((remote_engine_id, requests))
+
+    def shutdown(self) -> None:
+        """Drain accepted requests and their READs before releasing the executor."""
+        with self._shutdown_lock:
+            if self._executor_closed:
+                return
+            with self._request_submit_lock:
+                if not self._stopping:
+                    self._stopping = True
+                    if self.is_alive():
+                        self.request_queue.put(None)
+
+            while self.is_alive():
+                self.join(timeout=SHUTDOWN_WARNING_INTERVAL_S)
+                if self.is_alive():
+                    logger.warning("Mooncake pull receiver still draining queued requests during shutdown")
+
+            # In request mode, the receiver can exit while READs and their
+            # completion callbacks still run on executor threads.
+            warning = threading.Timer(
+                SHUTDOWN_WARNING_INTERVAL_S,
+                logger.warning,
+                args=("Mooncake pull executor still draining transfers during shutdown",),
+            )
+            warning.daemon = True
+            warning.start()
+            try:
+                self.executor.shutdown(wait=True)
+            finally:
+                warning.cancel()
+                warning.join()
+            self._executor_closed = True
 
     def get_and_clear_finished_requests(self) -> KVConnectorTransferResults:
         """Drain completion and failure together for each finished request."""
@@ -200,13 +244,16 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         """Consume queued requests and invoke the transfer implementation."""
         torch.npu.set_device(self.device)
         self.ready_event.set()
-        while True:
-            self._process_next()
+        while self._process_next():
+            pass
 
-    def _process_next_request(self) -> None:
+    def _process_next_request(self) -> bool:
         """Process one queue item with independent request completion."""
-        remote_engine_id, requests = self.request_queue.get()
+        work = self.request_queue.get()
         try:
+            if work is None:
+                return False
+            remote_engine_id, requests = work
             try:
                 endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
                 remote_host, remote_port = self._get_remote_endpoint(endpoints)
@@ -216,7 +263,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 logger.exception("Mooncake request metadata lookup failed for remote engine %s", remote_engine_id)
                 for request_id, request in requests.items():
                     self._finish_request(request_id, request, True)
-                return
+                return True
 
             for selection_index, (request_id, request) in enumerate(requests.items()):
                 try:
@@ -237,11 +284,15 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             logger.exception("Unexpected Mooncake request processing failure for remote engine %s", remote_engine_id)
         finally:
             self.request_queue.task_done()
+        return True
 
-    def _process_next_batch(self) -> None:
+    def _process_next_batch(self) -> bool:
         """Process one queue item with a batch completion barrier."""
-        remote_engine_id, requests = self.request_queue.get()
+        work = self.request_queue.get()
         try:
+            if work is None:
+                return False
+            remote_engine_id, requests = work
             failed_request_ids: set[str] = set()
             future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
             try:
@@ -288,6 +339,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             logger.exception("Unexpected Mooncake batch processing failure for remote engine %s", remote_engine_id)
         finally:
             self.request_queue.task_done()
+        return True
 
     def _finish_request(self, request_id: str, request: ReqMeta, failed: bool) -> None:
         """Publish completion only after all submitted reads have stopped."""
@@ -1576,18 +1628,26 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
-            assert self._recving_thread is not None
+            receiver = self._recving_thread
+            if receiver is None:
+                raise RuntimeError("Mooncake pull receiver is unavailable")
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
                 if request_metadata.do_virtual:
                     logger.debug("Mooncake virtual receive completed without transfer: %s", request_id)
-                    self._recving_thread.add_not_transfer_request(request_id)
+                    receiver.add_not_transfer_request(request_id)
                     continue
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 
             for remote_engine_id, requests in request_groups.items():
-                self._recving_thread.add_requests(remote_engine_id, requests)
+                receiver.add_requests(remote_engine_id, requests)
+
+    def shutdown(self) -> None:
+        receiver = self._recving_thread
+        if receiver is not None:
+            receiver.shutdown()
+            self._recving_thread = None
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Return completed receives, including their failure status."""
