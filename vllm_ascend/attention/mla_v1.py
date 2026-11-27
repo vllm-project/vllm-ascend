@@ -233,6 +233,8 @@ class AscendMLAAttention(MLAAttention):
         if spec.cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE and not use_sfa_hif8:
             values["kv_quant_mode"] = KVQuantMode.NONE
 
+        # FA-quantized split FIA stores NoPE in the quantized dtype and keeps
+        # RoPE in the owning model's original dtype.
         rope_dtype = None
         if (
             getattr(self.impl, "fa_quant_layer", False)

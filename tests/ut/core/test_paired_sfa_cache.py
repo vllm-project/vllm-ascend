@@ -59,6 +59,7 @@ def make_specs():
 
 def make_config():
     return SimpleNamespace(
+        kv_transfer_config=None,
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="kimi_k31"),
             hf_text_config=SimpleNamespace(model_type="kimi_linear"),

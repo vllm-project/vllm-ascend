@@ -98,16 +98,18 @@ def _make_owner(impl, backend, rope_dim=64):
     return layer
 
 
-def _get_owner_spec(monkeypatch, layer):
+def _get_owner_spec(monkeypatch, layer, *, is_draft=False, **config_kwargs):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=layer.kv_lora_rank + layer.qk_rope_head_dim,
         dtype=torch.bfloat16,
+        is_draft=is_draft,
     )
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        **config_kwargs,
     )
     return layer.get_kv_cache_spec(config)
 
@@ -148,6 +150,29 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     if quantized:
         assert spec.cache_dtype_str is None
     assert spec.rope_dtype == (torch.bfloat16 if quantized else None)
+
+
+def test_quantized_draft_spec_uses_its_own_rope_dtype(monkeypatch):
+    def unexpected_quant_query(*_args):
+        raise AssertionError("Draft spec must use the layer's existing FA quantization decision")
+
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", unexpected_quant_query)
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.fa_quant_layer = True
+    impl.use_flashmla = False
+    impl.dtype = torch.float8_e4m3fn
+    impl.head_size = 576
+    layer = _make_owner(impl, AscendMLABackend)
+    spec = _get_owner_spec(
+        monkeypatch,
+        layer,
+        is_draft=True,
+        speculative_config=SimpleNamespace(method="dspark", draft_model_config=SimpleNamespace(dtype=torch.float16)),
+        quant_config=SimpleNamespace(enable_fa_quant=False, get_kv_quant_dtype=unexpected_quant_query),
+    )
+
+    assert spec.dtype == torch.float8_e4m3fn
+    assert spec.rope_dtype == torch.float16
 
 
 def test_quant_flashmla_keeps_one_storage_dtype(monkeypatch):
