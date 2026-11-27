@@ -1,0 +1,6 @@
+pr: 22251
+entries:
+  - category: performance
+    text: >-
+      DSpark with GQA reuses matching draft attention metadata during full-graph replay,
+      avoiding a second metadata build within each proposal.

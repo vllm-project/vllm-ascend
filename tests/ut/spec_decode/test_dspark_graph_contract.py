@@ -162,6 +162,46 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
     assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_gqa_full_replay_reuses_metadata_only_within_proposal(monkeypatch, use_dcp):
+    parent_build = MagicMock(side_effect=lambda **kwargs: {})
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    speculator = _speculator(
+        attn_architecture="GQA",
+        use_dcp=use_dcp,
+        num_query_per_req=8,
+        arange_np=np.arange(5, dtype=np.int32),
+        input_batch=SimpleNamespace(num_reqs=4),
+        input_buffers=SimpleNamespace(positions=object(), seq_lens=torch.arange(4, dtype=torch.int32)),
+        vllm_config=SimpleNamespace(parallel_config=object()),
+        _group_causal={0: False},
+    )
+    batch_desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=32, num_reqs=4)
+    upper_bound = torch.tensor([8, 8, 8])
+    with pytest.raises(RuntimeError, match="proposal failed"), speculator._proposal_metadata(3):
+        first = speculator._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=3,
+            num_query_per_req=8,
+            seq_lens_cpu_upper_bound=upper_bound,
+            step=8,
+            causal={0: False},
+        )
+        replay = speculator.build_draft_attn_metadatas(4, upper_bound)[0]
+        assert (replay is first) is (not use_dcp)
+        assert parent_build.call_count == (2 if use_dcp else 1)
+        raise RuntimeError("proposal failed")
+
+    assert speculator._draft_metadata_num_reqs is None
+    assert speculator._proposal_host_lengths is None
+    assert speculator._proposal_attn_metadata is None
+    with speculator._proposal_metadata(3):
+        assert speculator.build_draft_attn_metadatas(4, upper_bound)[0] is not first
+
+
 @pytest.mark.parametrize("query_count", [1, 7, 8])
 @pytest.mark.parametrize("num_reqs_padded", [1, 2, 4, 16])
 def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, num_reqs_padded):

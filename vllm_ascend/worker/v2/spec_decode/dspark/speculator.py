@@ -60,6 +60,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
+    _proposal_attn_metadata: dict[tuple, dict[str, Any]] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -281,12 +282,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     @contextmanager
     def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
         with draft_metadata_request_count(self, num_reqs):
-            previous = self._proposal_host_lengths
+            previous_host_lengths = self._proposal_host_lengths
+            previous_attn_metadata = self._proposal_attn_metadata
             self._proposal_host_lengths = {}
+            # Metadata belongs to this proposal's prepared draft inputs.
+            self._proposal_attn_metadata = {}
             try:
                 yield
             finally:
-                self._proposal_host_lengths = previous
+                self._proposal_host_lengths = previous_host_lengths
+                self._proposal_attn_metadata = previous_attn_metadata
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
@@ -375,6 +380,25 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             )
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
+        cache = self._proposal_attn_metadata
+        cache_key = None
+        if (
+            cache is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and self.attn_architecture == "GQA"
+            and not self.use_dcp
+            and dcp_local_seq_lens is None
+        ):
+            cache_key = (
+                num_reqs,
+                batch_desc.num_tokens,
+                num_reqs_padded,
+                tuple(query_start_loc_np),
+                step,
+                causal if isinstance(causal, bool) else tuple(sorted(causal.items())),
+            )
+            if cache_key in cache:
+                return cache[cache_key]
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
@@ -403,6 +427,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        if cache is not None and cache_key is not None and attn_metadata is not None:
+            cache[cache_key] = attn_metadata
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
