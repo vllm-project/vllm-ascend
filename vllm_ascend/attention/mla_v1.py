@@ -38,6 +38,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_BAND_MASK_MODE,
+    FLASHMLA_CAUSAL_MASK_MODE,
     FLASHMLA_NUM_KV_HEADS,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
@@ -68,7 +70,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, SlidingWindowMLASpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -183,6 +185,12 @@ class AscendMLAAttention(MLAAttention):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        if isinstance(spec, SlidingWindowMLASpec):
+            # DFlash precomputes every context row. Retain the full KV cache
+            # and apply the window in the selected decode attention kernel.
+            # Only pass fields declared by the full-retention Ascend spec.
+            allowed = {field.name for field in fields(AscendMLAAttentionSpec) if field.init}
+            values = {name: value for name, value in values.items() if name in allowed}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
         if model_type in ("kimi_linear", "glm_moe_dsa"):
@@ -1085,6 +1093,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
+        self.sliding_window = sliding_window
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
@@ -1176,17 +1185,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_quant_flashmla: bool = self._can_use_quant_flashmla()
-        self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla()
+        dflash_draft_window = kwargs.get("dflash_draft_window", False)
+        self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla(
+            dflash_draft_window=dflash_draft_window
+        )
         self.a3_mla_adapter = None
         if supports_a3_mla(
             self,
             is_a3=get_ascend_device_type() == AscendDeviceType.A3,
-            is_draft=backends.model_tag == "dspark_head",
+            is_draft=backends.model_tag in ("dspark_head", "dflash_head"),
             supports_pd_layout=use_component_major_mla_pd_layout,
+            dflash_draft_window=dflash_draft_window,
         ):
             ops = get_a3_mla_ops()
             if ops is not None:
-                self.a3_mla_adapter = A3MLAAdapter(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype), *ops)
+                config = A3MLAConfig(
+                    self.num_heads,
+                    self.scale,
+                    dtype=self.dtype,
+                    mask_mode=FLASHMLA_BAND_MASK_MODE if dflash_draft_window else FLASHMLA_CAUSAL_MASK_MODE,
+                    sliding_window=self.sliding_window if dflash_draft_window else None,
+                )
+                self.a3_mla_adapter = A3MLAAdapter(config, *ops)
         self.use_a3_mla_sink = self.a3_mla_adapter is not None
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -1218,15 +1238,20 @@ class AscendMLAImpl(MLAAttentionImpl):
         dcp_size = config.parallel_config.decode_context_parallel_size
         return self.num_heads * dcp_size in supported_heads and get_quant_flashmla_ops() is not None
 
-    def _can_use_flashmla(self) -> bool:
+    def _can_use_flashmla(self, *, dflash_draft_window: bool = False) -> bool:
         config = self.vllm_config
-        if config.speculative_config is not None and config.speculative_config.method != "dspark":
+        method = getattr(config.speculative_config, "method", None)
+        if config.speculative_config is not None and method not in ("dspark", "dflash"):
             return False
         if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
             return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
+        if self.sliding_window is not None:
+            # Only DFlash supplies the valid per-request Q prefix for BAND.
+            # DCP's history pass uses a different, non-causal mask.
+            return dflash_draft_window and self.sliding_window > 0 and dcp_size == 1 and get_flashmla_ops() is not None
         # Replicated DSpark queries keep PCP=1 in their config, but reuse the
         # physical PCP group. Its ranks carry the same Q heads, so history
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
@@ -3054,6 +3079,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
+                if self.sliding_window is not None:
+                    # Sliding-window drafts attend through a fixed
+                    # band; CANN expresses it with sparse_mode=4 and
+                    # pre/next token counts, which stay valid for
+                    # every full-graph replay shape.
+                    sparse_mode = 4
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 assert dequant_scale_q_nope is not None
@@ -3138,6 +3169,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_qlen": actual_seq_lengths,
             "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
+        if sparse_mode == 4 and self.sliding_window is not None:
+            # The window includes the current token. FIA counts only preceding tokens here.
+            common_kwargs["pre_tokens"] = self.sliding_window - 1
+            common_kwargs["next_tokens"] = 0
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
         if self.fa_quant_layer:
