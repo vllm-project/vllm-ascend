@@ -410,6 +410,14 @@ test coverage and validation evidence the change needs. See the preceding
 sections for environment setup and commands, and [E2E CI Test](./e2e_ci_test.md)
 for PR CI.
 
+### Skipping CI for a revert PR
+
+Add the `skip_ci` label to a PR whose title contains `[Revert]` to skip the
+E2E workflow's lint, CPU UT, NPU E2E, and CODEOWNERS checks. The `ci-gate` job
+verifies the current title, label, and head before reporting success. Removing
+the label starts ordinary CI. GitHub still applies the target branch's native
+rules, including DCO and required reviews.
+
 ### CODEOWNERS approval gate
 
 Alongside `DCO` and the CI gate, every changed file must be approved by at

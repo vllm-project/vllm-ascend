@@ -25,10 +25,12 @@ on:
     # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
     # `ci-gate` is a required check, so a commit that was never tested stays
     # blocked rather than being merged untested.
+    # Re-evaluate the gate when a skip_ci label is removed.
     types:
       - opened
       - reopened
       - labeled
+      - unlabeled
     branches:
       - 'main'
       - '*-dev'
@@ -49,7 +51,7 @@ defaults:
 
 concurrency:
   # This workflow only sees pull_request events, so one group per PR is
-  # enough: a new run (opened / synchronize / labeled) cancels the stale one.
+  # enough: a new run cancels the stale one.
   # The review-event retrigger lives in pr_refresh_ci_gate.yaml, which keeps
   # its own concurrency group so it never cancels the in-flight CI run here
   # (the review retrigger waits for that run to finish before re-running its
@@ -59,6 +61,12 @@ concurrency:
 
 jobs:
   pre-commit:
+    # Every test job depends on pre-commit or its outputs. Skip the expensive
+    # jobs together, leaving the single required ci-gate job to report success.
+    if: >-
+      github.event.pull_request.state == 'open' &&
+      !(contains(github.event.pull_request.title, '[Revert]') &&
+        contains(github.event.pull_request.labels.*.name, 'skip_ci'))
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -958,6 +966,9 @@ jobs:
           # runs or when an earlier step aborted the job.
           CODEOWNERS_COVERAGE_OUTCOME: ${{ steps.codeowners-coverage.outcome }}
           CODEOWNERS_APPROVALS_OUTCOME: ${{ steps.codeowners-approvals.outcome }}
+          REVERT_SKIP_CI: ${{ contains(github.event.pull_request.title, '[Revert]') && contains(github.event.pull_request.labels.*.name, 'skip_ci') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -977,6 +988,30 @@ jobs:
             REASONS+=("$1")
             echo "::error::${1}"
           }
+
+          if [ "$REVERT_SKIP_CI" = true ]; then
+            # A manual re-run uses the original event. Confirm that the
+            # waiver still applies before marking this commit as passing.
+            if curl -fsS --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" |
+              python3 -c '
+          import json, os, sys
+          pr = json.load(sys.stdin)
+          eligible = (
+              pr["state"] == "open"
+              and pr["head"]["sha"] == os.environ["HEAD_SHA"]
+              and "[revert]" in pr["title"].casefold()
+              and any(label["name"].casefold() == "skip_ci" for label in pr["labels"])
+          )
+          sys.exit(not eligible)
+          '; then
+              echo "::notice::Skipping repository CI for a [Revert] PR with skip_ci."
+              exit 0
+            fi
+            add "Could not verify skip_ci on this [Revert] commit. Start a fresh CI run."
+            printf '%s\n' "${REASONS[@]}" > "$FAILURE_FILE"
+            exit 1
+          fi
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
