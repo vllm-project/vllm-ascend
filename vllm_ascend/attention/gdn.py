@@ -813,6 +813,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         has_non_spec_tokens = attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
         is_mixed_batch = has_spec_decode and has_non_spec_tokens
 
+        if has_spec_decode:
+            if is_mixed_batch:
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
+            else:
+                a_non_spec = b_non_spec = None
+        else:
+            a_non_spec, b_non_spec = a, b
+
         a_spec = b_spec = None
         g_spec = beta_spec = None
         g_non_spec = beta_non_spec = None
@@ -829,7 +838,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     b.index_select(0, non_spec_token_indx),
                     self.dt_bias,
                 )
-        else:
+        elif has_spec_decode or attn_metadata.num_decodes > 0:
             g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if is_mixed_batch:
                 g_spec = g.index_select(1, spec_token_indx)
@@ -948,15 +957,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_query_start_loc is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_non_spec:
                 if not split_conv:
                     query_non_spec = query_non_spec[:, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, num_decode_tokens:]
                     value_non_spec = value_non_spec[:, num_decode_tokens:]
-                g_non_spec = g_non_spec[:, num_decode_tokens:]
-                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                a_non_spec = a_non_spec[num_decode_tokens:]
+                b_non_spec = b_non_spec[num_decode_tokens:]
 
             # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
@@ -974,6 +983,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 HardwareCapability.FLA_GDN_PREFILL
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            use_chunk32_head_major = (
+                fla_gdn_prefill_op is not None
+                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+                # The ACLNN ABI has no layout attribute for g/beta. Prefer the
+                # legacy BTH interpretation when T == H because shape alone
+                # cannot distinguish BTH from BHT.
+                and a_non_spec.shape[0] != a_non_spec.shape[1]
+            )
+            g_non_spec, beta_non_spec = DeviceOperator.fused_gdn_gating(
+                self.A_log,
+                a_non_spec.contiguous(),
+                b_non_spec.contiguous(),
+                self.dt_bias,
+                output_head_major=use_chunk32_head_major,
+                output_raw_beta=use_chunk32_head_major,
+            )
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
             # dispatch on the Triton-compatible path even when its availability
             # probe was cached globally.
@@ -1005,12 +1030,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     prefill_has_initial_state,
                 )
-                # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
-                # while decode and other prefill routes keep the processed beta.
-                # beta = sigmoid(b); dt_bias belongs only to the decay gate
-                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
                 beta_fla = beta_non_spec
-                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+                    and not use_chunk32_head_major
+                ):
+                    # Ambiguous square shapes retain the legacy BTH/raw-beta
+                    # route. The chunk32 kernel applies sigmoid internally.
                     beta_fla = b.unsqueeze(0)
                     if has_spec_decode:
                         beta_fla = beta_fla.index_select(1, non_spec_token_indx)

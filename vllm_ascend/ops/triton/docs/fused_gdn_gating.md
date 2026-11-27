@@ -4,7 +4,7 @@
 
 - **Location**:
 `vllm_ascend/ops/triton/fused_gdn_gating.py` — `fused_gdn_gating_kernel`, 1:1 wrapper `fused_gdn_gating_patch`
-- **Function**: Computes the gating pair of the GDN (Gated DeltaNet) linear attention in one fused kernel: the log-decay gate `g` and the interpolation coefficient `beta_output`. It replaces the host-side torch chain `g = -exp(A_log) * softplus(a + dt_bias); beta = sigmoid(b)` in the recurrent-attention step of `vllm_ascend/attention/gdn.py` (Qwen3-Next / Qwen3.5 hybrid GDN models). Entry: `DeviceOperator.fused_gdn_gating` (A2/950PR&950DT Products) → 1:1 wrapper `fused_gdn_gating_patch` → `fused_gdn_gating_kernel`.
+- **Function**: Computes the gating pair of the GDN (Gated DeltaNet) linear attention in one fused kernel: the log-decay gate `g` and the interpolation coefficient `beta_output`. It replaces the host-side torch chain `g = -exp(A_log) * softplus(a + dt_bias); beta = sigmoid(b)` in the recurrent-attention step of `vllm_ascend/attention/gdn.py` (Qwen3-Next / Qwen3.5 hybrid GDN models). Entry: `DeviceOperator.fused_gdn_gating` (A2/950PR&950DT Products) → 1:1 wrapper `fused_gdn_gating_patch` → `fused_gdn_gating_kernel`. The A5 ChunkGDN chunk32 prefill path requests head-major outputs and raw beta so the downstream ACLNN wrapper can consume them without two standalone transposes or a discarded sigmoid.
 - **Formula** (per token `t`, per head `h`, computed in fp32):
     - `x = a[t, h] + dt_bias[h]`
     - `softplus(x) = (1/beta) * log(1 + exp(beta * x))` when `beta * x <= threshold`, else `x` (overflow guard, identical to `torch.nn.functional.softplus(beta, threshold)`)
@@ -29,15 +29,17 @@
 | `dt_bias` | Input | Per-head dt bias `[num_heads]` | fp16 / bf16 / fp32 | ND |
 | `beta` | Input | Softplus beta (default `1.0`) | fp32 | scalar |
 | `threshold` | Input | Softplus threshold (default `20.0`) | fp32 | scalar |
-| `g` | Output | Log-decay gate `[1, num_tokens, num_heads]`, always fp32 (consumed as fp32 by the downstream recurrent kernel); first element of the returned tuple | fp32 | ND |
-| `beta_output` | Output | Interpolation coefficient `sigmoid(b)` `[1, num_tokens, num_heads]`; second element of the returned tuple | same as `b` | ND |
+| `output_head_major` | Attribute | When true, return both outputs as contiguous `[1,num_heads,num_tokens]`; default false keeps `[1,num_tokens,num_heads]` | bool | scalar |
+| `output_raw_beta` | Attribute | When true, the second output is raw `b` rather than `sigmoid(b)`; used only when the downstream kernel performs sigmoid | bool | scalar |
+| `g` | Output | Log-decay gate; fp32; shape follows `output_head_major` | fp32 | ND |
+| `beta_output` | Output | `sigmoid(b)` by default or raw `b` when requested; shape follows `output_head_major` | same as `b` | ND |
 
 ## Constraints
 
 - `a`, `b`: `[num_tokens, num_heads]`; `A_log`, `dt_bias`: `[num_heads]` with the same `num_heads`. All inputs are indexed with flat offsets and must be contiguous.
 - The wrapper fixes `seq_len = 1` (decode-style flattened token batch); internal computation is fp32 regardless of input dtype.
 - Kernel-internal tiling constants: `BLK_HEADS=8`, `BLK_BATCHES=64`, `ROW_ITER = ceil(ceil(num_tokens / num_vectorcore) / 64)`.
-- `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` are `do_not_specialize`, so varying token counts or head counts do not trigger Triton recompilation.
+- `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` are `do_not_specialize`, so varying token counts or head counts do not trigger Triton recompilation. The two output-mode flags are compile-time branches and create only the standard and Chunk32 variants.
 - Only for inference (prefill/decode) on NPU.
 
 ## Origin and Differences
@@ -49,7 +51,7 @@
 
 ## Test Cases
 
-The test compares the Triton kernel (through its 1:1 wrapper `fused_gdn_gating_patch`) against the independent PyTorch reference `fused_gdn_gating_pytorch` (from `vllm_ascend/_310p/ops/fla/fused_gdn_gating.py`) for both outputs, fp16 inputs, `num_tokens=37`, `num_heads=8`, unified elementwise tolerance `rtol=atol=1e-2`.
+The tests compare the default Triton path against the independent PyTorch reference and additionally verify that the head-major/raw-beta mode is a contiguous transpose of the reference gate and the original beta input. The non-square case proves the intended Chunk32 layout; a square token/head case remains on the legacy path at the caller because shape-only ACLNN dispatch cannot distinguish BTH from BHT.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py
