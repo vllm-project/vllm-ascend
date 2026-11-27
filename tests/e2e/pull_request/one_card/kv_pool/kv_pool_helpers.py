@@ -71,7 +71,6 @@ import ipaddress
 import json
 import math
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -86,6 +85,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import regex as re
 from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
@@ -760,7 +760,7 @@ def _assert_semantic_answer(runner: VllmRunner, token_ids: list[int], tag: str) 
 
     Token identity against the cold run only proves the two legs agree; this
     proves the outputs still *answer* the question planted in the prefix, which
-    is what a silently truncated or mis-loaded KV block destroys.
+    is what a silently truncated or wrongly loaded KV block destroys.
     """
     answer = _semantic_answer(runner, token_ids)
     assert answer.strip() == str(POOL_SECRET), (
