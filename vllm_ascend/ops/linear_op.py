@@ -433,8 +433,6 @@ def _is_shared_expert_layer(prefix: str) -> bool:
 
 
 def _use_finegrained_mlp_tp(prefix: str) -> bool:
-    # GLM vision blocks reuse the language MLP projection names but keep
-    # their token rows local to the standard TP group.
     return mlp_tp_enable() and "visual" not in prefix.split(".") and not is_moe_layer(prefix)
 
 
