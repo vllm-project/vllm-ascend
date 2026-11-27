@@ -35,7 +35,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.kv_connector import get_kv_connector
+from vllm.v1.worker.gpu.kv_connector import NO_OP_KV_CONNECTOR, get_kv_connector
 from vllm.v1.worker.gpu.model_runner import BatchReqState, sort_batch_req_ids
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
@@ -787,6 +787,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        is_profiling: bool = False,
     ) -> None:
         """Allocate 310P attention caches as NZ and hybrid Mamba caches as ND."""
         kv_cache_config = deepcopy(kv_cache_config)
@@ -840,6 +841,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.decode_query_len,
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            is_profiling=is_profiling,
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
@@ -883,7 +885,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if kv_cache_config.needs_kv_cache_zeroing:
             self._init_kv_zero_meta()
             self.kv_block_zeroer.enabled = self._needs_kv_cache_zeroing_310p(kv_cache_config)
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self.kv_connector = NO_OP_KV_CONNECTOR if is_profiling else get_kv_connector(self.vllm_config, kv_caches_dict)
         self._install_pc_eager_cudagraph_dispatch()
 
     def _needs_kv_cache_zeroing_310p(self, kv_cache_config: KVCacheConfig) -> bool:

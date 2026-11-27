@@ -17,12 +17,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 import inspect
 import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -35,6 +37,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.model_executor.offloader.base import set_offloader
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -76,6 +79,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.compilation import acl_graph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -131,6 +135,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+from vllm_ascend.worker.encoder_acl_graph import reset_encoder_graph_params
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -458,6 +463,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None,
+        is_profiling: bool = False,
     ) -> None:
         # Upstream initialize_kv_cache builds the attention metadata builders
         # via init_attn_backend; the DSA builder registers its fused Q-RMS
@@ -468,10 +474,13 @@ class NPUModelRunner(GPUModelRunner):
         # window is optional for them.
         registry = getattr(self, "jit_warmup_registry", None)
         window = registry.activate() if registry is not None else nullcontext()
+        kwargs: dict[str, Any] = {"kv_cache_allocation_context": kv_cache_allocation_context}
+        if "is_profiling" in inspect.signature(GPUModelRunner.initialize_kv_cache).parameters:
+            kwargs["is_profiling"] = is_profiling
         with window:
             super().initialize_kv_cache(
                 kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
+                **kwargs,
             )
 
     def _has_target_flashmla_attention(self) -> bool:
@@ -489,10 +498,16 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        is_profiling: bool = False,
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
         kv_cache_config = deepcopy(kv_cache_config)
+        if is_profiling and any(
+            is_circular_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups
+        ):
+            # Ring page 0 is reserved; dummy graph capture indexes pages 1..num_reqs.
+            kv_cache_config.num_blocks = max(kv_cache_config.num_blocks, self.max_num_reqs + 1)
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         configure_dspark_kv_transfer(
             self.vllm_config, self.speculator, kv_cache_config, is_last_pp_rank=self.is_last_pp_rank
@@ -512,7 +527,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if not reuse_layout.reused_cache_names.isdisjoint(persistent_draft_names):
                 raise ValueError("Persistent draft caches cannot rotate through target layerwise slots.")
-        if sparse_cfg.enabled:
+        if sparse_cfg.enabled and not is_profiling:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
             )
@@ -527,7 +542,11 @@ class NPUModelRunner(GPUModelRunner):
         if is_hisparse_ascendstore_enabled(self.vllm_config, kv_cache_config):
             allocation_config = aligned_hisparse_allocation_config(kv_cache_config)
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(
+                allocation_config,
+                kv_cache_allocation_context,
+                is_profiling=is_profiling,
+            )
             # PCP owns the local-row capacity; FIA may append one padding
             # request for either target or draft metadata.
             max_metadata_reqs = (
@@ -546,13 +565,14 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(self.speculator, DraftModelSpeculator):
                     self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
-        bind_dspark_context_receiver(
-            self.vllm_config,
-            sparse_offload_enabled=sparse_cfg.enabled,
-            is_last_pp_rank=self.is_last_pp_rank,
-            max_requests=self.max_num_reqs,
-        )
-        if sparse_cfg.enabled and self.speculator is not None:
+        if not is_profiling:
+            bind_dspark_context_receiver(
+                self.vllm_config,
+                sparse_offload_enabled=sparse_cfg.enabled,
+                is_last_pp_rank=self.is_last_pp_rank,
+                max_requests=self.max_num_reqs,
+            )
+        if sparse_cfg.enabled and not is_profiling and self.speculator is not None:
             # Resident MLA DSpark has no host-pool LRU or LIM tail state.
             self.model_state._offload_draft_attn_groups = (
                 [] if resident_draft_names else getattr(self.speculator, "attn_groups", [])
@@ -593,7 +613,8 @@ class NPUModelRunner(GPUModelRunner):
 
         copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
         if (
-            callable(copy_mamba_state)
+            not is_profiling
+            and callable(copy_mamba_state)
             and has_kv_transfer_group()
             and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
         ):
@@ -619,11 +640,11 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
-        if self.vllm_config.attention_config.hisparse_config is not None:
+        if not is_profiling and self.vllm_config.attention_config.hisparse_config is not None:
             self.kv_connector = adapt_pcp_hisparse_connector(self)
             self.kv_connector = overlap_target_host_mirror(self)
         guard = getattr(self, "_kv_trace", None)
-        if guard is not None:
+        if not is_profiling and guard is not None:
             guard.configure(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
@@ -729,6 +750,52 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name in manager.offload_layer_names:
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
+
+    @torch.inference_mode()
+    def profile_cudagraph_memory(self) -> int:
+        """Estimate the NPU memory required to capture ACL graphs before KV sizing."""
+        if not hasattr(GPUModelRunner, "profile_cudagraph_memory"):
+            return 0
+        if getattr(self.cache_config, "enable_extensible_kv_cache", False):
+            return 0
+
+        acl_graph.reset_graph_params()
+        reset_encoder_graph_params()
+
+        throwaway_pool = current_platform.graph_pool_handle()
+        acl_wrappers = list(acl_graph._acl_graph_wrappers)
+        original_acl_pools = {id(wrapper): wrapper.graph_pool for wrapper in acl_wrappers}
+        for wrapper in acl_wrappers:
+            wrapper.graph_pool = throwaway_pool
+
+        try:
+            with (
+                torch_cuda_wrapper(),
+                communicator_switch(),
+                patch.object(current_platform, "graph_pool_handle", return_value=throwaway_pool),
+            ):
+                return int(super().profile_cudagraph_memory())
+        finally:
+            acl_graph.ACLGraphWrapper.clear_all_graphs()
+            for wrapper in acl_wrappers:
+                if id(wrapper) in original_acl_pools:
+                    wrapper.graph_pool = original_acl_pools[id(wrapper)]
+            acl_graph.reset_graph_params()
+            reset_encoder_graph_params()
+            entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
+            if entries is not None:
+                entries.clear()
+            zeroer = getattr(self, "kv_block_zeroer", None)
+            if isinstance(zeroer, C8KVBlockZeroer):
+                zeroer.entries.clear()
+                self.kv_block_zeroer = zeroer.delegate
+            self.kvpp = None
+            if hasattr(self, "model_state"):
+                self.model_state.kvpp_runtime = None
+                self.model_state.device_metadata = None
+            del throwaway_pool
+            gc.collect()
+            torch.npu.empty_cache()
 
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:

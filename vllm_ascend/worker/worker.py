@@ -756,6 +756,47 @@ class NPUWorker(GPUWorker):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    def _should_profile_npugraph_memory(self) -> bool:
+        model_config = getattr(self, "model_config", None)
+        if getattr(model_config, "enforce_eager", False) is True:
+            return False
+        profile_fn = getattr(self.model_runner, "profile_cudagraph_memory", None)
+        if not callable(profile_fn):
+            return False
+        compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        cudagraph_mode = getattr(compilation_config, "cudagraph_mode", CUDAGraphMode.NONE)
+        has_decoder_graphs = isinstance(cudagraph_mode, CUDAGraphMode) and cudagraph_mode != CUDAGraphMode.NONE
+        needs_capture = getattr(self.model_runner, "needs_cudagraph_capture", None)
+        has_encoder_graphs = bool(callable(needs_capture) and needs_capture() is True)
+        if not has_decoder_graphs and not has_encoder_graphs:
+            return False
+        if getattr(self.model_runner, "use_compress", False) is True:
+            hf_config = getattr(model_config, "hf_config", None)
+            if getattr(hf_config, "model_type", None) == "deepseek_v4":
+                logger.warning_once(
+                    "Skipping ACL graph memory profiling for DeepSeek-V4 DSA "
+                    "compressed attention; normal ACL graph capture still runs "
+                    "after KV cache allocation."
+                )
+                return False
+        lmhead_tp_size = getattr(
+            get_ascend_config().finegrained_tp_config,
+            "lmhead_tensor_parallel_size",
+            0,
+        )
+        if (
+            getattr(self.vllm_config, "speculative_config", None) is not None
+            and isinstance(lmhead_tp_size, int)
+            and lmhead_tp_size > 0
+        ):
+            logger.warning_once(
+                "Skipping pre-KV ACL graph memory profiling when speculative "
+                "decoding is combined with lmhead tensor parallelism; normal "
+                "ACL graph capture still runs after KV cache allocation."
+            )
+            return False
+        return True
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -834,6 +875,12 @@ class NPUWorker(GPUWorker):
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.non_torch_memory = profile_result.non_torch_increase
 
+        npugraph_memory_estimate = 0
+        if self._should_profile_npugraph_memory() and getattr(envs, "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", True):
+            with set_current_vllm_config(self.vllm_config):
+                npugraph_memory_estimate = int(self.model_runner.profile_cudagraph_memory())
+        self.npugraph_memory_estimate = npugraph_memory_estimate
+
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
@@ -844,7 +891,9 @@ class NPUWorker(GPUWorker):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        self.available_kv_cache_memory_bytes = (
+            self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate
+        )
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -1115,6 +1164,17 @@ class NPUWorker(GPUWorker):
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
+
+        npugraph_memory_estimate = getattr(self, "npugraph_memory_estimate", 0)
+        if isinstance(npugraph_memory_estimate, int) and npugraph_memory_estimate > 0:
+            diff = abs(npugraph_memory_bytes - npugraph_memory_estimate)
+            logger.info(
+                "ACL graph pool memory: %s GiB (actual), %s GiB (estimated), difference: %s GiB (%.1f%%).",
+                format_gib(npugraph_memory_bytes),
+                format_gib(npugraph_memory_estimate),
+                format_gib(diff),
+                100 * diff / max(npugraph_memory_bytes, 1),
+            )
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not

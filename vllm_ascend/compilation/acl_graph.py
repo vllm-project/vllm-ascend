@@ -158,6 +158,15 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def clear_graphs(self) -> None:
+        self.concrete_aclgraph_entries.clear()
+        self.first_run_finished = False
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        for instance in list(_acl_graph_wrappers):
+            instance.clear_graphs()
+
     def __call__(self, *args, **kwargs):
         if not is_forward_context_available():
             # Standalone modules can run outside the model's forward context.
@@ -372,6 +381,13 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params() -> None:
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):

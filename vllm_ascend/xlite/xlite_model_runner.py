@@ -167,10 +167,23 @@ class XliteModelRunnerV2(XliteModelRunnerMixin, NPUModelRunnerV2):  # type: igno
         with self._bypass_xlite_wrapper():
             return super()._dummy_run(*args, **kwargs)  # type: ignore[return-value]
 
+    def profile_cudagraph_memory(self) -> int:
+        with self._bypass_xlite_wrapper():
+            return super().profile_cudagraph_memory()
+
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, kv_cache_allocation_context: AbstractContextManager | None = None
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+        is_profiling: bool = False,
     ) -> None:
-        super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
+        super().initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+            is_profiling=is_profiling,
+        )
+        if is_profiling:
+            return
         kv_caches: list[torch.Tensor] = self._get_flattened_kv_caches(self.kv_caches, check_is_contiguous=False)
         logger.info_once("xlite: registering kv caches to runner model: %s", _TensorRepr(kv_caches, max_it=None))
         self.runner_model.register_kv_caches(kv_caches)

@@ -101,6 +101,11 @@ def get_encoder_graph_params() -> EncoderGraphParams | None:
     return _encoder_graph_params
 
 
+def reset_encoder_graph_params() -> None:
+    global _encoder_graph_params
+    _encoder_graph_params = None
+
+
 def update_encoder_graph_workspace(
     token_budget: int,
     workspace: torch.Tensor,
