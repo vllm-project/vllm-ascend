@@ -197,6 +197,7 @@ jobs:
               - 'tools/**'
               - 'CMakeLists.txt'
               - '!**/*.md'
+              - '!vllm_ascend/patch/__init__.py'
 
       - name: Get csrc hash
         id: get_csrc_hash
