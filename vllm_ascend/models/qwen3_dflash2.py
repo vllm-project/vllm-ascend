@@ -1,4 +1,5 @@
 from dataclasses import replace
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -22,7 +23,9 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv as UpstreamDFlashGroupedConv
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
 from vllm_ascend.models.quarot_utils import align_draft_weights
@@ -78,6 +81,43 @@ class DFlashGroupedConv(UpstreamDFlashGroupedConv):
         )
 
 
+def _resolve_dflash_query_width(speculative_config: Any) -> int:
+    """Resolve per-request query width (K anchor-first, K+1 fill-in)."""
+    speculator_config = speculative_config.speculator_config
+    if not isinstance(speculator_config, DFlashSpeculatorConfig):
+        raise TypeError(
+            "DFlash2Qwen3DecoderLayer requires a DFlashSpeculatorConfig (or subclass such as "
+            f"DFlash2SpeculatorConfig / DSparkSpeculatorConfig), got {type(speculator_config).__name__}."
+        )
+    num_query_tokens = getattr(speculator_config, "num_query_tokens", None)
+    if num_query_tokens is not None:
+        if isinstance(num_query_tokens, bool) or not isinstance(num_query_tokens, int) or num_query_tokens <= 0:
+            raise ValueError(f"num_query_tokens must be a positive integer, got {num_query_tokens!r}.")
+        return num_query_tokens
+
+    # Fallback matching upstream sample_from_anchor semantics until both
+    # pinned vLLM baselines expose DFlashSpeculatorConfig.num_query_tokens.
+    num_spec = speculative_config.num_speculative_tokens
+    if isinstance(num_spec, bool) or not isinstance(num_spec, int) or num_spec <= 0:
+        raise ValueError(f"num_speculative_tokens must be a positive integer, got {num_spec!r}.")
+    draft_model_config = speculative_config.draft_model_config
+    if draft_model_config is None:
+        return num_spec + 1
+    hf_config = draft_model_config.hf_config
+    if isinstance(speculator_config, DSparkSpeculatorConfig):
+        sample_from_anchor = bool(getattr(hf_config, "sample_from_anchor", True))
+    else:
+        dflash_cfg = getattr(hf_config, "dflash_config", None) or {}
+        nested = dflash_cfg.get("sample_from_anchor")
+        top = getattr(hf_config, "sample_from_anchor", None)
+        if nested is not None and top is not None and bool(nested) != bool(top):
+            raise ValueError(
+                f"Conflicting sample_from_anchor: dflash_config has {nested!r} but the top-level config has {top!r}."
+            )
+        sample_from_anchor = bool(nested if nested is not None else top)
+    return num_spec + (0 if sample_from_anchor else 1)
+
+
 class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
     def __init__(
         self,
@@ -109,7 +149,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             hidden_size=config.hidden_size,
             taps=int(draft_config["conv_kernel_size"]),
             group_size=int(draft_config["conv_group_size"]),
-            block_size=1 + speculative_config.num_speculative_tokens,
+            block_size=_resolve_dflash_query_width(speculative_config),
             params_dtype=vllm_config.model_config.dtype,
             quant_config=quant_config,
         )
