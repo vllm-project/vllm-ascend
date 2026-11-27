@@ -1204,7 +1204,7 @@ constexpr int64_t LI_CMP_RATIO = 1;
 constexpr int64_t LI_DYNAMIC_LENGTH = -1;
 
 void check_lightning_indexer_rows(const at::Tensor& starts, const at::Tensor& lengths,
-                                 int64_t heads, int64_t topk)
+                                 int64_t heads, int64_t topk, const c10::optional<at::Tensor>& used_query)
 {
     TORCH_CHECK(starts.device().type() == c10::DeviceType::PrivateUse1 && starts.device() == lengths.device(),
                 "Lightning Indexer row metadata must be on the same NPU");
@@ -1214,31 +1214,50 @@ void check_lightning_indexer_rows(const at::Tensor& starts, const at::Tensor& le
                 "Expected contiguous INT32 cumulative query starts [B+1] and KV lengths [B]");
     TORCH_CHECK(heads >= 1 && heads <= 64 && topk >= 1 && topk <= 8192,
                 "Ascend 950 Lightning Indexer V2 requires 1..64 query heads and Top-K in 1..8192");
+    TORCH_CHECK(!used_query.has_value() || (used_query->device() == starts.device() &&
+                used_query->scalar_type() == at::kInt && used_query->sizes() == lengths.sizes() &&
+                used_query->is_contiguous()), "Expected contiguous INT32 valid query lengths [B] on the same NPU");
 }
 }  // namespace
 
+std::string get_lightning_indexer_v2_missing_symbols()
+{
+    static const std::string missing = [] {
+        std::string result;
+        for (const char* symbol : {"aclnnLightningIndexerV2GetWorkspaceSize", "aclnnLightningIndexerV2",
+                                   "aclnnLightningIndexerV2MetadataGetWorkspaceSize", "aclnnLightningIndexerV2Metadata"}) {
+            if (GetOpApiFuncAddr(symbol) == nullptr) {
+                if (!result.empty()) {
+                    result += ", ";
+                }
+                result += symbol;
+            }
+        }
+        return result;
+    }();
+    return missing;
+}
+
 bool is_lightning_indexer_v2_available()
 {
-    static const bool available = GetOpApiFuncAddr("aclnnLightningIndexerV2GetWorkspaceSize") != nullptr &&
-                                  GetOpApiFuncAddr("aclnnLightningIndexerV2") != nullptr &&
-                                  GetOpApiFuncAddr("aclnnLightningIndexerV2MetadataGetWorkspaceSize") != nullptr &&
-                                  GetOpApiFuncAddr("aclnnLightningIndexerV2Metadata") != nullptr;
-    return available;
+    return get_lightning_indexer_v2_missing_symbols().empty();
 }
 
 at::Tensor npu_lightning_indexer_v2_metadata(
-    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal)
+    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal,
+    const c10::optional<at::Tensor>& seqused_q)
 {
-    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, num_heads_q, topk);
+    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, num_heads_q, topk, seqused_q);
     const c10_npu::NPUGuard guard(cu_seqlens_q.device());
     auto metadata = at::empty({LI_METADATA_SIZE}, cu_seqlens_q.options());
     // CANN's metadata wrapper represents omitted length tensors by empty INT32 tensors.
     auto unused = at::empty({0}, cu_seqlens_q.options());
+    const auto& used_query = seqused_q.has_value() ? *seqused_q : unused;
     const int64_t batch_size = seqused_k.size(0);
     const int64_t mask_mode = causal ? 3 : 0;
     char* layout_q = const_cast<char*>("TND");
     char* layout_k = const_cast<char*>("PA_BBND");
-    EXEC_NPU_CMD(aclnnLightningIndexerV2Metadata, cu_seqlens_q, unused, unused, seqused_k, unused,
+    EXEC_NPU_CMD(aclnnLightningIndexerV2Metadata, cu_seqlens_q, unused, used_query, seqused_k, unused,
                  num_heads_q, LI_KV_HEADS, LI_HEAD_DIM, topk, batch_size, LI_DYNAMIC_LENGTH, LI_DYNAMIC_LENGTH,
                  layout_q, layout_k, mask_mode, LI_CMP_RATIO, metadata);
     return metadata;
@@ -1247,13 +1266,14 @@ at::Tensor npu_lightning_indexer_v2_metadata(
 std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& weights,
     const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, const at::Tensor& block_table,
-    const at::Tensor& metadata, int64_t topk, bool causal, bool return_values)
+    const at::Tensor& metadata, int64_t topk, bool causal, bool return_values,
+    const c10::optional<at::Tensor>& seqused_q)
 {
     TORCH_CHECK(query.dim() == 3 && key.dim() == 4 && query.scalar_type() == at::kBFloat16 &&
                 key.scalar_type() == at::kBFloat16 && query.size(2) == LI_HEAD_DIM &&
                 key.size(0) > 0 && key.size(1) == 128 && key.size(2) == 1 && key.size(3) == LI_HEAD_DIM,
                 "Expected BF16 query [T,H,128] and paged BF16 key [blocks,128,1,128]");
-    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, query.size(1), topk);
+    check_lightning_indexer_rows(cu_seqlens_q, seqused_k, query.size(1), topk, seqused_q);
     const int64_t rows = query.size(0);
     TORCH_CHECK(query.device() == cu_seqlens_q.device() && query.device() == key.device() &&
                 query.device() == weights.device() && query.device() == block_table.device() &&
@@ -1286,7 +1306,7 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2(
     char* layout_k = const_cast<char*>("PA_BBND");
     const int64_t mask_mode = causal ? 3 : 0;
     const int64_t return_value = return_values;
-    EXEC_NPU_CMD(aclnnLightningIndexerV2, query, key, weights, cu_seqlens_q, absent, absent, seqused_k,
+    EXEC_NPU_CMD(aclnnLightningIndexerV2, query, key, weights, cu_seqlens_q, absent, seqused_q, seqused_k,
                  absent, block_table, absent, metadata, topk, LI_DYNAMIC_LENGTH, layout_q, layout_k, mask_mode,
                  LI_CMP_RATIO, return_value, indices, scores);
     return {indices, scores};
@@ -3056,12 +3076,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("is_lightning_indexer_v2_available() -> bool");
     ops.impl("is_lightning_indexer_v2_available", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::is_lightning_indexer_v2_available);
+    ops.def("get_lightning_indexer_v2_missing_symbols() -> str");
+    ops.impl("get_lightning_indexer_v2_missing_symbols", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_lightning_indexer_v2_missing_symbols);
     ops.def("npu_lightning_indexer_v2_metadata(Tensor cu_seqlens_q, Tensor seqused_k, "
-            "int num_heads_q, int topk, bool causal=False) -> Tensor");
+            "int num_heads_q, int topk, bool causal=False, Tensor? seqused_q=None) -> Tensor");
     ops.impl("npu_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2_metadata);
     ops.def("npu_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, Tensor cu_seqlens_q, "
             "Tensor seqused_k, Tensor block_table, Tensor metadata, int topk, "
-            "bool causal=False, bool return_values=True) -> (Tensor, Tensor)");
+            "bool causal=False, bool return_values=True, Tensor? seqused_q=None) -> (Tensor, Tensor)");
     ops.impl("npu_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2);
 
     ops.def("is_minimax_sparse_attention_split_kv_available() -> bool");

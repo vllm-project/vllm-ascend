@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
@@ -707,6 +708,9 @@ class BaseDeviceAdaptor:
                 ql_nope = F.pad(ql_nope.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
                 if q_pe is not None:
                     q_pe = F.pad(q_pe.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
+            if getattr(sfa_impl, "is_kimi_k31", False) is True and not getattr(sfa_impl, "_logged_kimi_sfa", False):
+                logger.info_once("Kimi K3.1 DSA first entering _C_ascend.npu_sparse_flash_attention", scope="process")
+                sfa_impl._logged_kimi_sfa = True
             result = torch.ops._C_ascend.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
@@ -793,9 +797,16 @@ class BaseDeviceAdaptor:
             value_quant_mode=2,
             rope_head_dim=rope_head_dim,
         )
-        use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
+        is_kimi_k31 = getattr(sfa_impl, "is_kimi_k31", False)
+        use_kimi_path = is_kimi_k31 or packed_query is not None
         if use_kimi_path or return_lse or rope_head_dim == 0:
             # Kimi requires the LSE path to trim trailing invalid candidates.
+            if is_kimi_k31 is True and not getattr(sfa_impl, "_logged_kimi_qsfa", False):
+                logger.info_once(
+                    "Kimi K3.1 DSA first entering _C_ascend.npu_kv_quant_sparse_flash_attention_vllm",
+                    scope="process",
+                )
+                sfa_impl._logged_kimi_qsfa = True
             return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
                 **kwargs, return_softmax_lse=use_kimi_path or return_lse
             )

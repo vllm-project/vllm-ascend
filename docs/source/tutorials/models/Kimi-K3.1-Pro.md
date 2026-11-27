@@ -2174,11 +2174,33 @@ The following accuracy results were reported for Kimi K3.1 Pro with PD separatio
 On Ascend 950, rebuild the vllm-ascend native extension from this checkout with
 a CANN installation that provides `LightningIndexerV2` and
 `LightningIndexerV2Metadata`. The BF16 K3.1 indexer detects these operators
-automatically. Unpadded DCP1 prefill uses causal retrieval. TP8/DCP8 decode
-scores each query's visible local KV in windows of up to 2048 tokens and
-merges the candidates across ranks. The startup log reports operator
-availability and selection. A device trace containing `LightningIndexerV2`
-confirms execution for the profiled batch.
+automatically. DCP1 uses causal retrieval. FULL graphs and padded TND
+batches pass the valid query length of each request to both native operators.
+TP8/DCP8 scores each query's visible local KV in windows of up to 8192 tokens,
+selects 2048 candidates per rank and merges them across ranks.
+
+Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>`.
+
+| Log field | Meaning |
+|---|---|
+| `stage=probe` | The worker loaded the reported extension and resolved both CANN operators. |
+| `stage=init status=eligible` or `disabled` | The worker evaluated the model dtype, indexer cache dtype, DCP/PCP layout, head geometry and native bindings. The log includes the first blocking reason and any issue specific to the padding ABI. |
+| `route=enter_causal`, `enter_causal_padded` or `enter_dcp_windows` | A forward entered the selected V2 path, before native metadata and scoring. |
+| `route=dispatched_causal`, `dispatched_causal_padded` or `dispatched_dcp_windows` | The host call returned. The DCP record includes the number of score windows submitted. |
+| `route=bf16_paged_fallback` or `device_postprocess` | The worker used the alternative scorer. The same line includes its reason, query and cache dtypes, cache shape/strides and sort budget. |
+| `route=skip_topk` or `custom_selector` | This layer skipped retrieval or delegated selection to the attention implementation. |
+| `DSA selected preprocess` and `DSA first entering` | The first record names the preprocessing implementation selected after loading weights. The forward records name the preprocessing and sparse attention operators reached by the worker. |
+
+Indexer forward records show the first occurrence per layer, route, reason and capture
+metadata mode. FULL graph replay runs the recorded device operations without
+repeating the Python log. In a device trace, look for the scoring event
+`LightningIndexerV2` alongside `LightningIndexerV2Metadata`. Quantized
+sharded indexers use the separate `QuantLightningIndexerV2` family.
+
+On 950 with PCP1, K3.1 NoPE layers with compatible BF16 projection weights
+can also use `cann_ops_transformer.mla_prolog` for projections, normalization
+and the main KV cache write. The startup record reports `preprocess=native`
+when the selected implementation uses the individual preprocessing operations.
 
 To compare rank-local BF16 scoring on the same inputs, run
 `python benchmarks/bf16_sharded_indexer.py --requests 16 --local-tokens 16384`

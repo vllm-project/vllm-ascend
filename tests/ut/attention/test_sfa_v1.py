@@ -34,6 +34,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_packed_bytes
 from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -719,7 +720,8 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer._dsa_cp_active = False
         indexer._use_fused_cache_store = False
         indexer._sharded_dcp = False
-        indexer._use_bf16_li_v2 = False
+        indexer._li_v2_disabled = "model"
+        indexer._is_kimi_k31 = False
         indexer._local_topk = False
         indexer.write_cache = MagicMock()
 
@@ -1688,6 +1690,58 @@ class TestAscendSFAImpl(TestBase):
         self.impl.enable_sparse_sfa_c8 = False
         self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
 
+    def test_kimi_bf16_prolog_with_bf16_indexer(self):
+        self._set_quant(None)
+        impl = self.impl
+        impl.is_kimi_k31 = True
+        impl.use_rope = False
+        impl.q_lora_rank, impl.kv_lora_rank = 1536, 512
+        impl.qk_nope_head_dim, impl.qk_rope_head_dim = 128, 64
+        impl.local_num_heads, impl.num_kv_heads = 12, 1
+        impl.vllm_config.model_config.dtype = torch.bfloat16
+        impl.fused_qkv_a_proj.weight = torch.empty((2112, 7168), dtype=torch.bfloat16, device="meta")
+        impl.q_proj.weight = torch.empty((12 * 192, 1536), dtype=torch.bfloat16, device="meta")
+        impl.has_indexer = True
+        impl.indexer = SimpleNamespace(wq_b=SimpleNamespace(weight=torch.empty(1, dtype=torch.bfloat16)))
+        profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+        schema = torch._C.parse_schema("mla_prolog(Tensor? rope_sin=None, Tensor? rope_cos=None) -> Tensor")
+        registration = SimpleNamespace(default=SimpleNamespace(_schema=schema))
+        with (
+            patch("vllm_ascend.attention.sfa_v1.get_current_hardware_profile", return_value=profile),
+            patch.object(torch.ops.cann_ops_transformer, "mla_prolog", registration, create=True),
+        ):
+            for consumer in (False, True):
+                impl.is_kv_consumer = consumer
+                impl.dcp_group = object() if consumer else None
+                for extension, expected in ((MagicMock(), PreprocessType.PROLOG_V3), (None, PreprocessType.NATIVE)):
+                    with (
+                        self.subTest(consumer=consumer, expected=expected),
+                        patch.dict(sys.modules, {"cann_ops_transformer": extension}),
+                    ):
+                        self.assertEqual(impl._resolve_preprocess_type(torch.bfloat16), expected)
+            with patch.dict(sys.modules, {"cann_ops_transformer": MagicMock()}):
+                with (
+                    patch("torch_npu.npu_format_cast", side_effect=lambda w, fmt: w),
+                    patch("torch.npu.empty_cache"),
+                    patch("vllm_ascend.attention.sfa_v1.dispose_layer") as dispose,
+                ):
+                    impl.is_kv_consumer = False
+                    impl._process_weights_for_fused_prolog_v3()
+                    self.assertEqual(
+                        [call.args[0] for call in dispose.call_args_list], [impl.fused_qkv_a_proj, impl.q_proj]
+                    )
+                    self.assertEqual(impl.fused_qkv_a_proj.weight.shape, (2112, 7168))
+                impl.qk_rope_head_dim = 0
+                self.assertEqual(impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+                impl.qk_rope_head_dim = 64
+                profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
+                self.assertEqual(impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+                profile.device_adaptor_family = DeviceAdaptorFamily.FP8_OPTIMIZED
+                registration.default._schema = torch._C.parse_schema(
+                    "mla_prolog(Tensor rope_sin, Tensor rope_cos) -> Tensor"
+                )
+                self.assertEqual(impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+
     def test_skipped_unquantized_indexer_preserves_native_query_path(self):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.has_indexer = True
@@ -1926,6 +1980,21 @@ class TestAscendSFAImpl(TestBase):
                 torch.testing.assert_close(result[2], tail)
                 self.assertEqual(result[3][0].data_ptr(), query_norm.data_ptr())
                 self.assertEqual(result[3][1].data_ptr(), query_scale.data_ptr())
+
+        # CANN's mode 0 returns an empty scale placeholder. Preserve the BF16
+        # tensor accepted directly by the indexer's unquantized projection.
+        impl.use_rope = False
+        impl._quant_type = None
+        query_norm = torch.zeros(3, 8, dtype=torch.bfloat16)
+        impl._prolog_v3_op = MagicMock(return_value=(query, tail, torch.empty(0), query_norm, torch.empty(0)))
+        result = impl._sfa_preprocess_prolog_v3(hidden, cache, None, None, slots, attn_metadata=metadata)
+        self.assertEqual(result[3].data_ptr(), query_norm.data_ptr())
+        self.assertEqual(impl._prolog_v3_op.call_args.kwargs["weight_quant_mode"], 0)
+        self.assertIsNone(impl._prolog_v3_op.call_args.kwargs["rope_sin"])
+        impl._prolog_v3_op.reset_mock()
+        empty = impl._sfa_preprocess_prolog_v3(hidden[:0], cache, None, None, slots[:0], attn_metadata=metadata)
+        self.assertEqual([t.shape for t in empty], [(0, 32), (0, 2, 128), (0, 2, 16), (0, 8)])
+        impl._prolog_v3_op.assert_not_called()
 
     # (MLAPO runtime path requires NPU hardware; covered by integration tests.)
 

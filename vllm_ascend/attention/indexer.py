@@ -56,7 +56,7 @@ from vllm_ascend.ops.bf16_sharded_indexer import (
 from vllm_ascend.ops.lightning_indexer_v2 import (
     LightningIndexerV2Plan,
     build_lightning_indexer_v2_plan,
-    has_lightning_indexer_v2,
+    get_lightning_indexer_v2_unavailable_reason,
     lightning_indexer_v2_candidates,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -280,17 +280,18 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_cache_dtype, self.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
-        model_type = get_current_vllm_config().model_config.hf_config.model_type
+        config = get_current_vllm_config()
+        model_type = config.model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa", "kimi_k31"]
 
         # Cache-write gathers for parallel layouts: PCP all-gathers every
         # non-replicated token across the CP group, DSA-CP all-gathers the
         # indexer k across the TP group. Both are no-ops in the base layout.
-        parallel_config = get_current_vllm_config().parallel_config
+        parallel_config = config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._pcp_active = self.use_pcp
-        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
+        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(config)
         self._dsa_cp_active = enable_dsa_cp()
         self._use_fused_cache_store = (
             type(self) is AscendSFAIndexerBackend
@@ -299,25 +300,32 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             and self.c8_k_cache_dtype == torch.int8  # INT8 config uses FP16 scales; C8 may also be FP8.
             and self.head_dim & (self.head_dim - 1) == 0  # Full-row tl.arange requires a power-of-two width.
         )
-        self._pcp_active = self.use_pcp
         self._sharded_dcp = enable_sfa_dcp_sharded_indexer()
-        self._sharded_bf16 = self._sharded_dcp and _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
-        self._use_bf16_li_v2 = (
-            _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
-            and not self.enable_sparse_li_quant
-            and not self.use_pcp
-            and not self._dsa_cp_active
-            and 1 <= self.n_head <= 64
-            and self.head_dim == 128
-            and self.topk_tokens == 2048
-            and (self._sharded_bf16 or parallel_config.decode_context_parallel_size == 1)
-            and is_950()
-            and has_lightning_indexer_v2()
+        self._sharded_bf16 = self._sharded_dcp and _uses_kimi_k31_bf16_indexer(config)
+        self._is_kimi_k31 = model_type == "kimi_k31" or getattr(
+            type(config.model_config.hf_config), "is_kimi_k31", False
         )
-        if self._use_bf16_li_v2:
+        self._li_v2_disabled = self._bf16_li_v2_config_reason(config)
+        self._li_v2_padding_disabled = None
+        if self._li_v2_disabled is None and not self._sharded_dcp:
+            self._li_v2_padding_disabled = get_lightning_indexer_v2_unavailable_reason(require_seqused_q=True)
+        self._li_v2_logged: set[tuple[str, str | None, bool]] = set()
+        if self._is_kimi_k31:
             logger.info_once(
-                "Kimi K3.1 BF16 indexer selected CANN LightningIndexerV2 (DCP=%s).",
+                "Kimi K3.1 LightningIndexerV2 stage=init status=%s reason=%s dcp=%s pcp=%s "
+                "model_dtype=%s indexer_kv_dtype=%s heads=%s head_dim=%s topk=%s padding_abi_issue=%s planned_route=%s",
+                "disabled" if self._li_v2_disabled else "eligible",
+                self._li_v2_disabled,
                 parallel_config.decode_context_parallel_size,
+                parallel_config.prefill_context_parallel_size,
+                config.model_config.dtype,
+                config.attention_config.indexer_kv_dtype,
+                self.n_head,
+                self.head_dim,
+                self.topk_tokens,
+                self._li_v2_padding_disabled,
+                ("dcp_windows" if self._sharded_bf16 else "causal") if self._li_v2_disabled is None else None,
+                scope="process",
             )
         if self._sharded_bf16:
             options = get_current_vllm_config().additional_config or {}
@@ -356,14 +364,78 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # its device storage is discarded and remapped empty.
         self.register_buffer("q_hadamard", None, persistent=False)
         self.register_buffer("k_hadamard", None, persistent=False)
-        hf_config = get_current_vllm_config().model_config.hf_config
-        self._is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
         self._q_stream: torch.npu.Stream | None = None
         self._fused_k_cache: Callable[..., None] | None = None
 
     @property
     def enable_sparse_li_quant(self) -> bool:
         return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
+    def _bf16_li_v2_config_reason(self, config: VllmConfig) -> str | None:
+        if not self._is_kimi_k31:
+            return "model"
+        if self.enable_sparse_li_quant:
+            return "quantized_indexer"
+        if not _uses_kimi_k31_bf16_indexer(config):
+            return "indexer_dtype"
+        if self.use_pcp or self._dsa_cp_active:
+            return "pcp_or_dsa_cp"
+        if not self._sharded_bf16 and config.parallel_config.decode_context_parallel_size != 1:
+            return "replicated_dcp"
+        if not (1 <= self.n_head <= 64 and self.head_dim == 128 and self.topk_tokens == 2048):
+            return "indexer_geometry"
+        if not is_950():
+            return "requires_ascend_950"
+        return get_lightning_indexer_v2_unavailable_reason()
+
+    @staticmethod
+    def _bf16_li_v2_batch_reason(query: torch.Tensor, key: torch.Tensor, table: torch.Tensor) -> str | None:
+        if query.shape[0] == 0 or key.shape[0] == 0 or table.numel() == 0:
+            return "empty_input"
+        if query.dtype != torch.bfloat16 or key.dtype != torch.bfloat16:
+            return "runtime_dtype"
+        if key.shape[1:] != (128, 1, 128) or key.stride(-1) != 1 or key.stride(1) != 128 or key.stride(0) < 128 * 128:
+            return "kv_layout"
+        return None
+
+    def _log_li_v2_route(
+        self,
+        route: str,
+        reason: str | None,
+        metadata: AscendSFAIndexerMetadata,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        *,
+        windows: int = 0,
+        sort_elements: int = 0,
+    ) -> None:
+        if not self._is_kimi_k31:
+            return
+        # Report the first example of each decision per layer and graph mode.
+        # Only inspect host-side tensor descriptors, including during capture.
+        decision = (route, reason, metadata.full_graph_mode)
+        if decision in self._li_v2_logged:
+            return
+        self._li_v2_logged.add(decision)
+        logger.info(
+            "Kimi K3.1 LightningIndexerV2 stage=forward route=%s reason=%s layer=%s capture_metadata=%s "
+            "query_rows=%s actual_tokens=%s query_dtype=%s kv_dtype=%s kv_shape=%s kv_stride=%s "
+            "table_shape=%s windows=%s sort_elements=%s sort_limit=%s",
+            route,
+            reason,
+            self.k_cache.prefix,
+            metadata.full_graph_mode,
+            query.shape[0],
+            metadata.num_actual_tokens,
+            query.dtype,
+            key.dtype if key is not None else None,
+            tuple(key.shape) if key is not None else None,
+            key.stride() if key is not None else None,
+            tuple(metadata.block_table.shape),
+            windows,
+            sort_elements,
+            _BF16_LI_V2_MAX_SORT_ELEMENTS,
+        )
 
     def process_weights_after_loading(self) -> None:
         if not self.enable_sparse_li_quant:
@@ -646,19 +718,41 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             cache = context.bf16_li_v2_plans = {}
         return cache
 
-    def _get_bf16_li_v2_causal_metadata(self, indexer_metadata: AscendSFAIndexerMetadata) -> torch.Tensor:
+    def _get_bf16_li_v2_causal_inputs(
+        self, indexer_metadata: AscendSFAIndexerMetadata, num_rows: int, padded: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
         cu_query = indexer_metadata.query_start_loc
         lengths = indexer_metadata.actual_seq_lengths_key
-        assert cu_query is not None and lengths is not None
+        assert cu_query is not None and lengths is not None and lengths.numel() > 0
         cache = AscendSFAIndexerBackend._get_bf16_li_v2_cache()
-        key = ("causal", id(indexer_metadata), id(cu_query), id(lengths), self.n_head, self.topk_tokens)
+        key = (
+            "causal",
+            id(indexer_metadata),
+            id(cu_query),
+            id(lengths),
+            self.n_head,
+            self.topk_tokens,
+            num_rows,
+            padded,
+        )
         owner = self.k_cache.prefix
         cached = cache.get(key)
         if cached is None or cached[0] == owner:
+            used_query = None
+            if padded:
+                # Live requests have KV length >= their query length. RunnerV2
+                # clears the KV length of each dummy request on every replay.
+                used_query = torch.minimum(cu_query.diff(), lengths)
+                # Earlier producers describe only the live prefix. Assign the
+                # trailing storage to the last request while keeping its valid
+                # length and right-aligned causal positions from the original.
+                cu_query = cu_query.clone()
+                cu_query[-1] = num_rows
+            kwargs = {"seqused_q": used_query} if padded else {}
             metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
-                cu_query, lengths, self.n_head, self.topk_tokens, True
+                cu_query, lengths, self.n_head, self.topk_tokens, True, **kwargs
             )
-            cached = (owner, metadata)
+            cached = (owner, (cu_query, lengths, used_query, metadata))
             cache[key] = cached
         return cached[1]
 
@@ -957,6 +1051,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             self.write_cache(k_li, k_li_scale, slot_mapping, indexer_metadata.cache_scatter_indices)
         if not compute_topk:
+            self._log_li_v2_route("skip_topk", "topk_not_requested", indexer_metadata, hidden_states)
             return None
 
         assert self.wk_weights_proj is not None
@@ -979,19 +1074,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
+            self._log_li_v2_route("custom_selector", "metadata_selector", indexer_metadata, q_li)
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         key_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
-        use_li_v2 = (
-            self._use_bf16_li_v2
-            and q_li.shape[0] > 0
-            and q_li.dtype == key_cache.dtype == torch.bfloat16
-            and key_cache.shape[0] > 0
-            and key_cache.shape[1:] == (128, 1, 128)
-            and key_cache.stride(-1) == 1
-            and key_cache.stride(1) == 128
-            and key_cache.stride(0) >= 128 * 128
-            and indexer_metadata.block_table.numel() > 0
-        )
+        reason = self._li_v2_disabled or self._bf16_li_v2_batch_reason(q_li, key_cache, indexer_metadata.block_table)
         if self._sharded_dcp:
             from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
 
@@ -999,14 +1085,36 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 assert indexer_metadata.local_visible_lengths is not None
                 table = indexer_metadata.block_table[:, : indexer_metadata.max_local_indexer_pages]
                 width = max(self.topk_tokens, table.shape[1] * key_cache.shape[1])
-                if (
-                    use_li_v2
-                    and indexer_metadata.request_rows is not None
-                    and q_li.shape[0] * width <= _BF16_LI_V2_MAX_SORT_ELEMENTS
-                ):
+                sort_elements = q_li.shape[0] * width
+                if reason is None:
+                    if table.shape[1] == 0:
+                        reason = "no_local_pages"
+                    elif indexer_metadata.request_rows is None:
+                        reason = "missing_request_rows"
+                    elif sort_elements > _BF16_LI_V2_MAX_SORT_ELEMENTS:
+                        reason = "sort_workspace_limit"
+                if reason is None:
+                    self._log_li_v2_route("enter_dcp_windows", None, indexer_metadata, q_li, key_cache)
                     plan = self._get_bf16_li_v2_plan(indexer_metadata, key_cache)
                     indices, scores = lightning_indexer_v2_candidates(q_li, weights, key_cache, plan, self.topk_tokens)
+                    self._log_li_v2_route(
+                        "dispatched_dcp_windows",
+                        None,
+                        indexer_metadata,
+                        q_li,
+                        key_cache,
+                        windows=len(plan.windows),
+                        sort_elements=sort_elements,
+                    )
                 else:
+                    self._log_li_v2_route(
+                        "bf16_paged_fallback",
+                        reason,
+                        indexer_metadata,
+                        q_li,
+                        key_cache,
+                        sort_elements=sort_elements,
+                    )
                     indices, scores = bf16_paged_indexer_candidates(
                         q_li,
                         weights,
@@ -1030,6 +1138,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     # The BF16 scorer already broke ties by ascending local ID.
                     input_sorted=True,
                 )
+            self._log_li_v2_route("quantized_dcp", reason, indexer_metadata, q_li, key_cache)
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
@@ -1085,29 +1194,35 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self._dcp_interleave,
                 return_local=self._local_topk,
             )
-        # In the direct TND ABI every storage row must belong to a request.
-        # FULL replay can shorten the active prefix after capture. The DCP
-        # adapter above represents its padded rows as zero-length KV requests.
-        if (
-            use_li_v2
-            and q_li.shape[0] == indexer_metadata.num_actual_tokens
-            and not indexer_metadata.full_graph_mode
-            and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
-        ):
-            tiling = self._get_bf16_li_v2_causal_metadata(indexer_metadata)
+        padded = reason is None and (
+            q_li.shape[0] != indexer_metadata.num_actual_tokens
+            or indexer_metadata.full_graph_mode
+            or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        )
+        if padded:
+            reason = self._li_v2_padding_disabled
+        if reason is None:
+            route = "causal_padded" if padded else "causal"
+            self._log_li_v2_route("enter_" + route, None, indexer_metadata, q_li, key_cache)
+            cu_query, lengths, used_query, tiling = self._get_bf16_li_v2_causal_inputs(
+                indexer_metadata, q_li.shape[0], padded
+            )
             indices, _ = torch.ops._C_ascend.npu_lightning_indexer_v2(
                 q_li.contiguous(),
                 key_cache,
                 weights.float().contiguous(),
-                indexer_metadata.query_start_loc,
-                indexer_metadata.actual_seq_lengths_key,
+                cu_query,
+                lengths,
                 indexer_metadata.block_table.contiguous(),
                 tiling,
                 self.topk_tokens,
                 causal=True,
                 return_values=False,
+                **({"seqused_q": used_query} if padded else {}),
             )
+            self._log_li_v2_route("dispatched_" + route, None, indexer_metadata, q_li, key_cache)
             return indices
+        self._log_li_v2_route("device_postprocess", reason, indexer_metadata, q_li, key_cache)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,

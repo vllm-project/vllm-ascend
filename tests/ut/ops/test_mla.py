@@ -133,7 +133,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.use_torch_npu_lightning_indexer = False
         indexer._use_fused_cache_store = False
         indexer._sharded_dcp = False
-        indexer._use_bf16_li_v2 = False
+        indexer._li_v2_disabled = "model"
+        indexer._is_kimi_k31 = False
         indexer._local_topk = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
@@ -336,25 +337,33 @@ class TestAscendSFAIndexerBackend(TestBase):
 
 
 @pytest.mark.parametrize(
-    "dcp,scenario,expected",
+    "dcp,scenario,expected,reason",
     [
-        (1, "bf16", "causal"),
-        (8, "bf16", "window"),
-        (1, "missing-symbol", "postprocess"),
-        (8, "missing-symbol", "paged"),
-        (1, "quantized", "postprocess"),
-        (8, "custom", "custom"),
-        (1, "full-graph", "postprocess"),
-        (1, "padded", "postprocess"),
-        (8, "A3", "paged"),
+        (1, "bf16", "causal", None),
+        (8, "bf16", "window", None),
+        (1, "missing-symbol", "postprocess", "missing aclnnLightningIndexerV2"),
+        (8, "missing-symbol", "paged", "missing aclnnLightningIndexerV2"),
+        (1, "quantized", "postprocess", "quantized_indexer"),
+        (8, "custom", "custom", "metadata_selector"),
+        (1, "full-graph", "causal", None),
+        (1, "runtime-full", "causal", None),
+        (1, "padded", "causal", None),
+        (1, "old-padding-abi", "postprocess", "missing seqused_q"),
+        (8, "A3", "paged", "requires_ascend_950"),
+        (8, "workspace", "paged", "sort_workspace_limit"),
+        (8, "no-pages", "paged", "no_local_pages"),
+        (8, "request-rows", "paged", "missing_request_rows"),
+        (8, "kv-layout", "paged", "kv_layout"),
+        (8, "skip", "skip", "topk_not_requested"),
+        (1, "native-error", "causal", None),
     ],
 )
-def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, expected):
+def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, expected, reason):
     from vllm_ascend.attention import indexer as module
     from vllm_ascend.attention.context_parallel import sharded_indexer
 
     quantized = scenario == "quantized"
-    graph = dcp > 1 or scenario == "full-graph"
+    graph = dcp > 1 or scenario in ("full-graph", "runtime-full", "old-padding-abi")
     cfg = MagicMock()
     cfg.model_config.hf_config.model_type = "kimi_k31"
     cfg.model_config.dtype = torch.bfloat16
@@ -371,7 +380,20 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
     monkeypatch.setattr(module, "get_current_vllm_config", lambda: cfg)
     monkeypatch.setattr(module, "get_ascend_config", lambda: ascend)
     monkeypatch.setattr(module, "enable_sfa_dcp_sharded_indexer", lambda: dcp > 1)
-    monkeypatch.setattr(module, "has_lightning_indexer_v2", lambda: scenario != "missing-symbol")
+    startup_log, forward_log = MagicMock(), MagicMock()
+    monkeypatch.setattr(module.logger, "info_once", startup_log)
+    monkeypatch.setattr(module.logger, "info", forward_log)
+
+    def probe(*, require_seqused_q=False):
+        if scenario == "missing-symbol":
+            return "missing aclnnLightningIndexerV2"
+        if require_seqused_q and scenario == "old-padding-abi":
+            return "missing seqused_q"
+        return None
+
+    monkeypatch.setattr(module, "get_lightning_indexer_v2_unavailable_reason", probe)
+    if scenario == "workspace":
+        monkeypatch.setattr(module, "_BF16_LI_V2_MAX_SORT_ELEMENTS", 1024)
     monkeypatch.setattr(module, "is_950", lambda: scenario != "A3")
     monkeypatch.setattr(module, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(module, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
@@ -381,7 +403,9 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
 
     backend = AscendSFAIndexerBackend(TestAscendSFAIndexerBackend._make_vllm_indexer(), qk_rope_head_dim=64)
     dtype = torch.int8 if quantized else torch.bfloat16
-    key = torch.empty(3, 128, 1, 128, dtype=dtype)
+    key = torch.empty(3, 128, 1, 256 if scenario == "kv-layout" else 128, dtype=dtype)
+    if scenario == "kv-layout":
+        key = key[..., ::2]
     backend.k_cache.kv_cache = (key, torch.empty(3, 128, 1, 1)) if quantized else (key,)
     query = torch.zeros(2, 64, 128, dtype=dtype)
     weights = torch.ones(2, 64)
@@ -390,15 +414,15 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
     monkeypatch.setattr(backend, "write_cache", MagicMock())
     metadata = TestAscendSFAIndexerBackend._make_indexer_metadata()
     metadata.block_table = torch.tensor([[1, 2]], dtype=torch.int32)
-    metadata.query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    metadata.query_start_loc = torch.tensor([0, 1 if scenario == "padded" else 2], dtype=torch.int32)
     metadata.actual_seq_lengths_query = metadata.query_start_loc[1:]
     metadata.actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
     metadata.local_visible_lengths = torch.tensor([3, 4], dtype=torch.int32)
-    metadata.request_rows = torch.zeros(2, dtype=torch.int32)
+    metadata.request_rows = None if scenario == "request-rows" else torch.zeros(2, dtype=torch.int32)
     metadata.num_actual_tokens = 1 if scenario == "padded" else 2
-    metadata.max_local_indexer_pages = 2
+    metadata.max_local_indexer_pages = 0 if scenario == "no-pages" else 2
     metadata.first_valid_indexer_page = 1
-    metadata.full_graph_mode = graph
+    metadata.full_graph_mode = graph and scenario != "runtime-full"
     selectors = {name: MagicMock() for name in ("causal", "window", "paged", "postprocess", "custom")}
     ids = torch.empty(2, 1, 2048, dtype=torch.int32)
     scores = torch.empty_like(ids, dtype=torch.float32)
@@ -412,8 +436,36 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
     monkeypatch.setattr(module.DeviceOperator, "indexer_select_post_process", selectors["postprocess"])
     merge = MagicMock(return_value=ids)
     monkeypatch.setattr(sharded_indexer, "distributed_topk", merge)
-    assert backend(query, query, query, metadata) is ids
-    assert [name for name, selector in selectors.items() if selector.called] == [expected]
+    disabled = scenario in ("missing-symbol", "quantized", "A3")
+    assert startup_log.call_args.args[1] == ("disabled" if disabled else "eligible")
+    if scenario == "native-error":
+        selectors["causal"].side_effect = RuntimeError("native launch failed")
+        with pytest.raises(RuntimeError, match="native launch failed"):
+            backend(query, query, query, metadata)
+        assert [call.args[1] for call in forward_log.call_args_list] == ["enter_causal"]
+        selectors["postprocess"].assert_not_called()
+        return
+    for _ in range(2):
+        out = backend(query, query, query, metadata, compute_topk=scenario != "skip")
+        assert out is (None if scenario == "skip" else ids)
+    assert [name for name, selector in selectors.items() if selector.called] == (
+        [] if expected == "skip" else [expected]
+    )
+    decisions = [(call.args[1], call.args[2]) for call in forward_log.call_args_list]
+    if expected in ("window", "causal"):
+        padded = graph and dcp == 1 or scenario == "padded"
+        suffix = "dcp_windows" if dcp > 1 else ("causal_padded" if padded else "causal")
+        assert decisions == [("enter_" + suffix, None), ("dispatched_" + suffix, None)]
+        if expected == "causal":
+            assert ("seqused_q" in selectors["causal"].call_args.kwargs) == padded
+    else:
+        route = {
+            "custom": "custom_selector",
+            "skip": "skip_topk",
+            "paged": "bf16_paged_fallback",
+            "postprocess": "device_postprocess",
+        }[expected]
+        assert decisions == [(route, reason)]
     assert merge.called == (expected in ("window", "paged"))
     if merge.called:
         assert merge.call_args.args[:2] == (ids, scores)

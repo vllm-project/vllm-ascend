@@ -913,6 +913,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Shared signed-Hadamard transform plus the ops-nn quantizer.
         self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
         self.preprocess_type = PreprocessType.NATIVE
+        self._last_kimi_preprocess: PreprocessType | None = None
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
@@ -1006,6 +1007,24 @@ class AscendSFAImpl(MLAAttentionImpl):
         if not self.rl_weight_update_enabled:
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
+        if self.is_kimi_k31:
+            if getattr(self, "use_fused_copy_sfa", False):
+                attention_op = "sparse KV offload (batch dependent)"
+            elif self.enable_sparse_sfa_turboquant:
+                attention_op = "torch_npu.npu_kv_quant_sparse_flash_attention"
+            elif self.enable_sparse_sfa_c8:
+                attention_op = "_C_ascend.npu_kv_quant_sparse_flash_attention_vllm"
+            elif self.qk_rope_head_dim:
+                attention_op = "_C_ascend.npu_sparse_flash_attention"
+            else:
+                attention_op = "NoPE sparse attention (metadata dependent)"
+            logger.info_once(
+                "Kimi K3.1 DSA selected preprocess=%s attention=%s backend=%s",
+                self._preprocess_op_name(self.preprocess_type),
+                attention_op,
+                type(self).__name__,
+                scope="process",
+            )
 
         if self.preprocess_type == PreprocessType.NATIVE:
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -1034,6 +1053,57 @@ class AscendSFAImpl(MLAAttentionImpl):
             return pp_type
         return PreprocessType.NATIVE
 
+    def _preprocess_op_name(self, pp_type: PreprocessType) -> str:
+        if pp_type == PreprocessType.PROLOG_V3:
+            return "torch_npu.npu_mla_prolog_v3" if self.use_rope else "cann_ops_transformer.mla_prolog"
+        if pp_type == PreprocessType.MLAPO:
+            return "_C_ascend.mla_preprocess"
+        return "native"
+
+    def _supports_kimi_bf16_prolog(self) -> bool:
+        # V4 with no sin/cos preserves Kimi's learned 64-channel tail. On 950
+        # its paged scatter skips negative DCP owner and graph-padding slots.
+        if (
+            not self.is_kimi_k31
+            or self.use_rope
+            or self.rl_weight_update_enabled
+            or self.enable_sparse_sfa_c8
+            or self.enable_sparse_sfa_turboquant
+            or self.vllm_config.parallel_config.prefill_context_parallel_size != 1
+            or self.vllm_config.model_config.dtype != torch.bfloat16
+            or (self.q_lora_rank, self.kv_lora_rank, self.qk_nope_head_dim, self.qk_rope_head_dim)
+            != (1536, 512, 128, 64)
+            or self.num_kv_heads != 1
+            or not 1 <= self.local_num_heads <= 128
+            or get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED
+        ):
+            return False
+        fused_weight = getattr(self.fused_qkv_a_proj, "weight", None)
+        q_weight = getattr(self.q_proj, "weight", None)
+        if (
+            fused_weight is None
+            or fused_weight.dtype != torch.bfloat16
+            or fused_weight.shape != (2112, 7168)
+            or q_weight is None
+            or q_weight.dtype != torch.bfloat16
+            or q_weight.shape != (192 * self.local_num_heads, 1536)
+        ):
+            return False
+        if self.has_indexer:
+            wq_b = getattr(self.indexer, "wq_b", None)
+            if getattr(getattr(wq_b, "weight", None), "dtype", None) != torch.bfloat16:
+                return False
+        try:
+            from cann_ops_transformer import mla_prolog
+
+            schema = torch.ops.cann_ops_transformer.mla_prolog.default._schema
+        except (AttributeError, ImportError, OSError):
+            return False
+        # Earlier registrations require RoPE tensors and cannot implement
+        # Kimi's no-rotation path. Check the installed schema before capture.
+        optional_rope = {arg.name for arg in schema.arguments if arg.has_default_value() and arg.default_value is None}
+        return callable(mla_prolog) and {"rope_sin", "rope_cos"} <= optional_rope
+
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Return the enabled fused preprocess type, or None if it cannot run."""
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
@@ -1045,14 +1115,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # prefill/P-node route selector: it routes to AscendSFADSACPImpl,
         # which unconditionally disables fused preprocessing, so the two are
         # mutually exclusive by construction. The C8 switches only select the
-        # KV cache layout and are orthogonal to this choice. Unquantized
-        # layers keep the NATIVE chain outside KV consumers because the
-        # unquantized weight preparation transposes fused_qkv_a_proj.weight
-        # in place, which the NATIVE fallback still consumes.
+        # KV cache layout and are orthogonal to this choice.
         if getattr(self, "dcp_group", None) is None or (
             self.is_kimi_k31 and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
         ):
-            prolog_v3_eligible = qt is not None or self.is_kv_consumer
+            prolog_v3_eligible = qt is not None or self.is_kv_consumer or self._supports_kimi_bf16_prolog()
             if prolog_v3_eligible and (
                 qt is AscendW8A8DynamicLinearMethod or qt is AscendW8A8MXFP8DynamicLinearMethod or qt is None
             ):
@@ -1089,12 +1156,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
-            # Prolog's indexer query can carry quantization scales independently
-            # of the MLA weight type. Preserve the native query for an
-            # unquantized indexer, including layers that later toggle skip_topk.
+            # Quantized prolog returns (query_norm, scale) for quantized wq_b.
+            # The mode-0 Kimi path instead feeds BF16 query_norm to wq_b.
             if self.has_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
-                if not hasattr(wq_b, "weight_scale"):
+                if not hasattr(wq_b, "weight_scale") and not (qt is None and self._supports_kimi_bf16_prolog()):
                     reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
@@ -1114,8 +1180,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
         assert self.q_proj is not None
 
-        self._prolog_v3_op = torch_npu.npu_mla_prolog_v3
-        if not self.use_rope:
+        if self.use_rope:
+            self._prolog_v3_op = torch_npu.npu_mla_prolog_v3
+        else:
             # Resolve in the model worker before graph capture. CANN's V4
             # entry disables RoPE while preserving the learned tail dimension.
             from cann_ops_transformer import mla_prolog
@@ -1124,16 +1191,15 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         qt = self._quant_type
 
-        if qt is None:
-            self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
-
         fused_weight = self.fused_qkv_a_proj.weight.data
+        if qt is None:
+            fused_weight = torch_npu.npu_format_cast(fused_weight, ACL_FORMAT_FRACTAL_ND).T
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:
             weight_uq_qr = self.q_proj.weight.data.contiguous()
         else:
-            weight_uq_qr = self.q_proj.weight.data.T.contiguous()
+            weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T.contiguous()
 
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
@@ -1161,10 +1227,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)
             self.weight_uq_qr_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
 
-        # Same reasoning as kv_b_proj: once the fused projections are consumed by
-        # PROLOG_V3 they are pure load sources, but discarding their storage
-        # breaks the next layerwise reload, so RL keeps them.
-        if self.is_kv_consumer and not self.rl_weight_update_enabled:
+        # This BF16 route runs for every token count on both PD workers. Drop
+        # the original projections after preparing their NZ copies, as on D.
+        if not self.rl_weight_update_enabled and (
+            self.is_kv_consumer or (qt is None and self._supports_kimi_bf16_prolog())
+        ):
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()
@@ -1439,6 +1506,15 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         qt = self._quant_type
         use_c8 = self.enable_sparse_sfa_c8
+        if qt is None and hidden_states.shape[0] == 0:
+            # The PA binding requires a nonempty cache_index. An idle rank
+            # has no cache writes but still participates in later collectives.
+            return (
+                hidden_states,
+                hidden_states.new_empty((0, self.local_num_heads, self.kv_lora_rank)),
+                hidden_states.new_empty((0, self.local_num_heads, self.qk_rope_head_dim)),
+                hidden_states.new_empty((0, self.q_lora_rank)) if self.has_indexer else None,
+            )
 
         common: dict[str, Any] = dict(
             weight_dq=self.weight_dq,
@@ -1535,7 +1611,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             if q_c is None:
                 raise RuntimeError("MLA prolog did not return query_norm for SFA indexer.")
             q_c = q_c.view(-1, self.q_lora_rank)
-            if q_c_scale is not None:
+            # In mode 0 V4 returns BF16 query_norm and an empty scale tensor.
+            # The indexer dispatches a (query, scale) pair to quantized matmul.
+            if qt is not None and q_c_scale is not None:
                 if qt is AscendW8A8MXFP8DynamicLinearMethod:
                     q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
                     q_c = (q_c, q_c_scale)
@@ -1983,6 +2061,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
+            if getattr(self, "is_kimi_k31", False) is True and not getattr(self, "_logged_kimi_dummy", False):
+                logger.info_once(
+                    "Kimi K3.1 DSA dummy forward skips attention and indexer (no metadata)", scope="process"
+                )
+                self._logged_kimi_dummy = True
             return self._forward_dummy(hidden_states, output)
 
         if (
@@ -2026,6 +2109,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         # prefill); only MLAPO carries a per-call token-count limit.
         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
             fused_type = PreprocessType.NATIVE
+        if (
+            getattr(self, "is_kimi_k31", False) is True
+            and getattr(self, "_last_kimi_preprocess", None) != fused_type
+            and num_input_tokens > 0
+        ):
+            logger.info_once(
+                "Kimi K3.1 DSA first entering preprocess=%s",
+                self._preprocess_op_name(fused_type),
+                scope="process",
+            )
+            self._last_kimi_preprocess = fused_type
 
         # IMPORTANT!
         # NOTE: With PIECEWISE ACL graphs, this method is executed in
@@ -2065,9 +2159,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
-                    # the per-step conversion so all layers of a step share
-                    # one Cast kernel (the .to() inside is a no-op on int64).
+                    # Share one int64 conversion across layers, including PCP.
                     slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
                     attn_metadata=attn_metadata,
                 )
@@ -2177,6 +2269,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         elif self.skip_topk:
             # Static shared-index layers keep no runtime indexer cache and
             # only reuse the shared top-k indices.
+            if getattr(self, "is_kimi_k31", False) is True and not getattr(self, "_logged_kimi_shared_topk", False):
+                logger.info_once("Kimi K3.1 DSA reuses shared top-k indices (no runtime indexer)", scope="process")
+                self._logged_kimi_shared_topk = True
             topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")

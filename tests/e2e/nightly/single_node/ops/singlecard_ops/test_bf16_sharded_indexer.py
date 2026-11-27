@@ -11,6 +11,7 @@ from vllm_ascend.ops.bf16_sharded_indexer import (
 )
 from vllm_ascend.ops.lightning_indexer_v2 import (
     build_lightning_indexer_v2_plan,
+    get_lightning_indexer_v2_unavailable_reason,
     has_lightning_indexer_v2,
     lightning_indexer_v2_candidates,
 )
@@ -108,10 +109,10 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(require_native_indexer
     query = torch.randint(-1, 2, (rows, heads, dim), generator=generator).bfloat16()
     query[1].zero_()  # More than K identical scores across two windows.
     weights = torch.randint(-2, 3, (rows, heads), generator=generator).float()
-    keys = torch.randint(-2, 3, (22, page_size, 1, dim), generator=generator).bfloat16()
+    keys = torch.randint(-2, 3, (70, page_size, 1, dim), generator=generator).bfloat16()
     keys[:first_valid_page].fill_(1000)
     # One high-scoring token lives in the second window, past the cutoff.
-    keys[18, 123].fill_(64)
+    keys[66, 123].fill_(64)  # Logical ID 8315 on rank 0.
     query[0].fill_(1)
     weights[0].fill_(1)
     table = torch.arange(2, len(keys), dtype=torch.int32).repeat(2, 1)
@@ -135,8 +136,8 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(require_native_indexer
 
     def visible_lengths(rank):
         global_lengths = [
-            3 * cycle + 128,
-            3 * cycle,
+            11 * cycle + 128,
+            11 * cycle,
             (16 + rank) * stripe + 513,
             rank * stripe + 127,
             rank * stripe + 129,
@@ -218,3 +219,49 @@ def test_native_bf16_indexer_causal_prefill(require_native_indexer):
     # ordering; this fixture has an unambiguous set at each row's cutoff.
     torch.testing.assert_close(ids.cpu().sort().values, expected_ids.sort().values)
     assert values.numel() == 0
+
+
+@torch.inference_mode()
+def test_native_bf16_indexer_causal_tnd_padding_replay(require_native_indexer):
+    reason = get_lightning_indexer_v2_unavailable_reason(require_seqused_q=True)
+    if reason:
+        pytest.skip(reason)
+    rows, heads, topk = 8, 32, 2048
+    query = torch.ones(rows, heads, 128, dtype=torch.bfloat16, device="npu")
+    key = torch.ones(3, 128, 1, 128, dtype=query.dtype, device="npu")
+    weights = torch.ones(rows, heads, dtype=torch.float32, device="npu")
+    table = torch.tensor([[1], [2]], dtype=torch.int32, device="npu")
+    cu = torch.tensor([0, 2, rows], dtype=torch.int32, device="npu")
+    lengths = torch.tensor([7, 5], dtype=torch.int32, device="npu")
+    used_query = torch.tensor([2, 3], dtype=torch.int32, device="npu")
+
+    def run():
+        ops = torch.ops._C_ascend
+        tiling = ops.npu_lightning_indexer_v2_metadata(cu, lengths, heads, topk, True, used_query)
+        ids, _ = ops.npu_lightning_indexer_v2(
+            query, key, weights, cu, lengths, table, tiling, topk, True, False, used_query
+        )
+        return ids
+
+    def check(ids, visible):
+        ref = torch.full((rows, 1, topk), -1, dtype=torch.int32)
+        for row, length in enumerate(visible):
+            ref[row, 0, :length] = torch.arange(length)
+        torch.testing.assert_close(ids.cpu().sort().values, ref.sort().values)
+
+    check(run(), [6, 7, 3, 4, 5, 0, 0, 0])
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        graph_ids = run()
+    # Move the second request and turn the first into a dummy with a
+    # nonempty physical span, just as in a padded decode batch.
+    cu.copy_(torch.IntTensor([0, 4, rows]))
+    lengths.copy_(torch.IntTensor([0, 3]))
+    used_query.copy_(torch.IntTensor([0, 2]))
+    graph.replay()
+    check(graph_ids, [0, 0, 0, 0, 2, 3, 0, 0])
+    lengths.zero_()
+    used_query.zero_()
+    graph.replay()
+    check(graph_ids, [0] * rows)

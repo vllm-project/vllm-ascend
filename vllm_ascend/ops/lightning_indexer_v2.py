@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import lru_cache
 from importlib import import_module
+from importlib.util import find_spec
 from typing import NamedTuple
 
 import torch
+from vllm.logger import logger
+
+_ASCEND_950_MAX_TOPK = 8192
 
 
 class LightningIndexerV2Window(NamedTuple):
@@ -40,7 +45,8 @@ def build_lightning_indexer_v2_plan(
     windows = []
     # Request every score within each window so invalid pages and arbitrary
     # native tie order cannot displace a valid candidate at the local cutoff.
-    window_pages = 2048 // page_size
+    # Ascend 950 supports score-returning Top-K up to 8192, including partial windows.
+    window_pages = _ASCEND_950_MAX_TOPK // page_size
     for start in range(0, pages.shape[1], window_pages):
         stop = min(start + window_pages, pages.shape[1])
         width = (stop - start) * page_size
@@ -52,14 +58,59 @@ def build_lightning_indexer_v2_plan(
     return LightningIndexerV2Plan(cu_query, tuple(windows))
 
 
-def has_lightning_indexer_v2() -> bool:
-    """Resolve the extension and both CANN operators during worker initialization."""
+@lru_cache(maxsize=2)
+def get_lightning_indexer_v2_unavailable_reason(*, require_seqused_q: bool = False) -> str | None:
+    """Check the worker's native bindings and CANN symbols before graph capture."""
+    name = "vllm_ascend.vllm_ascend_C"
     try:
-        import_module("vllm_ascend.vllm_ascend_C")
-    except ImportError:
-        return False
-    probe = getattr(torch.ops._C_ascend, "is_lightning_indexer_v2_available", None)
-    return probe is not None and probe()
+        from vllm_ascend.utils import bootstrap_custom_op_env
+
+        # The ACLNN adapter reads ASCEND_CUSTOM_OPP_PATH when its shared object loads.
+        bootstrap_custom_op_env()
+        extension = import_module(name)
+    except (ImportError, OSError) as exc:
+        spec = find_spec(name)
+        origin = spec.origin if spec else name
+        return f"failed to load {origin}: {exc}"
+
+    origin = extension.__file__
+    ops = torch.ops._C_ascend
+    for name in ("npu_lightning_indexer_v2", "npu_lightning_indexer_v2_metadata"):
+        binding = getattr(ops, name, None)
+        if binding is None:
+            return f"{origin} does not register _C_ascend::{name}; rebuild the vllm-ascend extension"
+        operator = binding.default
+        if not operator.has_kernel_for_dispatch_key("PrivateUse1"):
+            return f"{origin} has no NPU kernel registered for _C_ascend::{name}"
+        if require_seqused_q and "seqused_q" not in {arg.name for arg in operator._schema.arguments}:
+            return f"{origin} lacks the seqused_q argument of _C_ascend::{name}; rebuild the vllm-ascend extension"
+
+    # Older extensions expose only the boolean probe and can still run the unpadded ABI.
+    try:
+        details = getattr(ops, "get_lightning_indexer_v2_missing_symbols", None)
+        if details is not None:
+            missing = details()
+            if missing:
+                return f"{origin} could not resolve CANN symbols: {missing}"
+        else:
+            probe = getattr(ops, "is_lightning_indexer_v2_available", None)
+            if probe is None:
+                return f"{origin} lacks the LightningIndexerV2 availability probe; rebuild the vllm-ascend extension"
+            if not probe():
+                return f"{origin} could not resolve the CANN LightningIndexerV2 or LightningIndexerV2Metadata API"
+    except RuntimeError as exc:
+        return f"LightningIndexerV2 probe in {origin} failed: {exc}"
+    logger.info_once(
+        "Kimi K3.1 LightningIndexerV2 stage=probe extension=%s "
+        "resolved=aclnnLightningIndexerV2,aclnnLightningIndexerV2Metadata",
+        origin,
+        scope="process",
+    )
+    return None
+
+
+def has_lightning_indexer_v2() -> bool:
+    return get_lightning_indexer_v2_unavailable_reason() is None
 
 
 def lightning_indexer_v2_candidates(
@@ -87,6 +138,8 @@ def lightning_indexer_v2_candidates(
             q, key_cache, w, plan.cu_query, window.visible_lengths, window.block_table, window.metadata, width
         )
         restore_li_v2_scores(indices, scores, window.valid_pages, window.visible_lengths, dense, offset, page_size)
+        # Release these outputs before allocating the next pair or the final sort buffers.
+        del indices, scores
         offset += width
     best_scores, order = torch.sort(dense, dim=-1, descending=True, stable=True)
     best_scores = best_scores[:, :topk]

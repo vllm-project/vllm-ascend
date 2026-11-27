@@ -35,13 +35,38 @@ def test_bf16_li_v2_causal_metadata_uses_request_prefix_and_shares_across_layers
     cu_query = torch.tensor([0, 2, 6], dtype=torch.int32)
     lengths = torch.tensor([10, 14], dtype=torch.int32)
     meta = SimpleNamespace(query_start_loc=cu_query, actual_seq_lengths_key=lengths)
-    get_metadata = AscendSFAIndexerBackend._get_bf16_li_v2_causal_metadata
-    result = get_metadata(first, meta)
-    assert get_metadata(other, meta) is result
+    get_inputs = AscendSFAIndexerBackend._get_bf16_li_v2_causal_inputs
+    result = get_inputs(first, meta, 6, False)
+    assert get_inputs(other, meta, 6, False) is result
     op.assert_called_once_with(cu_query, lengths, 32, 2048, True)
+    assert result[0] is cu_query and result[1] is lengths and result[2] is None
     lengths.fill_(17)
-    torch.testing.assert_close(get_metadata(first, meta), lengths)
+    torch.testing.assert_close(get_inputs(first, meta, 6, False)[3], lengths)
     assert op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "starts,kv_lengths,storage_starts,used",
+    [
+        ([0, 2, 6], [10, 14], [0, 2, 8], [2, 4]),  # The last real request absorbs trailing storage.
+        ([0, 2, 4, 6, 8], [10, 14, 0, 0], [0, 2, 4, 6, 8], [2, 2, 0, 0]),  # Padded request rows.
+        ([0, 0, 0], [0, 0], [0, 0, 8], [0, 0]),
+    ],
+)
+def test_bf16_li_v2_causal_tnd_padding(monkeypatch, starts, kv_lengths, storage_starts, used):
+    context = SimpleNamespace()
+    monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
+    op = Mock()
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", op, raising=False)
+    layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048)
+    meta = SimpleNamespace(query_start_loc=torch.IntTensor(starts), actual_seq_lengths_key=torch.IntTensor(kv_lengths))
+    get_inputs = AscendSFAIndexerBackend._get_bf16_li_v2_causal_inputs
+    cu, lengths, used_q, tiling = get_inputs(layer, meta, 8, True)
+    torch.testing.assert_close(cu, torch.IntTensor(storage_starts))
+    torch.testing.assert_close(used_q, torch.IntTensor(used))
+    torch.testing.assert_close(meta.query_start_loc, torch.IntTensor(starts))
+    op.assert_called_once_with(cu, lengths, 32, 2048, True, seqused_q=used_q)
+    assert tiling is op.return_value
 
 
 def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch):
@@ -51,10 +76,10 @@ def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", metadata_op, raising=False)
     first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32)
     next_layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="next"), n_head=32)
-    table = torch.arange(36, dtype=torch.int32).reshape(2, 18)
+    table = torch.arange(132, dtype=torch.int32).reshape(2, 66)
     table[1, 1] = -1
     owners = torch.tensor([1, 1, 0, 1], dtype=torch.int32)
-    lengths = torch.tensor([[2177], [130], [0], [4096]], dtype=torch.int32)
+    lengths = torch.tensor([[8321], [130], [0], [9000]], dtype=torch.int32)
     meta = SimpleNamespace(
         block_table=table,
         request_rows=owners,
@@ -62,16 +87,16 @@ def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch)
         first_valid_indexer_page=2,
         max_local_indexer_pages=None,
     )
-    key_cache = torch.empty((34, 128, 1, 128), dtype=torch.bfloat16)
+    key_cache = torch.empty((130, 128, 1, 128), dtype=torch.bfloat16)
     get_plan = AscendSFAIndexerBackend._get_bf16_li_v2_plan
     plan = get_plan(first, meta, key_cache)
     assert get_plan(next_layer, meta, key_cache) is plan
     assert metadata_op.call_count == 2
     torch.testing.assert_close(plan.cu_query, torch.arange(5, dtype=torch.int32))
-    assert [call.args[-2:] for call in metadata_op.call_args_list] == [(32, 2048), (32, 256)]
-    for window, start, stop in zip(plan.windows, (0, 16), (16, 18)):
+    assert [call.args[-2:] for call in metadata_op.call_args_list] == [(32, 8192), (32, 256)]
+    for window, start, stop in zip(plan.windows, (0, 64), (64, 66)):
         pages = table[owners.long(), start:stop]
-        expected_valid = (pages >= 2) & (pages < 34)
+        expected_valid = (pages >= 2) & (pages < 130)
         torch.testing.assert_close(window.valid_pages, expected_valid)
         torch.testing.assert_close(window.block_table, torch.where(expected_valid, pages, 0))
         assert window.block_table.is_contiguous()
@@ -666,6 +691,7 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     indexer = SimpleNamespace(
         use_pcp=False,
         _select_execution_paths=lambda *args: (None, False, False),
+        _log_li_v2_route=Mock(),
         _pcp_active=False,
         _dsa_cp_active=True,
         enable_sparse_li_c8=quantized,

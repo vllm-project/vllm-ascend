@@ -1035,7 +1035,8 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
 }
 
 at::Tensor npu_lightning_indexer_v2_metadata_meta(
-    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal)
+    const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal,
+    const c10::optional<at::Tensor>& seqused_q)
 {
     return at::empty({2048}, cu_seqlens_q.options().dtype(at::kInt));
 }
@@ -1043,7 +1044,7 @@ at::Tensor npu_lightning_indexer_v2_metadata_meta(
 std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& weights, const at::Tensor& cu_seqlens_q,
     const at::Tensor& seqused_k, const at::Tensor& block_table, const at::Tensor& metadata,
-    int64_t topk, bool causal, bool return_values)
+    int64_t topk, bool causal, bool return_values, const c10::optional<at::Tensor>& seqused_q)
 {
     const auto shape = std::vector<c10::SymInt>{query.sym_size(0), 1, topk};
     auto indices = at::empty_symint(shape, query.options().dtype(at::kInt));
