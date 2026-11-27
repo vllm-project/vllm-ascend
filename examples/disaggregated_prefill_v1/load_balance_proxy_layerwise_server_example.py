@@ -15,9 +15,10 @@
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
-# - Python 3.8+
+# - Python 3.10+
 # - Install dependencies:
-#     pip install fastapi<0.124.0 httpx uvicorn vllm
+#     pip install fastapi<0.124.0 httpx uvicorn
+# - Copy this script alone; no other repository Python files are required.
 #
 # Step 1: Start Your Backend Servers
 # ----------------------------------
@@ -88,6 +89,7 @@ import argparse
 import asyncio
 import copy
 import functools
+import heapq
 import ipaddress
 import json
 import logging
@@ -100,25 +102,14 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack, asynccontextmanager
+from dataclasses import dataclass
+from enum import Enum
 from multiprocessing.managers import BaseManager
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-
-try:
-    # Imported as a package module (tests).
-    from examples.disaggregated_prefill_v1.load_balance_proxy_server_example import (
-        ServerRole,
-        SharedProxyScheduler,
-        server_key,
-    )
-    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
-except ImportError:
-    # Run as a standalone script: the script's own directory is on sys.path.
-    from load_balance_proxy_server_example import ServerRole, SharedProxyScheduler, server_key
-    from sse_frame_parser import SSEFrameParser
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +120,9 @@ WORKER_STOP_TIMEOUT = 10
 WORKER_POLL_INTERVAL = 0.1
 LISTEN_BACKLOG = 2048
 MAX_PORT = 65535
+PREFILL_KV_WEIGHT = 0.3
+SSE_FRAME_SEPARATOR = b"\n\n"
+SSE_DONE_SENTINEL = b"[DONE]"
 
 # Add uvloop for faster event loop if available
 try:
@@ -137,6 +131,50 @@ try:
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass
+
+
+class SSEFrameParser:
+    """Buffer incomplete SSE frames while the handler forwards the original bytes."""
+
+    def __init__(self):
+        self._buffer = b""
+
+    def feed(self, chunk: bytes) -> list[dict]:
+        self._buffer += chunk
+        frames = []
+        while SSE_FRAME_SEPARATOR in self._buffer:
+            raw, _, self._buffer = self._buffer.partition(SSE_FRAME_SEPARATOR)
+            text = raw.strip()
+            if text.startswith(b"data:"):
+                text = text[len(b"data:") :].strip()
+            if text == SSE_DONE_SENTINEL:
+                self._buffer = b""
+                break
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(text.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(payload, dict):
+                frames.append(payload)
+        return frames
+
+
+class ServerRole(str, Enum):
+    PREFILL = "prefill"
+    DECODE = "decode"
+
+
+def server_key(host: str, port: int) -> str:
+    host = host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+    return f"{host}:{int(port)}"
+
+
+@dataclass
+class BackendLoad:
+    ordinal: int
+    active_tokens: float = 0.0
+    active_kv_cache: float = 0.0
+    heap_seq: int = 0
 
 
 class ServerState:
@@ -163,22 +201,64 @@ class ServerState:
         # Removed individual server lock - will use global locks instead
 
 
-class LayerwiseScheduler(SharedProxyScheduler):
+class LayerwiseScheduler:
     """Share backend load, retaining ownership so a dead worker can release it."""
 
     def __init__(self, prefiller_instances, decoder_instances):
-        super().__init__(prefiller_instances, decoder_instances)
+        self._lock = threading.RLock()
+        self.prefillers = {server_key(h, p): BackendLoad(i) for i, (h, p) in enumerate(prefiller_instances)}
+        self.decoders = {server_key(h, p): BackendLoad(i) for i, (h, p) in enumerate(decoder_instances)}
+        self._servers = {ServerRole.PREFILL: self.prefillers, ServerRole.DECODE: self.decoders}
+        self._heaps = {role: [] for role in ServerRole}
+        for role, servers in self._servers.items():
+            for key in servers:
+                self._push_heap(role, key)
         self.worker_loads = {}
+
+    def _heap_entry(self, role, key):
+        server = self._servers[role][key]
+        priority = server.active_tokens
+        if role is ServerRole.PREFILL:
+            priority += server.active_kv_cache * PREFILL_KV_WEIGHT
+        return priority, server.ordinal, server.heap_seq, key
+
+    def _push_heap(self, role, key):
+        servers = self._servers[role]
+        servers[key].heap_seq += 1
+        heapq.heappush(self._heaps[role], self._heap_entry(role, key))
+        # Discard stale entries periodically so completed requests do not grow the heap.
+        if len(self._heaps[role]) > 2 * len(servers):
+            self._heaps[role] = [self._heap_entry(role, key) for key in servers]
+            heapq.heapify(self._heaps[role])
+
+    def _release_load(self, role, key, load, *, active_tokens=False, kv_cache=False):
+        server = self._servers[role][key]
+        if active_tokens:
+            server.active_tokens -= load
+        if kv_cache:
+            server.active_kv_cache = max(0.0, server.active_kv_cache - load)
+        self._push_heap(role, key)
 
     def reserve(self, worker_id, role, load):
         role = ServerRole(role)
         with self._lock:
-            picked = self._pick_server(role, load, active_tokens=True, kv_cache=role is ServerRole.PREFILL)
-            loads = self.worker_loads.setdefault(worker_id, {}).setdefault((role, picked["key"]), [0.0, 0.0])
+            heap = self._heaps[role]
+            while heap:
+                _, _, seq, key = heapq.heappop(heap)
+                server = self._servers[role][key]
+                if seq == server.heap_seq:
+                    break
+            else:
+                raise RuntimeError(f"No available {role.value} servers")
+            server.active_tokens += load
+            if role is ServerRole.PREFILL:
+                server.active_kv_cache += load
+            self._push_heap(role, key)
+            loads = self.worker_loads.setdefault(worker_id, {}).setdefault((role, key), [0.0, 0.0])
             loads[0] += load
             if role is ServerRole.PREFILL:
                 loads[1] += load
-            return picked["key"]
+            return key
 
     def release(self, worker_id, role, key, load, kv_cache=False):
         role = ServerRole(role)
@@ -595,8 +675,7 @@ async def _handle_completions(api: str, request: Request):
                             if chunk:
                                 yield chunk
                             continue
-                        for frame in frames:
-                            chunk_json = frame.payload
+                        for chunk_json in frames:
                             choices = chunk_json.get("choices", [])
                             if not choices:
                                 yield chunk

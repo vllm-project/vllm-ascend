@@ -1265,6 +1265,11 @@ this example. Keep these unauthenticated example endpoints on a trusted network.
 
 ## Example Proxy for Deployment
 
+The layerwise proxy is a standalone script: copy only
+`load_balance_proxy_layerwise_server_example.py` and install `fastapi`, `httpx`,
+and `uvicorn`. No other repository Python files or vLLM installation are needed
+on the proxy host.
+
 The layerwise proxy supports `--workers N` for Mooncake push deployments. With
 `N > 1`, each worker binds an independent `SO_REUSEPORT` listener on the public
 `--host:--port` address. The platform must support TCP `SO_REUSEPORT`. Backend

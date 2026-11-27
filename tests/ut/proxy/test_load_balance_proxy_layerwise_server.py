@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -184,6 +185,31 @@ def test_plain_stream_is_forwarded_unchanged():
     assert b"plain-token" in body
 
 
+def test_embedded_parser_handles_split_utf8_and_malformed_frames():
+    parser = proxy.SSEFrameParser()
+    payload = {"choices": [], "text": "你好"}
+    frame = b"data: " + json.dumps(payload, ensure_ascii=False).encode() + b"\n\n"
+    stream = b"data: invalid\n\ndata: []\n\n" + frame + DONE + frame
+    # Deliver UTF-8 characters across network reads; DONE drops trailing data.
+    cut = frame.index("你".encode()) + len(b"data: invalid\n\ndata: []\n\n") + 1
+    assert parser.feed(stream[:cut]) == []
+    assert parser.feed(stream[cut:]) == [payload]
+
+
+def test_scheduler_keeps_kv_pressure_until_release():
+    scheduler = proxy.LayerwiseScheduler([("p", 1), ("p", 2)], [("d", 1)])
+    for _ in range(32):
+        first = scheduler.reserve(0, "prefill", 100)
+        second = scheduler.reserve(1, "prefill", 1)
+        assert first != second
+        scheduler.release(0, "prefill", first, 100)
+        # P tokens are finished but its KV reservation still contributes load.
+        assert scheduler.reserve(2, "prefill", 1) == second
+        for worker_id in range(3):
+            scheduler.release_worker(worker_id)
+    assert scheduler.reserve(0, "prefill", 1) == first
+
+
 def test_shared_load_and_dead_worker_cleanup():
     scheduler = proxy.LayerwiseScheduler([("p", 1), ("p", 2)], [("d", 1), ("d", 2)])
     p0 = scheduler.reserve(0, "prefill", 100)
@@ -334,12 +360,18 @@ def running_proxy(request, tmp_path_factory):
     if workers > 1 and not hasattr(socket, "SO_REUSEPORT"):
         pytest.skip("Independent TCP listeners require SO_REUSEPORT")
     directory = tmp_path_factory.mktemp("layerwise")
+    script = directory / "standalone_proxy.py"
+    shutil.copyfile(EXAMPLES_DIR / "load_balance_proxy_layerwise_server_example.py", script)
     backend_port = _available_ports()
     port = _available_ports(workers + 1)
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(EXAMPLES_DIR.parents[1]), os.environ.get("PYTHONPATH", "")]))
+    backend_env = dict(
+        os.environ, PYTHONPATH=os.pathsep.join([str(EXAMPLES_DIR.parents[1]), os.environ.get("PYTHONPATH", "")])
+    )
+    # Keep the selected Uvicorn version, but exclude the checkout and sibling scripts.
+    env = dict(os.environ, PYTHONPATH=str(Path(uvicorn.__file__).resolve().parents[1]))
     command = [
         sys.executable,
-        str(EXAMPLES_DIR / "load_balance_proxy_layerwise_server_example.py"),
+        str(script),
         "--host",
         "127.0.0.1",
         "--port",
@@ -360,14 +392,14 @@ def running_proxy(request, tmp_path_factory):
     with (directory / "backend.log").open("w") as backend_log, (directory / "proxy.log").open("w") as proxy_log:
         backend = subprocess.Popen(
             [sys.executable, __file__, "--backend", str(backend_port)],
-            env=env,
+            env=backend_env,
             stdout=backend_log,
             stderr=backend_log,
         )
         process = None
         try:
             _wait_http(backend_port, backend)
-            process = subprocess.Popen(command, env=env, stdout=proxy_log, stderr=proxy_log)
+            process = subprocess.Popen(command, cwd=directory, env=env, stdout=proxy_log, stderr=proxy_log)
             ports = [port] if workers == 1 else list(range(port + 1, port + workers + 1))
             for listen_port in [port, *ports]:
                 _wait_http(listen_port, process)
@@ -457,7 +489,7 @@ def test_independent_listeners_restart_and_port_conflicts(running_proxy):
     # Occupied public or callback ports must fail, including another reuse group.
     for listen_port in (port, port + 2):
         with proxy.bind_listener("127.0.0.1", listen_port, reuse_port=True):
-            result = subprocess.run(command, env=env, capture_output=True, timeout=15)
+            result = subprocess.run(command, cwd=directory, env=env, capture_output=True, timeout=15)
             assert result.returncode != 0
 
 
