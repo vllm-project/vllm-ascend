@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    round_up,
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
@@ -97,11 +98,36 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
-# QLI and the legacy metadata op use 1024.
+# SparseFlashMla metadata has one entry per AIC/AIV scheduling field.
+SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC = 9
+SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV = 8
+SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 128
+SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE = 2048
 SAS_METADATA_BUFFER_SIZE = 1024
-SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
 QLI_METADATA_BUFFER_SIZE = 1024
+
+
+def _sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
+    properties = torch.npu.get_device_properties(device)
+    entries = (
+        SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num
+        + SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV * properties.vector_core_num
+    )
+    return max(
+        SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE,
+        round_up(entries, SPARSE_FLASH_MLA_PLAN_ALIGNMENT),
+    )
+
+
+def _copy_sas_metadata(buffer: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
+    size = plan.numel()
+    if not 0 < size <= buffer.numel():
+        raise ValueError(
+            f"SAS metadata size {size} is outside buffer capacity {buffer.numel()}"
+        )
+    # Keep the backing address stable and pass the exact plan shape to CANN.
+    output = buffer if size == buffer.numel() else buffer[:size]
+    return output.copy_(plan)
 
 
 class OProjBufferPool:
@@ -492,6 +518,7 @@ class AscendDSAReqMetadata:
     # key lets the compressor metadata be computed once per group per substep.
     cache_group_key: str = ""
     sas_metadata: torch.Tensor = None
+    sas_metadata_group_id: int | None = None
     qli_metadata: torch.Tensor = None
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
@@ -807,7 +834,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
-            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
+            _sparse_flash_mla_plan_buffer_size(self.device)
             if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
                 sparse_flash_mla_metadata,
@@ -1600,20 +1627,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                self.spec_sas_metadata[draft_index - 1][: self.sas_metadata_buffer_size].copy_(
-                    result[: self.sas_metadata_buffer_size]
+                return _copy_sas_metadata(
+                    self.spec_sas_metadata[draft_index - 1],
+                    result,
                 )
-                return self.spec_sas_metadata[draft_index - 1]
             return result
 
+        req_metadata_ref: list[AscendDSAReqMetadata | None] = [None]
         if build_dspark_swa is not None:
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
+            group_id = id(sas_metadata)
 
             def run_attention_metadata() -> None:
-                build_attention_metadata()
+                req_metadata = req_metadata_ref[0]
+                assert req_metadata is not None
+                req_metadata.sas_metadata = build_attention_metadata()
 
             self._device_metadata_tasks = (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, id(sas_metadata)),
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, group_id),
             )
         else:
             self._device_metadata_tasks = ()
@@ -1621,7 +1652,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
-        return AscendDSAReqMetadata(
+        req_metadata = AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
@@ -1634,6 +1665,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_reqs,
             cache_group_key=self.cache_group_key,
             sas_metadata=sas_metadata,
+            sas_metadata_group_id=group_id if build_dspark_swa is not None else None,
             qli_metadata=None,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
@@ -1641,6 +1673,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
         )
+        if build_dspark_swa is not None:
+            req_metadata_ref[0] = req_metadata
+        return req_metadata
 
     def build_for_graph_capture(
         self,
@@ -1769,7 +1804,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        output[: self.sas_metadata_buffer_size] = sas_metadata
+        output = _copy_sas_metadata(output, sas_metadata)
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
@@ -1900,10 +1935,18 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             )
 
         if self._device_metadata_enabled:
+            group_id = id(self.sas_metadata_buffer)
+
+            def run_sas_metadata() -> None:
+                req.sas_metadata = build_sas_metadata()
+
             self._device_metadata_tasks += (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+                DeviceMetadataTask(
+                    DeviceMetadataStage.ATTENTION, run_sas_metadata, group_id
+                ),
             )
             req.sas_metadata = self.sas_metadata_buffer
+            req.sas_metadata_group_id = group_id
         else:
             req.sas_metadata = build_sas_metadata()
         req.cu_cmp_seqlen_list = cu_seqlens_cmp_kv
@@ -2890,7 +2933,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
         notify_kv_cache_written(layer_name)
-        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
+        group_id = common_metadata.sas_metadata_group_id
+        if group_id is None:
+            group_id = id(common_metadata.sas_metadata)
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, group_id)
         record_attention_compute_start()
         kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
