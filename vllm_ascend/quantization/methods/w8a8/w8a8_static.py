@@ -149,7 +149,9 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         return output
 
     def input_quant_key(self):
-        return kInt8StaticTensorSym
+        if self.act_quant_type is torch.int8:
+            return kInt8StaticTensorSym
+        return None
 
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
