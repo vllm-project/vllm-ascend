@@ -114,7 +114,6 @@ def _verify_section(
     accept_len: int | None = None,
     blocks_override: int | None = None,
     records_override: int | None = None,
-    pipeline_stages: int = 2,
     layer_groups: tuple[int, ...] | None = None,
 ) -> tuple[float, float]:
     """Time the stock deferred path (``flush + verify``) against the fused
@@ -196,7 +195,6 @@ def _verify_section(
                 replay_boundary_state_indices=replay[2],
                 replay_boundary_recovery_lens=replay[3],
                 records_pool_size=records_override,
-                pipeline_stages=pipeline_stages,
             )
 
     t_stock = _time(lambda: run(ctxs_stock, layers_stock, False), steps, warmup)
@@ -453,9 +451,6 @@ def main() -> None:
                              "length from a truncated geometric (default: all accepted)")
     parser.add_argument("--accept-len", type=int, default=None,
                         help="fixed replay length for every request (overrides --accept-rate)")
-    parser.add_argument("--pipeline-stages", type=int, default=2,
-                        help="software-pipeline depth for the verify kernel's "
-                             "per-token loop")
     parser.add_argument("--layer-groups", type=str, default=None,
                         help="comma-separated commit-context sizes splitting the layers, "
                              "matching the scheduler's mamba cache groups (GLM-5.3-Flash "
@@ -531,7 +526,7 @@ def main() -> None:
             t_stock, t_fused = _verify_section(
                 layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
                 args.accept_rate, args.accept_len, args.blocks, records,
-                args.pipeline_stages, layer_groups=group_sizes,
+                layer_groups=group_sizes,
             )
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
@@ -634,7 +629,7 @@ def main() -> None:
         _verify_section(
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,
             args.accept_rate, args.accept_len, args.blocks, records,
-            args.pipeline_stages, layer_groups=group_sizes,
+            layer_groups=group_sizes,
         )
 
     if args.check:

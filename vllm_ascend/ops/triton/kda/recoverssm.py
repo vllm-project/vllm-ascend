@@ -30,10 +30,6 @@ RECOVERSSM_COMMIT_UB_HEADROOM_ROWS = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
-# Software-pipeline depth for the fused verify's hot loops. The dynamic-bound
-# replay and verify loops need an explicit tl.range(..., num_stages=N) request;
-# the launch-level num_stages default does not pipeline plain range() loops.
-RECOVERSSM_VERIFY_PIPELINE_STAGES = 2
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
@@ -145,7 +141,6 @@ def _kda_recoverssm_verify_kernel(
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
-    PIPELINE_STAGES: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -277,7 +272,7 @@ def _kda_recoverssm_verify_kernel(
                                 ALIGN_MODE,
                             )
                 else:
-                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=PIPELINE_STAGES):
+                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=2):
                         final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
                             replay_correction_ptr,
                             replay_kg_ptr,
@@ -325,7 +320,7 @@ def _kda_recoverssm_verify_kernel(
                         boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
                         tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
-    for token_offset in tl.range(0, query_len, num_stages=PIPELINE_STAGES):
+    for token_offset in tl.range(0, query_len, num_stages=2):
         token = bos + token_offset
         q = tl.load(
             q_ptr + token * stride_q_token + pid_h * K + offs_k,
@@ -1115,7 +1110,6 @@ def kda_recoverssm_verify(
     replay_boundary_recovery_lens: torch.Tensor | None = None,
     replay_align: bool = False,
     records_pool_size: int | None = None,
-    pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1288,9 +1282,8 @@ def kda_recoverssm_verify(
         ALIGN_MODE=replay_align,
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
-        PIPELINE_STAGES=pipeline_stages,
         num_warps=4,
-        num_stages=pipeline_stages,
+        num_stages=2,
     )
     return out
 
