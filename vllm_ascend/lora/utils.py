@@ -112,33 +112,6 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
 
 
 class AscendMergedColumnParallelLinearWithLoRA(_PackedLoRAAWeightsMixin):
-    def create_lora_weights(
-        self, max_loras: int, lora_config: LoRAConfig, model_config: PretrainedConfig | None = None
-    ) -> None:
-        # Host metadata follows the same slot lifetime as the device factors.
-        self.lora_slots_by_slice: list[set[int]] = [set() for _ in range(self.n_slices)]
-        super().create_lora_weights(max_loras, lora_config, model_config)
-
-    def reset_lora(self, index: int) -> None:
-        super().reset_lora(index)
-        for slots in self.lora_slots_by_slice:
-            slots.discard(index)
-
-    def set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor | list[torch.Tensor | None],
-        lora_b: torch.Tensor | list[torch.Tensor | None],
-    ) -> None:
-        super().set_lora(index, lora_a, lora_b)
-        for slice_index, (a, b) in enumerate(zip(lora_a, lora_b)):
-            if a is not None and b is not None:
-                self.lora_slots_by_slice[slice_index].add(index)
-
-    def has_active_lora(self, slice_index: int | None = None) -> bool:
-        slices = self.lora_slots_by_slice if slice_index is None else (self.lora_slots_by_slice[slice_index],)
-        return any(slots & self.punica_wrapper.active_lora_slots for slots in slices)
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -149,7 +122,9 @@ class AscendMergedColumnParallelLinearWithLoRA(_PackedLoRAAWeightsMixin):
         model_config: PretrainedConfig | None,
     ) -> bool:
         return (
-            type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear) and len(packed_modules_list) == 2
+            lora_config.max_loras == 1
+            and type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear)
+            and len(packed_modules_list) == 2
         )
 
 
@@ -238,6 +213,8 @@ class AscendVariableSliceWithLoRA(MergedColumnParallelLinearVariableSliceWithLoR
 
     def __init__(self, base_layer):
         super().__init__(base_layer)
+        # Paired vLLM c410543d9 lacks upstream 4c1ddc6d9f38. Remove this
+        # subclass and register the upstream class once that fix is paired.
         replicated = getattr(base_layer, "replicated_shard_ids", ())
         self.output_ids = tuple(0 if i in replicated else self.tp_rank for i in range(self.n_slices))
 
