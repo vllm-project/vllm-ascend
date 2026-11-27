@@ -204,7 +204,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     # commit context. Set per-instance in __init__ based on kda_decode_backend:
     # "triton" for the immediate commit path, "fp32_deferred" for deferred
     # verify (the commit is delayed to the next verify's flush).
-    recoverssm_backend: str = "triton"
+    recoverssm_backend = "triton"
 
     tp_size: int
     head_dim: int
@@ -583,8 +583,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
         deferred = getattr(attn_metadata_narrowed, "recoverssm_deferred", None)
+        # Idempotent: a no-op unless this narrowed path bypassed the outer forward.
         if use_spec and deferred is not None:
-            deferred.wait_layer(self.prefix)
+            deferred.start_flush(self.prefix)
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache

@@ -88,11 +88,6 @@ class KDARecoverSSMDeferred:
         self.started = True
         self.context.compact_conv(self.state_indices, self.record_rows[:rows], self.pending)
 
-    def wait_layer(self, prefix: str) -> None:
-        """No-op: the fused verify replays the pending state in-kernel."""
-        if not self.started and not self.flushed:
-            self.start_flush(prefix)
-
     def replay_plan(self):
         """The prepared plan for ``kda_recoverssm_verify``'s fused replay."""
         if not self.started:
