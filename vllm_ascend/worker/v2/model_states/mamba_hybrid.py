@@ -46,6 +46,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheSpec
+
+    from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
@@ -55,7 +58,7 @@ _PREPROCESS_BLOCK_SIZE = 256
 
 def _partition_gdn_groups(attn_groups: list[list[AttentionGroup]]):
     """Keep one full build per compatible GDN spec and preserve cache-group indices."""
-    leaders = {}
+    leaders: dict[tuple[KVCacheSpec, type[AscendGDNAttentionMetadataBuilder]], tuple[str, GDNGraphStateUpdater]] = {}
     followers = []
     build_groups = []
     for group_id, groups in enumerate(attn_groups):
@@ -589,7 +592,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )
-        graph_writes = {}
+        graph_writes: dict[GDNGraphStateUpdater, list] = {}
         for group_id, group, builder, (first_layer, updater) in followers:
             updated = builder.update_block_table(
                 metadata[first_layer],
