@@ -237,3 +237,63 @@ class TestEnableFaQuant(TestBase):
         self.assertFalse(result)
         result = enable_fa_quant(vllm_config, layer_name="test_layer")
         self.assertFalse(result)
+
+    @patch("vllm.model_executor.models.utils.get_draft_quant_config")
+    @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
+    def test_dspark_draft_uses_own_fa_quant_recipe_with_sfa_target(self, mock_profile, mock_get_draft_quant):
+        draft_quant_config = MagicMock(enable_fa_quant=True)
+        draft_quant_config.enabling_fa_quant.return_value = True
+        mock_get_draft_quant.return_value = draft_quant_config
+        mock_profile.return_value.supports.return_value = True
+        draft_model_config = SimpleNamespace(use_mla=True)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                use_mla=True,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+            ),
+            speculative_config=SimpleNamespace(
+                method="dspark",
+                draft_model_config=draft_model_config,
+            ),
+            quant_config=MagicMock(enable_fa_quant=False),
+            cache_config=SimpleNamespace(cache_dtype="fp8"),
+            kv_transfer_config=None,
+        )
+
+        with patch("vllm.compilation.backends.model_tag", "dspark_head"):
+            self.assertTrue(enable_fa_quant(vllm_config, layer_name="model.layers.93.self_attn.attn"))
+        mock_get_draft_quant.assert_called_once_with(vllm_config)
+        draft_quant_config.enabling_fa_quant.assert_called_once_with(
+            vllm_config,
+            "model.layers.93.self_attn.attn",
+        )
+
+        # Outside the draft loader scope, the same config remains a sparse
+        # target and must not enable dense FA quantization.
+        with patch("vllm.compilation.backends.model_tag", "backbone"):
+            self.assertFalse(enable_fa_quant(vllm_config))
+
+    @patch("vllm.model_executor.models.utils.get_draft_quant_config", return_value=None)
+    @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
+    def test_non_kimi_dspark_draft_keeps_fa_quant_validation(self, mock_profile, mock_get_draft_quant):
+        mock_profile.return_value.supports.return_value = True
+        draft = SimpleNamespace(
+            use_mla=True, quantization=None, hf_config=SimpleNamespace(model_type="other_dspark_mla")
+        )
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(use_mla=True, hf_text_config=SimpleNamespace(index_topk=2048)),
+            speculative_config=SimpleNamespace(method="dspark", draft_model_config=draft, kv_cache_dtype=None),
+            quant_config=MagicMock(enable_fa_quant=False),
+            cache_config=SimpleNamespace(cache_dtype="fp8"),
+            kv_transfer_config=None,
+        )
+        with patch("vllm.compilation.backends.model_tag", "dspark_head"):
+            self.assertFalse(enable_fa_quant(config, "model.layers.93.self_attn.attn"))
+            # A declared quantization method must not silently become BF16 if
+            # its config/recipe is missing. Preserve the existing ValueError.
+            draft.quantization = "ascend"
+            with self.assertRaises(ValueError):
+                enable_fa_quant(config, "model.layers.93.self_attn.attn")
+            mock_get_draft_quant.return_value = AscendModelSlimConfig(W8A8_CONFIG)
+            with self.assertRaisesRegex(ValueError, "corresponding quantized weights are required"):
+                enable_fa_quant(config, "model.layers.93.self_attn.attn")

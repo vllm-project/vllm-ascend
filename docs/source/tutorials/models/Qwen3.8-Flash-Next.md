@@ -38,6 +38,8 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
 Select the image for your target hardware.
@@ -56,26 +58,11 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -89,34 +76,11 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -130,29 +94,15 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=500g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -174,7 +124,7 @@ Initialize the CANN and ATB environments in the serving shell as described in th
 
 ### 4.3 Docker for Three-Tier PD Pooling
 
-Use these containers for [MemCache three-tier PD pooling](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Other deployment modes use Section 4.1. Container privileges follow the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks).
+Use these containers for MemCache three-tier PD pooling. Other deployment modes use [Section 4.1](#41-docker-image-installation). Container privileges follow the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks).
 
 Prepare storage on the **host**, then create one container per host using the matching hardware tab. Start the services inside the containers as described in Section 5.5.
 
@@ -236,7 +186,7 @@ Verify that all host device and file paths exist before running Docker.
 
 !!! note "950DT products communication prerequisites"
 
-    Prepare the communication environment following the [950DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#950pr950dt-products-container-requirements) and [MemCache environment preparation](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Add communication-file mounts required by the selected runtime and transport; the container requirements describe when `/lib/route.conf` can be omitted.
+    Prepare the communication environment following the [950DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#950pr950dt-products-container-requirements) and the prerequisite steps in [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Add communication-file mounts required by the selected runtime and transport; the container requirements describe when `/lib/route.conf` can be omitted.
 
 === "A2 series"
 
@@ -249,26 +199,10 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -293,35 +227,11 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       --device "${SSD_DEVICE_PATH_2}:${SSD_DEVICE_PATH_2}" \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -339,29 +249,14 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=500g \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
@@ -386,7 +281,7 @@ python -c "import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid
 
 Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO memory separately from the container's `/dev/shm` limit (`--shm-size`).
 
-!!! note "950 DT pooling runtime"
+!!! note "950DT pooling runtime"
 
     Use a runtime that supports Qwen3.8-Flash-Next and MemCache three-tier pooling. Initialize CANN/ATB as described in Section 4.1. If the image does not initialize its repository, custom operators, and model libraries automatically, apply the following in each service shell; use actual container paths, with library directories separated by `:`.
 
@@ -399,6 +294,17 @@ Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO m
     ```
 
     Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.5.
+
+### 4.4 Verify the GBSA interface
+
+Qwen3.8-Flash-Next uses the `cann_ops_transformer` Python interface for standard GBSA Decode
+and Union GBSA Prefill. After installing the CANN ops package for your device and initializing
+the CANN and ATB environments, run this check in the same shell you will use to start
+`vllm serve`. For Docker installations, run it inside the serving container.
+
+```bash
+python -c "from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention"
+```
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -545,7 +451,7 @@ Before starting:
 
 **Service Verification:**
 
-Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A2 series and A3 series or `8087` for 950 DT:
+Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A2 series and A3 series or `8087` for 950DT:
 
 ```bash
 curl --fail "http://127.0.0.1:8088/v1/models"
@@ -557,7 +463,7 @@ The response should list the configured model name. After startup, use [Section 
 
 Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.
 
-For 950DT products, basic PD, the image-and-text 10K case, and the long-context case use the same Docker container setup from [Section 4.1](#41-docker-image-installation), under the `950DT products` tab.
+For 950DT products, basic PD, the image-and-text 10k case, and the long-context case use the same Docker container setup from [Section 4.1](#41-docker-image-installation), under the `950DT products` tab.
 
 !!! note
 
@@ -734,11 +640,16 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -751,6 +662,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
     export HCCL_BUFFSIZE=8192
+    export HCCL_BUFFSIZE_EP=4096
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -784,11 +696,15 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -800,7 +716,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
-    export HCCL_BUFFSIZE=512
+    export HCCL_BUFFSIZE=1024
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -810,6 +726,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
+        --data-parallel-address "${local_ip}" \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -893,7 +810,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -901,13 +821,14 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -959,7 +880,10 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -967,12 +891,13 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+    unset VLLM_USE_FASTOKENS
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
@@ -1078,9 +1003,9 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
 - Keep Mooncake DP2/TP2 declarations consistent with the services. The proxy connects to Prefill on port 8088 and Decode on port 8092. Keep the configured KV base ports at 30000 and 30100; the connector applies rank offsets internally.
 
-### 5.3 Image-and-Text 10K PD Separation Deployment
+### 5.3 Image-and-Text 10k PD Separation Deployment
 
-The 10K target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
+The 10k target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
 
 For A2 and A3, make sure Mooncake is importable in both serving containers before running the environment setup. If needed, follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md).
 
@@ -1224,7 +1149,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
     **Service Verification:**
 
-    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
+    Send a 10k sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
@@ -1232,7 +1157,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
         -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
 
-    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10k target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1374,7 +1299,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
     **Service Verification:**
 
-    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
+    Send a 10k sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
@@ -1382,7 +1307,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
         -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
 
-    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10k target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1392,9 +1317,9 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
 === "950DT products"
 
-    This case uses the same eight-device 950DT products host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
+    This case uses the same eight-device 950DT products host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10k validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
 
-    The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
+    The 10k target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
 
     Initialize the environment as described in [Section 4](#4-installation) and run Prefill and Decode in separate terminals. Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp` from ModelScope.
 
@@ -1487,7 +1412,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
     **Service Verification:**
 
-    Check P TP2/PP2/DP1, D TP2/DP2 with static kernels, and `max_model_len=143360` in the startup logs. Send a 10K sample through the proxy, replacing `<IMAGE_URL>` and `<TEXT_PROMPT>` with an accessible image and its text:
+    Check P TP2/PP2/DP1, D TP2/DP2 with static kernels, and `max_model_len=143360` in the startup logs. Send a 10k sample through the proxy, replacing `<IMAGE_URL>` and `<TEXT_PROMPT>` with an accessible image and its text:
 
     ```bash
     curl --fail "http://127.0.0.1:8247/v1/models"
@@ -1497,7 +1422,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
 
-    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10k target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1517,7 +1442,7 @@ This section extends the model context for PD separation on A2 series, A3 series
 
     Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
 
-    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.33.0, and verify the long-context request on your target image.
+    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.34.0, and verify the long-context request on your target image.
 
 On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
 
@@ -1942,7 +1867,7 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
 
 ### 5.5 PD Separation with MemCache Three-Tier KV Cache Pool
 
-`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. Each hardware tab contains its complete pooling Prefill and Decode commands. A2 uses the basic PD topology from [Section 5.2](#52-basic-pd-separation-deployment). A3 uses a dedicated Prefill topology for the 128K/1K multi-prefix workload. This section does not cover colocated deployment, the image-and-text 10K case, or the long-context case.
+`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. Each hardware tab contains its complete pooling Prefill and Decode commands. A2 uses the basic PD topology from [Section 5.2](#52-basic-pd-separation-deployment). A3 uses a dedicated Prefill topology for the 128k/1k multi-prefix workload. This section does not cover colocated deployment, the image-and-text 10k case, or the long-context case.
 
 **Before starting:**
 
@@ -2206,7 +2131,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "A3 series"
 
-    The 128K/1K multi-prefix pooling example uses 16 devices, eight per role. Prefill uses TP2 × PP2 × DP2 (EP4) on devices 0–7, and Decode uses TP2 × DP4 (EP8) on devices 8–15. Both Mooncake configurations declare this topology. Both roles enable Engram CPU offload and DP shared memory.
+    The 128k/1k multi-prefix pooling example uses 16 devices, eight per role. Prefill uses TP2 × PP2 × DP2 (EP4) on devices 0–7, and Decode uses TP2 × DP4 (EP8) on devices 8–15. Both Mooncake configurations declare this topology. Both roles enable Engram CPU offload and DP shared memory.
 
     **Prepare a new pool:**
 
@@ -2606,7 +2531,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 **Verify three-tier cache reuse:**
 
-1. **Service:** Run the Section 5.2 chat-completion request for A2/A3, or the 950 DT request above, through the matching proxy and verify correct output and P-to-D transfer.
+1. **Service:** Run the Section 5.2 chat-completion request for A2/A3, or the 950DT request above, through the matching proxy and verify correct output and P-to-D transfer.
 2. **External cache:** Send requests with shared prefixes and different suffixes; check MemCache lookup, put, get, and hit activity. A local prefix-cache hit alone does not prove external cache reuse.
 3. **SSD restore:** Fill DRAM past the eviction watermark, confirm SSD eviction, then request an evicted prefix again and verify SSD read/restore activity and correct output. Keep MetaService and P/D running; SSD writes alone do not prove restoration.
 
@@ -2631,11 +2556,11 @@ Verify generation through `/v1/chat/completions`, using the API address and mode
 | A2 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | 950DT products PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
-| 950DT products image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
+| 950DT products image-and-text 10k PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 | 950DT products long-context PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 | 950DT products three-tier pooling PD proxy | `http://127.0.0.1:8249` | `qwen38-megamoe-sp-pd` |
 
-For PD, first complete the matching startup and proxy checks in Sections [5.2](#52-basic-pd-separation-deployment), [5.3](#53-image-and-text-10k-pd-separation-deployment), [5.4](#54-long-context-pd-separation-deployment), or [5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Pooling also requires the SSD eviction/restore checks in Section 5.5.
+For PD, first complete the matching startup and proxy checks in [Section 5.2](#52-basic-pd-separation-deployment), [Section 5.3](#53-image-and-text-10k-pd-separation-deployment), [Section 5.4](#54-long-context-pd-separation-deployment), or [Section 5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Pooling also requires the SSD eviction/restore checks in [Section 5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool).
 
 ### 6.1 Basic Chat Completion
 
@@ -2850,20 +2775,20 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
 | A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
 | 950DT products | Decode (basic PD) | 4–7 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
-| A2 series | Prefill (image-and-text 10K) | 0–7 on prefill host | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
-| A3 series | Prefill (image-and-text 10K) | 0–7 | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
-| 950DT products | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
-| A2 series | Decode (image-and-text 10K) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
-| A3 series | Decode (image-and-text 10K) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
-| 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
+| A2 series | Prefill (image-and-text 10k) | 0–7 on prefill host | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
+| A3 series | Prefill (image-and-text 10k) | 0–7 | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
+| 950DT products | Prefill (image-and-text 10k) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
+| A2 series | Decode (image-and-text 10k) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
+| A3 series | Decode (image-and-text 10k) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
+| 950DT products | Decode (image-and-text 10k) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 | A2 series | Prefill (long-context) | 0–7 on prefill host | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
 | A3 series | Prefill (long-context) | 0–7 | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
 | 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
 | A2 series | Decode (long-context) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
 | A3 series | Decode (long-context) | 8–15 | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
 | 950DT products | Decode (long-context) | 4–7 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
-| A3 series | Prefill (128K/1K three-tier pooling) | 0–7 | 2 × 2 × 2 (EP4) | 262144 | 32 | 8192 |
-| A3 series | Decode (128K/1K three-tier pooling) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
+| A3 series | Prefill (128k/1k three-tier pooling) | 0–7 | 2 × 2 × 2 (EP4) | 262144 | 32 | 8192 |
+| A3 series | Decode (128k/1k three-tier pooling) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
 | 950DT products | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 (EP4) | 262144 | 64 | 4096 |
 | 950DT products | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 (EP4) | 262144 | 64 | 4096 |
 

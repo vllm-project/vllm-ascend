@@ -45,6 +45,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
@@ -57,6 +58,9 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
@@ -64,16 +68,20 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
+        HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     },
     AscendDeviceType._310P: frozenset(
         {
@@ -107,6 +115,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
+            HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
@@ -118,13 +127,14 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
-            HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+            HardwareCapability.MM_REDUCE_SCATTER_BF16,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.NPU_TOP_K_TOP_P,
+            HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
             HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -272,6 +282,19 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
 
 
 @pytest.mark.parametrize(
+    "device_type,expected_min_rows",
+    [
+        (AscendDeviceType.A2, 2048),
+        (AscendDeviceType.A3, 2048),
+        (AscendDeviceType.A5, 1024),
+    ],
+)
+def test_qwen4exp_hc_gate_mix_row_block_threshold(device_type, expected_min_rows):
+    profile = get_hardware_profile(device_type)
+    assert profile.qwen4exp_hc_gate_mix_row_block_min_rows == expected_min_rows
+
+
+@pytest.mark.parametrize(
     "device_type,expected_precision",
     [
         (AscendDeviceType.A2, 0),
@@ -323,8 +346,8 @@ def test_every_device_type_has_a_profile() -> None:
 @pytest.mark.parametrize(
     ("device_type", "models"),
     [
-        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX})),
-        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN})),
+        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN})),
         (AscendDeviceType.A5, frozenset({FlashAttentionNpu3Model.STEP5})),
         (AscendDeviceType._310P, frozenset()),
     ],

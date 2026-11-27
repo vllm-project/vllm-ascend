@@ -31,7 +31,6 @@ def make_config(text_config=None):
             pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
         ),
         kv_transfer_config=None,
-        use_v2_model_runner=True,
     )
 
 
@@ -81,7 +80,6 @@ def test_unrelated_model_is_not_selected():
         ("speculative_config", "method", "dflash", "supports DSpark"),
         ("speculative_config", "method", "mtp", "supports DSpark"),
         ("speculative_config", "enable_adaptive_verification", True, "adaptive verification"),
-        (None, "use_v2_model_runner", False, "Model Runner V2"),
         ("mamba_config", "enable_stochastic_rounding", True, "stochastic rounding"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),

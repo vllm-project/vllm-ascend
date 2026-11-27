@@ -19,7 +19,7 @@ def test_tensor_collection_deduplicates_exact_impl_alias_but_keeps_distinct_view
     model = torch.nn.Module()
     model.register_parameter("weight", weight)
     model.impl = SimpleNamespace(weight=weight, view=weight[:2])
-    monkeypatch.setattr(tensor_layout, "is_transferable_tensor", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_transferable_tensor", lambda _tensor: True)
 
     collected = tensor_layout.collect_transferable_tensors(model, processed_layout=True)
 
@@ -30,7 +30,7 @@ def test_tensor_collection_deduplicates_exact_impl_alias_but_keeps_distinct_view
 @pytest.mark.parametrize("processed_layout", [False, True])
 def test_bfs_discards_plain_leaves_before_classification(tensor_runtime, monkeypatch, processed_layout):
     layout = tensor_runtime.tensor_layout
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_tensor_on_transfer_device", lambda _tensor: True)
     model = torch.nn.Module()
     model.weight = torch.nn.Parameter(torch.ones(2))
     model.register_buffer("scale", torch.tensor(1.0))
@@ -45,8 +45,8 @@ def test_bfs_discards_plain_leaves_before_classification(tensor_runtime, monkeyp
         tuple_values=tuple(leaves),
         mapping=dict(enumerate(leaves)),
     )
-    classify = Mock(wraps=layout._tensor_child_key)
-    monkeypatch.setattr(layout, "_tensor_child_key", classify)
+    classify = Mock(wraps=tensor_runtime.weight_state._tensor_child_key)
+    monkeypatch.setattr(tensor_runtime.weight_state, "_tensor_child_key", classify)
 
     collected = layout.collect_transferable_tensors(model, processed_layout)
 
@@ -61,7 +61,7 @@ def test_bfs_discards_plain_leaves_before_classification(tensor_runtime, monkeyp
 
 @pytest.mark.parametrize("processed_layout", [False, True])
 def test_collector_excludes_scheduler_sized_topk_indices_buffer(tensor_runtime, monkeypatch, processed_layout):
-    monkeypatch.setattr(tensor_runtime.tensor_layout, "is_transferable_tensor", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_transferable_tensor", lambda _tensor: True)
 
     def make_model(max_num_batched_tokens):
         model = torch.nn.Module()
@@ -129,9 +129,10 @@ def test_post_load_layout_diagnostic_failure_does_not_escape(tensor_runtime, mon
 def test_session_reuses_inventory_and_final_digest(runtime, monkeypatch, processed_layout, exclude_shared):
     prefix = "vllm_ascend.model_loader.rfork"
     layout = sys.modules[f"{prefix}.tensor_layout"]
+    walker = sys.modules["vllm_ascend.model_loader.weight_state"]
     transfer = _load_module(monkeypatch, f"{prefix}.transfer_backend", "transfer_backend.py")
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", transfer.RForkTransferBackend)
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(walker, "is_tensor_on_transfer_device", lambda tensor: True)
     monkeypatch.setattr(layout, "read_npu_format", lambda tensor: 0)
     monkeypatch.setattr(transfer, "read_npu_format", lambda tensor: 0)
     monkeypatch.setattr(sys.modules[f"{prefix}.manifest"], "read_npu_format", lambda tensor: 0)
@@ -211,7 +212,7 @@ def test_bfs_preserves_device_empty_meta_and_layout_checks(tensor_runtime, monke
     cpu = torch.ones(3)
     model.impl = {"weight": weight, "cpu": cpu, "empty": torch.empty(0), "meta": torch.empty(2, device="meta")}
     layout = tensor_runtime.tensor_layout
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: tensor is not cpu)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_tensor_on_transfer_device", lambda tensor: tensor is not cpu)
 
     collected = layout.collect_transferable_tensors(model, True)
 
@@ -225,7 +226,7 @@ def test_bfs_preserves_device_empty_meta_and_layout_checks(tensor_runtime, monke
 @pytest.mark.parametrize("processed_layout", [False, True])
 def test_registered_tensors_stay_canonical_over_shallower_aliases(tensor_runtime, monkeypatch, processed_layout):
     layout = tensor_runtime.tensor_layout
-    monkeypatch.setattr(layout, "is_transferable_tensor", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_transferable_tensor", lambda _tensor: True)
     model = torch.nn.Module()
     model.layer = torch.nn.Module()
     model.layer.inner = torch.nn.Linear(2, 2, bias=False)
@@ -251,7 +252,7 @@ def test_registration_digest_reads_formats_only_for_excluded_tensors(tensor_runt
     model = torch.nn.Module()
     model.weight = torch.nn.Parameter(torch.ones(4))
     model.register_buffer("shared", torch.ones(2))
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_tensor_on_transfer_device", lambda _tensor: True)
     monkeypatch.setattr(transfer, "read_npu_format", lambda _tensor: 29)
     layout_reads = Mock(return_value=29)
     monkeypatch.setattr(layout, "read_npu_format", layout_reads)

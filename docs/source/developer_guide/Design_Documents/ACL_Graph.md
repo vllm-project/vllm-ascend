@@ -11,7 +11,7 @@ On Ascend, the design goal is the same as upstream static graph execution: reduc
 - Upstream vLLM design doc for generic graph concepts: [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/).
 - PyTorch graph documentation for generic capture and replay semantics: [Accelerating PyTorch with CUDA Graphs](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/).
 - Ascend user guide for operational enablement: [Graph Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html).
-- Existing repo design note: [ACL Graph](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/Design_Documents/ACL_Graph.html)
+- Existing repo design note: [ACL Graph](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/Design_Documents/ACL_Graph.html).
 
 This document intentionally does not re-explain upstream topics such as graph mode selection, dispatcher behavior, batch descriptor construction, capture bucketing, padding policy, or the generic meaning of full versus piecewise execution.
 
@@ -77,7 +77,6 @@ This mechanism is implemented in attention backends such as:
 
 - `vllm_ascend/attention/attention_v1.py`
 - `vllm_ascend/attention/mla_v1.py`
-- `vllm_ascend/attention/context_parallel/attention_cp.py`
 - `vllm_ascend/attention/context_parallel/mla_cp.py`
 
 The important design point is that Ascend full graph support depends on backend-provided `update_graph_params()` hooks. Without that hook, capture alone is not enough to replay the correct attention state.
@@ -111,9 +110,7 @@ Full graph mode is the more performance-oriented path when the attention backend
 ## Related Files
 
 - `vllm_ascend/platform.py`, mode normalization, platform hooks, and static graph wrapper selection.
-- `vllm_ascend/compilation/acl_graph.py`, ACL graph wrapper, capture and replay cache, graph parameter containers, and full graph update dispatch.
-- `vllm_ascend/compilation/acl_graph.py`, runtime ACL graph capture, replay, and capture-failure guidance.
+- `vllm_ascend/compilation/acl_graph.py`, ACL graph wrapper, capture and replay cache, graph parameter containers, full graph update dispatch, and capture-failure guidance.
 - `vllm_ascend/attention/attention_v1.py`, full graph attention parameter capture and update logic.
 - `vllm_ascend/attention/mla_v1.py`, MLA (Multi-Head Latent Attention) specific full graph parameter capture and update logic.
-- `vllm_ascend/attention/context_parallel/attention_cp.py`, context parallel attention update path.
 - `vllm_ascend/attention/context_parallel/mla_cp.py`, context parallel MLA update path.

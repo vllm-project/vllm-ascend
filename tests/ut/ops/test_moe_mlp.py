@@ -68,9 +68,15 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
         return method
 
     def test_apply_gmm1_act_quant_custom_op_path(self):
-        method = self._make_method()
-        layer = _w8a8_layer()
-        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, dynamic_eplb=True)
+        method = self._make_method(use_expert_weight_list=True)
+        layer = SimpleNamespace(
+            w13_weight_list=[torch.randn(8, 16)],
+            w13_weight_scale_fp32_list=[torch.randn(8)],
+            w2_weight_list=[torch.randn(16, 8)],
+            w2_weight_scale_list=[torch.randn(16)],
+            activation="silu",
+        )
+        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True)
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
@@ -87,12 +93,13 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
             out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
         self.assertEqual((out, scale), ("out", "scale"))
         mock_op.assert_called_once()
-        self.assertIs(mock_op.call_args.kwargs["weight"][0], layer.w13_weight)
+        self.assertIs(mock_op.call_args.kwargs["weight"], layer.w13_weight_list)
+        self.assertIs(mock_op.call_args.kwargs["weight_scale"], layer.w13_weight_scale_fp32_list)
 
     def test_apply_gmm1_act_quant_fused_op_path(self):
         method = self._make_method()
         layer = _w8a8_layer()
-        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, dynamic_eplb=False)
+        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True)
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
@@ -603,15 +610,15 @@ class TestUnifiedApplyActivation(unittest.TestCase):
         up = linear_beta * torch.tanh(up / linear_beta)
         self.assertTrue(torch.allclose(out, gate * up))
 
-    def test_swiglustep_uses_hardcoded_limit(self):
-        with patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value="out") as mock_act:
+    def test_swiglustep_uses_its_own_limit(self):
+        with patch("vllm.triton_utils.HAS_TRITON", False):
             out = _unified_apply_activation(
-                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0),
-                "x",
+                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0, swiglustep_limit=4.0),
+                torch.tensor([[8.0, 6.0]]),
                 self._quant_method(),
             )
-        self.assertEqual(out, "out")
-        mock_act.assert_called_once_with("x", limit=7.0)
+        # min(SiLU(8), 4) * clamp(6, -4, 4)
+        torch.testing.assert_close(out, torch.tensor([[16.0]]))
 
     def test_swigluoai_uninterleave_uses_clipped_swiglu(self):
         with patch(f"{MOE_MLP}.DeviceOperator.clipped_swiglu", return_value="out") as mock_act:

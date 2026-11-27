@@ -7,10 +7,11 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_mock_ascend_config,
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DSDynamicLinearMethod,
@@ -18,6 +19,8 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 # The MXFP schemes gate on the MX weight format at construction; tests build
 # them on any machine by pinning a profile that reports MXFP8 support.
@@ -347,9 +350,106 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
 
 
 class TestAscendW8A8MXFP8DSLinearMethod(TestBase):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    def setUp(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
+        mx_profile = allow_mx_weight_format()
+        mx_profile.start()
+        self.addCleanup(mx_profile.stop)
+        self.scheme = AscendW8A8MXFP8DSDynamicLinearMethod()
+
+    def test_dsa_wo_a_3d_layout(self):
+        group_size = 32
+        for n_local_groups, o_lora_rank, hidden in [(1, 4, 64), (1, 128, 1024), (2, 4, 64), (4, 4, 64)]:
+            with self.subTest(n_local_groups=n_local_groups, o_lora_rank=o_lora_rank, hidden=hidden):
+                self._check_dsa_wo_a_3d_layout(n_local_groups, o_lora_rank, hidden, group_size)
+
+    def _check_dsa_wo_a_3d_layout(self, n_local_groups, o_lora_rank, hidden, group_size):
+        output_size = n_local_groups * o_lora_rank
+        scale_k_dim = hidden // group_size
+        weight = (torch.arange(output_size * hidden) % 256).to(torch.uint8).reshape(output_size, hidden)
+        weight = weight.to(torch.float8_e4m3fn)
+        scale = (torch.arange(output_size * scale_k_dim) % 256).to(torch.uint8).reshape(output_size, scale_k_dim)
+        expected_weight = weight.reshape(n_local_groups, o_lora_rank, hidden).transpose(1, 2).contiguous()
+        expected_scale = scale.reshape(n_local_groups, o_lora_rank, scale_k_dim // 2, 2).transpose(1, 2).contiguous()
+
+        layer = nn.Module()
+        layer.weight = nn.Parameter(weight.clone(), requires_grad=False)
+        layer.weight_scale = nn.Parameter(scale.clone(), requires_grad=False)
+        layer.prefix = "model.layers.0.attn.wo_a"
+        layer.skip_weight_nz_conversion = True
+        layer.o_lora_rank = o_lora_rank
+
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz") as mock_nz:
+            self.scheme.process_weights_after_loading(layer)
+        mock_nz.assert_not_called()
+        self.assertEqual(layer.weight.shape, (n_local_groups, hidden, o_lora_rank))
+        self.assertEqual(layer.weight_scale.shape, (n_local_groups, scale_k_dim // 2, o_lora_rank, 2))
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
+        torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
+        torch.testing.assert_close(layer.weight_scale, expected_scale)
+
+    def test_output_sharded_full_weight_prefill_gather(self):
+        # Two PCP ranks. 3D wo_a groups live on dim 0 after post-processing, so
+        # a dim-1 gather would expand K ([1, 64, 4] -> [1, 128, 4]) instead of
+        # reconstructing groups ([2, 64, 4]).
+        hidden = 64
+        local_output = 4
+        layers = [self._processed_output_sharded_layer(hidden, local_output, rank) for rank in range(2)]
+        gather_specs, _, shard_axis = self.scheme._get_weight_switch_specs(
+            layers[0],
+            WeightSwitchConfig(group=object(), world_size=2, rank=0),
+        )
+        self.assertEqual(shard_axis, "output")
+        self.assertEqual([spec.gather_dim for spec in gather_specs], [0, 0])
+
+        local_weights = [layer.weight.detach().clone() for layer in layers]
+        local_scales = [layer.weight_scale.detach().clone() for layer in layers]
+        self._gather_two_rank_full_weights(layers)
+
+        self.assertEqual(tuple(layers[0].weight.shape), (2, hidden, local_output))
+        self.assertEqual(tuple(layers[0].weight_scale.shape), (2, 1, local_output, 2))
+        torch.testing.assert_close(
+            layers[0].weight.float(),
+            torch.cat(local_weights, dim=0).float(),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(layers[0].weight_scale, torch.cat(local_scales, dim=0))
+
+    def _processed_output_sharded_layer(self, hidden, local_output, rank):
+        weight = (torch.arange(local_output * hidden) + rank * 17) % 256
+        weight = weight.to(torch.uint8).reshape(local_output, hidden).to(torch.float8_e4m3fn)
+        scale_k = hidden // self.scheme.group_size
+        scale = (torch.arange(local_output * scale_k) + rank * 17) % 256
+        scale = scale.to(torch.uint8).reshape(local_output, scale_k)
+        layer = nn.Module()
+        layer.weight = nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = nn.Parameter(scale, requires_grad=False)
+        layer.input_size = hidden
+        layer.input_size_per_partition = hidden
+        layer.output_size = local_output * 2
+        layer.output_size_per_partition = local_output
+        layer.skip_weight_nz_conversion = True
+        layer.prefix = "model.layers.0.attn.wo_a"
+        layer.o_lora_rank = local_output
+        self.scheme.process_weights_after_loading(layer)
+        return layer
+
+    def _gather_two_rank_full_weights(self, layers):
+        config = WeightSwitchConfig(group=object(), world_size=len(layers), rank=0)
+        states = [self.scheme.enable_weight_switch(layer, config) for layer in layers]
+        for name in ("weight", "weight_scale"):
+            gathered = torch.cat([state.gather_parts[name].gather_input for state in states], dim=0)
+            states[0].gather_parts[name].gather_output.copy_(gathered)
+        self.scheme.switch_weight(layers[0], states[0], use_full_weight=True)
+
     def test_process_weights_uses_checkpoint_block_size(self):
         for block_size, output_size, input_size in ((32, 64, 64), (128, 256, 256)):
             scheme = object.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.quant_method = None
             scheme.block_size = block_size
             scheme.group_size = 32
             layer = nn.Module()
@@ -382,10 +482,8 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = allow_mx_weight_format()
         mx_profile.start()
         self.addCleanup(mx_profile.stop)
@@ -401,27 +499,16 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.addCleanup(mega_moe.stop)
         mega_moe.start()
 
-    def test_expert_lists_follow_v1_and_v2_eplb_configuration(self):
-        for use_v2, dynamic_eplb, enable_eplb, expected in (
-            (False, False, False, False),
-            (False, True, False, True),
-            (True, False, True, True),
-            (True, True, False, False),
-        ):
-            with self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb):
+    def test_expert_lists_follow_upstream_eplb_configuration(self):
+        for enable_eplb in (False, True):
+            expected = enable_eplb
+            with self.subTest(enable_eplb=enable_eplb):
                 config = create_mock_vllm_config()
-                config.use_v2_model_runner = use_v2
                 config.parallel_config.enable_eplb = enable_eplb
-                ascend_config = create_mock_ascend_config()
-                ascend_config.eplb_config.dynamic_eplb = dynamic_eplb
                 with (
                     patch(
                         "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                         return_value=config,
-                    ),
-                    patch(
-                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                        return_value=ascend_config,
                     ),
                     allow_mx_weight_format(),
                 ):
@@ -504,15 +591,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
         vllm_config.quant_config = SimpleNamespace()
-        vllm_config.use_v2_model_runner = True
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
-            ),
-            patch(
-                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                return_value=create_mock_ascend_config(),
             ),
             allow_mx_weight_format(),
         ):
@@ -712,7 +794,6 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = None
         layer.swiglu_alpha = 1.0
         layer.swiglu_beta = 0.0
@@ -729,6 +810,36 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        expanded_x = x.repeat_interleave(topk_ids.shape[1], dim=0)
+        mlp_input = build_mlp_compute_input(
+            fused_experts_input=fused_input,
+            token_dispatch_output=MoETokenDispatchOutput(
+                hidden_states=expanded_x,
+                group_list=torch.ones(self.num_experts, dtype=torch.int64),
+                group_list_type=1,
+                dynamic_scale=None,
+                topk_scales=None,
+                combine_metadata=SimpleNamespace(),
+            ),
+            use_fusion_ops=False,
+        )
+        output = torch.randn(expanded_x.shape[0], 2 * self.intermediate_size, dtype=torch.bfloat16)
+        with (
+            patch.object(
+                self.scheme, "_quant_hidden_states", return_value=(expanded_x, torch.ones(expanded_x.shape[0]))
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_grouped_matmul",
+                return_value=[output],
+                create=True,
+            ) as grouped_matmul,
+        ):
+            result = self.scheme.apply_gmm1(mlp_input)
+
+        self.assertIs(result, output)
+        self.assertIs(grouped_matmul.call_args.kwargs["weight"], layer.w13_weight_list)
+        self.assertIs(grouped_matmul.call_args.kwargs["scale"], layer.w13_weight_scale_list)
 
 
 class TestDSMXFP8OProjLayout(TestBase):
@@ -737,6 +848,7 @@ class TestDSMXFP8OProjLayout(TestBase):
 
         for local_groups in (1, 2, 8):
             scheme = AscendW8A8MXFP8DSDynamicLinearMethod.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+            scheme.quant_method = None
             scheme.block_size = 128
             scheme.group_size = 32
             scheme.n_local_groups = 8  # Ordinary TP differs from OTP.

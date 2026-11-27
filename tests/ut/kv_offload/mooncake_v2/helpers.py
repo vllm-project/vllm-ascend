@@ -25,6 +25,22 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def vllm_dcp_ranks_by_worker(tp_size: int, pcp_size: int, dcp_size: int) -> tuple[int, ...]:
+    """Return each Mooncake worker's expected rank in its vLLM DCP group."""
+    # TODO: Remove this branch once the release tag and verified main both include vllm-project/vllm#64534.
+    if not vllm_version_is("0.34.0"):
+        return tuple(range(dcp_size)) * (tp_size * pcp_size // dcp_size)
+
+    global_ranks = [pcp * tp_size + tp for tp in range(tp_size) for pcp in range(pcp_size)]
+    dcp_ranks = {}
+    for start in range(0, len(global_ranks), dcp_size):
+        group = sorted(global_ranks[start : start + dcp_size])
+        for dcp_rank, global_rank in enumerate(group):
+            dcp_ranks[global_rank] = dcp_rank
+    return tuple(dcp_ranks[rank] for rank in global_ranks)
 
 
 def make_kv_cache_tensor(
@@ -223,16 +239,10 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "_all_token_ids": list(range(32)),
         "max_tokens": 16,
         "block_hashes": [],
+        "truncate_block_hashes": MagicMock(),
     }
     values.update(overrides)
-    request = SimpleNamespace(**values)
-    if "update_block_hashes" not in overrides:
-
-        def update_block_hashes() -> None:
-            request.block_hashes.append(tuple(request._all_token_ids))
-
-        request.update_block_hashes = update_block_hashes
-    return request
+    return SimpleNamespace(**values)
 
 
 def make_blocks(

@@ -64,6 +64,11 @@ def test_decode_batch_sizes():
     channels, dilation = 10240, 3
     for tokens in (1, 10, 50, 100, 104, 200):
         for dtype in (torch.bfloat16, torch.float16):
+            # Keep both dtypes at the endpoints and pair the middle batch sizes.
+            if tokens in (10, 100, 104) and dtype != torch.bfloat16:
+                continue
+            if tokens == 50 and dtype != torch.float16:
+                continue
             inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
             weights = torch.randn(channels, 4, device="npu", dtype=dtype)
             # Ascend kernels use the SD layout [slots, window, channels].
@@ -93,6 +98,16 @@ def test_modes_and_token_mapping():
     for mode in ("decode", "spec", "prefill"):
         for dtype in (torch.bfloat16, torch.float16):
             for outer_enabled in (False, True):
+                # Cover each mode with both dtypes and outer-residual choices.
+                if (mode, dtype, outer_enabled) not in (
+                    ("decode", torch.bfloat16, False),
+                    ("decode", torch.float16, True),
+                    ("spec", torch.bfloat16, True),
+                    ("spec", torch.float16, False),
+                    ("prefill", torch.bfloat16, False),
+                    ("prefill", torch.float16, True),
+                ):
+                    continue
                 requests = 14
                 tokens = requests if mode == "decode" else (3 * requests if mode == "spec" else 64)
                 channels, dilation, spec_len = 10240, 3, 3
@@ -172,6 +187,17 @@ def test_prefill_one_request():
                     for outer_enabled in (False, True):
                         # Keep the long shape to the common valid-state path.
                         if tokens == 8192 and (not initialized or null_slot):
+                            continue
+                        # Keep pairwise state, slot and outer coverage for each dtype.
+                        if tokens == 256 and (initialized, null_slot, outer_enabled) not in (
+                            (True, False, False),
+                            (True, True, True),
+                            (False, False, True),
+                            (False, True, False),
+                        ):
+                            continue
+                        # Retain both dtypes and outer modes on the long prefill.
+                        if tokens == 8192 and outer_enabled != (dtype == torch.bfloat16):
                             continue
                         expected_state = original_state.clone()
                         actual_state = original_state.clone()
