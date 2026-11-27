@@ -58,6 +58,7 @@ test_cases:
         top_k: 20
         presence_penalty: 1.5
         repetition_penalty: 1.0
-        # Calibration only. Set the accuracy floor after hardware CI.
+        # Pooled-PD reference: 178/198, 178/198, 181/198; median 89.90% (PR #3).
+        # Colocated accuracy has not been measured; do not use the best PD score as its floor.
         verify_mode: ge
         baseline: 0

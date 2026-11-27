@@ -3,6 +3,8 @@ test_cases:
   - name: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3
     model: &model Eco-Tech/Qwen3.8-Flash-Next-w4a8
     service_mode: pd
+    special_dependencies:
+      fastokens: "0.3.5"
     envs:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_USE_V2_MODEL_RUNNER: "1"
@@ -11,6 +13,7 @@ test_cases:
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
     pd_server_envs:
       - HCCL_NPU_SOCKET_PORT_RANGE: "61400-61499"
+        VLLM_USE_FASTOKENS: "1"
         HCCL_BUFFSIZE: "8192"
       - HCCL_NPU_SOCKET_PORT_RANGE: "61500-61599"
         HCCL_BUFFSIZE: "512"
@@ -33,7 +36,7 @@ test_cases:
         - --data-parallel-size
         - "1"
         - --max-model-len
-        - "262144"
+        - "143360"
         - --max-num-seqs
         - "32"
         - --max-num-batched-tokens
@@ -67,7 +70,7 @@ test_cases:
            "kv_role": "kv_producer",
            "kv_port": 32600,
            "kv_connector_extra_config": {"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
-      # Decode
+      # Decode (local prefix caching disabled; reuse happens on P)
       - - *model
         - --host
         - "0.0.0.0"
@@ -84,24 +87,22 @@ test_cases:
         - --data-parallel-size
         - "4"
         - --max-model-len
-        - "262144"
+        - "143360"
         - --max-num-seqs
         - "32"
         - --max-num-batched-tokens
         - "8192"
         - --gpu-memory-utilization
         - "0.90"
-        - --enable-prefix-caching
+        - --no-enable-prefix-caching
         - --async-scheduling
         - --enable-expert-parallel
-        - --mamba-cache-mode
-        - align
         - --mamba-ssm-cache-dtype
         - bfloat16
         - --engram-config
         - '{"cpu_offload":true,"dp_shared_memory":true}'
         - --compilation-config
-        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,12,16,32,40,44,48,64,96,128]}'
         - --additional-config
         - >-
           {"enable_flashcomm1": true,
@@ -109,7 +110,7 @@ test_cases:
            "enable_shared_expert_dp": true,
            "multistream_overlap_shared_expert": true,
            "scheduler_config": {"recompute_scheduler_enable":true},
-           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":true}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
         - --kv-transfer-config
@@ -119,9 +120,13 @@ test_cases:
            "kv_port": 32700,
            "kv_connector_extra_config": {"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
     test_content: []
+    # Measured references: https://github.com/zsponly/vllm-ascend/pull/4
+    # Evidence revision: c48249d30613a5fc1b2ef448a537086e316c030b. Throughputs are aggregate tokens/s.
+    # Reference: A3 r136 / CANN 9.3.0, custom Union GBSA ops and PR overlays.
+    # Reported D throughput/TPOT use steady-stage samples; the runner checks total.
+    # Keep steady-stage baseline candidates commented until full-run calibration.
     benchmarks:
-      # Repeat one native Qwen prompt per length to construct a 100% shared prefix.
-      prepare_prefix100:
+      prepare_decode_prompts:
         case_type: curl_cmd
         cmds:
           - |
@@ -131,40 +136,59 @@ test_cases:
             from tools.aisbench import maybe_download_from_modelscope
 
             for source, name, count in (
-                ("vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen", "16k", 128),
-                ("vllm-ascend/GSM8K-in131072-bs100-qwen3", "128k", 8),
+                ("vllm-ascend/GSM8K-in131072-bs100-qwen3", "128k", 512),
+                ("vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen", "16k", 440),
             ):
                 src = Path(maybe_download_from_modelscope(source, repo_type="dataset"))
                 with (src / "test.jsonl").open("rb") as data:
                     prompt = next(data).rstrip(b"\r\n") + b"\n"
-                out = Path(get_data_path(".")) / "qwen38_prefix100_a3" / name
+                out = Path(get_data_path(".")) / "qwen38_a3_decode" / name
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "train.jsonl").write_bytes(b"")
+                # Warm and measure the same native Qwen prompt (100% shared input).
                 (out / "test.jsonl").write_bytes(prompt * count)
             PY
-      warmup_d_16k: &warmup_16k
+      warmup_d_128k: &warmup_d_128k
         case_type: performance
-        dataset_path_local: qwen38_prefix100_a3/16k
+        dataset_path_local: qwen38_a3_decode/128k
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 32
-        batch_size: 32
+        num_prompts: 16
+        batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_16k:
-        <<: *warmup_16k
-        num_prompts: 128
+      pure_d_128k: &pure_d_128k
+        <<: *warmup_d_128k
+        num_prompts: 512
+        batch_size: 128
         max_out_len: 1024
-      warmup_d_128k: &warmup_128k
+        # Steady-stage reference (384 requests): output 3687.79 tokens/s; TPOT 18.6 ms.
+        # Full-run reference: 3276.9468 tokens/s, but mean output was 1019.4141.
+        # Recalibrate with 1024 output tokens before enabling the total gate.
+        # baseline: 3687.79  # Steady-stage only, not the runner total.
+        # threshold: 0.97
+      warmup_d_128k_round_2: *warmup_d_128k
+      pure_d_128k_round_2: *pure_d_128k
+      warmup_d_128k_round_3: *warmup_d_128k
+      pure_d_128k_round_3: *pure_d_128k
+      warmup_d_16k: &warmup_d_16k
         case_type: performance
-        dataset_path_local: qwen38_prefix100_a3/128k
+        dataset_path_local: qwen38_a3_decode/16k
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 2
-        batch_size: 2
+        num_prompts: 16
+        batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_128k:
-        <<: *warmup_128k
-        num_prompts: 8
+      pure_d_16k: &pure_d_16k
+        <<: *warmup_d_16k
+        num_prompts: 440
+        batch_size: 110
         max_out_len: 1024
+        # Steady-stage reference: output 6461.38 tokens/s; TPOT 19.5 ms.
+        # baseline: 6461.38  # Steady-stage only, not the runner total.
+        # threshold: 0.97
+      warmup_d_16k_round_2: *warmup_d_16k
+      pure_d_16k_round_2: *pure_d_16k
+      warmup_d_16k_round_3: *warmup_d_16k
+      pure_d_16k_round_3: *pure_d_16k

@@ -54,6 +54,7 @@ test_cases:
         top_k: 20
         presence_penalty: 1.5
         repetition_penalty: 1.0
-        # Calibration only. Set the accuracy floor after hardware CI.
+        # PD-only reference: 181/198 (91.41%), median of three; fork PR #4.
+        # Colocated accuracy has not been measured; do not use the PD score as its floor.
         verify_mode: ge
         baseline: 0

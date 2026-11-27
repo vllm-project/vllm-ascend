@@ -166,10 +166,12 @@ a3-560t:
         config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: Qwen3.8-Flash-Next-w4a8-PD-Prefill-A3
         os: linux-aarch64-a3-800i-16
+        testcase_timeout: "300"
         config_file_path: Qwen3.8-Flash-Next-w4a8-PD-Prefill-A3.yaml
         config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3
         os: linux-aarch64-a3-800i-16
+        testcase_timeout: "300"
         config_file_path: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3.yaml
         config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: Qwen3.8-27B-w8a8-A3
