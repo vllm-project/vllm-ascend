@@ -145,7 +145,7 @@ def test_need_pre_sample_hook_for_rare_chars(tmp_path: Path):
     cfg = _cfg(tmp_path)
     guard = SimpleNamespace(
         runtime_config=cfg,
-        action_executor=SimpleNamespace(can_run_detection=lambda: True),
+        action_executor=SimpleNamespace(is_action_leader=lambda: True),
         runner=SimpleNamespace(),
     )
     assert need_pre_sample_hook(guard) is True
@@ -282,7 +282,7 @@ def test_warmup_fail_latches_off_until_config_disable(tmp_path: Path):
     guard = SimpleNamespace(
         runtime_config=cfg,
         detectors=SimpleNamespace(rare_chars_enabled=_active),
-        action_executor=SimpleNamespace(can_run_detection=lambda: True),
+        action_executor=SimpleNamespace(is_action_leader=lambda: True),
         runner=SimpleNamespace(),
     )
     assert _rare_chars_active(guard) is False
@@ -290,6 +290,8 @@ def test_warmup_fail_latches_off_until_config_disable(tmp_path: Path):
 
     cfg._data["detector"]["rare_chars"]["enabled"] = False
     cfg._invalidate_hot_path_gates()
+    # In-memory toggle does not bump config_version; force re-apply.
+    det._applied_config_version = None
     det.refresh_from_config()
     assert det.warmup_failed is False
     assert det._session.can_feed() is True

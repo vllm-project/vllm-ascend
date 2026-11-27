@@ -75,7 +75,7 @@ def _active_guard() -> MagicMock:
     # Avoid MagicMock auto-truthy rare_chars_enabled() opening the pre-sample wrap.
     guard.detectors.rare_chars_enabled.return_value = False
     guard.runtime_config.detector_get.return_value = False
-    guard.action_executor.can_run_detection.return_value = False
+    guard.action_executor.is_action_leader.return_value = False
     return guard
 
 
