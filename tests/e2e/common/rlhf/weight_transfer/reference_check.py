@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Startup-load reference and two-update equivalence checks."""
+"""Startup-load reference and live-update equivalence checks."""
 
 import base64
+import hashlib
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from io import BytesIO
 
+import torch
 from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
@@ -19,6 +21,17 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 )
 
 UPDATE_ROUNDS = 2
+
+
+def capture_update_result(server, case):
+    if case.weight_quantization:
+        return capture_quantized_result(server, case)
+    return generation_signature(
+        server.get_client(),
+        case.model,
+        prompts=case.prompts,
+        image_prompt=case.image_prompt,
+    )
 
 
 FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
@@ -295,6 +308,72 @@ def weight_transfer_servers(
         yield server, reference, dummy_signature
 
 
+@contextmanager
+def hccl_weight_transfer_servers(
+    sources,
+    case,
+    *,
+    backend,
+    tensor_parallel_size,
+    device_index,
+    gpu_memory_utilization,
+    env_dict,
+):
+    """Build independent references for explicit HCCL update sources.
+
+    Keep A's temporary directory alive for the live server's config/recipe.
+    Both references finish before the live server starts, sharing one NPU.
+    No reference cache is used: each source has independent weights/scales.
+    """
+    references = {}
+    with ExitStack() as stack:
+        model_directory = None
+        for name, source in sources.items():
+            directory = stack.enter_context(fixed_startup_checkpoint(source))
+            if model_directory is None:
+                model_directory = directory
+            for rank in range(tensor_parallel_size):
+                wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
+            port = get_open_port()
+            with rlhf_server(
+                directory,
+                vllm_serve_args=reference_serve_args(
+                    case,
+                    port=port,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    tensor_parallel_size=tensor_parallel_size,
+                ),
+                server_host="127.0.0.1",
+                server_port=port,
+                env_dict=env_dict,
+            ) as server:
+                references[name] = capture_update_result(server, case)
+        for rank in range(tensor_parallel_size):
+            wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
+        port = get_open_port()
+        with rlhf_server(
+            model_directory,
+            vllm_serve_args=[
+                "--tokenizer",
+                case.model,
+                "--served-model-name",
+                case.model,
+                *live_update_serve_args(
+                    case,
+                    backend=backend,
+                    port=port,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    tensor_parallel_size=tensor_parallel_size,
+                ),
+            ],
+            server_host="127.0.0.1",
+            server_port=port,
+            env_dict=env_dict,
+        ) as server:
+            dummy = None if case.weight_quantization else capture_update_result(server, case)
+            yield server, references, dummy
+
+
 def assert_weight_update_matches_reference(
     dummy_signature, reference_signature, updated_signatures, case: WeightUpdateModelCase
 ) -> None:
@@ -317,3 +396,93 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class MXFP8AuditWorker:
+    """Inspect representative dense/MoE layers without changing reload behavior."""
+
+    def _mxfp8_tensors(self):
+        """Yield the same inference buffers for content and address checks."""
+        kinds = set()
+        for prefix, layer in self.model_runner.model.named_modules():
+            if not hasattr(layer, "_mxfp8_original_shapes"):
+                continue
+            kind = "moe" if "w13_weight" in layer._mxfp8_original_shapes else "linear"
+            if kind in kinds:
+                continue
+            assert getattr(layer, "_already_called_process_weights_after_loading", False), (
+                f"{prefix}: MXFP8 post-processing was skipped"
+            )
+            kinds.add(kind)
+            for name in ("w13_weight", "w2_weight") if kind == "moe" else ("weight",):
+                for tensor_name in (name, name + "_scale"):
+                    tensor = getattr(layer, tensor_name, None)
+                    if tensor is None:
+                        values = getattr(layer, tensor_name + "_list", None)
+                        if values is None:
+                            values = getattr(layer, "cann_mega_moe_" + tensor_name + "_list")
+                        tensor = values[0]
+                    elif kind == "moe":
+                        tensor = tensor[0]
+                    expected_dtypes = (
+                        (torch.float8_e4m3fn,) if tensor_name == name else (torch.uint8, torch.float8_e8m0fnu)
+                    )
+                    assert tensor.dtype in expected_dtypes, (prefix, tensor_name, tensor.dtype)
+                    assert tensor.element_size() == 1, (
+                        prefix,
+                        tensor_name,
+                        tensor.dtype,
+                    )
+                    yield prefix + "." + tensor_name, tensor
+        assert kinds == {"linear", "moe"}, f"Missing MXFP8 layer types: {kinds}"
+
+    def mxfp8_snapshot(self):
+        tensors = {}
+        for name, tensor in self._mxfp8_tensors():
+            raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+            tensors[name] = {
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        return tensors
+
+    def mxfp8_pointers(self):
+        return {name: tensor.data_ptr() for name, tensor in self._mxfp8_tensors()}
+
+
+def capture_quantized_pointers(server):
+    """Capture live receiver addresses without running dummy-weight inference."""
+    return post_control(server, "collective_rpc", json={"method": "mxfp8_pointers"}).json()["results"]
+
+
+def assert_quantized_storage_unchanged(initial, updates, case):
+    """Compare dummy -> A -> B -> A addresses within the same receiver only."""
+    assert initial and all(initial), f"{case.id}: missing initial inference tensor addresses"
+    assert len(updates) == 3, f"{case.id}: expected three A/B/A address snapshots"
+    for update_round, actual in enumerate(updates, start=1):
+        assert len(actual) == len(initial), f"{case.id}: worker count changed in round {update_round}"
+        for rank, (before, after) in enumerate(zip(initial, actual, strict=True)):
+            assert before.keys() == after.keys(), f"{case.id}: rank {rank} inference tensor names changed"
+            for name, pointer in before.items():
+                assert after[name] == pointer, (
+                    f"{case.id}: rank {rank} {name} moved after update {update_round}: {pointer} -> {after[name]}"
+                )
+
+
+def capture_quantized_result(server, case):
+    return {
+        "generation": generation_signature(server.get_client(), case.model, prompts=case.prompts),
+        "tensors": post_control(server, "collective_rpc", json={"method": "mxfp8_snapshot"}).json()["results"],
+    }
+
+
+def assert_quantized_updates(references, updates, case):
+    assert len(references) == 2 and len(updates) == 3, f"{case.id}: expected A/B/A and two fresh-load baselines"
+    for index, actual in enumerate(updates):
+        assert actual == references[index % 2], f"{case.id}: round {index + 1} differs from fresh-load"
+    assert updates[0]["generation"] != updates[1]["generation"], "A/B inference results did not change"
+    for rank_a, rank_b in zip(updates[0]["tensors"], updates[1]["tensors"], strict=True):
+        assert rank_a.keys() == rank_b.keys()
+        for name in rank_a:
+            assert rank_a[name]["sha256"] != rank_b[name]["sha256"], f"{name}: A/B value unchanged"

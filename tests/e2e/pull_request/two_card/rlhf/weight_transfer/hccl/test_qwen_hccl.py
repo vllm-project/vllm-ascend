@@ -6,6 +6,7 @@
 import pytest
 
 from tests.e2e.common.rlhf.weight_transfer.case import (
+    QWEN35_W8A8_MXFP_CASE,
     QWEN_CASES,
     WeightUpdateModelCase,
     pytest_model_cases,
@@ -17,4 +18,11 @@ from tests.e2e.common.rlhf.weight_transfer.hccl import (
 
 @pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl", model_cases=QWEN_CASES))
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+    run_hccl_weight_transfer_transaction(case, packed)
+
+
+@pytest.mark.e2e_model(QWEN35_W8A8_MXFP_CASE.model)
+@pytest.mark.parametrize(("case", "packed"), [(QWEN35_W8A8_MXFP_CASE, True)], ids=["packed-qwen35-quant-mxfp8"])
+def test_hccl_quantize_weight_transfer(case: WeightUpdateModelCase, packed: bool):
+    # Packed HCCL preserves FP8 weight/scale dtypes through opaque byte buffers.
     run_hccl_weight_transfer_transaction(case, packed)
