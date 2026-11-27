@@ -58,7 +58,7 @@ from vllm_ascend.utils import attention_calculation_stream, npu_stream_switch
 
 from . import triton_ops
 from .attention_fusions import fused_output_gate
-from .c8_kvqsfa import attend_c8_v2, attend_c8_window
+from .c8_kvqsfa import BANDED_HEADS, attend_c8_v2, attend_c8_window, supports_banded_window
 from .c8_read import supports_c8_qk_heads
 from .decode_fusions import (
     is_decode_batch,
@@ -1345,12 +1345,19 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 and cache.dtype == torch.uint8
                 and cache.is_contiguous()
                 and block_table.is_contiguous()
-                and 0 < query.shape[1] <= C8_PREFILL_MAX_HEADS
             ):
                 early = max(0, self.window - 1 - (seq_len - num_queries))
                 early = ((early + QUERY_CHUNK - 1) // QUERY_CHUNK) * QUERY_CHUNK
                 if num_queries - early >= QUERY_CHUNK:
-                    loop_stop = start + early
+                    # Preserve the existing C8 path for small head counts. A
+                    # 32-head suffix can use two 16-head calls when each query
+                    # already has a full causal window.
+                    suffix = query[start + early : stop]
+                    if 0 < query.shape[1] <= C8_PREFILL_MAX_HEADS or (
+                        query.shape[1] == 2 * BANDED_HEADS
+                        and supports_banded_window(suffix, self.learnable_sink_param, self.window)
+                    ):
+                        loop_stop = start + early
             reuse_window = is_prefill and self.indexer is None and num_queries > QUERY_CHUNK and loop_stop > start
             batch_early_window = (
                 reuse_window

@@ -9,11 +9,11 @@ from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm_ascend.models.hy_v4_flash import model
 
 
-@pytest.mark.parametrize("tp,dp", [(4, 1), (1, 4)])
+@pytest.mark.parametrize("tp,pp,dp", [(4, 1, 1), (1, 1, 4), (2, 2, 1), (4, 2, 1), (2, 4, 1)])
 @pytest.mark.parametrize(
     "connector,layerwise", [("MooncakeConnectorV2", False), ("MooncakeConnectorV2", True), ("Other", False)]
 )
-def test_flash_pd_accepts_only_whole_request_pull(monkeypatch, tp, dp, connector, layerwise):
+def test_flash_pd_accepts_only_whole_request_pull(monkeypatch, tp, pp, dp, connector, layerwise):
     text = SimpleNamespace(
         validate_flash_config=lambda: None,
         kv_lora_rank=512,
@@ -28,9 +28,10 @@ def test_flash_pd_accepts_only_whole_request_pull(monkeypatch, tp, dp, connector
         swa_num_attention_heads=64,
     )
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=text, dtype=torch.bfloat16, quantization=None),
+        model_config=SimpleNamespace(hf_text_config=text, dtype=torch.bfloat16, quantization=None, enforce_eager=True),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pp,
+            use_sequence_parallel_moe=False,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=1,
             enable_eplb=False,
@@ -55,3 +56,52 @@ def test_flash_pd_accepts_only_whole_request_pull(monkeypatch, tp, dp, connector
     else:
         with pytest.raises(ValueError, match="pull mode"):
             model.validate_runtime(config)
+
+
+@pytest.mark.parametrize("unsupported", ["graph", "decode", "speculative", "sequence_parallel", "no_ihc"])
+def test_pipeline_rejects_unsupported_execution_modes(unsupported):
+    text = SimpleNamespace(validate_flash_config=lambda: None, enable_ihc=unsupported != "no_ihc")
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=text, enforce_eager=unsupported != "graph"),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2, use_sequence_parallel_moe=unsupported == "sequence_parallel"
+        ),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer" if unsupported == "decode" else "kv_producer"),
+        speculative_config=object() if unsupported == "speculative" else None,
+    )
+    with pytest.raises(ValueError, match="eager iHC prefill"):
+        model.validate_runtime(config)
+
+
+def test_nonfirst_stage_uses_global_engram_index_and_its_own_layers(monkeypatch):
+    received = torch.tensor([[1.0, 2.0]])
+    hashes = torch.tensor([[-1], [7]])
+    captured = []
+
+    def apply_engram(hidden, layer_hashes, embedding_rows):
+        captured.append((layer_hashes, embedding_rows))
+        return hidden + 3
+
+    class StageLayer:
+        hc_attn_layer = SimpleNamespace(prepare_input=lambda hidden: hidden)
+        engram_layer = staticmethod(apply_engram)
+
+        def __call__(self, positions, hidden, residual):
+            return hidden * 2, None
+
+    stage = SimpleNamespace(
+        start_layer=1,
+        end_layer=2,
+        layers=[None, StageLayer(), None],
+        engram_hash_indices={1: 1},
+        pp_buffers={},
+        finish_hidden_states=lambda hidden: hidden - 1,
+    )
+    monkeypatch.setattr(model, "get_pp_group", lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True))
+    monkeypatch.setattr(model, "copy_pp_buffers", lambda source, buffers: None)
+    result = model.AscendHYV4FlashModel._forward_stage_with_engram(
+        stage, None, None, {"hidden_states": received}, None, None, (hashes, {1: "stage rows"}), False
+    )
+    torch.testing.assert_close(result, (received + 3) * 2 - 1)
+    assert len(captured) == 1 and captured[0][1] == "stage rows"
+    torch.testing.assert_close(captured[0][0], hashes[1])

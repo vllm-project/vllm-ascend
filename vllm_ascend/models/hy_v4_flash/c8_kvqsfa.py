@@ -12,6 +12,8 @@ from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
 
 from .prefill_metadata import sparse_lengths, window_indices
 
+BANDED_HEADS = 16
+
 
 def _pack_c8_pages(cache, block_table, block_size, num_pages):
     if HAS_TRITON and 0 < num_pages <= block_table.numel():
@@ -48,7 +50,7 @@ def attend_c8_v2(query, cache, block_table, block_size, selected, seq_len, sink,
 
         query = query[compact_prefix:].contiguous()
         indices = selected[compact_prefix:].to(torch.int32).unsqueeze(1).contiguous()
-        if query.shape[0] >= 512 and query.shape[1:] == (8, 576) and indices.shape[-1] == 2048:
+        if query.shape[0] >= 512 and query.shape[1:] in ((8, 576), (16, 576)) and indices.shape[-1] == 2048:
             # The page gather already placed every requested C8 row in logical
             # order. Truncate the last page and let the kernel index that view.
             dense_kv = packed.reshape(-1, 1, C8_ROW_BYTES)[:seq_len].unsqueeze(0)
@@ -130,25 +132,64 @@ def _prepare_banded_c8(cache, block_table, block_size, seq_len):
     return key, key[..., :512].contiguous()
 
 
+def supports_banded_window(query, sink, window):
+    return (
+        query.device.type == "npu"
+        and query.dtype == torch.bfloat16
+        and query.ndim == 3
+        and query.shape[-1] == 576
+        and 512 <= query.shape[0] <= 4096
+        and window == 512
+        and query.shape[1] in (BANDED_HEADS, 2 * BANDED_HEADS)
+        and sink.dtype == torch.float32
+        and sink.shape == (query.shape[1],)
+        and is_950()
+        and hasattr(torch_npu, "npu_fusion_attention")
+    )
+
+
 def _attend_c8_banded(query, cache, block_table, block_size, seq_len, sink, scale, window):
     key, value = _prepare_banded_c8(cache, block_table, block_size, seq_len)
     kv = key.view(1, seq_len, 1, 576)
     value = value.view(1, seq_len, 1, 512)
     stream = torch.npu.current_stream(query.device)
-    result, *_ = torch_npu.npu_fusion_attention(
-        query.unsqueeze(0),
-        kv,
-        value,
-        query.shape[1],
-        "BSND",
-        atten_mask=_band_mask(query.device, stream.npu_stream),
-        scale=scale,
-        sparse_mode=4,
-        pre_tockens=window - 1,
-        next_tockens=0,
-        sink=sink.contiguous(),
-    )
-    return result.squeeze(0)
+    mask = _band_mask(query.device, stream.npu_stream)
+    outputs = []
+    split_heads = query.size(1) > BANDED_HEADS
+    fused_sink = split_heads and HAS_TRITON and query.device.type == "npu"
+    if fused_sink:
+        from .swa_sink import _write_window_output
+
+        output = query.new_empty((query.size(0), query.size(1), 512))
+    for head_start in range(0, query.size(1), BANDED_HEADS):
+        heads = slice(head_start, head_start + BANDED_HEADS)
+        result, row_max, row_sum, *_ = torch_npu.npu_fusion_attention(
+            query[:, heads].contiguous().unsqueeze(0),
+            kv,
+            value,
+            BANDED_HEADS,
+            "BSND",
+            atten_mask=mask,
+            scale=scale,
+            sparse_mode=4,
+            pre_tockens=window - 1,
+            next_tockens=0,
+            sink=None if split_heads else sink.contiguous(),
+        )
+        context = result.squeeze(0)
+        if fused_sink:
+            _write_window_output(context, row_max, row_sum, sink, output, head_start)
+            continue
+        if split_heads:
+            # The BSND kernel on 950DT returns window-only probabilities for
+            # this shape. Add the learned zero-value sink to the denominator.
+            log_partition = row_max[0, :, :, 0] + row_sum[0, :, :, 0].log()
+            window_weight = torch.sigmoid(log_partition.transpose(0, 1) - sink[heads])
+            context = (context.float() * window_weight.unsqueeze(-1)).to(context.dtype)
+        outputs.append(context)
+    if fused_sink:
+        return output
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=1)
 
 
 def attend_c8_window(query, cache, block_table, block_size, seq_len, sink, scale, *, window):
@@ -158,20 +199,7 @@ def attend_c8_window(query, cache, block_table, block_size, seq_len, sink, scale
     page_offset = first_page * block_size
     first_index = first_query - window + 1 - page_offset
     window_kv_len = seq_len - page_offset
-    if (
-        query.device.type == "npu"
-        and query.dtype == torch.bfloat16
-        and query.ndim == 3
-        and query.shape[-1] == 576
-        and 512 <= query.shape[0] <= 4096
-        and window == 512
-        and query.shape[1] == 16
-        and first_page >= 0
-        and sink.dtype == torch.float32
-        and sink.shape == (query.shape[1],)
-        and is_950()
-        and hasattr(torch_npu, "npu_fusion_attention")
-    ):
+    if first_page >= 0 and supports_banded_window(query, sink, window):
         return _attend_c8_banded(
             query,
             cache,

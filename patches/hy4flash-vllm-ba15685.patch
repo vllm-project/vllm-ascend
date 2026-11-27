@@ -3325,3 +3325,21 @@ index 852ad0b..ebce5f3 100644
              )
 
          blocks, num_local, shared_prefix_boundary = (
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -361,4 +361,14 @@
+         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
++        # Worker layer lists are projected onto one PP stage. Publish the global
++        # membership to the scheduler for HY4's packed-cache handoff validation.
++        if vllm_config.parallel_config.pipeline_parallel_size > 1 and all(
++            getattr(g.kv_cache_spec, "cache_dtype_str", None) == "hy4_packed"
++            for g in global_kv_cache_groups
++        ):
++            for local, full in zip(scheduler_kv_cache_config.kv_cache_groups, global_kv_cache_groups, strict=True):
++                assert local.kv_cache_spec == full.kv_cache_spec
++                assert set(local.layer_names).issubset(full.layer_names)
++                local.layer_names = list(full.layer_names)
+         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+         if kv_cache_groups:

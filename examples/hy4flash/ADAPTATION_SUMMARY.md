@@ -164,3 +164,10 @@ git -C vllm apply --check ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch
 git -C vllm apply ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch
 install -m 0755 vllm-ascend/examples/hy4flash/start_hy4flash.sh ./start_hy4flash.sh
 ```
+
+### P 端流水线并行
+
+四张 950DT 上可将专用 P 实例设置为 `--tensor-parallel-size 2 --pipeline-parallel-size 2`。
+使用 eager 和 iHC，关闭 P 端投机解码和序列并行 MoE。P、D 两端的 Mooncake
+`kv_connector_extra_config.prefill` 都填写同一组 `tp_size`、`pp_size` 和 `dp_size`。
+更新上文的配套 vLLM 补丁后再启动两端，以便 D 端核对所有流水段的 KV 缓存组。

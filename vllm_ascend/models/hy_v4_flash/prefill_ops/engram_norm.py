@@ -222,7 +222,8 @@ def apply_lookup_norm(rows, gamma, dtype, eps, *, inverse=None):
         _apply_lookup_norm[(cores,)](rows, gamma, out, groups, eps, heads, width, block, cores,
                                      enable_fp_fusion=False)
     else:
-        block = 16
+        # The kernel spans all local heads per token. Bound its live tile as TP shrinks.
+        block = min(16, max(1, 4096 // triton.next_power_of_2(heads * width)))
         cores = min(triton.cdiv(tokens, block), get_vectorcore_num())
         _apply_lookup_norm_with_inverse[(cores,)](rows, inverse, gamma, out, tokens, heads, width, block, cores,
                                                   enable_fp_fusion=False)

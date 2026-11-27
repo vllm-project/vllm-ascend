@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from copy import copy
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_ep_group, get_tp_group
+from vllm.distributed import get_ep_group, get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import copy_pp_buffers, is_pp_missing_parameter
+from vllm.models.hy_v4.nvidia.model import HYV4Model
 from vllm.models.hy_v4_flash.model import HYV4FlashDecoderLayer, HYV4FlashForCausalLM, HYV4FlashModel
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_config import get_ascend_device_type, is_950
@@ -33,8 +37,18 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
     config = model.hf_text_config
     config.validate_flash_config()
     parallel = vllm_config.parallel_config
+    if parallel.pipeline_parallel_size > 1 and not (
+        model.enforce_eager
+        and uses_prefill_ops(vllm_config)
+        and config.enable_ihc
+        and vllm_config.speculative_config is None
+        and not parallel.use_sequence_parallel_moe
+    ):
+        raise ValueError(
+            "HYV4 Flash Ascend pipeline parallelism requires eager iHC prefill "
+            "with speculative decoding and sequence-parallel MoE disabled"
+        )
     for field in (
-        "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
     ):
@@ -178,11 +192,48 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             # Cap each peer's payload on the shared TP and routed EP groups.
             for group in (get_tp_group(), get_ep_group()):
                 group.device_communicator.max_sequence_collective_peer_bytes = FLASHCOMM_950_PEER_BYTES
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        pipeline_parallel = vllm_config.parallel_config.pipeline_parallel_size > 1
+        if pipeline_parallel:
+            # The HYV4 backbone partitions decoder layers; the upstream Flash
+            # constructor would additionally attach Engram to off-stage placeholders.
+            HYV4Model.__init__(self, vllm_config=vllm_config, prefix=prefix)
+        else:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.pipeline_parallel = pipeline_parallel
+        self.engram_hash_indices = {
+            layer_id - 1: index
+            for index, layer_id in enumerate(self.config.engram_layer_ids or ())
+            if self.start_layer <= layer_id - 1 < self.end_layer
+        }
+        if pipeline_parallel:
+            self._init_stage_engram(vllm_config, prefix)
         self.uses_dfly = vllm_config.speculative_config is not None
         self._engram_prefetch_stream = None
         if self.engram_hash is not None:
             self.engram_hash.use_fused_prefill = is_950() and uses_prefill_ops(vllm_config)
+
+    def _init_stage_engram(self, vllm_config, prefix):
+        config = self.config
+        local_ids = [layer_index + 1 for layer_index in self.engram_hash_indices]
+        self.loaded_parts = {}
+        self.engram_hash = None
+        if local_ids:
+            # Hash seeds and offsets use the global order of Engram layers.
+            self.engram_hash = self.engram_hash_cls(config, dummy=vllm_config.load_config.load_format == "dummy")
+            for layer_id in local_ids:
+                self.layers[layer_id - 1].engram_layer = self.engram_cls(
+                    vllm_config, self.engram_hash.layout, layer_id, f"{prefix}.layers.{layer_id - 1}.engram_layer"
+                )
+        self.token_lookback_depth = config.engram_max_ngram_size - 1 if local_ids else 0
+        # The inherited checkpoint verifier checks every declared Engram layer.
+        # Give it the stage's list without changing the shared model config.
+        self.config = copy(config)
+        self.config.engram_layer_ids = local_ids
+
+    def load_weights(self, weights):
+        if self.pipeline_parallel:
+            weights = ((name, value) for name, value in weights if not is_pp_missing_parameter(name, self))
+        return super().load_weights(weights)
 
     def forward(
         self,
@@ -208,16 +259,27 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             and input_ids.device.type == "npu"
         ):
             metadata = get_forward_context().attn_metadata
-            layer_name = self.layers[0].self_attn.layer_name
+            layer_name = self.layers[self.start_layer].self_attn.layer_name
             batch = metadata.get(layer_name) if isinstance(metadata, dict) else None
             if batch is not None and batch.prefill_reqs and all(batch.prefill_reqs):
-                embeddings = [
-                    self.layers[i - 1].engram_layer.multi_head_embedding for i in self.config.engram_layer_ids
-                ]
-                if all(embedding.map_host_weight for embedding in embeddings):
+                embeddings = {
+                    index: self.layers[layer].engram_layer.multi_head_embedding
+                    for layer, index in self.engram_hash_indices.items()
+                }
+                if all(embedding.map_host_weight for embedding in embeddings.values()):
                     prepared_engram = self._prefetch_engram(
                         input_ids, lookback_token_ids, layer_name, batch, embeddings
                     )
+        if self.pipeline_parallel and self.engram_hash is not None:
+            return self._forward_stage_with_engram(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                lookback_token_ids,
+                prepared_engram,
+                defer_hc_head,
+            )
         if not defer_hc_head or self.engram_hash is None:
             return super().forward(
                 input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram,
@@ -280,6 +342,55 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             hidden, _ = layer(positions, hidden, None)
         return hidden
 
+    def _forward_stage_with_engram(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds,
+        lookback_token_ids,
+        prepared_engram,
+        defer_hc_head,
+    ):
+        if input_ids is None and prepared_engram is None:
+            raise ValueError("Flash Engram requires original input token IDs")
+        pp = get_pp_group()
+        if pp.is_first_rank:
+            hidden = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            hidden = intermediate_tensors["hidden_states"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+
+        if prepared_engram is None:
+            layer_name = self.layers[self.start_layer].self_attn.layer_name
+            hashes = self._prepare_engram_hashes(input_ids, lookback_token_ids, layer_name)
+            rows = None
+        else:
+            hashes, rows = prepared_engram
+        for layer_index in range(self.start_layer, self.end_layer):
+            layer = self.layers[layer_index]
+            if layer_index in self.engram_hash_indices:
+                index = self.engram_hash_indices[layer_index]
+                hidden = layer.hc_attn_layer.prepare_input(hidden)
+                if rows is None:
+                    hidden = layer.engram_layer(hidden, hashes[index])
+                else:
+                    hidden = layer.engram_layer(hidden, hashes[index], embedding_rows=rows[index])
+            hidden, _ = layer(positions, hidden, None)
+        if pp.is_last_rank:
+            return hidden if defer_hc_head else self.finish_hidden_states(hidden)
+        buffers = {name: tensor[: hidden.shape[0]] for name, tensor in self.pp_buffers.items()}
+        return IntermediateTensors({"hidden_states": hidden.flatten(1), **buffers})
+
+    def _prepare_engram_hashes(self, input_ids, lookback, layer_name):
+        hashes = input_ids.new_empty(
+            (len(self.engram_hash.layout.layer_ids), input_ids.numel(), self.engram_hash.offsets.shape[1]),
+            dtype=torch.int32,
+        )
+        self.engram_hash.prepare_hashes_with_output(input_ids, lookback, layer_name, hashes)
+        return hashes
+
     def _prefetch_engram(self, input_ids, lookback, layer_name, batch, embeddings):
         if self._engram_prefetch_stream is None:
             self._engram_prefetch_stream = torch.npu.Stream(device=input_ids.device)
@@ -287,20 +398,16 @@ class AscendHYV4FlashModel(HYV4FlashModel):
         compute_stream = torch.npu.current_stream(device=input_ids.device)
         stream.wait_stream(compute_stream)
         with torch.npu.stream(stream):
-            hashes = input_ids.new_empty(
-                (len(embeddings), input_ids.numel(), self.engram_hash.offsets.shape[1]),
-                dtype=torch.int32,
-            )
-            self.engram_hash.prepare_hashes_with_output(input_ids, lookback, layer_name, hashes)
+            hashes = self._prepare_engram_hashes(input_ids, lookback, layer_name)
             for tensor in (input_ids, lookback, batch.query_start_loc_device):
                 if tensor is not None and tensor.device == input_ids.device:
                     tensor.record_stream(stream)
-            outputs = []
-            for index, embedding in enumerate(embeddings):
+            outputs = {}
+            for index, embedding in embeddings.items():
                 rows = embedding.prefetch_rows(hashes[index])
                 ready = torch.npu.Event()
                 ready.record(stream)
-                outputs.append((rows, ready))
+                outputs[index] = (rows, ready)
         hashes.record_stream(compute_stream)
         return hashes, PrefetchedEngramRows(outputs)
 
@@ -310,6 +417,7 @@ class AscendHYV4FlashModel(HYV4FlashModel):
 
 
 class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
+    supports_pp = True
     model_cls = AscendHYV4FlashModel
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

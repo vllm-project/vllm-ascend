@@ -1,0 +1,9 @@
+pr: 2
+entries:
+  - category: feature
+    model: HY4 Flash
+    text: >-
+      Dedicated HY4 Flash prefill on Ascend 950DT can run with tensor parallel
+      size 2 and pipeline parallel size 2 in eager mode. Apply the updated
+      companion vLLM patch and configure the same prefill topology on both
+      ends of the Mooncake connector.

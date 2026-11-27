@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -8,7 +9,7 @@ import pytest
 import torch
 
 from vllm_ascend.hisparse.c8 import pack_c8_components
-from vllm_ascend.models.hy_v4_flash import attention
+from vllm_ascend.models.hy_v4_flash import attention, c8_kvqsfa
 
 
 @pytest.mark.parametrize("other_layer_first", [False, True])
@@ -75,6 +76,8 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
     model.window = 8
     model.ops = attention.triton_ops
     model.use_cann_prefill = False
+    model.use_pd_decode = False
+    model.bulk_c8_decode_reads = False
     model.fuse_c8_prefill_window = False
     model.latent_dim = latent
     model.kv_width = latent + rope
@@ -122,6 +125,7 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
             num_reqs=len(seq_lens),
             seq_lens_cpu=torch.tensor(seq_lens),
             query_start_loc_cpu=torch.tensor(starts),
+            query_start_loc=torch.tensor(starts),
             is_prefilling=torch.tensor(is_prefilling) if is_prefilling is not None else None,
             block_table_tensor=pages,
             slot_mapping=torch.empty(0, dtype=torch.long),
@@ -164,3 +168,97 @@ def test_hy4_operator_role(role, prefill):
     transfer = None if role is None else SimpleNamespace(kv_role=role)
     config = SimpleNamespace(kv_transfer_config=transfer)
     assert attention.uses_prefill_ops(config) is prefill
+
+
+@pytest.mark.parametrize("heads", [16, 32])
+def test_banded_head_groups_preserve_sink_and_head_order(monkeypatch, heads):
+    generator = torch.Generator().manual_seed(41)
+    query = torch.randn(3, heads, 576, generator=generator)
+    key = torch.randn(5, 576, generator=generator)
+    value = key[:, :512].contiguous()
+    sink = torch.linspace(-3, 3, heads)
+    scale = 576**-0.5
+    calls = []
+
+    def window_logits(q, k):
+        scores = torch.einsum("qhd,kd->hqk", q, k) * scale
+        relative = torch.arange(5) - torch.arange(2, 5)[:, None]
+        return scores.masked_fill((relative > 0) | (relative < -2), -torch.inf)
+
+    def with_sink(scores, sink_logits):
+        extra = sink_logits[:, None, None].expand(-1, scores.size(1), 1)
+        return torch.cat((scores, extra), dim=-1).softmax(-1)[..., :-1]
+
+    def fusion(q, k, v, num_heads, layout, **options):
+        calls.append(num_heads)
+        assert layout == "BSND" and num_heads == 16 and options["pre_tockens"] == 2
+        scores = window_logits(q[0], k[0, :, 0])
+        probabilities = scores.softmax(-1) if options["sink"] is None else with_sink(scores, options["sink"])
+        context = torch.einsum("hqk,kd->qhd", probabilities, v[0, :, 0])
+        maximum = scores.amax(-1, keepdim=True)
+        denominator = (scores - maximum).exp().sum(-1, keepdim=True)
+        return context[None], maximum[None], denominator[None]
+
+    monkeypatch.setattr(c8_kvqsfa, "_prepare_banded_c8", lambda *args: (key, value))
+    monkeypatch.setattr(c8_kvqsfa, "_band_mask", lambda *args: None)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda *args: SimpleNamespace(npu_stream=0))
+    monkeypatch.setattr(c8_kvqsfa.torch_npu, "npu_fusion_attention", fusion)
+    actual = c8_kvqsfa._attend_c8_banded(query, None, None, 64, len(key), sink, scale, window=3)
+    expected = torch.einsum("hqk,kd->qhd", with_sink(window_logits(query, key), sink), value)
+    torch.testing.assert_close(actual, expected)
+    assert calls == [16] * (heads // 16)
+
+
+@pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
+def test_split_window_sink_kernel_writes_each_head_slice():
+    if not c8_kvqsfa.HAS_TRITON or not c8_kvqsfa.is_950():
+        pytest.skip("requires the 950 Triton sink path")
+    from vllm_ascend.models.hy_v4_flash.swa_sink import _write_window_output
+
+    tokens, heads = 35, 16
+    generator = torch.Generator().manual_seed(19)
+    context = torch.randn(tokens, 2 * heads, 512, generator=generator).to(torch.bfloat16).npu()
+    maximum = torch.randn(1, heads, tokens, 8, generator=generator).npu()
+    total = torch.rand(1, heads, tokens, 8, generator=generator).add_(0.25).npu()
+    sink = torch.linspace(-3, 3, 2 * heads).npu()
+    output = torch.empty_like(context)
+    log_partition = (maximum[0, :, :, 0] + total[0, :, :, 0].log()).T
+    for first in (0, heads):
+        part = slice(first, first + heads)
+        _write_window_output(context[:, part], maximum, total, sink, output, first)
+        expected = context[:, part].float() * torch.sigmoid(log_partition - sink[part]).unsqueeze(-1)
+        torch.testing.assert_close(output[:, part], expected.bfloat16(), atol=0.015625, rtol=0.0078125)
+
+
+@pytest.mark.parametrize(
+    "heads,queries,layout",
+    [(8, 512, "BSND"), (16, 512, "BSND"), (16, 511, "PA_BSND"), (32, 512, "PA_BSND")],
+)
+def test_sparse_kv_preserves_logical_page_order(monkeypatch, heads, queries, layout):
+    block_size, length = 64, 513
+    row_bytes = c8_kvqsfa.C8_ROW_BYTES
+    table = torch.arange(8, -1, -1, dtype=torch.int32)
+    # A distinct byte per physical row exposes page reordering and last-page truncation.
+    row_ids = torch.arange(9 * block_size).to(torch.uint8)
+    cache = row_ids[:, None].expand(-1, row_bytes + 4).contiguous()
+    expected = row_ids.view(-1, block_size)[table.long()].flatten()
+    query = torch.empty(queries, heads, 576, dtype=torch.bfloat16)
+    selected = torch.zeros(queries, 2048, dtype=torch.int32)
+
+    def sparse(q, key, value, indices, *args, **options):
+        assert options["layout_kv"] == layout
+        assert key.data_ptr() == value.data_ptr()
+        actual = key.view(torch.uint8).reshape(-1, row_bytes)[:, 0]
+        if layout == "BSND":
+            assert "block_table" not in options
+            torch.testing.assert_close(actual, expected[:length])
+        else:
+            assert options["block_table"].numel() == len(table)
+            torch.testing.assert_close(actual, expected)
+        return q[..., :1], None, None
+
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(kv_quant_sparse_flash_attention=sparse))
+    context = c8_kvqsfa.attend_c8_v2(
+        query, cache, table, block_size, selected, length, torch.zeros(heads), 1.0, compact_prefix=0
+    )
+    assert context.shape == (queries, heads, 1)
