@@ -67,6 +67,7 @@ from vllm_ascend.ascend_forward_context import (
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    use_cann_megamoe,
 )
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -880,12 +881,14 @@ class NPUModelRunner(GPUModelRunner):
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens
         profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
+        comm_method = (
+            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) if mc2_tokens_capacity is not None else None
+        )
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
                 and profile_tokens > mc2_tokens_capacity
-                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
-                in {MoECommType.MC2, MoECommType.FUSED_MC2}
+                and comm_method in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
@@ -896,6 +899,17 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
+            if (
+                mc2_tokens_capacity is not None
+                and comm_method is MoECommType.FUSED_MC2
+                and use_cann_megamoe(self.vllm_config)
+            ):
+                # CANN MegaMoe sizes its symmetric buffer to exactly
+                # mc2_tokens_capacity and rejects larger batches. The
+                # scheduler budget can exceed the decode graph budget on
+                # decode-only nodes, but real decode steps never do, so
+                # profile at the buffer capacity instead of over-sizing it.
+                profile_tokens = min(profile_tokens, mc2_tokens_capacity)
             self.max_num_tokens = profile_tokens
             try:
                 super().profile_run(**profile_kwargs)

@@ -1764,6 +1764,7 @@ def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=4),
         patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=moe_type),
+        patch("vllm_ascend.worker.v2.model_runner.use_cann_megamoe", return_value=moe_type is MoECommType.FUSED_MC2),
         patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
         patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
         patch.object(GPUModelRunner, "profile_run") as parent,
@@ -1779,6 +1780,7 @@ def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
 def test_profile_run_disables_nested_backbone_compilation(fail_warmup, moe_type):
     runner = _make_runner()
     runner.max_num_tokens = 2048
+    expected_budget = 1 if moe_type is MoECommType.FUSED_MC2 else 2048
 
     # Match V4.1's wrapper -> language_model -> model structure.
     backbone = torch.nn.Module()
@@ -1799,13 +1801,14 @@ def test_profile_run_disables_nested_backbone_compilation(fail_warmup, moe_type)
 
     def profile(*args, **kwargs):
         calls.append(("profile", runner.max_num_tokens))
-        assert runner.max_num_tokens == 2048
+        assert runner.max_num_tokens == expected_budget
         assert backbone.do_not_compile is False
 
     runner._dummy_run = MagicMock(side_effect=warmup)
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=1),
         patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=moe_type),
+        patch("vllm_ascend.worker.v2.model_runner.use_cann_megamoe", return_value=moe_type is MoECommType.FUSED_MC2),
         patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
         patch.object(GPUModelRunner, "profile_run", side_effect=profile),
     ):
@@ -1818,8 +1821,36 @@ def test_profile_run_disables_nested_backbone_compilation(fail_warmup, moe_type)
     assert backbone.do_not_compile is False
     expected = [("warmup", 1)]
     if not fail_warmup:
-        expected.append(("profile", 2048))
+        expected.append(("profile", expected_budget))
     assert calls == expected
+
+
+@pytest.mark.parametrize("mega_moe", [False, True])
+def test_profile_run_caps_megamoe_budget_to_mc2_capacity(mega_moe):
+    runner = _make_runner()
+    runner.max_num_tokens = 288
+    runner.max_num_reqs = 48
+    runner.get_model = MagicMock(return_value="m")
+    runner._dummy_run = MagicMock()
+    budgets = []
+
+    def profile(*args, **kwargs):
+        budgets.append(runner.max_num_tokens)
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=48),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=MoECommType.FUSED_MC2),
+        patch("vllm_ascend.worker.v2.model_runner.use_cann_megamoe", return_value=mega_moe),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run", side_effect=profile),
+    ):
+        runner.profile_run()
+
+    # MegaMoe's symmetric buffer is fixed at 48 tokens, so the profile must not
+    # exceed it; non-MegaMoe FUSED_MC2 keeps the scheduler-sized budget.
+    assert budgets == [48 if mega_moe else 288]
+    assert runner.max_num_tokens == 288
 
 
 def test_profile_run_skips_mc2_dummy_without_capacity():
