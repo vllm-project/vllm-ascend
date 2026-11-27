@@ -1176,11 +1176,9 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[layer_name] = hybrid_backing[start : start + layer_size]
             continue
 
-        # Use one raw allocation for Mamba and hybrid caches. The reshape step
-        # creates the V1-compatible contiguous state views and overlaps
-        # Attention K/V with the aligned tail of the same buffer.
+        # Hybrid allocations have already consumed their shared backing above.
         contains_mamba = any(isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_names)
-        if contains_mamba or use_hybrid_layout:
+        if contains_mamba:
             tensor_size = kv_cache_tensor.size
             if vllm_config.kv_transfer_config is None:
                 tensor = torch.zeros(tensor_size, dtype=torch.int8, device=device)
@@ -1197,7 +1195,6 @@ def _allocate_kv_cache(
         assert isinstance(example_spec, AttentionSpec)
 
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
-            num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
             # vLLM #51718 packs all group layers into one tensor;
             # kv_cache_config.num_blocks is the per-layer block count.
             num_blocks = kv_cache_config.num_blocks
@@ -2057,9 +2054,7 @@ def _reshape_kv_cache_v2(
                 (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto") if kv_cache_spec.is_draft else cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
-            if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
-                get_kv_cache_compression_ratio(kv_cache_spec) > 1
-            ):
+            if isinstance(kv_cache_spec, MLAAttentionSpec) and get_kv_cache_compression_ratio(kv_cache_spec) > 1:
                 raw_single = raw_cache[0] if isinstance(raw_cache, tuple) else raw_cache
                 if isinstance(raw_cache, tuple) and len(raw_cache) != 1:
                     raise ValueError(f"Compressed indexer cache for {layer_name} must be a single tensor.")
@@ -2076,7 +2071,7 @@ def _reshape_kv_cache_v2(
                 cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
                 kv_caches[layer_name] = (cache,)
                 continue
-            if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
+            if isinstance(kv_cache_spec, MLAAttentionSpec):
                 num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
@@ -2117,7 +2112,7 @@ def _reshape_kv_cache_v2(
             else:
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
-                if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
+                if isinstance(kv_cache_spec, MLAAttentionSpec):
                     k_cache, v_cache = _reshape_combined_mla_kv_cache(
                         raw_cache, k_shape, v_shape, k_dtype, page_stride_bytes, num_blocks_per_kv_block
                     )
