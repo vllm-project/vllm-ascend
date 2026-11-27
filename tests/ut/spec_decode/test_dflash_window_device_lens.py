@@ -14,6 +14,7 @@ branch.
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -109,7 +110,7 @@ def _capture_factory(monkeypatch, supplied):
 def test_mla_draft_eager_and_acl_get_exact_lengths(monkeypatch):
     monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     spec = _spec([1034, 1040, 7, 9])
-    supplied = []
+    supplied: list[dict[str, Any]] = []
     _capture_factory(monkeypatch, supplied)
     upper_bound = torch.tensor([1040, 1048], dtype=torch.int32)
 
@@ -204,7 +205,7 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
     # Reconstruct the newest visible key for each physical query as FIA does.
     # The first sampled row must see key 4093 (window [3070, 4093]).
     window = built["window"].decode
-    ends = []
+    ends: list[tuple[int, int] | None] = []
     start = 0
     for end, kv_len, table in zip(window.actual_seq_lengths_q, window.seq_lens_list, window.block_table, strict=True):
         ends.extend((int(table[0]), pos) if kv_len else None for pos in range(kv_len - (end - start), kv_len))
@@ -246,7 +247,7 @@ def test_flashmla_window_supplies_unclipped_first_positions(monkeypatch, a3_sink
     spec.sample_pos[::7] = torch.tensor([4093, 4097, 2041, 0])
     monkeypatch.setattr(AscendDFlashSpeculator, "max_model_len", 4096, raising=False)
     monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
-    supplied = []
+    supplied: list[dict[str, Any]] = []
     _capture_factory(monkeypatch, supplied)
     monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", lambda *args, **kwargs: {})
     monkeypatch.setattr(dflash_speculator_module, "prepare_draft_fia_lengths", lambda *_a, **_kw: pytest.fail("D2H"))
