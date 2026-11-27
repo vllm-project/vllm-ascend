@@ -643,8 +643,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         meta = super().build_connector_worker_meta()
         if not getattr(self, "_scheduler_read_pin_acks", None):
             return meta
-        if meta is None:
-            meta = AscendStoreKVConnectorWorkerMetadata()
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+            meta = AscendStoreKVConnectorWorkerMetadata(dict(getattr(meta, "completed_events", {})))
         rank = get_world_group().rank
         for ticket in self._scheduler_read_pin_acks:
             meta.scheduler_read_pin_acks.setdefault(ticket, set()).add(rank)

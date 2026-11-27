@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
@@ -67,7 +68,7 @@ def _enable_metadata_lease_namespace() -> None:
     capability.restype = ctypes.c_int
     if capability() != 1:
         raise RuntimeError(f"Memcache scheduler read lease namespace version mismatch in {extension_path}")
-    os.environ["MMC_METADATA_LEASE_OWNER_ID"] = str(_scheduler_lease_identity[1])
+    envs.set_memcache_metadata_lease_owner_id(_scheduler_lease_identity[1])
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
@@ -161,16 +162,35 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         return tuple(keys)
 
     def _remove_native_read_leases(self, keys: list[str]) -> None:
-        if keys and (status := self.store_scheduler.batch_remove_lease(keys)) != 0:
+        store = getattr(self, "store_scheduler", None)
+        if not keys:
+            return
+        if store is None:
+            logger.warning("Scheduler store unavailable during read lease cleanup for %d keys", len(keys))
+            return
+        try:
+            status = store.batch_remove_lease(keys)
+        except Exception:
+            logger.exception("Scheduler read lease cleanup failed for %d keys", len(keys))
+            return
+        if status != 0:
             logger.error("Scheduler read lease cleanup failed for %d keys, status=%s", len(keys), status)
 
     def _reserve_external_read_pins(self, keys: tuple[str, ...]) -> _SchedulerReadPin | None:
-        if not keys:
+        store = getattr(self, "store_scheduler", None)
+        if not keys or store is None:
             return None
         new_keys = [key for key in keys if key not in self._read_pin_references]
         if new_keys:
-            results = self.store_scheduler.batch_add_lease(new_keys, _SCHEDULER_READ_LEASE_TTL_MS)
+            try:
+                results = store.batch_add_lease(new_keys, _SCHEDULER_READ_LEASE_TTL_MS)
+            except Exception:
+                # Grants may have committed before the batch reply was lost.
+                logger.exception("Scheduler read lease acquisition failed for %d keys", len(new_keys))
+                self._remove_native_read_leases(new_keys)
+                return None
             if not isinstance(results, (list, tuple)):
+                self._remove_native_read_leases(new_keys)
                 return None
             successes = [
                 key for key, status in zip(new_keys, results, strict=False) if type(status) is int and status == 0
@@ -180,10 +200,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 return None
             # An eviction already committing may have won the race.
             try:
-                readable = self.store_scheduler.batch_is_readable(new_keys)
+                readable = store.batch_is_readable(new_keys)
             except Exception:
+                logger.exception("Scheduler read lease recheck failed for %d keys", len(new_keys))
                 self._remove_native_read_leases(successes)
-                raise
+                return None
             if (
                 not isinstance(readable, (list, tuple))
                 or len(readable) != len(new_keys)
@@ -229,7 +250,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             return result
         pin = self._reserve_external_read_pins(self._external_read_pin_keys(request, spec))
         if pin is None:
-            self.load_specs.pop(request.request_id)
+            self.load_specs.pop(request.request_id, None)
             logger.debug("Scheduler read lease unavailable for %s; computing the prefix", request.request_id)
             return 0, False
         self._pending_read_pins[request.request_id] = pin

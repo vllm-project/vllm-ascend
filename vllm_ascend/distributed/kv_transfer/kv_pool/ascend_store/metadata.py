@@ -1364,9 +1364,8 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     scheduler_read_pin_acks: dict[int, set[int]] = field(default_factory=dict)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
-        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
-            "aggregate worker metadata must be type of AscendStoreKVConnectorWorkerMetadata"
-        )
+        if not isinstance(other, AscendStoreKVConnectorWorkerMetadata):
+            raise TypeError(f"Cannot aggregate AscendStore worker metadata with {type(other).__name__}")
 
         merged: dict[int, int] = dict(self.completed_events)
         for event_id in other.completed_events:

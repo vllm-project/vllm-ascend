@@ -139,8 +139,10 @@ def test_layerwise_declines_finished_partial_tail():
     assert scheduler.register_finished_partial_tail(MagicMock(), ([1], [2]), [(1, 2, 64)]) is False
 
 
-@pytest.mark.parametrize("eviction", ["before_lease", "during_lease", None])
-def test_external_prefix_is_admitted_only_after_complete_read_lease(eviction):
+@pytest.mark.parametrize(
+    "scenario", ["before_lease", "during_lease", "acquire_error", "probe_error", "rollback_error", "no_client", None]
+)
+def test_external_prefix_is_admitted_only_after_complete_read_lease(scenario):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     scheduler._pin_external_prefix = True
     scheduler._pending_read_pins = {}
@@ -157,30 +159,45 @@ def test_external_prefix_is_admitted_only_after_complete_read_lease(eviction):
     scheduler.layerwise_max_transfer_blocks = 0
     keys = ["prefix-pp0", "prefix-pp1"]
     readable = set(keys)
+    acquiring = False
     scheduler._make_layerwise_hit_check_keys = lambda *_: keys
 
     def lookup(*_):
-        assert scheduler._query_layerwise_block_hits([keys]) == [True]
-        if eviction == "before_lease":
+        if scenario != "no_client":
+            assert scheduler._query_layerwise_block_hits([keys]) == [True]
+        if scenario in ("before_lease", "rollback_error"):
             readable.remove(keys[1])
         return StoreLookupResult(8)
 
     def acquire(lease_keys, _ttl):
+        nonlocal acquiring
+        acquiring = True
+        if scenario == "acquire_error":
+            raise RuntimeError("lease RPC failed")
         result = [0 if key in readable else -1 for key in lease_keys]
-        if eviction == "during_lease":
+        if scenario == "during_lease":
             readable.remove(keys[1])
         return result
 
+    def is_readable(batch):
+        if acquiring and scenario == "probe_error":
+            raise RuntimeError("recheck RPC failed")
+        return [key in readable for key in batch]
+
     scheduler._lookup_external_hit_tokens = lookup
     scheduler.store_scheduler = SimpleNamespace(
-        batch_is_readable=lambda batch: [key in readable for key in batch],
+        batch_is_readable=is_readable,
         batch_add_lease=MagicMock(side_effect=acquire),
-        batch_remove_lease=MagicMock(return_value=0),
+        batch_remove_lease=MagicMock(
+            return_value=0, side_effect=RuntimeError("cleanup RPC failed") if scenario == "rollback_error" else None
+        ),
     )
+    if scenario == "no_client":
+        scheduler.store_scheduler = None
     request = SimpleNamespace(request_id="req", num_tokens=16, block_hashes=["hash"])
     result = scheduler.get_num_new_matched_tokens(request, 0)
 
-    if eviction is None:
+    if scenario is None:
         assert result == (8, False)
         assert scheduler.load_specs[request.request_id].can_load
         assert scheduler._pending_read_pins[request.request_id].keys == tuple(keys)
@@ -190,9 +207,11 @@ def test_external_prefix_is_admitted_only_after_complete_read_lease(eviction):
         assert scheduler.load_specs == {}
         assert scheduler._pending_read_pins == {}
         assert scheduler._read_pin_references == {}
-        released = keys[:1] if eviction == "before_lease" else keys
-        scheduler.store_scheduler.batch_remove_lease.assert_called_once_with(released)
-    scheduler.store_scheduler.batch_add_lease.assert_called_once()
+        if scenario != "no_client":
+            released = keys[:1] if scenario in ("before_lease", "rollback_error") else keys
+            scheduler.store_scheduler.batch_remove_lease.assert_called_once_with(released)
+    if scenario != "no_client":
+        scheduler.store_scheduler.batch_add_lease.assert_called_once()
 
 
 @pytest.mark.parametrize("dspark", [False, True])
