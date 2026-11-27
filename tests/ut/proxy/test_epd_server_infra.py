@@ -25,13 +25,19 @@ import io
 import json
 import subprocess
 import sys
+import time
 import types
 
 import pytest
+from requests.exceptions import RequestException
 
 from tests.e2e.common.epd import epd_servers
 from tests.e2e.common.epd.epd_servers import DISAGG_EPD_PROXY_SCRIPT, DisaggEpdProxy, RemoteEPDServer
+from tests.e2e.common.serving import remote_openai_server
 from tests.e2e.common.serving.remote_openai_server import RemoteOpenAIServer
+
+# Captured before the autouse fixture replaces it with a no-op.
+_REAL_WAIT_FOR_MULTIPLE_SERVERS = RemoteOpenAIServer._wait_for_multiple_servers
 
 ENCODE_PORT = "19534"
 PREFILL_DECODE_PORT = "19535"
@@ -295,6 +301,42 @@ def test_poll_reports_a_crashed_instance(monkeypatch):
     for proc in clean._proc_list:
         proc.alive = False
     assert clean._poll() is None, "a clean exit is not a startup failure"
+
+
+def test_readiness_loop_fails_fast_when_an_instance_died(monkeypatch):
+    """A crashed instance must abort the startup wait instead of timing out."""
+    terminated: list[bool] = []
+
+    def _record_terminate(self):
+        terminated.append(True)
+        return []
+
+    def _mark_dead_then_wait(self, targets, timeout, **kwargs):
+        for proc in self._proc_list:
+            proc.alive = False
+        _REAL_WAIT_FOR_MULTIPLE_SERVERS(self, targets, timeout, **kwargs)
+
+    def _refuse(*args, **kwargs):
+        raise RequestException("connection refused")
+
+    monkeypatch.setattr(RemoteEPDServer, "_terminate_server", _record_terminate)
+    monkeypatch.setattr(RemoteOpenAIServer, "_wait_for_multiple_servers", _mark_dead_then_wait)
+    monkeypatch.setattr(remote_openai_server.requests, "get", _refuse)
+    factory = _FakePopenFactory(exit_codes=[7, 7])
+    _install_fake_popen(monkeypatch, factory)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="exited unexpectedly"):
+        RemoteEPDServer(
+            vllm_serve_args=[["--port", ENCODE_PORT], ["--port", PREFILL_DECODE_PORT]],
+            max_wait_seconds=30,
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10, "the readiness loop waited for the startup timeout instead of failing fast"
+    # The base wait already terminates on failure; the constructor retries it, so
+    # only "at least once" is contractual here.
+    assert terminated, "the aborted wait must terminate the started instances"
 
 
 def test_failed_readiness_wait_terminates_started_instances(monkeypatch):

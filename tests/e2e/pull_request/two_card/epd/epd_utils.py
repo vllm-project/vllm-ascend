@@ -107,7 +107,11 @@ def wait_for_ec_files(
     expected_new: int,
     timeout: float = EC_WAIT_SECONDS,
 ) -> set[Path]:
-    """Wait until expected_new EC cache files appeared, then return them."""
+    """Wait until expected_new new EC cache files appeared, then return the snapshot.
+
+    The return value is every file present at that moment, not only the new ones,
+    so it can be passed to assert_ec_files() as the "after" set.
+    """
     wait_until(
         lambda: len(snapshot_ec_files(shared_storage_path) - set(before)) >= expected_new,
         timeout=timeout,
