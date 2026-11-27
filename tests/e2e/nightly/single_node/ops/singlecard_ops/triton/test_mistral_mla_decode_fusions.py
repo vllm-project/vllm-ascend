@@ -36,8 +36,9 @@ def test_mistral_mla_decode_fusions_match_reference(tokens):
         assert actual_key is None
         return
 
-    expected_nope, expected_pe = scaling(query, log_positions).split(64, dim=-1)
-    expected_query_pe = torch_npu.npu_interleave_rope(expected_pe.unsqueeze(2), cos, sin).squeeze(2)
+    expected_query = query.clone()
+    expected_query[..., 64:] = torch_npu.npu_interleave_rope(query[..., 64:].unsqueeze(2), cos, sin).squeeze(2)
+    expected_nope, expected_query_pe = scaling(expected_query, log_positions).split(64, dim=-1)
     expected_key = torch_npu.npu_interleave_rope(kv[..., 512:], cos, sin)
     assert actual_query is not None and actual_key is not None
     torch.testing.assert_close(actual_query[0], expected_nope, rtol=0, atol=0)

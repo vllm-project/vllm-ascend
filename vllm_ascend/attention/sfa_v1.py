@@ -1558,11 +1558,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     ):
         """Mistral Large 4 query path for the no-q-LoRA SFA contract.
 
-        Mistral projects Q directly from hidden states and applies SSMax before
-        NoPE absorption.  NoPE layers project only the fixed 192-wide query
-        and append the model's zero RoPE lane; RoPE layers project both lanes.
-        SSMax is a per-token/per-head scalar, so applying it before absorption
-        is numerically identical to scaling the absorbed NoPE lane afterwards.
+        RoPE precedes SSMax, preserving the upstream intermediate rounding.
+        SSMax scales the content lane before K absorption. NoPE layers append
+        the model's zero RoPE lane inside SSMax.
         """
         use_rope = bool(getattr(self, "mistral_use_rope", True))
         projected_head_dim = self.qk_head_dim if use_rope else self.qk_nope_head_dim
@@ -1591,16 +1589,20 @@ class AscendSFAImpl(MLAAttentionImpl):
                 from vllm_ascend.ops.triton.mistral_mla_q import try_ssmax_split_rope
 
                 fused = try_ssmax_split_rope(q, log_positions, ssmax.s, ssmax.b, cos, sin)
-            if fused is None:
+
+        if fused is None:
+            if use_rope and cos is not None and sin is not None:
+                q[..., self.qk_nope_head_dim :] = self.rope_single(q[..., self.qk_nope_head_dim :], cos, sin)
+            if ssmax is not None:
                 if use_rope:
                     q = ssmax(q, log_positions)
                 else:
                     q = ssmax(q, log_positions, out_head_dim=self.qk_head_dim)
-        elif not use_rope:
-            q = torch.nn.functional.pad(q, (0, self.qk_rope_head_dim))
-
-        if fused is None:
+            elif not use_rope:
+                q = torch.nn.functional.pad(q, (0, self.qk_rope_head_dim))
             q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            if use_rope and cos is not None and sin is not None:
+                q_pe = q_pe.contiguous()
         else:
             q_nope, q_pe = fused
         if (
@@ -1617,8 +1619,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         else:
             ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
-        if fused is None and use_rope and cos is not None and sin is not None:
-            q_pe = self.rope_single(q_pe, cos, sin)
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
