@@ -333,6 +333,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     understand this class
     """
 
+    supports_split_query_dcp = True
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
@@ -484,7 +485,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         assert metadata.external_flashmla is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        if not isinstance(fused_cache, torch.Tensor) and not getattr(self, "use_a3_mla_sink", False):
             raise RuntimeError("DCP FlashMLA requires the original fused BBND cache")
         record_attention_compute_start()
         # The framework owns stream ordering, exchange, reduction and V-up.
@@ -495,7 +496,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             None,
             preprocessed.current_k_nope,
             preprocessed.current_k_pe,
-            fused_cache.shape[1],
+            fused_cache[0].shape[1] if isinstance(fused_cache, tuple) else fused_cache.shape[1],
             metadata,
             q_descale=preprocessed.dequant_scale_q_nope,
         )
@@ -507,16 +508,22 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert k_nope is not None and k_pe is not None
         if self.use_quant_flashmla and (k_nope.dtype != current.cache.dtype or k_pe.dtype != current.cache.dtype):
             raise RuntimeError("QuantFlashMLA DCP current KV must use the writer's quantized FP8 rows")
+        if isinstance(current.cache, tuple):
+            content_cache, rope_cache = current.cache
+        else:
+            content_cache = current.cache[..., : self.kv_lora_rank]
+            rope_cache = current.cache[..., self.kv_lora_rank :]
         torch_npu.npu_scatter_pa_kv_cache(
             key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
             value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
-            key_cache=current.cache[..., : self.kv_lora_rank],
-            value_cache=current.cache[..., self.kv_lora_rank :],
+            key_cache=content_cache,
+            value_cache=rope_cache,
             slot_mapping=current.slots,
             cache_mode="Norm",
         )
-        current.query[..., : self.kv_lora_rank].copy_(q_nope)
-        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+        if current.query is not None:
+            current.query[..., : self.kv_lora_rank].copy_(q_nope)
+            current.query[..., self.kv_lora_rank :].copy_(q_pe)
 
     def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind, q_descale=None):
         """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
@@ -526,12 +533,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             query, cache = current.query, current.cache
             adapter, schedule = current.adapter, current.schedule
             block_table, cache_lens, attn_mask = current.block_table, flash.used_q, current.attn_mask
+            output_mask = getattr(current, "output_mask", None)
         else:
             query, cache = flash.query, k_nope
             adapter, schedule = flash.adapter, flash.schedule
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
-            query[..., : self.kv_lora_rank].copy_(q_nope)
-            query[..., self.kv_lora_rank :].copy_(q_pe)
+            output_mask = getattr(flash, "output_mask", None)
+            if query is not None:
+                query[..., : self.kv_lora_rank].copy_(q_nope)
+                query[..., self.kv_lora_rank :].copy_(q_pe)
+        if query is None:
+            query = (q_nope, q_pe)
         scale_kwargs = {}
         if self.use_quant_flashmla:
             if q_descale is None:
@@ -549,6 +561,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             seqused_q=flash.used_q,
             metadata=schedule,
             attn_mask=attn_mask,
+            **({"output_mask": output_mask, "normalize_output": False} if output_mask is not None else {}),
             **scale_kwargs,
         )
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
@@ -714,13 +727,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             else:
                 current = flash.current
                 assert current is not None
+                current_caches = current.cache if isinstance(current.cache, tuple) else (current.cache,)
+                current_tensors += current_caches
                 current_tensors += (
                     current.query,
-                    current.cache,
                     current.schedule,
                     current.block_table,
                     current.slots,
                     current.attn_mask,
+                    getattr(current, "output_mask", None),
                     flash.cu,
                     flash.used_q,
                     flash.token_live,
@@ -765,6 +780,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             history_output,
             history_lse,
             defer_combine=True,
+            output_mask=getattr(flash, "output_mask", None),
         )
         if has_current:
             main_stream.wait_event(current_attn_done)
@@ -776,6 +792,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             scatter_dim=1,
             local_output=current_output,
             local_lse=current_lse,
+            **(
+                {"local_output_mask": flash.current.output_mask}
+                if has_current and flash is not None and getattr(flash.current, "output_mask", None) is not None
+                else {}
+            ),
         )
         return self._v_up_proj_batch_major(attn_output)
 

@@ -134,7 +134,7 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
     monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
     # The warmed key includes the local strides, which participate in the
     # Triton cache key.
-    full_key = (4, tokens, 512, ranks, 4 * 512, 512, 1, 4, 1)
+    full_key = (4, tokens, 512, ranks, 4 * 512, 512, 1, 4, 1, False)
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({full_key}) if warmed else frozenset())
     tiled, static, scalar, head_scatter = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
@@ -147,7 +147,7 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
         kernel = Mock()
         kernel.__getitem__ = Mock(return_value=launch)
         monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
-    with FakeTensorMode():
+    with FakeTensorMode() as fake_mode:
         recv = torch.empty(ranks, 4, tokens, 516, dtype=torch.bfloat16, device="npu:0")
         local = torch.empty_strided((tokens, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
         lse = torch.empty(tokens, 4, 1, dtype=torch.float32, device="npu:0")
@@ -166,12 +166,26 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
         assert static.call_args.kwargs["NUM_HEADS"] == 4
         assert static.call_args.kwargs["BLOCK_D"] == 512
 
+        # Warming the unmasked launch alone must not enable a masked specialization.
+        with fake_mode:
+            mask = torch.empty(tokens, dtype=torch.bool, device="npu:0")
+            dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse, local_output_mask=mask)
+        assert static.call_count == 1
+        assert head_scatter.call_count == 1
+        assert head_scatter.call_args.kwargs["HAS_LOCAL_OUTPUT_MASK"] is True
+        masked_key = (*full_key[:-1], True)
+        monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({full_key, masked_key}))
+        with fake_mode:
+            dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse, local_output_mask=mask)
+        assert static.call_count == 2
+        assert static.call_args.kwargs["local_output_mask_ptr"] is mask
+
 
 def test_a3_static_warmup_accumulates(monkeypatch):
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
     monkeypatch.setattr(dcp_a2a, "_A3_RECORDED", set())
-    first = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
-    second = (4, 32, 512, 16, 2048, 512, 1, 4, 1)
+    first = (4, 16, 512, 16, 2048, 512, 1, 4, 1, False)
+    second = (4, 32, 512, 16, 2048, 512, 1, 4, 1, False)
     dcp_a2a.begin_a3_static_warmup({(4, 16, 512, 16)})
     dcp_a2a._A3_RECORDED.add(first)
     dcp_a2a.end_a3_static_warmup()
@@ -192,7 +206,7 @@ def test_return_lse_keeps_scalar_path(monkeypatch, device_type):
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
     monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
     monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
-    key = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
+    key = (4, 16, 512, 16, 2048, 512, 1, 4, 1, False)
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({key}))
     tiled, static, scalar, head_scatter = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
