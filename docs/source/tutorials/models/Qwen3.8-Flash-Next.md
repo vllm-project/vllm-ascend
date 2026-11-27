@@ -792,6 +792,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     | TP × PP × DP | 2 × 1 × 2 | 2 × 1 × 2 |
     | EP | 4 | 4 |
     | API port | 8088 | 8092 |
+    | DP RPC port | 13388 | 13389 |
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
     | Maximum context / sequences / batched tokens | 143360 / 64 / 4096 | 143360 / 64 / 4096 |
 
@@ -854,6 +855,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 13388 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
@@ -923,6 +925,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 13389 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
@@ -989,7 +992,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 **950DT products key parameters:**
 
-- Each command starts TP2 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role.
+- Each command starts TP2 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role. Use distinct DP RPC ports for Prefill and Decode.
 - Model Runner V2, async scheduling, and expert parallelism are enabled.
 - Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace.
 - Both roles enable prefix caching with Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
