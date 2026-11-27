@@ -1210,6 +1210,26 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
 
     @staticmethod
+    @lru_cache(maxsize=1)
+    def _load_cann_quant_lightning_indexer_ordered_ops():
+        """Return the optional token-order-preserving QLI V1 operator."""
+        errors: list[ModuleNotFoundError] = []
+        for package in ("cann_ops_transformer_qliorder", "cann_ops_transformer_sparsekvplan", "cann_ops_transformer"):
+            try:
+                module = import_module(f"{package}.ops.attention.quant_lightning_indexer_ordered")
+            except ModuleNotFoundError as exc:
+                if exc.name in (package, f"{package}.ops", f"{package}.ops.attention"):
+                    errors.append(exc)
+                    continue
+                raise
+            operation = getattr(module, "quant_lightning_indexer_ordered", None)
+            if callable(operation):
+                return operation
+        if len(errors) == 3:
+            return None
+        return None
+
+    @staticmethod
     def host_register_flags() -> int:
         # A5 runtime rejects the redundant PINNED hint with error 107000.
         # MAPPED works for both malloc-host allocations and shared mappings.
@@ -1892,6 +1912,33 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
+
+        # The ordered A5 variant has the same scoring contract as the native
+        # QLI, but emits valid indices in ascending logical-token order. That
+        # order is required by SparseKvPlan and removes a host-side sort.
+        ordered_qli = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ordered_ops()
+        if ordered_qli is not None and enable_sparse_li_c8 and q_li_scale is not None:
+            assert q_li_shape_ori is not None
+            q_scale = q_li_scale.view(q_li_shape_ori[:-1])
+            key_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+            return ordered_qli(
+                q_li.view(q_li_shape_ori),
+                kv_cache[indexer_cache_idx],
+                weights,
+                q_scale,
+                key_scale,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=topk,
+                sparse_mode=3,
+                pre_tokens=INT64_MAX,
+                next_tokens=INT64_MAX,
+            )
 
         if enable_sparse_li_c4:
             assert len(kv_cache) == 2

@@ -97,10 +97,15 @@ def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
         if workspace is None:
             # Identity, not shape, separates groups. The manager key does not
             # retain the runtime or any Host-pool/Graph owner.
+            from vllm_ascend.hisparse.plan_ops import SparseKvPlanWorkspace
+
+            def allocate_resolver(runtime=runtime):
+                if SparseKvPlanWorkspace.supports(runtime):
+                    return SparseKvPlanWorkspace.from_runtime(runtime)
+                return _allocate_resolver_workspace(runtime)
+
             key = ("ascend_hisparse_resolver", object())
-            workspace = current_workspace_manager().get_persistent_resource(
-                key, lambda runtime=runtime: _allocate_resolver_workspace(runtime)
-            )
+            workspace = current_workspace_manager().get_persistent_resource(key, allocate_resolver)
             group._ascend_profiled_resolver = workspace
         if not hasattr(runtime, "_ascend_profiled_cache_ops"):
             runtime._ascend_profiled_cache_ops = workspace, _allocate_attention_lengths(runtime)
@@ -133,7 +138,12 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the compiled Ascend DMA extension.") from error
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
-        _load_resolver()
+        from vllm_ascend.hisparse.plan_ops import install_sparse_kv_plan
+
+        if not install_sparse_kv_plan():
+            _load_resolver()
+        else:
+            logger.info_once("[hisparse] Using the Ascend950 SparseKvPlan decode resolver.", scope="process")
         _install_worker_dma_hooks()
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
@@ -148,15 +158,24 @@ class AscendHiSparseBackend(HiSparseBackend):
 
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
         from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps
+        from vllm_ascend.hisparse.plan_ops import SparseKvPlanWorkspace
 
         group = runtime.index_group
         prepared = getattr(runtime, "_ascend_profiled_cache_ops", None)
+        plan_workspace: SparseKvPlanWorkspace | None = None
         if runtime is group.leader:
-            workspace = prepared[0] if prepared is not None else _allocate_resolver_workspace(runtime)
+            if SparseKvPlanWorkspace.supports(runtime):
+                plan_workspace = (
+                    prepared[0] if prepared is not None else SparseKvPlanWorkspace.from_runtime(runtime)
+                )
+                workspace = None
+            else:
+                workspace = prepared[0] if prepared is not None else _allocate_resolver_workspace(runtime)
         else:
             leader_ops = group.leader.cache_ops
             if not isinstance(leader_ops, HiSparseNPUOps):
                 raise RuntimeError("Bind the HiSparse leader before follower caches.")
+            plan_workspace = leader_ops.plan_workspace
             workspace = leader_ops.workspace
         mapping = runtime.registered_host_pool._hisparse_registration
         attention_capacity = 0
@@ -191,6 +210,7 @@ class AscendHiSparseBackend(HiSparseBackend):
             attention_capacity=attention_capacity,
             attention_block_stride=attention_block_stride,
             attention_lengths=attention_lengths,
+            plan_workspace=plan_workspace,
         )
         if prepared is not None:
             del runtime._ascend_profiled_cache_ops

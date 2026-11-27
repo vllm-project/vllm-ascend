@@ -9,6 +9,7 @@ replay. Workspaces are owned by the bound cache operations.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from vllm.triton_utils import triton
@@ -125,9 +126,11 @@ class HiSparseNPUOps:
         attention_capacity: int = 0,
         attention_block_stride: int | None = None,
         attention_lengths: tuple[torch.Tensor, torch.Tensor] | None = None,
+        plan_workspace: Any | None = None,
     ) -> None:
         self.host_mapping = host_mapping
         self.workspace = workspace
+        self.plan_workspace = plan_workspace
         self.attention_capacity = attention_capacity
         self.attention_block_stride = attention_block_stride
         self.attention_lengths = attention_lengths
