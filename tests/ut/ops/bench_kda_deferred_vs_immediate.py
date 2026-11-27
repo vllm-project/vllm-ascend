@@ -15,6 +15,12 @@ from this checkout's operators instead of two checkouts:
 * Each case runs 24 executions per path in 12 order-balanced pairs; within
   a pair each path runs once first and once second (an ABBA block), so
   ordering cannot bias the medians.
+* Before timing, each case settles the card with sustained full steps for
+  ``--settle`` seconds, so the frequency governor reaches steady state
+  instead of being measured on its boost ramp; the garbage collector is
+  then disabled while the executions are enqueued, because a collector
+  pause lets the device drain its queue and the event windows start
+  measuring host stalls instead of kernel time.
 * Verify is the median of the per-execution mean over the L layer calls,
   commit runs once across the layers, and the total is the median of each
   execution's sum of L verify calls plus one commit.
@@ -38,6 +44,7 @@ import argparse
 import contextlib
 import gc
 import statistics
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -303,11 +310,13 @@ def measure_case(args: argparse.Namespace, shape: tuple, pattern: str) -> dict:
         build_case(shape, pattern, "deferred"),
     )
     for case in cases:
-        # Warmup with the real plan kernels: two full steps put the deferred
-        # path in steady state (pending = counts) and leave a valid plan for
-        # the measured executions, where the plan and conv kernels are
-        # skipped and the deferred path restores the replay plan instead.
-        for _ in range(2):
+        # Warmup with the real plan kernels: sustained steps settle the
+        # card's frequency governor before the timed window, and put the
+        # deferred path in steady state (pending = counts) with a valid
+        # plan for the measured executions, where the plan and conv kernels
+        # are skipped and the replay plan is restored from the snapshot.
+        deadline = time.perf_counter() + args.settle
+        while time.perf_counter() < deadline:
             case.step()
         if case.label == "deferred":
             case.context.compact_conv(case.indices, case.record_rows, case.pending)
@@ -338,13 +347,18 @@ def measure_case(args: argparse.Namespace, shape: tuple, pattern: str) -> dict:
         commit_end.record()
         executions[case.label].append((layer_events, commit_start, commit_end))
 
-    with skipped_kernels(recoverssm_module, PLAN_KERNELS):
-        for _ in range(args.pairs):
-            for case in cases:
-                queue_execution(case)
-            for case in cases[::-1]:
-                queue_execution(case)
-    torch.npu.synchronize()
+    gc.collect()
+    gc.disable()
+    try:
+        with skipped_kernels(recoverssm_module, PLAN_KERNELS):
+            for _ in range(args.pairs):
+                for case in cases:
+                    queue_execution(case)
+                for case in cases[::-1]:
+                    queue_execution(case)
+        torch.npu.synchronize()
+    finally:
+        gc.enable()
     del cases
     gc.collect()
     torch.npu.empty_cache()
@@ -355,6 +369,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pairs", type=int, default=12, help="order-balanced ABBA pairs per case"
+    )
+    parser.add_argument(
+        "--settle",
+        type=float,
+        default=1.0,
+        help="seconds of warmup per case to settle the frequency governor",
     )
     parser.add_argument("--filter", type=str, help="substring filter for case labels")
     return parser.parse_args()
@@ -372,7 +392,10 @@ def main() -> None:
     print(f"operators: {recoverssm_module.__file__}")
     print("immediate: plain verify + per-step state commit")
     print("deferred : fused-replay verify + one-warp defer commit")
-    print(f"{args.pairs} ABBA pairs ({2 * args.pairs} executions per path)")
+    print(
+        f"{args.pairs} ABBA pairs ({2 * args.pairs} executions per path),"
+        f" {args.settle:.1f}s settle per case"
+    )
     rows = []
     for shape in SHAPES:
         for pattern in PATTERNS:
