@@ -432,9 +432,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                # TODO: `dynamic_eplb` is a leftover V1 EPLB argument.
-                # Remove it once the fused-experts input no longer carries it.
-                dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
