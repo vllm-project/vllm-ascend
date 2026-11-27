@@ -85,7 +85,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertEqual(layer._mxfp8_original_shapes["weight"], (128, 256))
-        self.assertTrue(layer._mxfp8_transformed)
+        self.assertTrue(layer._already_called_process_weights_after_loading)
         self.assertEqual(layer.weight_scale.shape, (4, 128, 2))
         self.assertTrue(layer.weight.data.is_contiguous())
         self.assertTrue(layer.weight_scale.data.is_contiguous())
@@ -100,7 +100,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertEqual(layer.weight.shape, original_weight_shape)
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
-        self.assertFalse(layer._mxfp8_transformed)
+        self.assertFalse(layer._already_called_process_weights_after_loading)
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())

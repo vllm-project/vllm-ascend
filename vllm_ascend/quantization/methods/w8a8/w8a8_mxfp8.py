@@ -303,8 +303,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf
 
-        # Mark as transformed
-        layer._mxfp8_transformed = True
+        # Mark post-load processing complete
         layer._already_called_process_weights_after_loading = True
 
     def restore_weights_for_rl_loading(self, layer):
@@ -322,7 +321,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         - weight_scale: (k_dim//2, n_dim, 2) -> (n_dim, k_dim)
         """
 
-        if not getattr(layer, "_mxfp8_transformed", False):
+        if not getattr(layer, "_already_called_process_weights_after_loading", False):
             # Not transformed, nothing to restore
             return
 
@@ -356,8 +355,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape)
             layer.weight_scale.data.copy_(target_scale)
 
-        # Mark as not transformed (ready for weight loading)
-        layer._mxfp8_transformed = False
+        # Allow post-load processing after the next weight load
         layer._already_called_process_weights_after_loading = False
 
 
@@ -534,7 +532,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         use_mega_moe = use_cann_megamoe(get_current_vllm_config())
         if not use_mega_moe and not self.use_expert_weight_list:
             self._process_batched_weights(layer)
-            layer._mxfp8_transformed = True
             layer._already_called_process_weights_after_loading = True
             return
 
@@ -578,7 +575,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             dispose_tensor(parameter)
             delattr(layer, tensor_name)
 
-        layer._mxfp8_transformed = True
         layer._already_called_process_weights_after_loading = True
         torch.npu.empty_cache()
 
@@ -652,7 +648,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         - w2_weight_scale: (g_num, k_size//2, n_size, 2) -> (g_num, n_size, k_size)
         """
 
-        if not getattr(layer, "_mxfp8_transformed", False):
+        if not getattr(layer, "_already_called_process_weights_after_loading", False):
             # Not transformed, nothing to restore
             return
 
@@ -678,7 +674,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 )
                 weight.data = weight_nd.transpose(1, 2).contiguous()
                 scale.data = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name]).contiguous()
-            layer._mxfp8_transformed = False
             layer._already_called_process_weights_after_loading = False
             return
         parameters = layer._mxfp8_moe_parameters
@@ -709,8 +704,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             setattr(layer, weight_name, weight_parameter)
             setattr(layer, scale_name, scale_parameter)
 
-        # Mark as not transformed (ready for weight loading)
-        layer._mxfp8_transformed = False
+        # Allow post-load processing after the next weight load
         layer._already_called_process_weights_after_loading = False
 
     def _get_weights(self, layer, name):

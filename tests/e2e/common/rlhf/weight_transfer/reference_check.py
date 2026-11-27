@@ -410,7 +410,9 @@ class MXFP8AuditWorker:
             kind = "moe" if "w13_weight" in layer._mxfp8_original_shapes else "linear"
             if kind in kinds:
                 continue
-            assert layer._mxfp8_transformed, f"{prefix}: MXFP8 post-processing was skipped"
+            assert getattr(layer, "_already_called_process_weights_after_loading", False), (
+                f"{prefix}: MXFP8 post-processing was skipped"
+            )
             kinds.add(kind)
             for name in ("w13_weight", "w2_weight") if kind == "moe" else ("weight",):
                 for tensor_name in (name, name + "_scale"):
