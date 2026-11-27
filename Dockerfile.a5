@@ -105,7 +105,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install --force-reinstall --no-deps \
-        "${FLA_PACKAGE}===${FLA_VERSION}" && \
+        "${FLA_PACKAGE}==${FLA_VERSION}" && \
     # Install flash-attention-npu from the Ascend mirror
     FLASH_ATTN_BUILD_NPU=950 python3 -m pip install --no-build-isolation --no-deps \
         "flash-attn-npu==${FLASH_ATTN_NPU_VERSION}" && \

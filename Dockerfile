@@ -88,7 +88,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     # Install memfabric_hybrid kernels
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
-    python3 -m pip install "flash-linear-attention-npu-a2===${FLA_VERSION}" --force-reinstall --no-deps && \
+    python3 -m pip install "flash-linear-attention-npu-a2==${FLA_VERSION}" --force-reinstall --no-deps && \
     # Keep the CANN env and --no-build-isolation: the isolated build env lacks torch/torch_npu.
     FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
