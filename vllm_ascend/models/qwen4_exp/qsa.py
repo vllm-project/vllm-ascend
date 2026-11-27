@@ -617,7 +617,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         if main_metadata is None:
             return
         request_plan = getattr(main_metadata, "qsa_request_plan", None)
-        if request_plan is None or not request_plan.use_union_gbsa:
+        if request_plan is None or not getattr(request_plan, "use_union_gbsa", True):
             return
         layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
         if not hasattr(layer, "indexer"):

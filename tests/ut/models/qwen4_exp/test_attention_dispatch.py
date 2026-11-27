@@ -2,10 +2,12 @@
 """QSA request planning and dispatch coverage without requiring a native NPU."""
 
 import ast
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -277,6 +279,31 @@ def test_metadata_builder_propagates_prefill_compatibility_option():
     )
     builder.build(0, common)
     assert plans[0][1]["use_union_gbsa"] is False
+
+
+@pytest.mark.parametrize(
+    ("plan", "lookup_expected"),
+    [(None, False), (SimpleNamespace(use_union_gbsa=False), False), (SimpleNamespace(), True)],
+)
+def test_prepare_step_metadata_handles_legacy_and_opt_out_plans(monkeypatch, plan, lookup_expected):
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.models.qwen4_exp.attention_dispatch",
+        SimpleNamespace(prepare_qsa_union_batches=Mock()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton",
+        SimpleNamespace(prepare_qsa_visible_lengths=Mock()),
+    )
+    builder, _ = load_builder()
+    layers = Mock()
+    layers.get.return_value = None
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=layers))
+
+    builder.prepare_step_metadata({"qsa": SimpleNamespace(qsa_request_plan=plan)}, ["qsa"], 1, set())
+
+    assert layers.get.called is lookup_expected
 
 
 def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
