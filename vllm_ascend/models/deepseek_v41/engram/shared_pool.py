@@ -557,12 +557,12 @@ class ShardedPoolClient:
                 primary.runtime._packed_refs += 1
                 self._packed_mapping = mapping
         mapping = self._packed_mapping
+        row_bytes = width * dtype.itemsize
         for client in self.clients:
             shard = client.manifest["tensors"][key]
             first, last = shard["first_row"], shard["first_row"] + shard["rows"]
             chunk_start, chunk_end = max(aligned_start, first), min(end, last)
             for row in range(chunk_start, chunk_end, CHUNK_ROWS):
-                row_bytes = width * torch.empty((), dtype=dtype).element_size()
                 offset = shard["byte_offset"] + (row - first) * row_bytes
                 size = min(CHUNK_ROWS, chunk_end - row) * row_bytes
                 pointers.append(

@@ -803,7 +803,7 @@ class _OwnerConnection(socketserver.BaseRequestHandler):
                     address=stage.data_ptr(),
                     engine=endpoint,
                     batch_lookup=True,
-                    shard=getattr(owner, "shard", {"index": 0, "count": 1}),
+                    shard=owner.shard,
                 ),
             )
             while True:

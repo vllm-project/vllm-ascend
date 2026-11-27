@@ -192,6 +192,7 @@ def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
     """A control EOF does not establish completion of a remote HIXL read."""
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.generation = "test-generation"
     owner.sessions, owner.retained, owner.lock, owner.pending_handlers = {}, [], threading.Lock(), 0
     stage, handle, deregistered = SimpleNamespace(data_ptr=lambda: 123), object(), []
@@ -234,6 +235,7 @@ def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
 def test_owner_rejects_missing_or_invalid_physical_device(rdma, monkeypatch, physical_device):
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.sessions, owner.retained, owner.lock = {}, [], threading.Lock()
     monkeypatch.setattr(rdma, "_configure_socket", lambda wire: None)
     client, server = socket.socketpair()
@@ -254,6 +256,7 @@ def test_owner_rejects_missing_or_invalid_physical_device(rdma, monkeypatch, phy
 def test_shutdown_tracks_attach_until_abrupt_disconnect(rdma, monkeypatch):
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.generation = "test-generation"
     owner.sessions, owner.retained, owner.lock, owner.pending_handlers = {}, [], threading.Lock(), 0
     started, release = threading.Event(), threading.Event()
@@ -670,50 +673,49 @@ def test_shard_ranges_cover_uneven_table(rdma):
         rdma.shard_range(2, 0, 3)
 
 
+def _fake_remote_reader_factory(events, engine, metadata, *, shard_count=3, fail_ack_at=None):
+    class FakeReader:
+        def __init__(self, index, transport):
+            events.append(("attach", index, transport is not None))
+            self.index = index
+            self.shard = {"index": index, "count": shard_count}
+            self.metadata = metadata
+            self.supports_batch = True
+            self.engine = engine
+            self.generation = str(index)
+            self.wire = SimpleNamespace(close=lambda: events.append(("wire-close", index)))
+            self.failed = False
+            self.closed = False
+            self.buffer = object()
+
+        def _retire_lease(self):
+            if self.index == fail_ack_at:
+                raise ConnectionError("ack failed")
+            events.append(("retire", self.index))
+            self.closed = True
+
+    def reader(model, endpoint, *, capacity, library_path, listen_port, local_comm_res, transport):
+        return FakeReader(int(endpoint), transport)
+
+    return reader
+
+
 def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
     events: list[Any] = []
     engine = SimpleNamespace(close=lambda: events.append("engine-close"))
     metadata = {"identity": "checkpoint", "tables": {}}
-
-    def reader(model, endpoint, *, capacity, library_path, listen_port, local_comm_res, transport):
-        index = int(endpoint)
-        events.append(("attach", index, transport is not None))
-
-        fake = SimpleNamespace(
-            shard={"index": index, "count": 3},
-            metadata=metadata,
-            supports_batch=True,
-            engine=engine,
-            generation=str(index),
-            wire=SimpleNamespace(close=lambda: events.append(("wire-close", index))),
-            failed=False,
-            closed=False,
-            buffer=object(),
-        )
-
-        def retire():
-            rdma._send(None, dict(op="close", generation=str(index)))
-            assert rdma._receive(None) == {"closed": True}
-            events.append(("wire-close", index))
-            fake.closed = True
-
-        fake._retire_lease = retire
-        return fake
-
-    monkeypatch.setattr(rdma, "RemoteReader", reader)
-    monkeypatch.setattr(rdma, "_send", lambda wire, msg: events.append(("retire", msg["generation"])))
-    monkeypatch.setattr(rdma, "_receive", lambda wire: {"closed": True})
+    monkeypatch.setattr(rdma, "RemoteReader", _fake_remote_reader_factory(events, engine, metadata))
     multi = rdma.ShardedRemoteReader("model", ["0", "1", "2"], capacity=16)
     multi.close()
     multi.close()
     assert events[:3] == [("attach", 0, False), ("attach", 1, True), ("attach", 2, True)]
     assert events.count("engine-close") == 1
     assert [event for event in events if isinstance(event, tuple) and event[0] == "retire"] == [
-        ("retire", "0"),
-        ("retire", "1"),
-        ("retire", "2"),
+        ("retire", 0),
+        ("retire", 1),
+        ("retire", 2),
     ]
-    assert events.index("engine-close") < events.index(("retire", "0"))
+    assert events.index("engine-close") < events.index(("retire", 0))
 
 
 @pytest.mark.parametrize("code_dtype", [torch.int8, torch.float8_e4m3fn])
@@ -1001,33 +1003,20 @@ def test_sharded_reader_rejects_fewer_than_two_endpoints(rdma, endpoints):
         rdma.ShardedRemoteReader("model", endpoints, capacity=1)
 
 
-def test_sharded_reader_blocks_lookup_after_partial_close(rdma, monkeypatch):
-    engine = SimpleNamespace(close=lambda: None)
-
-    class Item:
-        closed = failed = False
-        engine: Any
-        wire = object()
-        generation = "g"
-
-        def _retire_lease(self):
-            rdma._send(self.wire, dict(op="close", generation=self.generation))
-            if rdma._receive(self.wire) != {"closed": True}:
-                raise RuntimeError("owner did not retire remote Engram lease")
-            self.wire.close()
-            self.buffer = None
-            self.closed = True
-
-    item = Item()
-    item.engine = engine
-    reader = object.__new__(rdma.ShardedRemoteReader)
-    reader.readers = [item]
-    reader._operation_lock = threading.Lock()
-    reader._closing = False
-    reader._last_use = None
-    monkeypatch.setattr(rdma, "_send", lambda *args: None)
-    monkeypatch.setattr(rdma, "_receive", lambda *args: (_ for _ in ()).throw(ConnectionError("ack failed")))
-    with pytest.raises(ConnectionError, match="ack failed"):
-        reader.close()
-    with pytest.raises(RuntimeError, match="failed or closed"):
-        reader._lookup([], [], [], [])
+def test_sharded_reader_retires_later_owners_after_partial_close(rdma, monkeypatch):
+    events: list[Any] = []
+    engine = SimpleNamespace(close=lambda: events.append("engine-close"))
+    metadata = {"identity": "checkpoint", "tables": {}}
+    monkeypatch.setattr(rdma, "RemoteReader", _fake_remote_reader_factory(events, engine, metadata, fail_ack_at=1))
+    reader = rdma.ShardedRemoteReader("model", ["0", "1", "2"], capacity=16)
+    try:
+        with pytest.raises(ConnectionError, match="ack failed"):
+            reader.close()
+        assert events[3:] == ["engine-close", ("retire", 0), ("retire", 2)]
+        assert events.count("engine-close") == 1
+        assert reader.readers[0].closed and reader.readers[2].closed
+        assert not reader.readers[1].closed and reader.readers[1] in rdma._held_readers
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader._lookup([], [], [], [])
+    finally:
+        rdma._held_readers.clear()
