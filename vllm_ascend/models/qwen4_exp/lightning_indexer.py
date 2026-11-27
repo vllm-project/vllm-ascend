@@ -39,6 +39,12 @@ def qsa_select_paged_tokens_lightning_v2(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    main_key: torch.Tensor | None = None,
+    main_value: torch.Tensor | None = None,
+    main_key_cache: torch.Tensor | None = None,
+    main_value_cache: torch.Tensor | None = None,
+    main_slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select QSA groups with native request-batched LightningIndexerV2.
 
@@ -137,5 +143,10 @@ def qsa_select_paged_tokens_lightning_v2(
         compress_ratio,
         token_topk,
         out[:rows, :packed_width],
+        key=main_key,
+        value=main_value,
+        key_cache=main_key_cache,
+        value_cache=main_value_cache,
+        slot_mapping=main_slot_mapping,
     )
     return out
