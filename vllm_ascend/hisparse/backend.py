@@ -208,9 +208,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
     ) -> None:
-        from .binding import _bind_indexer_views, get_hisparse_indexer_specs
+        from .binding import prepare_hisparse_cache_views
 
-        _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+        prepare_hisparse_cache_views(kv_cache_config, kv_caches, forward_context)
 
     def is_current_stream_capturing(self) -> bool:
         return torch.npu.is_current_stream_capturing()

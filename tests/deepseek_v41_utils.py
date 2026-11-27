@@ -51,8 +51,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
         )
         specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
@@ -61,8 +59,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
             scale_dim=1,
             scale_dtype=torch.float16,
         )

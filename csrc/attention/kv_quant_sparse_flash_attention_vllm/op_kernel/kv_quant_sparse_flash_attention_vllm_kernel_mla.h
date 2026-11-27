@@ -424,6 +424,11 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::GetSparseActua
             }
             const uint64_t rowOffset = (queryBase + s1Idx) * constInfo.sparseBlockCount;
             const uint64_t originalLength = tempLoopInfo.curActualSeqLen;
+            // A causally masked first candidate may belong to an all-masked
+            // row. Preserve its original MAX/SUM padding semantics.
+            if (topKGm.GetValue(rowOffset) >= threshold) {
+                return;
+            }
             // No removable suffix: also avoids scanning full-valid rows.
             if (topKGm.GetValue(rowOffset + originalLength - 1) >= 0) {
                 return;
@@ -436,19 +441,16 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::GetSparseActua
                 topKGm.GetValue(rowOffset + lastAlignedBlock) >= 0) {
                 return;
             }
-            uint64_t firstInvalid = originalLength - 1;
-            bool invalidSeen = false;
-            for (uint64_t index = 0; index + 1 < originalLength; ++index) {
-                const int32_t candidate = topKGm.GetValue(rowOffset + index);
-                if (candidate < 0) {
-                    if (!invalidSeen) {
-                        firstInvalid = index;
-                        invalidSeen = true;
-                    }
-                } else if (invalidSeen || candidate >= threshold) {
-                    // Keep the old AIV boundaries for holes or causally masked
-                    // nonnegative IDs, including their all-masked MAX/SUM.
-                    return;
+            // The input contract requires a valid prefix followed by invalid
+            // indices. The last entry is already known to be invalid.
+            uint64_t firstInvalid = 0;
+            uint64_t upper = originalLength - 1;
+            while (firstInvalid < upper) {
+                const uint64_t middle = firstInvalid + (upper - firstInvalid) / 2;
+                if (topKGm.GetValue(rowOffset + middle) >= 0) {
+                    firstInvalid = middle + 1;
+                } else {
+                    upper = middle;
                 }
             }
             // AIC and both AIV subblocks make this same pure-read decision.

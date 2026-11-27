@@ -70,7 +70,6 @@ Select an image based on your machine type and start the Docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
@@ -89,7 +88,6 @@ Select an image based on your machine type and start the Docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
@@ -324,7 +322,7 @@ vllm bench serve \
   --model Qwen/Qwen3-VL-30B-A3B-Instruct \
   --served-model-name qwen3-vl-30b \
   --dataset-name random \
-  --random-input 200 \
+  --random-input-len 200 \
   --num-prompts 200 \
   --request-rate 1 \
   --save-result \

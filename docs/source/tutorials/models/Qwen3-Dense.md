@@ -473,7 +473,7 @@ vllm bench serve \
     --served-model-name qwen3 \
     --port <port> \
     --dataset-name random \
-    --random-input 200 \
+    --random-input-len 200 \
     --num-prompts 200 \
     --request-rate 1 \
     --save-result \

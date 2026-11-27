@@ -28,7 +28,7 @@ from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 @pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="eplb,dynamic_eplb",
+    feature="eplb",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",

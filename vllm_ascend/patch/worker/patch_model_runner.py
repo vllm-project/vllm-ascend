@@ -3,11 +3,13 @@
 
 from contextlib import AbstractContextManager
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import pad_num_tokens
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -15,10 +17,21 @@ from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 # rank-local request counts.
 def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
-    if uniform_token_count and vllm_config is not None and vllm_config.parallel_config.pcp_shard_decode_requests:
+    parallel_config = vllm_config.parallel_config if vllm_config is not None else None
+    if uniform_token_count and parallel_config is not None and parallel_config.pcp_shard_decode_requests:
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
+    if (
+        vllm_config is not None
+        and parallel_config.prefill_context_parallel_size == 1
+        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    ):
+        num_tokens = pad_num_tokens(
+            num_tokens,
+            vllm_config,
+            get_ascend_config().enable_shared_expert_dp,
+        )
     return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
 
 
@@ -144,12 +157,8 @@ def initialize_kv_cache(
         self.kv_cache_config,
         use_replayssm=self.cache_config.use_replayssm,
     )
-    if vllm_version_is("0.33.0"):
-        breakable_cg = upstream.envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-        graph_kwargs = {"decode_query_len": self.decode_query_len}
-    else:
-        breakable_cg = upstream.is_breakable_cudagraph_enabled(self.compilation_config)
-        graph_kwargs = {"decode_query_lens": self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len)}
+    breakable_cg = upstream.is_breakable_cudagraph_enabled(self.compilation_config)
+    graph_kwargs = {"decode_query_lens": self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len)}
     piecewise_capture_available = bool(breakable_cg or upstream.has_compiled_submodule(self.model))
     if self.adaptive_verification is not None:
         self.compilation_config.cudagraph_mode = upstream.resolve_adaptive_cudagraph_mode(
@@ -161,12 +170,10 @@ def initialize_kv_cache(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
-        **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
         kv_cache_config=self.kv_cache_config,
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,
         piecewise_capture_available=piecewise_capture_available,
-        **{},
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,
@@ -217,11 +224,9 @@ def initialize_kv_cache(
     self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
     # Model-state initialization may allocate ReplaySSM trackers. Collect the
     # final tensors after that binding so scheduler copies keep live references.
-    # #55688 adds the collector on main; v0.33.0 shares trackers during binding.
-    if not vllm_version_is("0.33.0"):
-        self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
-            self.compilation_config.static_forward_context
-        )
+    self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
+        self.compilation_config.static_forward_context
+    )
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:
@@ -229,20 +234,11 @@ def initialize_kv_cache(
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
         if self.vllm_config.aux_output_config.enabled:
-            if vllm_version_is("0.33.0"):
+            if self.aux_output_connector is None:
                 self.aux_output_connector = upstream.get_aux_output_connector(  # type: ignore[call-arg]
-                    self.model, self.vllm_config, kv_cache_config
+                    self.model, self.vllm_config
                 )
-            else:
-                # Main drops the constructor argument and initializes the data
-                # plane once the KV-cache layout is resolved.
-                if self.aux_output_connector is None:
-                    self.aux_output_connector = upstream.get_aux_output_connector(  # type: ignore[call-arg]
-                        self.model, self.vllm_config
-                    )
-                self.aux_output_connector.initialize_output_storage(  # type: ignore[attr-defined]
-                    kv_cache_config
-                )
+            self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace

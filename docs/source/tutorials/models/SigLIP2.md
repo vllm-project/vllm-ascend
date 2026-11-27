@@ -62,7 +62,6 @@ You can use the official all-in-one Docker image. For the available image tags a
   --name $NAME \
   --net=host \
   --shm-size=1g \
-  --privileged=true \
   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
   -v /root/.cache:/root/.cache \
   -it $IMAGE bash
