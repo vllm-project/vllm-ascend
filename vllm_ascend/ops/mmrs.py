@@ -237,8 +237,9 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
     The loaded INT8 weight is [K, N] after ModelSlim's transpose and may be
     cast to NZ (weight_nz_mode=2). This CANN version rejects NZ MMRS
     operands, so the fused path converts an NZ weight back to ND once and
-    caches the value-preserving copy; the cache rebuilds only when the
-    weight is replaced or mutated in place.
+    caches the value-preserving copy; the cache rebuilds when the weight is
+    replaced or mutated in place, and is invalidated explicitly on an
+    in-place reload (which preserves Parameter identity and _version).
     """
 
     REQUIRED_CAPABILITY = HardwareCapability.MM_REDUCE_SCATTER_INT8
@@ -292,6 +293,27 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
         self._nd_weight_version = weight._version
         self._nd_weight = nd_weight
         return nd_weight
+
+    def invalidate_weight_cache(self) -> None:
+        """Drop the converted ND weight; the next fused call reconverts."""
+        self._nd_weight_source = None
+        self._nd_weight_version = -1
+        self._nd_weight = None
+
+    @classmethod
+    def invalidate_weight_caches(cls, model: torch.nn.Module) -> None:
+        """Drop the ND conversion caches of the ops installed on *model*.
+
+        The upstream in-place reload writes through ``param.data.copy_(...)``
+        and restores the original Parameter, so neither its identity nor its
+        ``_version`` changes and the cache key cannot observe the reload. The
+        reload contract leaves invalidating derived state to the caller; the
+        model runner routes it here.
+        """
+        for module in model.modules():
+            custom_op = getattr(module, "custom_op", None)
+            if isinstance(custom_op, cls):
+                custom_op.invalidate_weight_cache()
 
     def _run_fused(self, input_: torch.Tensor) -> torch.Tensor:
         """INT8 dynamic-quant MM + ReduceScatter through the fused path.

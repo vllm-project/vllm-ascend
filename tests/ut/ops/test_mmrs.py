@@ -660,3 +660,45 @@ def test_create_selects_the_bf16_variant_otherwise(harness):
     assert type(op) is mmrs.SequenceParallelMMReduceScatterOp
     assert op.min_tokens == 256
     assert op.max_tokens == 16384
+
+
+def test_quant_nd_cache_invalidated_after_data_copy_reload(quant_harness):
+    h = quant_harness
+    h.weight_format.return_value = ACL_FORMAT_FRACTAL_NZ
+    x = torch.ones(4096, 256, dtype=torch.bfloat16)
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    h.format_cast.assert_called_once()
+    nd_weight = h.fused.call_args.args[1]
+
+    # The upstream in-place reload writes through param.data.copy_(...) and
+    # restores the original Parameter: identity and _version stay unchanged,
+    # so the op keeps serving the stale copy until told explicitly.
+    h.layer.weight.data.copy_(torch.full((256, 32), 2, dtype=torch.int8))
+    assert h.layer.weight._version == 0
+    h.op.run(x)
+    assert h.fused.call_args.args[1] is nd_weight
+    h.format_cast.assert_called_once()
+
+    # The reload caller invalidates the derived cache; the next fused call
+    # reconverts from the live weight and sees the reloaded values.
+    h.op.invalidate_weight_cache()
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    assert h.format_cast.call_count == 2
+    assert h.fused.call_args.args[1] is not nd_weight
+
+
+def test_invalidate_weight_caches_walks_installed_custom_ops(quant_harness):
+    h = quant_harness
+    h.op._nd_weight_source = h.layer.weight
+    h.op._nd_weight_version = 0
+    h.op._nd_weight = torch.ones(256, 32, dtype=torch.int8)
+
+    class Holder(torch.nn.Module):
+        pass
+
+    model = Holder()
+    model.o_proj = Holder()
+    model.o_proj.custom_op = h.op
+    mmrs.SequenceParallelQuantMMReduceScatterOp.invalidate_weight_caches(model)
+    assert h.op._nd_weight is None
+    assert h.op._nd_weight_source is None
