@@ -74,7 +74,7 @@
     - `query_dequant_scale`和`key_dequant_scale`支持FLOAT16，不支持FLOAT32和FLOAT8_e8m0。
     - `weights`支持FLOAT16，不支持FLOAT32。
     - 不支持`output_idx_offset`；`return_value` 支持 0/1（DCP 跨 rank 全局 TopK 需要 score，DCP 场景强制为1）。
-    - `query`的N仅支持64，`key`的N仅支持1。
+    - `query`支持32或64个头。在A3上，`candidate_mode=0`时也支持4个头。`key`仅支持1个头。
     - `topk`支持[1, 2048]。
 
 ## DCP（Decode Context Parallel，解码上下文并行）

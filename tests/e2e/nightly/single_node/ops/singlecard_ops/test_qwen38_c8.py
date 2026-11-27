@@ -345,9 +345,9 @@ def test_c8_mtp_indexer_request_batch_matches_singletons_after_replay():
     offsets = torch.arange(width, dtype=torch.int32, device="npu").repeat(4) - width
     positions = lengths[owners.long()] + offsets
 
-    def run(decode_width):
+    def run(decode_width, input_query=query):
         return qsa_select_paged_tokens_quantized(
-            query,
+            input_query,
             cache,
             table,
             owners,
@@ -375,6 +375,19 @@ def test_c8_mtp_indexer_request_batch_matches_singletons_after_replay():
             torch.testing.assert_close(actual[row, :512].sort().values, expected)
 
     check(run(width))
+    # Different heads and query rows contribute different scores. Compare against
+    # the original 64-head operator to catch cross-token mixing in the weight tile.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(114)
+        varied_query = torch.randn(query.shape, dtype=torch.bfloat16).npu()
+        original_key = key.clone()
+        key.copy_(torch.randint(-120, 121, key.shape, dtype=torch.int8))
+        padded_query = torch.nn.functional.pad(varied_query, (0, 0, 0, 60))
+        native = run(width, varied_query).cpu()
+        padded = run(width, padded_query).cpu()
+        torch.testing.assert_close(native[:, :512].sort().values, padded[:, :512].sort().values)
+        torch.testing.assert_close(native[:, 512:], padded[:, 512:])
+        key.copy_(original_key)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         captured = run(width)
@@ -434,16 +447,18 @@ def test_c8_query_fusion_graph_replay_matches_reference(heads, dim):
     torch.testing.assert_close(captured, quantize_qsa_rows(query), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("native_four_heads", [False, True])
 @pytest.mark.parametrize("tokens,heads", [(0, 4), (1, 4), (4, 4), (96, 32), (4096, 4), (4, 64)])
 @torch.inference_mode()
-def test_c8_qli_query_padding_and_graph_replay(tokens, heads):
+def test_c8_qli_query_padding_and_graph_replay(tokens, heads, native_four_heads):
     query = torch.randn(tokens, 128, heads, dtype=torch.bfloat16, device="npu").transpose(1, 2)
 
     def check(outputs):
         codes, scales, weights = outputs
         ref_codes, ref_scales = quantize_qsa_rows(query)
-        assert codes.shape == (tokens, 64, 128) and codes.dtype == torch.int8
-        assert scales.shape == weights.shape == (tokens, 64) and scales.dtype == weights.dtype == torch.float16
+        physical_heads = 4 if native_four_heads and heads == 4 else 64
+        assert codes.shape == (tokens, physical_heads, 128) and codes.dtype == torch.int8
+        assert scales.shape == weights.shape == (tokens, physical_heads) and scales.dtype == weights.dtype == torch.float16
         torch.testing.assert_close(codes[:, :heads], ref_codes, rtol=0, atol=0)
         torch.testing.assert_close(scales[:, :heads], ref_scales.half(), rtol=0, atol=0)
         torch.testing.assert_close(weights[:, :heads], torch.full_like(ref_scales.half(), 1 / math.sqrt(128)))
@@ -451,12 +466,12 @@ def test_c8_qli_query_padding_and_graph_replay(tokens, heads):
         assert not weights[:, heads:].any().item()
         assert (scales[:, heads:] == 1).all().item()
 
-    check(prepare_qli_query(query))
+    check(prepare_qli_query(query, native_four_heads=native_four_heads))
     if tokens:
         torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            captured = prepare_qli_query(query)
+            captured = prepare_qli_query(query, native_four_heads=native_four_heads)
         query[0].zero_()
         query[-1, :, :6] = torch.tensor([127, -127, 0.5, 1.5, -0.5, -1.5], device="npu", dtype=torch.bfloat16)
         graph.replay()

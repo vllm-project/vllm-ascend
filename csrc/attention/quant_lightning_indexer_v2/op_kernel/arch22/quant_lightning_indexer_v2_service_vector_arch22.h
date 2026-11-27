@@ -1189,14 +1189,25 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec0(const QLIV2Common::RunIn
     AscendC::Mul(inWeightsUb, inWeightsUb, inQScaleUb, cuProcEleNum);
     PipeBarrier<PIPE_V>();
     LocalTensor<half> resUb = outQueue_.AllocTensor<half>();
-    AscendC::Brcb(resUb, inWeightsUb, static_cast<uint8_t>(cuProcEleNum / 8), {1, 8});
+    if (gSize_ == 4) {
+        // In the Cube K dimension each token owns four consecutive heads.
+        // Column t selects only those heads. Zero the entire tile for partial S1 tails.
+        AscendC::Duplicate(resUb, static_cast<half>(0), BLOCK_CUBE * BLOCK_CUBE);
+        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+        for (int32_t h = 0; h < cuProcRealNum; ++h) {
+            resUb.SetValue(h * BLOCK_CUBE + h / 4, inWeightsUb.GetValue(h));
+        }
+        SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+    } else {
+        AscendC::Brcb(resUb, inWeightsUb, static_cast<uint8_t>(cuProcEleNum / 8), {1, 8});
+    }
     inQueue_.FreeTensor(inWeightsUb);
 
     outQueue_.EnQue<half>(resUb);
     resUb = outQueue_.DeQue<half>();
     AscendC::DataCopyParams copyOutParams;
     copyOutParams.blockCount = 1;
-    copyOutParams.blockLen = cuProcRealNum * BLOCK_CUBE * sizeof(half);
+    copyOutParams.blockLen = (gSize_ == 4 ? BLOCK_CUBE : cuProcRealNum) * BLOCK_CUBE * sizeof(half);
     copyOutParams.srcStride = 0;
     copyOutParams.dstStride = 0;
     AscendC::DataCopyPad(vec0OutGm[vec0OutGmOffset], resUb, copyOutParams);

@@ -188,13 +188,16 @@ def _pad_qli_query(
             tl.store(weights + dest, tl.where(active, HEAD_WEIGHT, 0.0))
 
 
-def prepare_qli_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Materialize the dense 64-head INT8 input and FP16 QLI v2 scales and weights."""
+def prepare_qli_query(query: torch.Tensor, *, native_four_heads: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize Q and prepare the head layout consumed by QLI v2."""
     tokens, heads, dim = query.shape
     codes, scales = quantize_qsa_query(query)
     shape = (tokens, QLI_V2_QUERY_HEADS)
     weight = 1.0 / math.sqrt(dim)
-    # A2/A3 QLI v2 requires 64 heads. Inactive heads have zero weight,
+    if native_four_heads and heads == 4:
+        fp16_scales = scales.to(torch.float16)
+        return codes, fp16_scales, torch.full_like(fp16_scales, weight)
+    # The padded path assigns inactive heads zero weight,
     # so the padding cannot change the score. Keep the exact same FP32
     # quantizer and convert scales only when writing the FP16 input.
     if query.device.type == "npu" and tokens >= _QLI_V2_FUSED_MIN_TOKENS:

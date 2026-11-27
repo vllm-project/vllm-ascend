@@ -189,10 +189,10 @@ aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t 
     }
     // 校验 A2/A3 参数
     if (socVersion.find("Ascend950") == std::string::npos) {
-        // num_heads_q 校验 (g=64/32, 32 参照 v1 对齐 mBaseSize=4*g 推导)
-        CHECK_COND((numHeadsQ == QLI_V2_NUM_HEADS_Q_UPPER_BOUND) || (numHeadsQ == QLI_V2_NUM_HEADS_Q_G32),
+        CHECK_COND(numHeadsQ == QLI_V2_NUM_HEADS_Q_UPPER_BOUND || numHeadsQ == QLI_V2_NUM_HEADS_Q_G32 ||
+                       numHeadsQ == 4,
                    ACLNN_ERR_PARAM_INVALID,
-                   "num_heads_q should be %lld or %lld, but got %lld", QLI_V2_NUM_HEADS_Q_UPPER_BOUND,
+                   "num_heads_q should be 4, %lld or %lld, but got %lld", QLI_V2_NUM_HEADS_Q_UPPER_BOUND,
                    QLI_V2_NUM_HEADS_Q_G32, numHeadsQ);
         // topk 校验
         CHECK_COND(topk >= QLI_V2_TOPK_LOWER_BOUND && topk <= QLI_V2_A3_TOPK_UPPER_BOUND, ACLNN_ERR_PARAM_INVALID,

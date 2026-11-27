@@ -154,6 +154,7 @@ class HardwareCapability(Enum):
     NATIVE_INT8_SPARSE = auto()
     # INT8 QLI v2 supports paged, request-batched compressed causal decode.
     INT8_QLI_V2_REQUEST_BATCHED_DECODE = auto()
+    INT8_QLI_V2_FOUR_QUERY_HEADS = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
@@ -471,6 +472,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
+                HardwareCapability.INT8_QLI_V2_FOUR_QUERY_HEADS,
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,

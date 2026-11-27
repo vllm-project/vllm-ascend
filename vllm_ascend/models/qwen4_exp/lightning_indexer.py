@@ -195,6 +195,7 @@ def _prepare_quantized_indexer_metadata(
     max_seqlen_k: int,
     query_start_loc: torch.Tensor,
     decode_width: int,
+    num_heads_q: int,
 ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
     cache = None
     cache_key = (
@@ -204,6 +205,7 @@ def _prepare_quantized_indexer_metadata(
         sequence_lengths,
         query_start_loc,
         decode_width,
+        num_heads_q,
         group_topk,
         compress_ratio,
         max_seqlen_k,
@@ -237,7 +239,7 @@ def _prepare_quantized_indexer_metadata(
         common = dict(cu_seqlens_q=cu_query, seqused_k=visible_groups, mask_mode=0, cmp_ratio=1)
     common.update(quant_mode=2, layout_q="TND", layout_k="PA_BBND")
     metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-        num_heads_q=QLI_V2_QUERY_HEADS,
+        num_heads_q=num_heads_q,
         num_heads_k=1,
         head_dim=_HEAD_DIM,
         topk=group_topk,
@@ -288,7 +290,10 @@ def qsa_select_paged_tokens_quantized(
     out.fill_(-1)
     if not rows:
         return out
-    padded_query, padded_scales, weights = prepare_qli_query(query)
+    query_codes, query_scales, weights = prepare_qli_query(
+        query,
+        native_four_heads=get_current_hardware_profile().supports(HardwareCapability.INT8_QLI_V2_FOUR_QUERY_HEADS),
+    )
     group_topk = token_topk // compress_ratio
     common, page_table, metadata = _prepare_quantized_indexer_metadata(
         block_table,
@@ -300,12 +305,13 @@ def qsa_select_paged_tokens_quantized(
         block_table.shape[1] * key.shape[1],
         query_start_loc,
         decode_width,
+        query_codes.shape[1],
     )
     groups, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
-        query=padded_query,
+        query=query_codes,
         key=key,
         weights=weights,
-        query_dequant_scale=padded_scales,
+        query_dequant_scale=query_scales,
         key_dequant_scale=key_scales,
         topk=group_topk,
         block_table=page_table,

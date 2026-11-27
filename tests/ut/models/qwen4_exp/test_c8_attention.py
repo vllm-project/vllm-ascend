@@ -187,7 +187,7 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
     calls = []
 
     def build_metadata(**kwargs):
-        calls.append(kwargs["seqused_k"].tolist())
+        calls.append((kwargs["num_heads_q"], kwargs["seqused_k"].tolist()))
         return torch.empty(0)
 
     monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", build_metadata, raising=False)
@@ -198,9 +198,9 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
 
     boundaries = torch.tensor([0, 2], dtype=torch.int32)
 
-    def prepare(page_table=table):
+    def prepare(page_table=table, heads=4):
         return lightning_indexer._prepare_quantized_indexer_metadata(
-            page_table, requests, positions, lengths, 512, 4, 256, boundaries, 0
+            page_table, requests, positions, lengths, 512, 4, 256, boundaries, 0, heads
         )
 
     def new_context():
@@ -211,6 +211,7 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
     with new_context():
         first = prepare()
         assert (prepare() is first) == reuse
+        assert prepare(heads=64) is not first
         other_table = torch.tensor([[2, 3]], dtype=torch.int32)
         other = prepare(other_table)
         assert other is not first
@@ -224,7 +225,8 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
     assert first is not second
     torch.testing.assert_close(second[1], table.expand(2, -1))
     calls_per_input = 1 if reuse else 2
-    assert calls == [[1, 2]] * 2 * calls_per_input + [[0, 1]] * calls_per_input
+    expected = [(4, [1, 2])] * calls_per_input
+    assert calls == expected + [(64, [1, 2])] + expected + [(4, [0, 1])] * calls_per_input
 
 
 @pytest.mark.parametrize(
