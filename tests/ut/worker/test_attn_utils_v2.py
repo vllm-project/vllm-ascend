@@ -1395,31 +1395,12 @@ def test_k26_basic_mla_preserves_strided_views(k26_basic_mla):
     assert torch.equal(torch.as_tensor(first_cache.untyped_storage(), dtype=torch.int8), reference)
 
 
-def test_pure_mla_routing_uses_cache_owners(k26_basic_mla):
-    config, vllm_config, _ = k26_basic_mla
-    vllm_config.model_config.hf_config.model_type = "deepseek_v3"
-    vllm_config.model_config.hf_text_config.model_type = "deepseek_v3"
-    vllm_config.speculative_config = SimpleNamespace(method="ngram")
-    assert attn_utils._can_unify_mla_cache(vllm_config, config)
-    assert all(spec.num_heads == 1 for spec in attn_utils.get_kv_cache_spec(vllm_config).values())
-
-
-def test_pure_mla_routes_multiple_descriptors_in_one_pool(k26_basic_mla):
-    config, _, layers = k26_basic_mla
-    (descriptor,) = config.kv_cache_tensors
-    config.kv_cache_tensors = [
-        replace(descriptor, layers=[name], offset=index * descriptor.layer_stride) for index, name in enumerate(layers)
-    ]
-    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [128])
-    first, second = (caches[name][0] for name in layers)
-    assert first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
-    assert second.data_ptr() - first.data_ptr() == descriptor.layer_stride
-
-
-@pytest.mark.parametrize("feature", ["pd", "writer", "block_outer"])
+@pytest.mark.parametrize("feature", ["speculative", "pd", "writer", "block_outer"])
 def test_k26_basic_mla_keeps_legacy_path(k26_basic_mla, feature):
     config, vllm_config, layers = k26_basic_mla
-    if feature == "pd":
+    if feature == "speculative":
+        vllm_config.speculative_config = object()
+    elif feature == "pd":
         vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
     elif feature == "writer":
         layers["layers.1.mla"].impl.supports_strided_mla_writer = lambda: False
@@ -1427,7 +1408,7 @@ def test_k26_basic_mla_keeps_legacy_path(k26_basic_mla, feature):
         descriptor = config.kv_cache_tensors[0]
         page = descriptor.block_stride
         config.kv_cache_tensors[0] = replace(descriptor, layer_stride=page, block_stride=page * len(layers))
-    assert not attn_utils._can_unify_mla_cache(vllm_config, config)
+    assert not attn_utils._can_unify_kimi_mla_cache(vllm_config, config)
     if feature != "block_outer":
         assert all(spec.num_heads == 16 for spec in attn_utils.get_kv_cache_spec(vllm_config).values())
 
