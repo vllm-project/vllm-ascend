@@ -101,13 +101,15 @@ else:
 # SparseFlashMla metadata has one entry per AIC/AIV scheduling field.
 SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC = 9
 SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV = 8
-SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 128
+SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 1024
 SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE = 2048
 SAS_METADATA_BUFFER_SIZE = 1024
 QLI_METADATA_BUFFER_SIZE = 1024
 
 
 def _sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
+    if device.type != "npu":
+        return SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE
     properties = torch.npu.get_device_properties(device)
     entries = (
         SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num
@@ -122,9 +124,7 @@ def _sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
 def _copy_sas_metadata(buffer: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
     size = plan.numel()
     if not 0 < size <= buffer.numel():
-        raise ValueError(
-            f"SAS metadata size {size} is outside buffer capacity {buffer.numel()}"
-        )
+        raise ValueError(f"SAS metadata size {size} is outside buffer capacity {buffer.numel()}")
     # Keep the backing address stable and pass the exact plan shape to CANN.
     output = buffer if size == buffer.numel() else buffer[:size]
     return output.copy_(plan)
@@ -1941,9 +1941,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
                 req.sas_metadata = build_sas_metadata()
 
             self._device_metadata_tasks += (
-                DeviceMetadataTask(
-                    DeviceMetadataStage.ATTENTION, run_sas_metadata, group_id
-                ),
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_sas_metadata, group_id),
             )
             req.sas_metadata = self.sas_metadata_buffer
             req.sas_metadata_group_id = group_id
