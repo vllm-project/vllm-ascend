@@ -3205,27 +3205,29 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
+        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+        quant_kwargs = {}
         if getattr(self, "use_a3_mla_sink", False):
             query = (preprocessed.ql_nope, preprocessed.q_pe)
             output_kwargs = {"output_mask": flash.output_mask, "return_softmax_lse": False}
         else:
             output_kwargs = {}
-            query = getattr(preprocessed, "packed_query", None)
-            if query is None:
+            packed_query = getattr(preprocessed, "packed_query", None)
+            if packed_query is None:
                 # Pack separate NoPE and RoPE outputs into the retained TND buffer.
-                query = flash.query
-                query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-                query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+                packed_query = flash.query
+                packed_query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+                packed_query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+            if self.use_quant_flashmla:
+                q_descale = preprocessed.dequant_scale_q_nope
+                if q_descale is None:
+                    raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")
+                quant_kwargs = {
+                    "q_descale": q_descale.view(packed_query.shape[0], self.num_heads),
+                    "k_descale": self.fak_descale_float.view(1),
+                }
+            query = packed_query
         record_attention_compute_start()
-        quant_kwargs = {}
-        if self.use_quant_flashmla:
-            q_descale = preprocessed.dequant_scale_q_nope
-            if q_descale is None:
-                raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")
-            quant_kwargs = {
-                "q_descale": q_descale.view(query.shape[0], self.num_heads),
-                "k_descale": self.fak_descale_float.view(1),
-            }
         latent, _ = flash.adapter.attention(
             query,
             fused_cache,
