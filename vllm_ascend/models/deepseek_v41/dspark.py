@@ -293,7 +293,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
-        # Expand only this rank's token rows, as in the target model.
         hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
