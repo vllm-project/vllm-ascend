@@ -1801,6 +1801,32 @@ void npu_indexer_region_score_ids_out_meta(
     }
 }
 
+#ifdef VLLM_ASCEND_ENABLE_DSV41_MLA_PROLOG
+std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_meta(
+    const at::Tensor &x, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &wQb, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, at::Tensor &, double)
+{
+    return {
+        at::empty_symint(c10::SymDimVector{x.sym_size(0), wQb.sym_size(1) / 512, 512}, x.options()),
+        at::empty_symint(c10::SymDimVector{x.sym_size(0), 1280}, x.options()),
+    };
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> dsv41_mla_prolog_no_cache_meta(
+    const at::Tensor &x, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &wQb, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, const at::Tensor &, double)
+{
+    return {
+        at::empty_symint(c10::SymDimVector{x.sym_size(0), wQb.sym_size(1) / 512, 512}, x.options()),
+        at::empty_symint(c10::SymDimVector{x.sym_size(0), 1280}, x.options()),
+        at::empty_symint(c10::SymDimVector{x.sym_size(0), 512}, x.options()),
+    };
+}
+#endif
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1842,6 +1868,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
+#ifdef VLLM_ASCEND_ENABLE_DSV41_MLA_PROLOG
+    ops.impl("dsv41_mla_prolog", &vllm_ascend::meta::dsv41_mla_prolog_meta);
+    ops.impl("dsv41_mla_prolog_no_cache", &vllm_ascend::meta::dsv41_mla_prolog_no_cache_meta);
+#endif
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors

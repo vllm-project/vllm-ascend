@@ -7,10 +7,13 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
@@ -390,3 +393,157 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     )
     assert result[0] is quantized
     assert result[1].shape == (2, 1, 2, 2)
+
+
+@pytest.mark.parametrize(
+    "device, model_type, mode, pcp, dcp, nz_mode, custom_ops, registered, expect_available",
+    [
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 1, 1, 1, True, True, True),
+        (AscendDeviceType.A2, "deepseek_v41", CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A5, "deepseek_v41", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v4", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v32", CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, None, CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41_text", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, 1, True, True, True),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, 1, True, True, True),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.FULL, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.PIECEWISE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.FULL_AND_PIECEWISE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 4, 1, 1, True, True, True),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 1, 2, 1, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 1, 1, 2, True, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 1, 1, 1, False, True, False),
+        (AscendDeviceType.A3, "deepseek_v41", CUDAGraphMode.NONE, 1, 1, 1, True, False, False),
+    ],
+)
+def test_mla_prologue_activation(
+    monkeypatch, device, model_type, mode, pcp, dcp, nz_mode, custom_ops, registered, expect_available
+):
+    ops = {"dsv41_mla_prolog": Mock(), "dsv41_mla_prolog_no_cache": Mock()} if registered else {}
+    config = SimpleNamespace(weight_nz_mode=nz_mode)
+    model_config = (
+        SimpleNamespace(enforce_eager=False, hf_config=SimpleNamespace(model_type=model_type))
+        if model_type is not None
+        else None
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+    )
+    monkeypatch.setattr(dsa_v41, "get_current_hardware_profile", lambda: get_hardware_profile(device))
+    monkeypatch.setattr(dsa_v41, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(dsa_v41, "enable_custom_op", lambda: custom_ops)
+    monkeypatch.setattr(torch.ops, "_C_ascend", SimpleNamespace(**ops))
+
+    assert AscendDSAV41Impl._resolve_fused_mla_prolog(config) == (
+        tuple(ops.values()) if expect_available else (None, None)
+    )
+
+
+@pytest.mark.parametrize(
+    "mode, prefills, decodes, replicated, decode_op_available, fused_tokens, write_cache, op_succeeds",
+    [
+        (CUDAGraphMode.NONE, 0, 2, False, True, 2, True, True),
+        (CUDAGraphMode.NONE, 2, 0, False, False, 2, False, True),
+        (CUDAGraphMode.NONE, 1, 1, False, True, 2, False, True),
+        (CUDAGraphMode.NONE, 1, 1, True, True, 2, False, True),
+        (CUDAGraphMode.NONE, 2, 0, False, True, 2, False, False),
+        (CUDAGraphMode.NONE, 0, 2, False, True, 2, True, False),
+        (CUDAGraphMode.NONE, 0, 2, False, False, None, False, False),
+        (CUDAGraphMode.NONE, 0, 2, True, True, None, False, False),
+        (CUDAGraphMode.NONE, 0, 0, False, True, None, False, False),
+        (CUDAGraphMode.FULL, 0, 1, False, True, 4, True, True),
+        (CUDAGraphMode.FULL, 0, 1, False, False, None, False, False),
+        (CUDAGraphMode.FULL, 1, 1, False, True, None, False, False),
+        (CUDAGraphMode.FULL, 0, 2, True, True, None, False, False),
+        (CUDAGraphMode.PIECEWISE, 1, 1, False, True, None, False, False),
+        (CUDAGraphMode.PIECEWISE, 0, 2, False, True, None, False, False),
+    ],
+)
+def test_mla_prologue_preserves_indexer_and_compression(
+    monkeypatch, mode, prefills, decodes, replicated, decode_op_available, fused_tokens, write_cache, op_succeeds
+):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl.multistream_dsv4_dsa_overlap = False
+    impl._fused_mla_prolog = Mock() if decode_op_available else None
+    impl._fused_mla_prolog_no_cache = Mock()
+    x = torch.empty(4, 4, dtype=torch.bfloat16)
+    q, qr, kv = (torch.empty(fused_tokens or 2, 4, dtype=x.dtype) for _ in range(3))
+    cos, sin = torch.empty(4, 2), torch.empty(4, 2)
+    batch_swa = SimpleNamespace(num_prefills=prefills)
+    swa = SimpleNamespace(
+        num_actual_tokens=2,
+        num_input_tokens=4,
+        num_prefills=0 if replicated else prefills,
+        num_decodes=decodes,
+        num_reqs=2,
+        global_metadata=batch_swa if replicated else None,
+    )
+    local_metadata = SimpleNamespace(swa=swa, rope=Mock(side_effect=lambda _, tokens: (cos[:tokens], sin[:tokens])))
+    global_metadata = SimpleNamespace(swa=batch_swa) if replicated else local_metadata
+    attn = SimpleNamespace(
+        rotary_emb=SimpleNamespace(layername="test"),
+        q_norm=Mock(return_value=qr),
+        wq_a=Mock(),
+        wq_b=Mock(return_value=q),
+        head_dim=4,
+    )
+    fused_result = (q, qr) if write_cache else (q, qr, kv)
+    impl._try_fused_mla_prolog = Mock(return_value=fused_result if op_succeeds else None)
+    impl._project_kv = Mock(return_value=kv)
+    impl._write_swa_cache = Mock()
+    impl._apply_rotary = Mock()
+    impl._prepare_indexer_inputs = Mock()
+    impl._prepare_compressed_cache = Mock()
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=mode))
+
+    q_out, indexer = impl._preprocess(attn, x, local_metadata, global_metadata)
+
+    assert q_out.data_ptr() == q.data_ptr()
+    assert q_out.size(0) == 2
+    assert indexer is impl._prepare_indexer_inputs.return_value
+    indexer_attn, indexer_x, indexer_qr, indexer_cos, indexer_sin = impl._prepare_indexer_inputs.call_args.args
+    assert indexer_attn is attn
+    assert indexer_x.data_ptr() == x.data_ptr()
+    assert indexer_qr.data_ptr() == qr.data_ptr()
+    assert indexer_x.size(0) == indexer_qr.size(0) == indexer_cos.size(0) == indexer_sin.size(0) == 2
+    assert impl._prepare_compressed_cache.call_args.args[4:] == (local_metadata, global_metadata, indexer)
+    if fused_tokens is None:
+        impl._try_fused_mla_prolog.assert_not_called()
+    else:
+        impl._try_fused_mla_prolog.assert_called_once()
+        _, fused_x, fused_cos, fused_sin, fused_swa = impl._try_fused_mla_prolog.call_args.args
+        assert fused_swa is swa
+        assert fused_x.size(0) == fused_cos.size(0) == fused_sin.size(0) == fused_tokens
+        assert impl._try_fused_mla_prolog.call_args.kwargs == {"write_cache": write_cache}
+    if op_succeeds:
+        attn.wq_a.assert_not_called()
+        impl._project_kv.assert_not_called()
+        impl._apply_rotary.assert_not_called()
+    else:
+        attn.wq_a.assert_called_once()
+        impl._project_kv.assert_called_once()
+        impl._apply_rotary.assert_called_once()
+    if op_succeeds and write_cache:
+        impl._write_swa_cache.assert_not_called()
+    else:
+        impl._write_swa_cache.assert_called_once_with(attn, swa, kv)
+
+
+@pytest.mark.parametrize(
+    "tokens, block_size, packed_cache",
+    [(0, 128, None), (4097, 128, None), (3, 64, None), (3, 128, object())],
+)
+@pytest.mark.parametrize("write_cache", [True, False])
+def test_mla_prologue_skips_ineligible_batches(tokens, block_size, packed_cache, write_cache):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl._fused_mla_prolog = Mock()
+    impl._fused_mla_prolog_no_cache = Mock()
+    attn = SimpleNamespace(packed_cache_ops=packed_cache)
+    metadata = SimpleNamespace(storage_block_size=block_size)
+    # Shape-only input ensures the batch gate exits before reading any weights.
+    x = SimpleNamespace(shape=(tokens, 5120))
+    assert impl._try_fused_mla_prolog(attn, x, None, None, metadata, write_cache=write_cache) is None
+    impl._fused_mla_prolog.assert_not_called()
+    impl._fused_mla_prolog_no_cache.assert_not_called()

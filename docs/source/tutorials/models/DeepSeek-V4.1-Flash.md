@@ -2826,7 +2826,42 @@ keep `--gpu-memory-utilization` at `0.9`: each 64GB device already reports
 about 61.4 GiB of HBM in use at that setting, so higher values leave no
 headroom for the KV cache.
 
-### 9.1 Tool-Assisted Tuning with msmodeling
+### 9.1 Fused MLA Prologue on Atlas A3
+
+DeepSeek-V4.1-Flash on Atlas A3 automatically uses the fused MLA prologue for
+eligible eager batches containing prefill and for eligible pure decode batches.
+Use a build with A3 custom operators, tensor parallel size 1, 2, or 4, and a compatible checkpoint.
+The attention projections `wq_a` and `wkv` must use BF16 ND weights. The `wq_b` projection must
+use `W8A8_DYNAMIC` with an INT8 FRACTAL_NZ weight and BF16 per-channel scales. For a
+ModelSlim checkpoint, use `--quantization ascend`. Check the attention tensor layouts even
+when the checkpoint is labeled W4A8.
+
+Use `weight_nz_mode=1` (the default), BF16 compute and KV cache, SWA block
+size 128, and decode context parallel size 1.
+
+```bash
+--dtype bfloat16 --kv-cache-dtype auto --block-size 128 \
+--decode-context-parallel-size 1
+```
+
+- **Prefill server**. Use eager execution (`--enforce-eager` or `cudagraph_mode=NONE`).
+  The prologue returns KV rows for the existing framework writer, including its
+  gather when prefill context parallelism is active.
+- **Combined prefill and decode server**. Eager batches containing prefill use the
+  same automatic path, including batches that also contain decode requests.
+  `FULL_DECODE_ONLY` supports this path because these batches execute eagerly.
+- **Decode server**. Use `--prefill-context-parallel-size 1` for direct SWA KV writes.
+  The prologue runs automatically in eager mode and under
+  `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`. Omit
+  `--enforce-eager` to capture the decode graph. The prologue uses the capture
+  bucket's token shape and skips padded slots.
+
+Ineligible model and device combinations, graph modes, batches, and tensor
+layouts use the existing attention implementation. In an NPU profile, look for
+`dsv41_mla_prolog` on Decode or `dsv41_mla_prolog_no_cache` on Prefill at the
+PyTorch operator level.
+
+### 9.2 Tool-Assisted Tuning with msmodeling
 
 The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
 parameters together, combining measured results with knowledge-base experience
