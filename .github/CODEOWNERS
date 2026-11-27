@@ -65,7 +65,6 @@
 # examples
 /examples/ @MrZ20
 /examples/rl/ @Ronald1995 @Liccol
-/examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
 # c++ source code
@@ -129,7 +128,7 @@
 /vllm_ascend/ops/triton/msa @CXY-Katrina
 /vllm_ascend/ops/triton/kda/recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/ops/triton/docs/kda_recoverssm.md @drslark @chenxi-hh
-/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan @freyfwt
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 /vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh @hust17yixuan
@@ -177,6 +176,9 @@
 /vllm_ascend/patch/platform/patch_replayssm_config.py @drslark @chenxi-hh
 /vllm_ascend/patch/worker/patch_kda_recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
+/vllm_ascend/patch/platform/patch_fused_moe.py @freyfwt
+/vllm_ascend/patch/worker/patch_fused_moe.py @freyfwt
+/vllm_ascend/patch/worker/patch_routed_experts_capture.py @freyfwt
 /vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952 @hust17yixuan
 /vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
 /vllm_ascend/patch/worker/patch_step3p5.py @earthmanylf
@@ -257,13 +259,8 @@
 /tests/ut/models/test_kimi_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/ops/test_kimi_kda_recoverssm.py @drslark @chenxi-hh
 
-# EPLB
-/vllm_ascend/eplb @freyfwt
-
 # observability
 # /vllm_ascend/observability
-/vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
-/vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
 # profiler
 # /vllm_ascend/profiler

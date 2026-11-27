@@ -111,7 +111,5 @@ def validate_expert_offload_config(
     for name in ("mix_placement", "enable_force_eplb", "enable_fused_mc2", "multistream_overlap_shared_expert"):
         if getattr(ascend_config, name):
             raise ValueError(f"expert offload has no slot/pool integration for {name}; disable {name}")
-    if ascend_config.eplb_config.dynamic_eplb:
-        raise ValueError("expert offload does not coordinate dynamic EPLB with resident slots; disable dynamic EPLB")
     if ascend_config.rl_config.enabled:
         raise ValueError("expert offload cannot rebuild prepared host bytes and graphs during RL weight reloading")

@@ -40,6 +40,7 @@ class DummyParallelConfig:
     tensor_parallel_size = 1
     pipeline_parallel_size = 1
     local_world_size = 1
+    enable_eplb = False
 
 
 class DummyVllmConfig:
@@ -247,8 +248,6 @@ def test_init_with_invalid_config(monkeypatch):
 def test_fallback_cleanup_context_releases_references_and_restores_state(monkeypatch):
     from vllm.model_executor.layers import rotary_embedding
 
-    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-
     class FakeCompileWrapper(nn.Module):
         def __init__(self):
             super().__init__()
@@ -266,7 +265,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     failed_model.add_module("draft", draft_layer)
     failed_model.add_module("compiled", compile_wrapper)
     shared_moe_layers = [target_layer]
-    eplb_layers = [target_layer]
     passed_config = SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={"target.layer": target_layer, "stale.layer": stale_layer},
@@ -288,7 +286,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     target_rope = object()
     rope_cache = {target_key: target_rope}
     monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", rope_cache)
-    monkeypatch.setattr(VllmEplbAdaptor, "_registered_moe_layers", eplb_layers)
     monkeypatch.setattr(
         "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper",
         FakeCompileWrapper,
@@ -303,7 +300,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     passed_config.compilation_config.static_forward_context["draft.layer"] = draft_layer
     current_config.compilation_config.static_forward_context["current.draft"] = draft_layer
     shared_moe_layers.append(draft_layer)
-    eplb_layers.append(draft_layer)
     rope_cache[draft_key] = object()
 
     failed_model_ref = ModelNetLoaderElastic._release_failed_model_references(
@@ -313,7 +309,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     assert passed_config.compilation_config.static_forward_context == {"target.layer": target_layer}
     assert current_config.compilation_config.static_forward_context == {"current.target": target_layer}
     assert shared_moe_layers == [target_layer]
-    assert eplb_layers == [target_layer]
     assert rope_cache == {target_key: target_rope}
     assert cleanup_context.memory_baseline == (100, 200)
     assert failed_model_ref() is failed_model
@@ -747,6 +742,34 @@ def test_load_draft_model_skips_invalid_source_addresses(mock_logger, monkeypatc
     assert captured["sources"] == [
         {"device_id": 0, "sources": [f"127.0.0.1:{5000 + DRAFT_PORT_OFFSET}"]},
     ]
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_load_model_reverts_to_default_when_eplb_enabled(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    revert_calls = []
+
+    def fake_revert(model_config, vllm_config, device_config, prefix):
+        revert_calls.append((model_config, vllm_config, device_config, prefix))
+        return dummy_model, False
+
+    loader = make_loader_with_config(
+        {
+            "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+            "MODEL": "dummy-model",
+            "LISTEN_PORT": 5555,
+            "INT8_CACHE": "no",
+        }
+    )
+    monkeypatch.setattr(loader, "revert_to_default", fake_revert)
+
+    vllm_config = DummyVllmConfig()
+    vllm_config.parallel_config = DummyParallelConfig()
+    vllm_config.parallel_config.enable_eplb = True
+    result = loader.load_model(vllm_config, DummyModelConfig())
+
+    assert result is dummy_model
+    assert len(revert_calls) == 1
 
 
 if __name__ == "__main__":

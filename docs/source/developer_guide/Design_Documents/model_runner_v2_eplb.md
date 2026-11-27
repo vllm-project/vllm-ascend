@@ -62,10 +62,9 @@ alternative implementation of EPLB.
 
 ## Request and layer flow
 
-At runner initialization, platform validation checks the Model Runner version,
-EPLB mode, quantization layout, and execution features. Unsupported
-combinations fail before serving. Ascend uses the upstream EPLB control plane;
-the legacy Model Runner V1 EPLB controls have been removed.
+At runner initialization, platform validation checks EPLB mode, quantization
+layout, and execution features. Unsupported combinations fail before serving.
+Ascend uses the upstream EPLB control plane.
 
 At the start of a Model Runner V2 batch, the runner tells
 `AscendEPLBController` whether the batch belongs to the configured load
