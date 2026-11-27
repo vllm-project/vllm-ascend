@@ -1,4 +1,4 @@
-# Serving: GLM5.3-Flash.md ordinary A3 PD, PR #23368 at 4e46a2c06a78.
+# Serving: GLM5.3-Flash.md ordinary A3 PD, PR #23368 at 5fa7ec2b9f83.
 # Two A3 hosts (16 logical devices each): P DP1/TP1/PCP16, D DP16/TP1.
 # RP3 A3 release table: P row151, PD row177, D low row170, D high row162.
 # D high row161 is a stable subset (876 requests / 7590.3374 tokens/s);
