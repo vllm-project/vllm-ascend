@@ -152,6 +152,7 @@ def _prepare_dflash_inputs_with_block_stride(
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+    use_a3_mla_sink: bool = False
     _windowed_fia_layers: tuple[str, ...] = ()
     _windowed_flashmla_builders: tuple[FlashMLAMetadataBuilder, ...] = ()
 
@@ -185,7 +186,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         batch_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.FULL, num_tokens=num_tokens_padded, num_reqs=num_reqs_padded
         )
-        attn_metadata = self._build_uniform_attn_metadata(
+        attn_metadata = super()._build_uniform_attn_metadata(
             num_reqs=num_reqs,
             batch_desc=batch_desc,
             num_query_per_req=self.num_query_per_req,
@@ -194,6 +195,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             causal=self._group_causal,
         )
         return [attn_metadata]
+
+    def _build_uniform_attn_metadata(self, batch_desc: BatchExecutionDescriptor, *args, **kwargs):
+        # The FULL graph manager refreshes the captured A3 schedule exactly once.
+        if self.use_a3_mla_sink and batch_desc.cg_mode == CUDAGraphMode.FULL:
+            return None
+        return super()._build_uniform_attn_metadata(batch_desc, *args, **kwargs)
 
     def _build_attn_metadata(
         self,
@@ -218,7 +225,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
-        use_fia = self.attn_architecture == "MLA" and not self.use_flashmla
+        use_fia = self.attn_architecture == "MLA" and not (self.use_flashmla or self.use_a3_mla_sink)
         use_band = self.attn_architecture == "MLA" and bool(self._windowed_flashmla_builders)
         valid_queries = None
         seq_lens_cpu = None
@@ -254,7 +261,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,
             )
-        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None and not self.use_a3_mla_sink:
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot. This covers
             # FIA-backed GQA and MLA drafts alike, as in DSpark.
@@ -388,7 +395,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                     raise ValueError(f"Windowed MLA draft layers must be causal (layer {layer_name}).")
                 if isinstance(impl, AscendMlaDCPImpl):
                     raise ValueError(f"Windowed MLA draft layer {layer_name} cannot use decode context parallelism.")
-                if impl.use_flashmla:
+                if impl.use_flashmla or getattr(impl, "use_a3_mla_sink", False):
                     windowed_flashmla_layers.add(layer_name)
                 else:
                     windowed_fia_layers.append(layer_name)
@@ -402,7 +409,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             if not windowed_flashmla_layers.isdisjoint(group.layer_names)
         )
         install_ascend_dflash_input_preparation()
-        self.attn_architecture, self.use_flashmla, _ = detect_draft_attn_architecture(self.attn_groups)
+        self.attn_architecture, self.use_flashmla, self.use_a3_mla_sink = detect_draft_attn_architecture(
+            self.attn_groups
+        )
 
     def propose(
         self,

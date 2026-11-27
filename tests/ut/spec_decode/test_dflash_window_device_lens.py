@@ -228,9 +228,11 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
         assert sample_pos_copies == 2
 
 
-def test_flashmla_window_supplies_unclipped_first_positions(monkeypatch):
+@pytest.mark.parametrize("a3_sink", [False, True], ids=["a5", "a3"])
+def test_flashmla_window_supplies_unclipped_first_positions(monkeypatch, a3_sink):
     spec = _spec([4096, 4096, 2048, 0])
-    spec.use_flashmla = True
+    spec.use_flashmla = not a3_sink
+    spec.use_a3_mla_sink = a3_sink
     bounds = []
 
     @contextmanager

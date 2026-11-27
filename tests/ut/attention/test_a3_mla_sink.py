@@ -161,6 +161,20 @@ def test_selection_is_hardware_and_model_scoped(is_a3, is_draft):
     ) is (is_a3 and is_draft)
 
 
+@pytest.mark.parametrize("version, eligible", [("0.5.0", False), ("0.5.1.post1", True)])
+def test_dflash_window_requires_compatible_provider(monkeypatch, version, eligible):
+    impl = selection_impl()
+    impl.vllm_config.speculative_config.method = "dflash"
+    monkeypatch.setattr(sink, "version", lambda name: version)
+    assert (
+        sink.supports_a3_mla(
+            impl, is_a3=True, is_draft=True, dflash_draft_window=True, supports_pd_layout=lambda _: True
+        )
+        is eligible
+    )
+    assert not sink.supports_a3_mla(impl, is_a3=True, is_draft=True, supports_pd_layout=lambda _: True)
+
+
 def test_multi_rank_selection_requires_split_dcp_implementation():
     impl = selection_impl()
     impl.use_dcp = True

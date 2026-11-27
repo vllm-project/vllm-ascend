@@ -38,6 +38,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_BAND_MASK_MODE,
+    FLASHMLA_CAUSAL_MASK_MODE,
     FLASHMLA_NUM_KV_HEADS,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
@@ -1183,19 +1185,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_quant_flashmla: bool = self._can_use_quant_flashmla()
+        dflash_draft_window = kwargs.get("dflash_draft_window", False)
         self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla(
-            dflash_draft_window=kwargs.get("dflash_draft_window", False)
+            dflash_draft_window=dflash_draft_window
         )
         self.a3_mla_adapter = None
         if supports_a3_mla(
             self,
             is_a3=get_ascend_device_type() == AscendDeviceType.A3,
-            is_draft=backends.model_tag == "dspark_head",
+            is_draft=backends.model_tag in ("dspark_head", "dflash_head"),
             supports_pd_layout=use_component_major_mla_pd_layout,
+            dflash_draft_window=dflash_draft_window,
         ):
             ops = get_a3_mla_ops()
             if ops is not None:
-                self.a3_mla_adapter = A3MLAAdapter(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype), *ops)
+                config = A3MLAConfig(
+                    self.num_heads,
+                    self.scale,
+                    dtype=self.dtype,
+                    mask_mode=FLASHMLA_BAND_MASK_MODE if dflash_draft_window else FLASHMLA_CAUSAL_MASK_MODE,
+                    sliding_window=self.sliding_window if dflash_draft_window else None,
+                )
+                self.a3_mla_adapter = A3MLAAdapter(config, *ops)
         self.use_a3_mla_sink = self.a3_mla_adapter is not None
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None

@@ -536,6 +536,9 @@ class FlashMLAMetadataBuilder:
         self._query_position_limit: tuple[torch.Tensor, int] | None = None
         self.current_adapter = adapter
         self.adapters = {True: adapter}
+        self._split_window_queries = (
+            isinstance(adapter, A3MLAAdapter) and adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE
+        )
         if adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE:
             if self.dcp_size > 1:
                 raise ValueError("FlashMLA BAND requires the full unsharded KV sequence")
@@ -694,6 +697,10 @@ class FlashMLAMetadataBuilder:
         padding_rows = ceil(padding_tokens / max_query_len) if max_query_len is not None else 0
         if max_query_len is not None and num_decodes + padding_rows > FLASHMLA_MAX_BATCH_SIZE:
             raise ValueError("QuantFlashMLA decode and padding rows exceed the metadata batch limit")
+        # The A3 ABI takes packed Q boundaries. Reserve a zero-KV segment after
+        # each real request for its clipped suffix, keeping query token offsets stable.
+        stride = 2 if self._split_window_queries else 1
+        rows = (rows - 1) * stride + 1
         columns = common.block_table_tensor.shape[1]
         key = tokens, rows, columns, common.causal
         if has_prefill and retain_for_graph:
@@ -709,7 +716,9 @@ class FlashMLAMetadataBuilder:
 
         def refresh():
             flash.cu.fill_(tokens)
-            flash.cu[: num_decodes + 1].copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
+            real_rows = slice(0, num_decodes * stride, stride)
+            query_starts = flash.cu[::stride][: num_decodes + 1]
+            query_starts.copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
             if padding_rows > 1:
                 # QuantFlashMLA can inspect padded spans even when their used Q is zero.
                 width = ceil(padding_tokens / padding_rows)
@@ -720,13 +729,15 @@ class FlashMLAMetadataBuilder:
                     out=flash.cu[num_decodes + 1 : num_decodes + padding_rows],
                 )
             flash.used_q.zero_()
-            used_q = flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes]
+            used_q = query_starts[1:] - query_starts[:-1]
             if flash.adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE and self._query_position_limit is not None:
                 first_positions, limit = self._query_position_limit
                 available = (limit - first_positions[:num_decodes]).clamp_min_(0)
                 used_q = torch.minimum(used_q, available)
-            flash.used_q[:num_decodes].copy_(used_q)
-            flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+            flash.used_q[real_rows].copy_(used_q)
+            flash.used_q[real_rows].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+            if self._split_window_queries:
+                flash.cu[1 : num_decodes * stride : stride].copy_(query_starts[:-1] + flash.used_q[real_rows])
             flash.cache_lens.zero_()
             lengths = common.seq_lens[:num_decodes]
             if flash.current is not None:
@@ -740,10 +751,10 @@ class FlashMLAMetadataBuilder:
                     dcp_rank=self.dcp_rank_tensor,
                     cp_kv_cache_interleave_size=self.cp_interleave,
                 )
-            flash.cache_lens[:num_decodes].copy_(lengths)
+            flash.cache_lens[real_rows].copy_(lengths)
             flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
             flash.block_table.zero_()
-            flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
+            flash.block_table[real_rows].copy_(common.block_table_tensor[:num_decodes])
             flash.slots.fill_(-1)
             slots = common.slot_mapping[:num_decode_tokens]
             flash.slots[: slots.numel()].copy_(slots)
