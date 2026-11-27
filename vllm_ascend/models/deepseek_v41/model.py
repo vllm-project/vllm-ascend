@@ -26,8 +26,10 @@ from vllm.distributed import (
     get_engram_dp_size,
     get_ep_group,
     get_pp_group,
+    get_engram_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -1143,6 +1145,7 @@ class DeepseekV41DecoderLayer(nn.Module):
 class DeepseekV41Model(nn.Module, EagleModelMixin):
     """V4.1 backbone with delayed HC collapse and shared attention state."""
 
+    engram_ssd_runtime = None
     supports_aux_hidden_states_over_pp = True
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
     decoder_layer_cls = DeepseekV41DecoderLayer
@@ -1265,6 +1268,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
+        self._engram_layerwise_decode_graph = False
         shared_config = get_ascend_config().shared_engram
         remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
         remote_reader = None
@@ -1305,7 +1309,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
             shared_pool_identity = checkpoint_identity(self.engram_weight_root)
         with ExitStack() as rollback:
-            if self.engram_layout is not None:
+            if self.engram_layout is not None and get_ascend_config().engram_ssd.enabled:
+                self._init_engram_ssd(vllm_config, rollback)
+            if self.engram_layout is not None and self.engram_ssd_runtime is None:
                 # Head buckets use TP x DP x PCP when sharded, or TP alone when host
                 # storage is shared across local DP x PCP replicas.
                 # Fail on an unreadable checkpoint before the first table exists:
@@ -1369,6 +1375,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # context, so it keys by the padded token count (the FULL graph bucket).
             self._engram_graph_events = {}
             self._engram_prepare_stream = None
+            self._engram_prefill_stream = None
+            self._engram_prefill_gather_stream = None
             self._engram_capture_stream = None
             self._engram_capture_events = None
             self._engram_overlap_enabled = get_ascend_config().multistream_engram_overlap
@@ -1469,6 +1477,160 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
 
+    def _init_engram_ssd(self, vllm_config: VllmConfig, rollback: ExitStack) -> None:
+        config = self.config
+        ssd_cfg = get_ascend_config().engram_ssd
+        assert self.engram_layout is not None
+        if len(config.engram_layer_ids) != 2:
+            raise ValueError("engram_ssd currently requires exactly 2 engram layers")
+        if vllm_config.load_config.load_format != "ascend_engram_ssd":
+            raise ValueError(
+                "engram_ssd requires --load-format ascend_engram_ssd so the "
+                "table tensors stay on disk")
+        from vllm_ascend.models.deepseek_v41.engram.ssd.cache import SSDRowCache
+        from vllm_ascend.models.deepseek_v41.engram.ssd.embedding import (
+            AscendSSDEngramEmbedding,
+        )
+        from vllm_ascend.models.deepseek_v41.engram.ssd.engine import SSDFillEngine
+        from vllm_ascend.models.deepseek_v41.engram.ssd.manifest import (
+            SSDManifest,
+        )
+        from vllm_ascend.models.deepseek_v41.engram.ssd.runtime import (
+            EngramSSDRuntime,
+        )
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        model_layout = {
+            "version": ssd_cfg.artifact_version,
+            "layers": {
+                int(layer_id): {
+                    "rows": int(rows),
+                    "codes_dtype": "I8",
+                    "codes_dim": int(config.engram_head_dim),
+                    "scale_dtype": "F8_E8M0",
+                }
+                for layer_id, rows in zip(config.engram_layer_ids,
+                                          config.engram_num_embeddings)
+            },
+        }
+        manifest = SSDManifest.load(ssd_cfg.manifest, model_layout, ssd_cfg.table_paths)
+        n_hash_cols = (config.engram_max_ngram_size - 1) * config.engram_n_heads
+        if n_hash_cols % tp_size:
+            raise ValueError(
+                f"engram_ssd requires uniform column shards: {n_hash_cols} "
+                f"columns over TP{tp_size}")
+        part_cols = n_hash_cols // tp_size
+        max_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+        # The sharing group uses one cache and fill engine on its leader.
+        dp_group = None
+        protocol = None
+        shared_planes = None
+        shared_engine = None
+        shared_cache = None
+        expected_group_size = (vllm_config.parallel_config.data_parallel_size
+                               * vllm_config.parallel_config.prefill_context_parallel_size)
+        if get_engram_dp_size() != expected_group_size:
+            raise ValueError("engram_ssd requires the full DP*PCP group on one node")
+        layerwise = getattr(ssd_cfg, "layerwise_overlap", False)
+        self._engram_layerwise_decode_graph = layerwise and not vllm_config.model_config.enforce_eager
+        if getattr(ssd_cfg, "prefill_lookahead", False) and (
+            vllm_config.parallel_config.data_parallel_size != 1
+            or vllm_config.parallel_config.decode_context_parallel_size != 1
+            or not vllm_config.model_config.enforce_eager
+        ):
+            raise ValueError("Engram SSD prefill_lookahead requires eager execution, DP1 and DCP1")
+        if layerwise and (
+            (not vllm_config.model_config.enforce_eager
+             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY)
+            or tp_size != 1
+            or get_pp_group().world_size != 1
+            or expected_group_size < 2
+            or max_tokens * 2 * part_cols * expected_group_size > ssd_cfg.capacity()
+            or sorted(config.engram_layer_ids) != list(config.engram_layer_ids)
+        ):
+            raise ValueError("layerwise Engram SSD requires eager or FULL_DECODE_ONLY in MRV2, "
+                             "TP1/PP1, ordered layers, and shared slots for a full DP/PCP batch")
+        if get_engram_dp_size() > 1:
+            from vllm_ascend.models.deepseek_v41.engram.ssd.distributed import (
+                LAYERED_DECODE_INLINE_ROWS,
+                EngramSSDProtocol,
+                LeaderCacheHooks,
+                ProtocolEpoch,
+            )
+            from vllm_ascend.models.deepseek_v41.engram.ssd.planes import SSDPlanes
+
+            dp_group = get_engram_dp_group()
+            if dp_group is None or dp_group.world_size <= 1:
+                raise ValueError(
+                    "engram_ssd with DP>1 requires a node-local engram DP group")
+            # aclrtHostRegisterV2 需要设备上下文已初始化
+            torch.zeros(1, device=torch.device("npu", torch.npu.current_device()))
+            shared_planes = SSDPlanes(ssd_cfg.capacity(), torch.device(
+                "npu", torch.npu.current_device()), group=dp_group)
+            rollback.callback(shared_planes.close)
+            if dp_group.rank_in_group == 0:
+                cpu_base = ssd_cfg.io_cpu_list[0] if ssd_cfg.io_cpu_list else -1
+                shared_engine = SSDFillEngine(
+                    ssd_cfg.table_paths,
+                    layer_rows=[sp.logical_rows for sp in manifest.specs],
+                    layer_bases=[sp.packed_global_base for sp in manifest.specs],
+                    threads_per_disk=ssd_cfg.threads_per_disk,
+                    qd=ssd_cfg.queue_depth,
+                    io_nr=ssd_cfg.io_setup_events,
+                    cpu_base=cpu_base)
+                rollback.callback(shared_engine.close)
+                rebuild = ssd_cfg.rebuild_threshold or None
+                shared_cache = SSDRowCache(
+                    ssd_cfg.capacity(),
+                    row_limit=max(manifest.total_logical_rows,
+                                  manifest.specs[-1].packed_global_base
+                                  + manifest.specs[-1].logical_rows),
+                    rebuild_threshold=rebuild)
+                rollback.callback(shared_cache.close)
+            hooks = None
+            if shared_cache is not None:
+                codes_np, scales_np = shared_planes.numpy_views()
+                hooks = LeaderCacheHooks(
+                    shared_cache, shared_engine, codes_np, scales_np,
+                    base1=manifest.specs[1].packed_global_base
+                    if len(manifest.specs) > 1 else 0,
+                    extents_threshold=64)
+            # The background thread can issue a collective during model forward.
+            # Keep its ordering independent of the ordinary DP CPU group.
+            cpu_group = (torch.distributed.new_group(ranks=dp_group.ranks, backend="gloo",
+                                                     use_local_synchronization=True)
+                         if layerwise else None)
+            protocol = EngramSSDProtocol(
+                dp_group, epoch_fn=ProtocolEpoch.current,
+                timeout_s=300.0, leader_hooks=hooks, cpu_group=cpu_group,
+                layered_inline_rows=(LAYERED_DECODE_INLINE_ROWS
+                                     if self._engram_layerwise_decode_graph else 0))
+        self.engram_ssd_runtime = EngramSSDRuntime(
+            ssd_cfg, manifest,
+            device=torch.device("npu", torch.npu.current_device()),
+            num_layers=len(config.engram_layer_ids),
+            total_hash_cols=n_hash_cols,
+            col_start=tp_rank * part_cols,
+            col_count=part_cols,
+            max_tokens=max_tokens,
+            tp_size=tp_size,
+            planes=shared_planes, engine=shared_engine,
+            cache=shared_cache, protocol=protocol,
+        )
+        rollback.callback(self.engram_ssd_runtime.close)
+        for slot, (layer_id, rows) in enumerate(
+                zip(config.engram_layer_ids, config.engram_num_embeddings)):
+            head_sizes = tuple(size for order in self.engram_layout.primes[slot]
+                               for size in order)
+            self.layers[layer_id].engram.embed_tokens = AscendSSDEngramEmbedding(
+                rows, config.engram_head_dim, head_sizes, slot,
+                tp_size=tp_size, head_start=tp_rank * part_cols,
+                part_n_hash_cols=part_cols)
+
     def prepare_engram(
         self,
         input_ids,
@@ -1486,6 +1648,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         mask_output_buffer=None,
         mask_ready_event=None,
         valid_token_count=None,
+        retire_after_gather=False,
+        skip_layerwise=False,
     ):
         """Hash on device with upstream NgramHashState, then look up head shards.
 
@@ -1527,11 +1691,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         hashes = None
         mask = torch.empty(0, dtype=torch.bool, device=device)
 
+        layered = not skip_layerwise and getattr(self.engram_ssd_runtime, "layerwise_active", False)
+
         def publish_mask():
             if mask_output_buffer is not None:
                 mask_output_buffer[: mask.numel()].copy_(mask)
                 mask_output_buffer[mask.numel() : output_tokens].zero_()
-            if mask_ready_event is not None:
+            if mask_ready_event is not None and (not layered or hashing or participates):
                 mask_ready_event.record(torch.npu.current_stream())
 
         if hashing:
@@ -1574,6 +1740,61 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         lookups = {}
         layer_ids = self.local_engram_layer_ids
         tables = [self.layers[layer_id].engram.embed_tokens for layer_id in layer_ids]
+        if self.engram_ssd_runtime is not None:
+            # Prepare SSD rows outside the graph, with the same output shape as DDR.
+            layerwise_options = {"skip_layerwise": True} if skip_layerwise else {}
+            if hashes is None:
+                # dummy/idle 无 hash: 不触发 SSD IO, 输出固定零。
+                # DP 共享模式且协议已激活: 以空行加入本轮(P0-P4),
+                # 使 busy 对端的行轮次可完成(§10: idle rank 每步参加)。
+                rt = self.engram_ssd_runtime
+                if (rt.protocol is not None and rt.protocol.epoch_fn() >= 1
+                        and not torch.npu.is_current_stream_capturing()):
+                    rt.prepare_idle(**layerwise_options)
+                for layer_id in config.engram_layer_ids:
+                    if output_buffers is None:
+                        lookups[layer_id] = torch.empty(
+                            (0, tables[0].n_hash_cols * tables[0].dim),
+                            dtype=torch.bfloat16, device=device)
+                    else:
+                        output_buffers[layer_id][:output_tokens].zero_()
+                        lookups[layer_id] = output_buffers[layer_id]
+                    if ready_events is not None:
+                        ready_events[layer_id].record(torch.npu.current_stream())
+                if layered and mask_ready_event is not None:
+                    # On an idle rank this event also covers zeroing its lookup buffers.
+                    mask_ready_event.record(torch.npu.current_stream())
+                return lookups, mask if mask_output_buffer is None else mask_output_buffer
+            rt = self.engram_ssd_runtime
+            token_mask = mask if mask_output_buffer is None else None
+            if layered:
+                kwargs = {"output_buffers": output_buffers}
+                if output_buffers is not None:
+                    for target in output_buffers.values():
+                        target[hashes.shape[0]:output_tokens].zero_()
+                if ready_events is not None:
+                    kwargs["graph_ready_events"] = ready_events
+                if retire_after_gather:
+                    kwargs["retire_after_gather"] = True
+                prepared = rt.prepare(hashes, token_mask, **kwargs)
+            else:
+                prepared = rt.prepare(hashes, token_mask, **layerwise_options)
+            for layer_id in config.engram_layer_ids:
+                out = prepared.layer_outputs[layer_id]     # [T, part_cols, dim]
+                if get_tensor_model_parallel_world_size() > 1:
+                    out = tensor_model_parallel_all_gather(out, dim=1)
+                rows = out.flatten(1)
+                if output_buffers is None:
+                    lookups[layer_id] = rows
+                else:
+                    target = output_buffers[layer_id]
+                    if not layered:
+                        target[: rows.shape[0]].copy_(rows)
+                        target[rows.shape[0]:output_tokens].zero_()
+                    lookups[layer_id] = target
+                if ready_events is not None and not layered:
+                    ready_events[layer_id].record(torch.npu.current_stream())
+            return lookups, mask if mask_output_buffer is None else mask_output_buffer
         if participates:
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
@@ -1642,6 +1863,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         """Preparation runs outside capture; consumers support eager and FULL."""
         if not self.has_engram or not self._engram_overlap_enabled:
             return False
+        if getattr(self, "engram_ssd_runtime", None) is not None:
+            # The SSD runtime owns its own preparation and retirement streams.
+            return False
         if not is_forward_context_available():
             return True
         context = get_forward_context()
@@ -1656,6 +1880,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self.has_engram
             and getattr(self, "_engram_remote_reader", None) is None
             and self._engram_overlap_enabled
+            and self.engram_ssd_runtime is None
             and self.engram_hash is not None
             and not self.engram_hash.use_slot_cache
             and not self.use_sequence_parallel
@@ -1718,6 +1943,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def retire_engram_lookups(self, *, reset_events=False):
         """Join preparation before input reuse, including skipped consumers."""
+        if self.engram_ssd_runtime is not None:
+            # gather 完成确认后释放租约; 失败(消费者状态不明)由 runtime poison。
+            self.engram_ssd_runtime.finish_execution(failed=reset_events)
         if self.has_engram:
             main = torch.npu.current_stream()
             if self._engram_prepare_stream is not None:
@@ -1784,8 +2012,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             return {}
         buffers, mask_buffer = self._get_engram_input_buffers()
         result: dict[str, Any] = {"engram_lookups": buffers, "engram_mask": mask_buffer}
-        if self._engram_overlap_enabled:
-            mask_ready, events = self._get_engram_external_events(padded_tokens, prime=True)
+        layerwise_graph = getattr(self, "_engram_layerwise_decode_graph", False)
+        if self._engram_overlap_enabled or layerwise_graph or getattr(self.engram_ssd_runtime, "layerwise_overlap", False):
+            # A captured wait can consume a stale priming signal on the first
+            # replay. SSD records its ExternalEvents only when data is ready.
+            mask_ready, events = self._get_engram_external_events(padded_tokens, prime=not layerwise_graph)
             result.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
         return result
 
@@ -1802,6 +2033,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        prefill_key=None,
+        prefill_next=None,
     ):
         """Prepare fixed rows on main or publish them from one auxiliary stream.
 
@@ -1815,6 +2048,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         ops. ``slot_mapping``/``block_table`` stay ``None`` under the V2
         runner, whose hashing is slotless.
         """
+        runtime = getattr(self, "engram_ssd_runtime", None)
+        if getattr(runtime, "prefill_lookahead", False):
+            prefetched = runtime.take_prefill(prefill_key)
+            if prefetched is not None:
+                self._queue_engram_prefill(prefill_next, positions.device)
+                return prefetched
         graph_inputs = self.prepare_engram_graph_inputs(padded_tokens, prime=False)
         if not graph_inputs["engram_lookups"]:
             return graph_inputs
@@ -1831,10 +2070,22 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # event keys after entering the forward context. None
             # means unknown, which stays synchronous.
             overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
-            if overlap and cg_mode == CUDAGraphMode.FULL:
-                mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
-                graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
-        if overlap and "engram_pending" not in graph_inputs:
+        # Non-FULL steps can enter the compiled model without graph events.
+        skip_layerwise = (getattr(self, "_engram_layerwise_decode_graph", False)
+                          and cg_mode != CUDAGraphMode.FULL)
+        overlap = overlap and not skip_layerwise
+        layered = not skip_layerwise and getattr(runtime, "layerwise_active", False)
+        layerwise_full = cg_mode == CUDAGraphMode.FULL and getattr(runtime, "layerwise_overlap", False)
+        if cg_mode == CUDAGraphMode.FULL and (overlap or layerwise_full):
+            # The capture and every replay must refer to the same events.
+            overlap = True
+            mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
+            graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
+        if layered and "engram_pending" not in graph_inputs:
+            overlap = True
+            # Eager consumes the eventual per-layer events through Python.
+            graph_inputs["engram_mask_ready_event"] = torch.npu.Event()
+        elif overlap and "engram_pending" not in graph_inputs:
             graph_inputs.update(
                 engram_pending={layer: torch.npu.Event() for layer in self.local_engram_layer_ids},
                 engram_mask_ready_event=torch.npu.Event(),
@@ -1854,6 +2105,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             output_tokens=output_tokens,
             mask_output_buffer=graph_inputs["engram_mask"],
             mask_ready_event=graph_inputs.get("engram_mask_ready_event"),
+            **({"retire_after_gather": True} if prefill_next is not None else {}),
+            **({"skip_layerwise": True} if skip_layerwise else {}),
         )
         if not overlap:
             prepare()
@@ -1882,10 +2135,50 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 tensor.record_stream(stream)
             with torch.npu.stream(stream):
                 prepare()
+            self._queue_engram_prefill(prefill_next, positions.device)
         except Exception:
             self.retire_engram_lookups(reset_events=True)
             raise
         return graph_inputs
+
+    def _queue_engram_prefill(self, chunk, device) -> None:
+        if chunk is None:
+            return
+        runtime = self.engram_ssd_runtime
+        main = torch.npu.current_stream()
+        if self._engram_prefill_stream is None:
+            self._engram_prefill_stream = torch.npu.Stream(device=device)
+            self._engram_prefill_gather_stream = torch.npu.Stream(device=device)
+        stream = self._engram_prefill_stream
+        stream.wait_stream(main)
+        try:
+            with torch.npu.stream(stream):
+                _, _, start, end = chunk.key
+                history = chunk.token_history
+                inputs = history[start:end]
+                positions = torch.arange(start, end, dtype=torch.int64, device=device)
+                boundaries = torch.arange(2, dtype=torch.int32, device=device) * (end - start)
+                offsets = torch.arange(1, self.engram_hash.lookback_depth + 1, device=device)
+                indices = start - offsets
+                lookback = history.index_select(0, indices.clamp_min(0)).masked_fill(indices < 0, -1).unsqueeze(0)
+                indices = torch.cat([
+                    torch.arange(part.start, part.stop, device=device) for part in chunk.segments
+                ]) if chunk.segments else positions[:0]
+                image_token = self.config.image_token_id
+                image_pad = getattr(self.config, "image_pad_token_id", image_token + 1)
+                dead = engram_dead_mask(inputs, image_token, image_pad)
+                hashes = self.engram_hash(
+                    inputs, positions, boundaries, dead, lookback,
+                    engram_dead_mask(lookback, image_token, image_pad), None, None,
+                )
+                runtime.queue_prefill(
+                    chunk.key, hashes.index_select(0, indices), (~dead).index_select(0, indices),
+                    chunk.padded_tokens, self._engram_prefill_gather_stream,
+                )
+        except Exception:
+            logger.exception("Failed to stage Engram SSD prefill lookahead")
+            main.wait_stream(stream)
+            runtime.queue_failed_prefill(chunk.key)
 
     def prepare_engram_graph_inputs(self, padded_tokens=None, *, prime=True):
         """Capture fixed-address buffers without CPU history or routing work."""
@@ -1914,6 +2207,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         engram_graph_events=False,
         lookback_token_ids=None,
         engram_mask_ready_event=None,
+        engram_graph_capturing=False,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         pp_group = get_pp_group()
@@ -1933,11 +2227,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         cache_transport = getattr(self, "pp_cache_transport", None)
         if cache_transport is not None:
             cache_transport.receive(intermediate_tensors, full_num_tokens)
-        # V2 hands fixed-address ExternalEvents over before the forward context
-        # exists; piecewise and eager tracking streams must not trace stream
-        # control ops, so only a FULL runtime consumes the captured waits.
+        # FULL decode may record waits while runtime mode is NONE.
         if engram_graph_events and not (
-            is_forward_context_available() and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+            engram_graph_capturing
+            or (is_forward_context_available()
+                and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL)
         ):
             engram_pending = None
             engram_graph_events = False
@@ -2010,6 +2304,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 # Graph captures keep lookup buffers at static capacity; the
                 # model's actual token dimension remains scheduler-dynamic.
                 # SP can copy rows, so shard only after this table is ready.
+                rt = getattr(self, "engram_ssd_runtime", None)
+                if (not getattr(self, "_engram_layerwise_decode_graph", False)
+                        and not engram_graph_events
+                        and getattr(rt, "layerwise_active", False)):
+                    rt.consume_layer(layer.layer_idx)
                 lookup = lookups[layer.layer_idx]
                 if use_sequence_parallel:
                     lookup = sp_shard(lookup)
@@ -2072,6 +2371,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         reader = getattr(self.model, "_engram_remote_reader", None)
         if reader is not None:
             reader.close()
+        runtime = getattr(self.model, "engram_ssd_runtime", None)
+        if runtime is not None:
+            runtime.close()
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return self.filter_unused_checkpoint_weights and any(
@@ -2080,6 +2382,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             for suffix in ("weight", "scale")
         )
 
+    @close_engram_on_init_failure(("model", "engram_ssd_runtime"))
     @close_engram_on_init_failure(("model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -2137,6 +2440,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        **prefill_options,
     ):
         return self.model.prepare_engram_inputs(
             input_ids,
@@ -2149,6 +2453,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
+            **prefill_options,
         )
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
@@ -2159,6 +2464,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
     def retire_engram_lookups(self, *, reset_events=False):
         self.model.retire_engram_lookups(reset_events=reset_events)
+
+    @property
+    def engram_prefill_lookahead(self) -> bool:
+        return getattr(self.model.engram_ssd_runtime, "prefill_lookahead", False)
 
     def get_model_state_cls(self):
         """V2 runner states read token_lookback_depth and drive engram inputs."""
@@ -2197,7 +2506,17 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     lookback_token_ids=lookback_token_ids,
                     **graph_inputs,
                 )
-        return self.model(
+        # Detect physical capture outside the compiled backbone. MRV2's
+        # uncaptured warmup also passes the persistent event objects.
+        engram_graph_capturing = (
+            engram_graph_events
+            and getattr(self.model, "_engram_layerwise_decode_graph", False)
+            and torch.npu.is_current_stream_capturing()
+        )
+        # The AOT backbone was compiled during warmup without stream waits.
+        # Record these waits with the actual FULL graph.
+        backbone_forward = self.model.forward if engram_graph_capturing else self.model
+        return backbone_forward(
             input_ids,
             positions,
             intermediate_tensors,
@@ -2208,6 +2527,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             engram_graph_events=engram_graph_events,
             lookback_token_ids=lookback_token_ids,
             engram_mask_ready_event=engram_mask_ready_event,
+            engram_graph_capturing=engram_graph_capturing,
         )
 
     @property
@@ -2239,6 +2559,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             # path; release all of that group's preallocated tables together.
             _rollback_local_engram_tables(self, load_error)
             raise
+        if self.model.engram_ssd_runtime is not None:
+            from vllm_ascend.model_loader.engram_ssd_loader import (
+                assert_external_tables_complete,
+            )
+
+            assert_external_tables_complete(
+                self.model.engram_root,
+                list(self.model.config.engram_layer_ids))
         return loaded
 
     def set_moe_parameters(self):

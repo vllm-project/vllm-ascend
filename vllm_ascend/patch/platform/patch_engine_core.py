@@ -14,8 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import wraps
+
 import vllm.v1.engine.core as _engine_core_mod
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
@@ -49,16 +51,30 @@ def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0,
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
+def _apply_engram_ssd_startup_patch() -> None:
+    # Activate after the engine has finished worker warmup and graph capture.
+    original_init = EngineCore.__init__
+    if getattr(original_init, "_engram_ssd_startup", False):
+        return
+
+    @wraps(original_init)
+    def initialize_and_activate(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        from vllm_ascend.engram_ssd_activation import activate_engine_protocol
+
+        activate_engine_protocol(self)
+
+    initialize_and_activate._engram_ssd_startup = True
+    EngineCore.__init__ = initialize_and_activate
+
+
 def _apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
     _PATCHED = True
 
-    # Patch EngineCoreProc.run_engine_core
-    # And in _run_engine_core_patch_func:
-    # 1. Patch EngineCore.__init__ by _apply_profiling_patches
-    # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc
+    _apply_engram_ssd_startup_patch()
     EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_patch_func)
 
 

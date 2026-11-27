@@ -36,6 +36,7 @@ The following table lists additional configuration options available in vLLM Asc
 
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
+| `engram_ssd` | object | disabled | Place DeepSeek V4.1 Engram tables on a local SSD. See [Engram SSD offload](#engram-ssd-offload). |
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
@@ -403,3 +404,46 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## Engram SSD offload
+
+For a local DeepSeek V4.1 safetensors checkpoint with two INT8 Engram tables, add
+`engram_ssd.path` to the service's existing additional configuration:
+
+```bash
+vllm serve /models/DeepSeek-V4.1-Flash --additional-config '{"engram_ssd":{"path":"/data/engram"}}'
+```
+
+Install vLLM Ascend with custom kernels enabled so the build includes
+`libengram_ssd.so`. The directory must be writable and reside on the intended
+local SSD. On the first start, the launcher selects the SSD loader and packs
+the checkpoint tables into `<path>/<artifact-version>/table.bin` with a
+`manifest.json`. Allow enough space for the table plus 64 MiB. Later starts
+with the same checkpoint and directory reuse the completed artifact. Changing
+TP, PCP or cache size does not repack it. Keep the input and generated files
+unchanged during serving.
+
+| Option in `engram_ssd` | Default | Use |
+| --- | --- | --- |
+| `host_memory_bytes` | 32,000,000,000 | Whole-service DDR budget for the Engram cache. The budget is divided among TP ranks. DP and PCP peers share each TP rank's cache on the same node. About five eighths of each share is row payload. The rest covers the directory, metadata, I/O buffers and rebuild peak. |
+| `threads_per_disk` | 8 | SSD read workers per disk in path mode. |
+| `queue_depth` | 1024 | Maximum outstanding reads per worker. |
+| `io_setup_events` | 1280 | AIO event capacity requested per worker. |
+| `io_cpu_list` | Empty | Optional consecutive CPU IDs for read workers. By default, workers use the inherited CPU affinity. |
+| `layerwise_overlap` | `false` | Allow each Engram layer to begin its UVA gather as soon as its SSD fill completes. Supports eager or `FULL_DECODE_ONLY` with TP1 and a shared DP or PCP group. Size the cache for the full group's batch. |
+| `prefill_lookahead` | `false` | With layerwise overlap, prefetch the next chunk of a single prompt while the current chunk runs. Requires eager, TP1, DP1 and PCP greater than one. Changed batch boundaries fall back to demand lookup. |
+
+`host_memory_bytes` covers the Engram cache's host allocations. Leave additional
+DDR for the rest of the service and check the container memory limit. The
+path interface configures CPU offload and enables shared host memory for
+DP or PCP groups. Use PP1, DCP1, and a single node for the group. TP must
+divide the number of Engram hash columns. EPLB, elastic EP, sleep mode,
+microbatching and `shared_engram` are incompatible with this backend.
+
+For an existing packed table, the explicit configuration accepts
+`enabled: true`, `manifest`, `artifact_version`, `table_paths` and
+`total_host_budget_bytes` (per TP owner), with `cache_payload_bytes` as
+part of that budget. Select `--load-format ascend_engram_ssd` and set
+`engram_config.cpu_offload=true`. Set `engram_config.dp_shared_memory=true`
+when using a DP or PCP group. Use either these explicit fields or the
+path interface.

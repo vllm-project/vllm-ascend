@@ -74,6 +74,7 @@ class AscendDeepseekV41ForCausalLM(
             return IMAGE_PLACEHOLDER
         return None
 
+    @close_engram_on_init_failure(("language_model", "model", "engram_ssd_runtime"))
     @close_engram_on_init_failure(("language_model", "model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
@@ -262,6 +263,7 @@ class AscendDeepseekV41ForCausalLM(
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        **prefill_options,
     ):
         return self.language_model.prepare_engram_inputs(
             input_ids,
@@ -274,6 +276,7 @@ class AscendDeepseekV41ForCausalLM(
             token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
+            **prefill_options,
         )
 
     @property
@@ -284,6 +287,10 @@ class AscendDeepseekV41ForCausalLM(
     def token_lookback_depth(self) -> int:
         """What the runner sizes the prompt lookback buffer from."""
         return self.language_model.token_lookback_depth
+
+    @property
+    def engram_prefill_lookahead(self) -> bool:
+        return self.language_model.engram_prefill_lookahead
 
     @property
     def supports_engram_graph_producer(self) -> bool:

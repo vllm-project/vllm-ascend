@@ -102,6 +102,7 @@ class EngramModelState(AscendModelState):
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
+        self._prefill_request_versions = np.zeros(self.max_num_reqs, dtype=np.int64)
         if depth > 0:
             model.register_forward_pre_hook(self._prepare_engram_before_forward, with_kwargs=True)
             # Persistent so a captured graph can read it on replay.
@@ -116,6 +117,7 @@ class EngramModelState(AscendModelState):
 
     def add_request(self, req_index: int, new_req_data) -> None:
         super().add_request(req_index, new_req_data)
+        self._prefill_request_versions[req_index] += 1
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
         if self.decoder_replay_state is not None:
             params = new_req_data.sampling_params
@@ -312,8 +314,38 @@ class EngramModelState(AscendModelState):
             "force_dummy": dummy,
             "token_indices": token_indices,
         }
+        if getattr(self.model, "engram_prefill_lookahead", False) is True:
+            key, lookahead = self._plan_prefill_lookahead(batch, req_states, dummy)
+            self._engram_inputs.update(prefill_key=key, prefill_next=lookahead)
         model_inputs.update(self.model.prepare_engram_graph_inputs(input_batch.num_tokens_after_padding))
         return model_inputs
+
+    def _plan_prefill_lookahead(self, batch, req_states, dummy):
+        from vllm_ascend.models.deepseek_v41.engram.ssd.runtime import PrefillLookahead
+
+        # All PCP peers plan from the same global batch. Any mixed batch or
+        # changed scheduler boundary will fall back to its demand lookup.
+        if (dummy or self._cg_mode != CUDAGraphMode.NONE or self.pcp_manager is None
+                or batch.num_reqs != 1 or not batch.is_prefilling_np[0] or batch.num_draft_tokens):
+            return None, None
+        req_index = int(batch.idx_mapping_np[0])
+        start = int(batch.num_computed_tokens_np[0])
+        size = int(batch.num_scheduled_tokens[0])
+        end = start + size
+        prompt_end = int(req_states.prompt_len.np[req_index])
+        if (size <= 0 or start != int(batch.num_computed_prefill_tokens_np[0])
+                or end > prompt_end):
+            return None, None
+        request = (batch.req_ids[0], int(self._prefill_request_versions[req_index]))
+        key = (*request, start, end)
+        if end == prompt_end:
+            return key, None
+        next_end = min(end + size, prompt_end)
+        segments, padded_tokens = self.pcp_manager.prefill_lookahead_layout(next_end - end)
+        return key, PrefillLookahead(
+            (*request, end, next_end), req_states.all_token_ids.gpu[req_index],
+            segments, padded_tokens,
+        )
 
     def prepare_engram_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         self._engram_inputs = None
