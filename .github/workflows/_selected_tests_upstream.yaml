@@ -78,15 +78,26 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # TEMPORARY (fork-only validation): run the upstream suite on the offline
+  # karc a2 member; bypass the squid proxy for GitHub/CI backends and use the
+  # Huawei Cloud wheel mirrors (same treatment as _selected_tests.yaml).
+  NO_PROXY: "0.0.0.0,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.buildkitd,.svc.cluster.local,.cluster.local,.actions.githubusercontent.com,.blob.core.windows.net,api.github.com,100.100.100.200,stats.vllm.ai,metadata.google.internal,169.254.169.254,github.com,.github.com,codeload.github.com"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "http.version"
+  GIT_CONFIG_VALUE_0: "HTTP/1.1"
+  PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
+  UV_DEFAULT_INDEX: https://mirrors.huaweicloud.com/repository/pypi/simple
   UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_HTTP_TIMEOUT: 120
+  UV_HTTP_TIMEOUT: 600
+  UV_HTTP_RETRIES: 5
+  UV_CONCURRENT_DOWNLOADS: 2
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
 jobs:
     e2e-upstream_pr:
-        runs-on: linux-aarch64-a2b3-1
+        runs-on: linux-aarch64-a2b3-karc-fed-1
         env:
           RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
           RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com

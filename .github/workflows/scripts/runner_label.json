@@ -106,6 +106,24 @@
         "image_tag": "9.3.0_20261125184600-910b-ubuntu22.04-py3.12",
         "csrc_cache_target": "a2-arm64-ubuntu"
     },
+    "linux-aarch64-a2b3-karc-fed-1": {
+        "chip": "a2",
+        "npu_num": 1,
+        "image_tag": "9.3.0_20261113161300-910b-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a2-arm64-ubuntu"
+    },
+    "linux-aarch64-a3-800i-karc-fed-2": {
+        "chip": "a3",
+        "npu_num": 2,
+        "image_tag": "9.3.0_20261113161300-a3-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a3-arm64-ubuntu"
+    },
+    "linux-aarch64-a3-800i-karc-fed-4": {
+        "chip": "a3",
+        "npu_num": 4,
+        "image_tag": "9.3.0_20261113161300-a3-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a3-arm64-ubuntu"
+    },
     "linux-aarch64-a5-4": {
         "chip": "a5",
         "npu_num": 4,
