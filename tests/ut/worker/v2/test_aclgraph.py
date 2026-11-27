@@ -550,3 +550,47 @@ def test_multi_module_param_source_keeps_fia_parameters():
     assert isinstance(source, SharedSource)
     assert source.params is params
     speculator.build_fia_params.assert_called_once_with(2, metadata, False, num_tokens=4)
+
+
+def test_model_with_context_restores_extra_ctx_capturing() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import pytest
+    import torch
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    seen: list[bool | None] = []
+
+    class _Recorder(torch.nn.Module):
+        def __init__(self, should_raise: bool = False) -> None:
+            super().__init__()
+            self.should_raise = should_raise
+
+        def forward(self, x):
+            seen.append(extra_ctx.capturing)
+            if self.should_raise:
+                raise RuntimeError("boom")
+            return x
+
+    extra_ctx = SimpleNamespace(capturing=False)
+    fake_fc = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    fake_npu = SimpleNamespace(is_current_stream_capturing=lambda: True)
+
+    with (
+        patch.object(aclgraph_utils, "get_forward_context", return_value=fake_fc),
+        patch.object(aclgraph_utils, "_EXTRA_CTX", extra_ctx),
+        patch.object(torch, "npu", fake_npu, create=True),
+    ):
+        wrapped = aclgraph_utils.ModelWithContext(_Recorder())
+        assert wrapped(123) == 123
+        assert seen == [True]
+        assert extra_ctx.capturing is False
+
+        wrapped_err = aclgraph_utils.ModelWithContext(_Recorder(should_raise=True))
+        with pytest.raises(RuntimeError, match="boom"):
+            wrapped_err(123)
+        assert seen == [True, True]
+        assert extra_ctx.capturing is False

@@ -219,3 +219,135 @@ def test_lora_linear_triton_accuracy(
     del x, packed_a, packed_b, b_slices, y_initial, y
     gc.collect()
     torch.npu.empty_cache()
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@torch.inference_mode()
+def test_lora_linear_triton_v2_aclgraph_capture_and_no_lora_skip() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from vllm_ascend.lora import lora_ops
+    from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+
+    torch.manual_seed(456)
+    token_count = 8
+    hidden_size = 3584
+    output_slices = (3584, 512, 512)
+    slice_rank = 16
+    scale = 1.0
+
+    lora_config = SimpleNamespace(
+        max_lora_rank=slice_rank,
+        max_loras=1,
+        fully_sharded_loras=False,
+        lora_dtype=torch.bfloat16,
+    )
+    wrapper = PunicaWrapperNPU(
+        max_num_batched_tokens=64,
+        max_batches=64,
+        device=torch.device("npu:0"),
+        lora_config=lora_config,
+    )
+    wrapper.no_lora = False
+    assert wrapper._single_lora_mask is not None
+    mask = (torch.arange(token_count, device="npu") % 3 != 1).to(torch.bfloat16)
+    wrapper._single_lora_mask[:token_count, 0].copy_(mask)
+
+    x = torch.randn(token_count, hidden_size, dtype=torch.bfloat16, device="npu")
+    packed_a_2d, b_slices, packed_b_2d, _ = _make_packed_weights(slice_rank, hidden_size, output_slices)
+    a_slices = list(packed_a_2d.split(slice_rank))
+    lora_a_stacked = [a.unsqueeze(0).unsqueeze(0).contiguous() for a in a_slices]
+    lora_b_stacked = [b.unsqueeze(0).unsqueeze(0).contiguous() for b in b_slices]
+    packed_lora_a = packed_a_2d.unsqueeze(0).unsqueeze(0).contiguous()
+    packed_lora_b = packed_b_2d.unsqueeze(0).unsqueeze(0).contiguous()
+    y_initial = torch.randn(token_count, sum(output_slices), dtype=torch.bfloat16, device="npu")
+    y = y_initial.clone()
+
+    # Simulate V2 ForwardContext (no `.capturing` attribute on ForwardContext).
+    v2_fc = SimpleNamespace(additional_kwargs={})
+    triton_hits: list[bool] = []
+    orig_try_triton = lora_ops._try_lora_linear_triton
+
+    def spy_try_triton(*args, **kwargs):
+        hit = orig_try_triton(*args, **kwargs)
+        triton_hits.append(hit)
+        return hit
+
+    with (
+        patch.object(lora_ops, "is_forward_context_available", return_value=True),
+        patch.object(lora_ops, "get_forward_context", return_value=v2_fc),
+        patch.object(lora_ops, "_EXTRA_CTX", SimpleNamespace(capturing=None)),
+        patch.object(lora_ops, "_try_lora_linear_triton", side_effect=spy_try_triton),
+        patch.object(wrapper, "_lora_linear_matmul", side_effect=AssertionError("unexpected matmul fallback")),
+    ):
+        assert lora_ops._lora_is_capturing() is False
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            assert lora_ops._lora_is_capturing() is True
+            lora_ops.lora_linear(
+                wrapper._wrapper_id,
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                scale,
+                list(output_slices),
+                packed_lora_a,
+                packed_lora_b,
+                True,
+            )
+        assert triton_hits == [True]
+
+    # 100 deterministic ACLGraph replays must remain bitwise identical and accurate.
+    first_replay = None
+    for _ in range(100):
+        y.copy_(y_initial)
+        graph.replay()
+        torch.npu.synchronize()
+        if first_replay is None:
+            first_replay = y.clone()
+        else:
+            assert torch.equal(y, first_replay)
+
+    deltas = [(x.float() @ a.float().T) @ b.float().T for a, b in zip(a_slices, b_slices)]
+    expected = y_initial.float() + torch.cat(deltas, dim=1) * mask[:, None].float() * scale
+    relative_l2 = torch.linalg.vector_norm(first_replay.float() - expected) / torch.linalg.vector_norm(expected)
+    assert relative_l2.item() < 0.005
+    inactive = ~mask.bool()
+    torch.testing.assert_close(first_replay[inactive], y_initial[inactive], rtol=0, atol=0)
+
+    # Pure-base (`no_lora=True`) graph capture must skip LoRA completely.
+    wrapper.no_lora = True
+    y_base = y_initial.clone()
+    base_graph = torch.npu.NPUGraph()
+    with (
+        patch.object(lora_ops, "is_forward_context_available", return_value=True),
+        patch.object(lora_ops, "get_forward_context", return_value=v2_fc),
+        patch.object(lora_ops, "_EXTRA_CTX", SimpleNamespace(capturing=None)),
+        patch.object(lora_ops, "_try_lora_linear_triton", side_effect=AssertionError("should skip when no_lora")),
+        patch.object(wrapper, "_lora_linear_matmul", side_effect=AssertionError("should skip when no_lora")),
+    ):
+        with torch.npu.graph(base_graph):
+            lora_ops.lora_linear(
+                wrapper._wrapper_id,
+                y_base,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                scale,
+                list(output_slices),
+                packed_lora_a,
+                packed_lora_b,
+                True,
+            )
+    y_base.copy_(y_initial)
+    base_graph.replay()
+    torch.npu.synchronize()
+    assert torch.equal(y_base, y_initial)
+
+    del graph, base_graph, wrapper, x, y, y_initial, y_base, first_replay
+    gc.collect()
+    torch.npu.empty_cache()

@@ -258,6 +258,7 @@ class ModelWithContext(nn.Module):
         forward_context = get_forward_context()
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
+        prev_capturing = _EXTRA_CTX.capturing
         _EXTRA_CTX.capturing = (
             torch.npu.is_current_stream_capturing()
             and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
@@ -272,6 +273,7 @@ class ModelWithContext(nn.Module):
                 self.device_metadata.begin_forward()
             return self.original_model(*args, **kwargs)
         finally:
+            _EXTRA_CTX.capturing = prev_capturing
             # Warmup and actual capture receive separate prepare_attn calls.
             # Retire each submission, including unused producers, after its
             # consumers; do not wait for metadata at graph entry.
