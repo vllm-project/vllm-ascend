@@ -166,7 +166,7 @@ static ge::graphStatus DispatchFFNCombineW4A8CheckShapeAndSetTiling(gert::Tiling
     uint64_t actualSize =
         static_cast<uint64_t>(info.M) * info.topK * info.K * sizeof(int8_t) * 3 + 10 * MB_SIZE;
     OP_TILING_CHECK((actualSize > maxWindowSize),
-        OP_LOGE(K_INNER_DEBUG, "HCCL_BUFFSIZE is too SMALL, m = %lu, k = %lu, topK = %lu"
+        OP_LOGE(K_INNER_DEBUG, "HCCL_BUFFSIZE is too SMALL, m = %u, k = %u, topK = %u"
             " expected HCCL_BUFFSIZE is ((m * k * topK * sizeof(int8_t)) * 3 + 10MB)= %luMB, HCCL_BUFFSIZE=%luMB.",
             info.M, info.K, info.topK, (actualSize + MB_SIZE - 1) / MB_SIZE, maxWindowSize / MB_SIZE),
         return ge::GRAPH_FAILED);

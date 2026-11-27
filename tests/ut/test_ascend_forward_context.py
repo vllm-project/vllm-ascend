@@ -233,13 +233,56 @@ def test_fused_mc2_window_guard_divides_batch_across_tp_ranks(monkeypatch):
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config(tensor_parallel_size=4))
 
 
-def test_fused_mc2_window_guard_skips_policies_with_capacity_fallback(monkeypatch):
-    # A2 keeps CAPACITY_AND_EXPERT_DENSITY and falls back to ALLGATHER above
-    # the MC2 budget, so the same batch must not be rejected.
+def test_fused_mc2_window_guard_rejects_a2_fused_mc2_batch(monkeypatch):
+    # A2 selects FUSED_MC2 for fused MC2 with EP16 before the capacity
+    # comparison, so the same oversized batch must be rejected there too.
     _patch_fused_mc2_window_deps(monkeypatch, device_type=AscendDeviceType.A2)
     monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
 
+    with pytest.raises(ValueError, match="needs about 1090 MiB per TP rank"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+@pytest.mark.parametrize("ep_world_size", [1, 33])
+def test_fused_mc2_window_guard_skips_ep_sizes_outside_fused_mc2_selection(monkeypatch, ep_world_size):
+    # Fused MC2 is not selected at EP=1 or above EP=32, so the batch will use
+    # MC2/ALLGATHER/ALLTOALL instead and must not be rejected.
+    _patch_fused_mc2_window_deps(monkeypatch, ep_world_size=ep_world_size)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("65535", 65535),
+        ("65536", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+        ("-1", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+        ("not-a-number", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+    ],
+)
+def test_configured_hccl_buffsize_mib_matches_tiling_uint16_range(monkeypatch, value, expected):
+    # The C++ tiling stores HCCL_BUFFSIZE in a uint16_t and uses the 200 MiB
+    # default above 65535; the Python pre-flight must apply the same policy.
+    monkeypatch.setenv("HCCL_BUFFSIZE", value)
+
+    assert afc._configured_hccl_buffsize_mib() == expected
+
+
+def test_fused_mc2_window_guard_accepts_uint16_max_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "65535")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_falls_back_for_hccl_buffsize_above_uint16(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "65536")
+
+    with pytest.raises(ValueError, match="HCCL_BUFFSIZE is 200 MiB"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
 
 
 def test_fused_mc2_window_guard_skips_kv_consumer_only_node(monkeypatch):

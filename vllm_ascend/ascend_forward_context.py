@@ -46,9 +46,12 @@ _MC2_TOKENS_PER_RANK_LIMIT = 512
 _FUSED_MC2_WINDOW_TOKEN_COPIES = 3
 _FUSED_MC2_WINDOW_RESERVE_BYTES = 10 * 1024 * 1024
 _HCCL_DEFAULT_BUFFSIZE_MIB = 200
+# The C++ tiling stores HCCL_BUFFSIZE in a uint16_t and falls back to the
+# default above this value; mirror that range policy here.
+_HCCL_MAX_BUFFSIZE_MIB = 65535
 _MIB_BYTES = 1024 * 1024
-# FUSED_OR_CAPACITY routes every batch to FUSED_MC2 only up to this EP world
-# size; larger EP groups fall back by capacity.
+# Fused MC2 (dispatch_ffn_combine) is only selected when the EP world size is
+# in (1, 32]; larger EP groups use MC2/ALLGATHER/ALLTOALL instead.
 _FUSED_MC2_MAX_EP_WORLD_SIZE = 32
 
 
@@ -70,14 +73,19 @@ def _configured_hccl_buffsize_mib() -> int:
     if not value:
         return _HCCL_DEFAULT_BUFFSIZE_MIB
     try:
-        return int(value)
+        configured_mib = int(value)
     except ValueError:
+        configured_mib = None
+    if configured_mib is None or not 0 <= configured_mib <= _HCCL_MAX_BUFFSIZE_MIB:
         logger.warning(
-            "Ignoring non-numeric HCCL_BUFFSIZE=%r, assuming the CANN default of %d MiB.",
+            "Ignoring HCCL_BUFFSIZE=%r outside [0, %d], assuming the CANN default of %d MiB "
+            "to match the tiling range check.",
             value,
+            _HCCL_MAX_BUFFSIZE_MIB,
             _HCCL_DEFAULT_BUFFSIZE_MIB,
         )
         return _HCCL_DEFAULT_BUFFSIZE_MIB
+    return configured_mib
 
 
 def _validate_fused_mc2_hccl_window(vllm_config: VllmConfig) -> None:
@@ -88,19 +96,19 @@ def _validate_fused_mc2_hccl_window(vllm_config: VllmConfig) -> None:
     checkpoints omits that check. Without it an oversized batch only fails
     later as an AI Core MTE fault during ``profile_run``.
     """
-    # Only the A3 FUSED_OR_CAPACITY policy sends an arbitrary batch to
-    # dispatch_ffn_combine. A2 (CAPACITY_AND_EXPERT_DENSITY) and A5
-    # (CAPACITY_AND_WORLD_SIZE) fall back to MC2/ALLGATHER/ALLTOALL above the
-    # capacity budget, so they must not be rejected here.
+    # Gate on the conditions that make the selectors pick FUSED_MC2 for
+    # dispatch_ffn_combine (A2 and A3 alike): fused MC2 enabled, not MegaMoe,
+    # MoE with expert parallelism, and 1 < EP world size <= 32. Both selectors
+    # return FUSED_MC2 before the capacity comparison, so a hardware-policy gate
+    # would miss A2 and let an oversized batch reach the tiling check.
     if not get_ascend_config().enable_fused_mc2:
-        return
-    if get_current_hardware_profile().moe_comm_policy != MoECommPolicy.FUSED_OR_CAPACITY:
         return
     if use_cann_megamoe(vllm_config):
         return
     if not is_moe_model(vllm_config) or not vllm_config.parallel_config.enable_expert_parallel:
         return
-    if get_ep_group().world_size > _FUSED_MC2_MAX_EP_WORLD_SIZE:
+    ep_world_size = get_ep_group().world_size
+    if ep_world_size <= 1 or ep_world_size > _FUSED_MC2_MAX_EP_WORLD_SIZE:
         return
     if _is_kv_consumer_only_node(vllm_config):
         # Decode nodes never run a prefill-sized batch.
