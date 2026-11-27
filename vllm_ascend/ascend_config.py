@@ -389,6 +389,15 @@ class RlConfig:
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
 
+    def apply_sleep_mode_config(self, model_config: Any) -> None:
+        """Normalize the legacy RL opt-in into upstream's single sleep flag."""
+        if self.enabled and self.sleep_mode_extra_cleanup:
+            logger.warning_once(
+                "rl_config.sleep_mode_extra_cleanup is deprecated; use enable_nccl_comm_suspend=True. "
+                "Ascend currently uses HCCL destroy/restore and ACL Graph recapture."
+            )
+            model_config.enable_nccl_comm_suspend = True
+
     def apply(self, ascend_config: AscendConfig) -> None:
         if not self.enabled:
             return
@@ -609,7 +618,7 @@ class AscendConfig:
             },
             "rl_config": {
                 "enabled": false,
-                "sleep_mode_extra_cleanup": false,
+                    "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
             },
@@ -2080,6 +2089,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.derive_and_validate(vllm_config)
     new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
+    if vllm_config.model_config is not None:
+        new_config.rl_config.apply_sleep_mode_config(vllm_config.model_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
     if _is_ascend_config_initialized(new_config):

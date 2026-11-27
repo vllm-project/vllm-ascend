@@ -856,11 +856,19 @@
 #       deduplicates groups by ranks / backend / pg_options / reuse-domain, and
 #       wrap `destroy_distributed_environment` so the registry is cleared after
 #       teardown.
+#       Bridge only `parallel_state.suspend_device_comms/resume_device_comms`
+#       to the same per-owner sleep adapters for PG-only groups (world and
+#       single-rank groups), retaining registry order and excluding the sleep
+#       anchor. Upstream skips these owners when device_communicator is None.
+#       Checkpoint traversal and normal data-communicator selection are unchanged.
 #    Related PR (if no, explain why):
 #       No, HCCL process-group reuse is Ascend-specific.
 #    Future Plan:
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
+#       Remove the sleep traversal bridge when upstream can discover PG-only
+#       lifecycle participants; keep graph/MoE ordering in the NPU worker until
+#       upstream offers the corresponding lifecycle hooks.
 #
 # ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

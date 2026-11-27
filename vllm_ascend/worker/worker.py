@@ -440,6 +440,9 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
+        if getattr(self.model_config, "enable_nccl_comm_suspend", False):
+            if not self.sleep_wakeup_manager.validate_sleep():
+                return
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -454,9 +457,7 @@ class NPUWorker(GPUWorker):
             self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
-        if cleanup_enabled:
+        if getattr(self.model_config, "enable_nccl_comm_suspend", False):
             self.sleep_wakeup_manager.sleep()
         self.synchronize_device()
 
@@ -484,6 +485,8 @@ class NPUWorker(GPUWorker):
                 "or enable additional_config.rl_config (enabled: true) which disables NZ "
                 "automatically."
             )
+        if getattr(self.model_config, "enable_nccl_comm_suspend", False):
+            self.sleep_wakeup_manager.validate_wakeup(tags)
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
         if tags is None or "kv_cache" in tags:
@@ -501,9 +504,7 @@ class NPUWorker(GPUWorker):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
-        if cleanup_enabled:
+        if getattr(self.model_config, "enable_nccl_comm_suspend", False):
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
 

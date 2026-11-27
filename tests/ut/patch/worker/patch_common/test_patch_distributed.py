@@ -126,6 +126,7 @@ def _load_patch_distributed_module():
         NON_GROUP_MEMBER = non_group_member
 
     torch_distributed.Backend = FakeBackend
+    torch_distributed.ProcessGroup = FakeProcessGroup
     torch_distributed.get_rank = get_rank
     torch_distributed.new_group = new_group
     torch_distributed.destroy_process_group = destroy_process_group
@@ -133,14 +134,18 @@ def _load_patch_distributed_module():
     torch_distributed_c10d.GroupMember = GroupMember
 
     torch_module.Tensor = FakeTensor
+    torch_module.device = str
     torch_module.distributed = torch_distributed
     torch_module.equal = lambda lhs, rhs: lhs is rhs
     torch_module.randn = lambda *shape: FakeTensor(shape)
     torch_module.npu = SimpleNamespace(current_device=current_device)
 
     vllm_module: Any = ModuleType("vllm")
+    vllm_module.__path__ = []  # make "import vllm.logger" treat vllm as a package
     vllm_distributed: Any = ModuleType("vllm.distributed")
     parallel_state_module: Any = ModuleType("vllm.distributed.parallel_state")
+    vllm_logger_module: Any = ModuleType("vllm.logger")
+    vllm_logger_module.logger = MagicMock()
 
     class BaseGroupCoordinator:
         pass
@@ -158,6 +163,14 @@ def _load_patch_distributed_module():
     parallel_state_module._groups = registered_groups
     parallel_state_module.destroy_distributed_environment = destroy_distributed_environment
 
+    def apply_to_device_comms(action):
+        for group_ref in list(registered_groups.values()):
+            group = group_ref()
+            if group is not None and group.device_communicator is not None:
+                action(group.device_communicator)
+
+    parallel_state_module._apply_to_device_comms = apply_to_device_comms
+
     shm_broadcast_module: Any = ModuleType("vllm.distributed.device_communicators.shm_broadcast")
 
     class MessageQueue:
@@ -165,34 +178,42 @@ def _load_patch_distributed_module():
 
     shm_broadcast_module.MessageQueue = MessageQueue
 
-    distributed_utils_module: Any = ModuleType("vllm.distributed.utils")
-    distributed_utils_module.get_cpu_distributed_timeout_or_none = lambda: None
-
     vllm_distributed.parallel_state = parallel_state_module
-    vllm_distributed.utils = distributed_utils_module
     vllm_distributed.destroy_distributed_environment = destroy_distributed_environment
     vllm_module.distributed = vllm_distributed
 
     vllm_ascend_module: Any = ModuleType("vllm_ascend")
+    vllm_ascend_module.__path__ = []
     vllm_ascend_patch: Any = ModuleType("vllm_ascend.patch")
     vllm_ascend_patch_worker: Any = ModuleType("vllm_ascend.patch.worker")
     vllm_ascend_distributed: Any = ModuleType("vllm_ascend.distributed")
     vllm_ascend_device_communicators: Any = ModuleType("vllm_ascend.distributed.device_communicators")
     npu_communicator_module: Any = ModuleType("vllm_ascend.distributed.device_communicators.npu_communicator")
     utils_module: Any = ModuleType("vllm_ascend.utils")
+    ascend_config_module: Any = ModuleType("vllm_ascend.ascend_config")
+    mxfp8_module: Any = ModuleType("vllm_ascend.distributed.device_communicators.mxfp8_all_reduce")
+    quantized_module: Any = ModuleType("vllm_ascend.distributed.device_communicators.quantized_all_reduce")
 
-    class FakeNPUCommunicator:
-        def __init__(self, **kwargs):
-            self.init_kwargs = kwargs
-            self.destroy = MagicMock()
-            communicator_instances.append(self)
+    base_communicator_module: Any = ModuleType("vllm.distributed.device_communicators.base_device_communicator")
 
-    npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
+    class BaseDeviceCommunicator:
+        def __init__(self, cpu_group, device, device_group, unique_name, **kwargs):
+            self.cpu_group = cpu_group
+            self.device_group = device_group
+            self.unique_name = unique_name
+            self.checkpoint_prepare = MagicMock()
+
+    base_communicator_module.DeviceCommunicatorBase = BaseDeviceCommunicator
+
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
-    # The patch only uses this to decide whether to set ``cpu_timeout`` (vLLM
-    # main) or leave it to the upstream base class (0.33.0); no test here
-    # asserts on that branch.
-    utils_module.vllm_version_is = lambda _target: False
+    utils_module.SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
+    ascend_config_module.get_ascend_config = MagicMock(
+        return_value=SimpleNamespace(
+            quantized_all_reduce_config=SimpleNamespace(enable=False, quant_dtype="int8", min_numel=1)
+        )
+    )
+    mxfp8_module.Mxfp8AllReduce = MagicMock()
+    quantized_module.QuantizedAllReduce = MagicMock()
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
@@ -204,19 +225,25 @@ def _load_patch_distributed_module():
         "torch.distributed": torch_distributed,
         "torch.distributed.distributed_c10d": torch_distributed_c10d,
         "vllm": vllm_module,
+        "vllm.logger": vllm_logger_module,
         "vllm.distributed": vllm_distributed,
         "vllm.distributed.parallel_state": parallel_state_module,
-        "vllm.distributed.utils": distributed_utils_module,
+        "vllm.distributed.device_communicators.base_device_communicator": base_communicator_module,
         "vllm.distributed.device_communicators.shm_broadcast": shm_broadcast_module,
         "vllm_ascend": vllm_ascend_module,
+        "vllm_ascend.ascend_config": ascend_config_module,
         "vllm_ascend.patch": vllm_ascend_patch,
         "vllm_ascend.patch.worker": vllm_ascend_patch_worker,
         "vllm_ascend.distributed": vllm_ascend_distributed,
         "vllm_ascend.distributed.device_communicators": (vllm_ascend_device_communicators),
         "vllm_ascend.distributed.device_communicators.npu_communicator": (npu_communicator_module),
+        "vllm_ascend.distributed.device_communicators.mxfp8_all_reduce": mxfp8_module,
+        "vllm_ascend.distributed.device_communicators.quantized_all_reduce": quantized_module,
         "vllm_ascend.utils": utils_module,
     }
 
+    lifecycle_name = "vllm_ascend.distributed.device_communicators.hccl_lifecycle"
+    modules[lifecycle_name] = ModuleType(lifecycle_name)
     previous_modules = {name: sys.modules.get(name) for name in modules}
     previous_patch_module = sys.modules.get(_PATCH_MODULE_NAME)
     previous_registry_module = sys.modules.get(_REGISTRY_MODULE_NAME)
@@ -224,14 +251,33 @@ def _load_patch_distributed_module():
         sys.modules.update(modules)
         sys.modules.pop(_PATCH_MODULE_NAME, None)
         sys.modules.pop(_REGISTRY_MODULE_NAME, None)
+        lifecycle_module = _load_module(
+            lifecycle_name, _WORKTREE_ROOT / "vllm_ascend/distributed/device_communicators/hccl_lifecycle.py"
+        )
+        communicator_name = "vllm_ascend.distributed.device_communicators.npu_communicator"
+        npu_communicator_module = _load_module(
+            communicator_name, _WORKTREE_ROOT / "vllm_ascend/distributed/device_communicators/npu_communicator.py"
+        )
+        real_communicator = npu_communicator_module.NPUCommunicator
+
+        class TrackedNPUCommunicator(real_communicator):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.init_kwargs = kwargs
+                self.destroy = MagicMock(wraps=self.destroy)
+                communicator_instances.append(self)
+
+        npu_communicator_module.NPUCommunicator = TrackedNPUCommunicator
         registry_module = _load_module(_REGISTRY_MODULE_NAME, _REGISTRY_MODULE_PATH)
         patch_module = _load_module(_PATCH_MODULE_NAME, _PATCH_MODULE_PATH)
         yield SimpleNamespace(
             module=patch_module,
+            lifecycle_module=lifecycle_module,
             registry_module=registry_module,
             torch=torch_module,
             distributed=torch_distributed,
             parallel_state_module=parallel_state_module,
+            original_apply_to_device_comms=apply_to_device_comms,
             utils_module=utils_module,
             new_group_calls=new_group_calls,
             destroy_process_group=destroy_process_group,
@@ -634,3 +680,150 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+def test_sleep_contract_keeps_communicator_and_cpu_group_across_two_cycles(module_env):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    communicator = group.device_communicator
+    cpu_group = group.cpu_group
+    for _ in range(2):
+        old_pg = group.device_group
+        communicator.suspend()
+        communicator.suspend()
+        assert group.device_communicator is communicator
+        assert group.device_group is None
+        assert communicator.device_group is None
+        assert group.cpu_group is cpu_group
+        assert module_env.destroy_process_group.call_args_list.count(call(old_pg)) == 1
+        communicator.destroy.assert_not_called()
+
+        communicator.resume()
+        new_pg = group.device_group
+        communicator.resume()
+        assert group.device_communicator is communicator
+        assert communicator.device_group is new_pg
+        assert new_pg is not old_pg
+        assert group.device_group is new_pg
+    assert len(_calls_with_backend(module_env, "gloo")) == 1
+
+
+def test_sleep_walk_covers_pg_only_world_singletons_and_shared_business_groups(module_env):
+    world = _make_group(module_env, group_name="world")
+    first = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    second = _make_group(module_env, group_name="pp", use_device_communicator=True)
+    singleton = _make_group(module_env, group_name="singleton", group_ranks=[[0], [1]])
+    anchor = _make_group(module_env, group_name="sleep_lifecycle_anchor")
+    # Shared mock options also exercise the anchor retaining a PG reference.
+    anchor._hccl_sleep_adapter.suspend = MagicMock()
+    anchor._hccl_sleep_adapter.resume = MagicMock()
+    old = first.device_group
+    module_env.module.suspend_device_comms()
+    assert all(group.device_group is None for group in (world, first, second, singleton))
+    anchor._hccl_sleep_adapter.suspend.assert_not_called()
+    # The anchor still owns the shared PG in this artificial configuration.
+    assert call(old) not in module_env.destroy_process_group.call_args_list
+    module_env.module.resume_device_comms()
+    assert world.device_group is first.device_group is second.device_group
+    assert singleton.device_group is not None
+    anchor._hccl_sleep_adapter.resume.assert_not_called()
+
+
+def test_sleep_shared_pg_destroyed_exactly_once_and_restored_once(module_env):
+    first = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    second = _make_group(module_env, group_name="pp", use_device_communicator=True)
+    old_pg = first.device_group
+    module_env.module.suspend_device_comms()
+    module_env.module.suspend_device_comms()
+    module_env.destroy_process_group.assert_called_once_with(old_pg)
+    assert first.device_group is second.device_group is None
+    module_env.module.resume_device_comms()
+    module_env.module.resume_device_comms()
+    assert first.device_group is second.device_group
+    assert len(_calls_with_backend(module_env, "hccl")) == 2
+
+
+@pytest.mark.parametrize("use_communicator", [False, True])
+def test_business_sleep_never_uses_legacy_teardown_or_replaces_shell(module_env, use_communicator):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=use_communicator)
+    communicator = group.device_communicator
+    old_pg = group.device_group
+    group.destroy_hccl = MagicMock(side_effect=AssertionError("legacy destroy entered business sleep"))
+    group.restore_hccl = MagicMock(side_effect=AssertionError("legacy restore entered business wake"))
+    group._release_hccl_resources = MagicMock(side_effect=AssertionError("final teardown entered business sleep"))
+    module_env.module.suspend_device_comms()
+    module_env.module.resume_device_comms()
+    group.destroy_hccl.assert_not_called()
+    group.restore_hccl.assert_not_called()
+    group._release_hccl_resources.assert_not_called()
+    assert group.device_communicator is communicator
+    assert group.device_group is not None and group.device_group is not old_pg
+    module_env.destroy_process_group.assert_called_once_with(old_pg)
+    if communicator is not None:
+        communicator.destroy.assert_not_called()
+
+
+def test_sleep_shutdown_does_not_restore_or_release_pg_twice(module_env):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    communicator = group.device_communicator
+    old_pg = group.device_group
+    communicator.suspend()
+    group.destroy()
+    group.destroy()
+    assert module_env.destroy_process_group.call_args_list.count(call(old_pg)) == 1
+    assert len(_calls_with_backend(module_env, "hccl")) == 1
+    with pytest.raises(RuntimeError, match="destroyed"):
+        communicator.resume()
+
+
+def test_sleep_restore_error_propagates_and_prevents_unsafe_retry(module_env):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    communicator = group.device_communicator
+    communicator.suspend()
+    module_env.distributed.new_group = MagicMock(side_effect=RuntimeError("restore failed"))
+    with pytest.raises(RuntimeError, match="restore failed"):
+        communicator.resume()
+    assert group.device_group is None
+    with pytest.raises(RuntimeError, match="failed"):
+        communicator.resume()
+    module_env.distributed.new_group.assert_called_once()
+
+
+def test_sleep_release_error_propagates_and_cannot_be_reported_suspended(module_env):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    module_env.destroy_process_group.side_effect = RuntimeError("destroy failed")
+    with pytest.raises(RuntimeError, match="destroy failed"):
+        group.device_communicator.suspend()
+    with pytest.raises(RuntimeError, match="failed"):
+        group.device_communicator.resume()
+
+
+def test_sleep_bridge_leaves_upstream_checkpoint_helper_untouched(module_env):
+    world = _make_group(module_env, group_name="world")
+    business = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    helper = module_env.parallel_state_module._apply_to_device_comms
+    assert helper is module_env.original_apply_to_device_comms
+    helper(lambda comm: comm.checkpoint_prepare())
+    business.device_communicator.checkpoint_prepare.assert_called_once_with()
+    assert world.device_group is not None
+    module_env.destroy_process_group.assert_not_called()
+    assert module_env.parallel_state_module.suspend_device_comms is module_env.module.suspend_device_comms
+    assert module_env.parallel_state_module.resume_device_comms is module_env.module.resume_device_comms
+
+
+def test_pg_only_adapter_is_closed_on_final_shutdown(module_env):
+    group = _make_group(module_env, group_name="world")
+    adapter = group._hccl_sleep_adapter
+    group.destroy()
+    with pytest.raises(RuntimeError, match="closed"):
+        adapter.resume()
+
+
+def test_sleep_adapter_does_not_keep_retired_coordinator_alive(module_env):
+    group = _make_group(module_env, group_name="tp", use_device_communicator=True)
+    communicator = group.device_communicator
+    owner_ref = weakref.ref(group)
+    module_env.parallel_state_module._register_group.reset_mock()
+    del group
+    assert owner_ref() is None
+    with pytest.raises(RuntimeError, match="owner no longer exists"):
+        communicator.suspend()

@@ -1,0 +1,13 @@
+pr: 22421
+entries:
+  - category: feature
+    text: >-
+      Added Ascend support for enable_nccl_comm_suspend through the communicator
+      sleep lifecycle. HCCL currently uses destroy/restore, with ACL Graph
+      recapture only when HCCL PGs are rebuilt; native HCCL suspension is not
+      used for memory reclamation.
+  - category: config
+    text: >-
+      Deprecated rl_config.sleep_mode_extra_cleanup in favor of
+      enable_nccl_comm_suspend. The legacy opt-in maps to the same lifecycle
+      and does not trigger duplicate communication cleanup.

@@ -144,6 +144,35 @@ class TestRlConfig(TestBase):
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
 
+    def test_unreleased_sleep_policy_keys_are_rejected(self):
+        for field, value in (
+            ("sleep_hccl_policy", "destroy"),
+            ("sleep_acl_graph_policy", "inplace"),
+            ("sleep_allow_fallback", True),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                RlConfig(**{field: value})
+
+    def test_legacy_sleep_flag_maps_to_upstream_once_without_changing_rl(self):
+        for native in (False, True):
+            model = SimpleNamespace(enable_nccl_comm_suspend=native)
+            config = RlConfig(enabled=True, sleep_mode_extra_cleanup=True)
+            config.apply_sleep_mode_config(model)
+            config.apply_sleep_mode_config(model)
+            self.assertTrue(model.enable_nccl_comm_suspend)
+            self.assertTrue(config.enabled)
+
+    def test_upstream_sleep_does_not_require_rl_opt_in(self):
+        model = SimpleNamespace(enable_nccl_comm_suspend=True)
+        RlConfig().apply_sleep_mode_config(model)
+        self.assertTrue(model.enable_nccl_comm_suspend)
+
+    def test_disabled_legacy_flags_do_not_enable_upstream_sleep(self):
+        for enabled, cleanup in ((False, False), (False, True), (True, False)):
+            model = SimpleNamespace(enable_nccl_comm_suspend=False)
+            RlConfig(enabled=enabled, sleep_mode_extra_cleanup=cleanup).apply_sleep_mode_config(model)
+            self.assertFalse(model.enable_nccl_comm_suspend)
+
 
 class TestQuantizedAllReduceConfig(TestBase):
     """Validate communication settings without initializing the upstream runtime."""

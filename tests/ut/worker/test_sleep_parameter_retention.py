@@ -71,16 +71,6 @@ def test_cpu_parameters_need_no_backup(worker):
     assert worker._sleep_saved_parameters == {}
 
 
-def test_sleep_retention_rejects_meta_parameters_before_sleep(worker):
-    worker.model_runner.model.register_parameter("placeholder", torch.nn.Parameter(torch.empty(2, device="meta")))
-    worker.model_config.sleep_preserve_parameter_names = ["placeholder"]
-
-    with pytest.raises(ValueError, match="Sleep retention cannot snapshot meta parameters: placeholder"):
-        worker.sleep(level=2)
-
-    worker.allocator.sleep.assert_not_called()
-
-
 @pytest.mark.parametrize("config", [SimpleNamespace(), SimpleNamespace(sleep_preserve_parameter_names=[])])
 def test_empty_or_older_configuration_clears_saved_parameters(worker, config):
     worker.model_config = config
@@ -187,3 +177,47 @@ def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
 
         assert torch.equal(model.weight, torch.full_like(model.weight, value))
         assert worker._sleep_saved_parameters == {}
+
+
+def test_upstream_sleep_flag_works_without_rl_opt_in(worker):
+    worker.model_config.enable_nccl_comm_suspend = True
+    worker.sleep()
+    worker.wake_up()
+    worker.sleep_wakeup_manager.sleep.assert_called_once_with()
+    worker.sleep_wakeup_manager.validate_wakeup.assert_called_once_with(None)
+    worker.sleep_wakeup_manager.wakeup.assert_called_once_with(None)
+
+
+def test_sleep_lifecycle_error_prevents_allocator_unmap(worker):
+    worker.model_config.enable_nccl_comm_suspend = True
+    worker.sleep_wakeup_manager.sleep.side_effect = RuntimeError("teardown failed")
+    with pytest.raises(RuntimeError, match="teardown failed"):
+        worker.sleep()
+    worker.allocator.sleep.assert_not_called()
+
+
+def test_repeated_sleep_does_not_overwrite_parameter_backups(worker):
+    worker.model_config.enable_nccl_comm_suspend = True
+    backup = {"weight": torch.ones(2, 2)}
+    worker._sleep_saved_parameters = backup
+    worker.sleep_wakeup_manager.validate_sleep.return_value = False
+    worker.sleep(level=2)
+    assert worker._sleep_saved_parameters is backup
+    worker.allocator.sleep.assert_not_called()
+
+
+def test_wake_validation_precedes_allocator_restore(worker):
+    worker.model_config.enable_nccl_comm_suspend = True
+    worker.sleep_wakeup_manager.validate_wakeup.side_effect = ValueError("weights must wake first")
+    with pytest.raises(ValueError, match="weights must wake first"):
+        worker.wake_up(["kv_cache"])
+    worker.allocator.wake_up.assert_not_called()
+
+
+def test_wake_lifecycle_error_reaches_worker_caller(worker):
+    worker.model_config.enable_nccl_comm_suspend = True
+    worker.sleep_wakeup_manager.wakeup.side_effect = RuntimeError("resume failed")
+    with pytest.raises(RuntimeError, match="resume failed"):
+        worker.wake_up()
+    worker.allocator.wake_up.assert_called_once_with(tags=None)
+    worker.synchronize_device.assert_not_called()

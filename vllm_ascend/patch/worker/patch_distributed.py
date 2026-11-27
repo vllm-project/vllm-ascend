@@ -23,11 +23,11 @@ import torch
 import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
-from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
+from vllm_ascend.distributed.device_communicators.hccl_lifecycle import HcclSleepAdapter
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
-from vllm_ascend.utils import create_hccl_pg_options
+from vllm_ascend.utils import SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME, create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
@@ -98,6 +98,36 @@ def _patch_destroy_distributed_environment():
     vllm.distributed.destroy_distributed_environment = destroy_fn
 
 
+def _apply_sleep_action(action: str) -> None:
+    """Bridge upstream sleep traversal to PG-only HCCL owners.
+
+    World and single-rank groups have no device communicator, but may still
+    own native HCCL memory. Preserve registry order and use the same per-owner
+    adapter for them. Do not change upstream's checkpoint traversal. Remove
+    this bridge when upstream can discover PG-only lifecycle participants.
+    """
+    participants = []
+    for group_ref in list(vllm.distributed.parallel_state._groups.values()):
+        group = group_ref()
+        if group is None or getattr(group, "group_name", None) == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
+            continue
+        communicator = group.device_communicator
+        if communicator is None and getattr(group, "backend", None) == "hccl":
+            communicator = group._hccl_sleep_adapter
+        if communicator is not None:
+            participants.append(communicator)
+    for communicator in participants:
+        getattr(communicator, action)()
+
+
+def suspend_device_comms() -> None:
+    _apply_sleep_action("suspend")
+
+
+def resume_device_comms() -> None:
+    _apply_sleep_action("resume")
+
+
 class GroupCoordinatorPatch(GroupCoordinator):
     def __init__(  # type: ignore[misc]
         self,
@@ -119,9 +149,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.local_rank = local_rank
         self.backend = _normalize_backend(torch_distributed_backend)
         self.torch_distributed_backend = torch_distributed_backend
-        # vLLM main keeps the CPU group timeout for cpu_all_reduce_; this patch
-        # reimplements GroupCoordinator.__init__ without calling super().
-        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
         self._acquired_hccl_keys: list[HcclPgKey] = []  # type: ignore[no-redef]
         self._unshared_hccl_groups: list[object] = []  # type: ignore[no-redef]
         self.use_device_communicator = use_device_communicator
@@ -134,6 +161,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_cpu_custom_send_recv = False
         self.group_name = group_name
         self.group_ranks = group_ranks
+        self._hccl_sleep_adapter = HcclSleepAdapter(self._suspend_hccl_for_sleep, self._resume_hccl_after_sleep)
 
         try:
             self._init_device_groups(create_cpu_group=True)
@@ -193,31 +221,53 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+                use_all2all=self.use_all2all,
+                sleep_adapter=self._hccl_sleep_adapter,
             )
 
-    def _release_hccl_resources(self) -> bool:
+    def _release_hccl_process_groups(self) -> bool:
+        """Release PG references once, shared by sleep and final teardown."""
         destroyed = False
+        if hasattr(self, "_acquired_hccl_keys"):
+            while self._acquired_hccl_keys:
+                _HCCL_PG_REGISTRY.release(self._acquired_hccl_keys[-1])
+                self._acquired_hccl_keys.pop()
+                destroyed = True
+
+        if hasattr(self, "_unshared_hccl_groups"):
+            while self._unshared_hccl_groups:
+                torch.distributed.destroy_process_group(self._unshared_hccl_groups[-1])
+                self._unshared_hccl_groups.pop()
+                destroyed = True
+
+        return destroyed
+
+    def _release_hccl_resources(self) -> bool:
         device_communicator = getattr(self, "device_communicator", None)
         if device_communicator is not None:
             device_communicator.destroy()
             self.device_communicator = None
-            destroyed = True
+        released = self._release_hccl_process_groups()
+        return released or device_communicator is not None
 
-        if hasattr(self, "_acquired_hccl_keys"):
-            for hccl_key in reversed(self._acquired_hccl_keys):
-                _HCCL_PG_REGISTRY.release(hccl_key)
-            self._acquired_hccl_keys = []
-            destroyed = True
+    def _suspend_hccl_for_sleep(self) -> None:
+        if self.backend != "hccl":
+            raise RuntimeError("HCCL sleep requires an HCCL process group.")
+        self._release_hccl_process_groups()
+        self.device_group = None
+        if self.device_communicator is not None:
+            self.device_communicator.device_group = None
 
-        if hasattr(self, "_unshared_hccl_groups"):
-            for device_group in reversed(self._unshared_hccl_groups):
-                torch.distributed.destroy_process_group(device_group)
-            self._unshared_hccl_groups = []
-            destroyed = True
-
-        return destroyed
+    def _resume_hccl_after_sleep(self) -> None:
+        self._init_device_groups(create_cpu_group=False)
+        assert self.device_group is not None
+        if self.device_communicator is not None:
+            # Rebind the same communicator shell and refresh PG-backed helpers
+            # (e.g. quantized all-reduce) onto the restored process group.
+            self.device_communicator.bind_device_group(self.device_group)
 
     def destroy(self):
+        self._hccl_sleep_adapter.close()
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
 
@@ -255,4 +305,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
+vllm.distributed.parallel_state.suspend_device_comms = suspend_device_comms
+vllm.distributed.parallel_state.resume_device_comms = resume_device_comms
 _patch_destroy_distributed_environment()

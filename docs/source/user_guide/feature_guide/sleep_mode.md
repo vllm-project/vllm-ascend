@@ -25,52 +25,67 @@ The engine (v0/v1) supports two sleep levels to manage memory during idle period
 
 Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
 
-## Optional extra cleanup
+## Optional communicator memory cleanup
 
-By default, sleep mode only releases memory managed by the sleep-mode allocator. For RL workloads that need to return more NPU memory to the trainer, vLLM Ascend also provides an optional extra cleanup path:
+By default, sleep releases memory managed by the sleep-mode allocator. To also
+release reclaimable HCCL process-group memory, use the upstream communicator
+lifecycle option:
 
 ```python
 llm = LLM(
     "Qwen/Qwen2.5-0.5B-Instruct",
     enable_sleep_mode=True,
-    additional_config={
-        "rl_config": {
-            "enabled": True,
-            "sleep_mode_extra_cleanup": True,
-        }
-    },
+    enable_nccl_comm_suspend=True,
+    additional_config={"weight_nz_mode": 0},
 )
 ```
 
-For online serving, pass the same option through `--additional-config`:
+For online serving:
 
 ```bash
 vllm serve Qwen/Qwen2.5-0.5B-Instruct \
     --enable-sleep-mode \
-    --additional-config '{"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
+    --enable-nccl-comm-suspend \
+    --additional-config '{"weight_nz_mode": 0}'
 ```
 
-When `rl_config.sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
+The option retains its upstream name on Ascend. When a cycle has HCCL PGs to
+rebuild, the current backend
+**destroys and restores process groups** through the communicator
+suspend/resume interface. It does not use native `HcclCommSuspend` for memory
+reclamation, and it does not preserve native communication-domain identity.
+A temporary lifecycle anchor remains alive during sleep and recovery.
 
-- clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;
-- resets the model runner graph manager so ACL graphs can be captured again after wakeup;
-- waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups.
+When ACL Graph is enabled and the cycle will rebuild HCCL, sleep invalidates
+captured graphs and their workspaces before communication teardown. Wake restores communication groups
+and MoE runtime metadata, then recaptures graphs once their inputs are ready.
+Existing graph entries are not reused across a destroy/restore cycle. Eager
+execution remains eager. This trades lower residual sleep memory for increased
+wake latency; actual HBM savings depend on the workload and software stack.
 
-During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator memory, and recaptures ACL graphs when needed.
+When there are no HCCL PGs to rebuild, including on a single-rank worker,
+communication cleanup leaves existing graphs and workspaces intact and wake
+does not recapture them. The decision is made separately for every sleep cycle.
 
-!!! note
+The legacy combination `rl_config.enabled=True` and
+`rl_config.sleep_mode_extra_cleanup=True` remains accepted with a deprecation
+warning and maps to the same upstream option. Enabling both old and new options
+runs cleanup once. The proposed `sleep_hccl_policy`, `sleep_acl_graph_policy`,
+and `sleep_allow_fallback` fields are not supported configuration options.
 
-    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `rl_config.sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
-
-For level 2 sleep, wakeup can be split into two phases:
+For staged wake, restore weights before KV cache:
 
 ```python
 llm.wake_up(tags=["weights"])
-# Reload or update model weights here.
+# Reload or update model weights here for level-2 sleep.
 llm.wake_up(tags=["kv_cache"])
 ```
 
-With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
+Required graph recapture and anchor release happen at the final KV-cache wake.
+Waking KV cache before weights is rejected when communicator cleanup is active. A full
+`wake_up()` restores both. If communication or graph recovery fails, the error
+is propagated; restart the worker rather than retrying a partially failed
+lifecycle.
 
 ## Prepare Model Weights
 

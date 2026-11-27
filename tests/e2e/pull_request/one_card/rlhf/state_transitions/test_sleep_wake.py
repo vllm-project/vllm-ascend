@@ -31,10 +31,13 @@ All tests require:
   --additional-config '{"weight_nz_mode": 0}'
 """
 
-from tests.e2e.common.rlhf.common import (
+import pytest
+
+from tests.e2e.pull_request.one_card.rlhf.conftest import (
     gen,
     health,
     npu_free_bytes,
+    ok,
     server,
     sleep,
     sleep_metrics,
@@ -111,3 +114,27 @@ class TestOutputCorrectness:
 
             resp = gen(url)
             assert resp and resp["choices"][0]["text"] == golden_text
+
+
+@pytest.mark.parametrize("entry", ["upstream", "legacy", "both"])
+def test_communicator_cleanup_entry_and_repeated_staged_wake(entry):
+    """TP1/eager smoke; TP2/MoE/ACL Graph still require their hardware matrix."""
+    extra_args = []
+    if entry in ("upstream", "both"):
+        extra_args.append("--enable-nccl-comm-suspend")
+    if entry in ("legacy", "both"):
+        extra_args += [
+            "--additional-config",
+            '{"weight_nz_mode": 0, "rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}',
+        ]
+    with server(extra_args=extra_args) as url:
+        baseline = gen(url)
+        assert ok(baseline)
+        expected = baseline["choices"][0]["text"]
+        for _ in range(2):
+            assert sleep(url, level=1) == 200
+            assert wake(url, tags=["weights"]) == 200
+            assert wake(url, tags=["kv_cache"]) == 200
+            result = gen(url)
+            assert ok(result)
+            assert result["choices"][0]["text"] == expected
