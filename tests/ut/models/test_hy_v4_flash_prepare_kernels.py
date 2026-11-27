@@ -169,37 +169,23 @@ def test_fused_c8_metadata_overwrites_padding_and_matches_reference(batch, padde
 
 
 @pytest.mark.parametrize("prepacked", [False, True])
-def test_native_fia_consumes_compact_marker_without_repacking(monkeypatch, prepacked):
+def test_native_context_respects_packed_reader_mask(prepacked):
     selected = torch.tensor([[1, -1, 2], [-1, -1, -1]])
-    nope = torch.arange(2 * 3 * 512).reshape(2, 3, 1, 512).to(torch.bfloat16)
-    rope = torch.arange(2 * 3 * 64).reshape(2, 3, 1, 64).to(torch.bfloat16)
-    expected_nope, expected_rope = fia_lengths.compact_fia_rows(selected, nope, rope)
-    calls = []
-    original = fia_lengths.compact_fia_rows
-
-    def compact(*args):
-        calls.append(True)
-        return original(*args)
-
-    def fia(**kwargs):
-        torch.testing.assert_close(kwargs["key"], expected_nope, rtol=0, atol=0)
-        torch.testing.assert_close(kwargs["key_rope"], expected_rope, rtol=0, atol=0)
-        assert "atten_mask" not in kwargs
-        assert kwargs["actual_seq_kvlen"] == [2, 1]
-        return torch.zeros(2, 1, 2, 512), torch.zeros(2, 2, 1, 1)
-
-    monkeypatch.setattr(fia_lengths, "compact_fia_rows", compact)
-    monkeypatch.setattr(decode_fusions.torch_npu, "npu_fused_infer_attention_score_v2", fia)
-    monkeypatch.setattr(attention_fusions, "fused_sink_context", lambda output, *args: output)
-    mask = selected.lt(0)[:, None, None]
-    kv = fia_lengths.CompactFIAKV(expected_nope, expected_rope, mask) if prepacked else (nope, rope, mask)
-    decode_fusions.native_mla_context(
-        torch.zeros(2, 2, 576),
-        selected,
-        kv,
-        torch.zeros(2),
-        1.0,
-        length_provider=SimpleNamespace(resolve=lambda _: {"actual_seq_kvlen": [2, 1]}),
-        metadata=None,
+    torch.manual_seed(1024)
+    kv = torch.randn(2, 3, 576, dtype=torch.float32)
+    query = torch.randn(2, 2, 576, dtype=torch.bfloat16)
+    sink = torch.zeros(2)
+    nope, rope = kv[..., :512].unsqueeze(2), kv[..., 512:].unsqueeze(2)
+    if prepacked:
+        nope, rope = fia_lengths.compact_fia_rows(selected, nope, rope)
+        mask = torch.tensor([[False, False, True], [True, True, True]])[:, None, None]
+        rows = fia_lengths.CompactFIAKV(nope, rope, mask)
+    else:
+        rows = (nope, rope, selected.lt(0)[:, None, None])
+    actual = decode_fusions.native_mla_context(
+        query, selected, rows, sink, 0.04, length_provider=None, metadata=None,
     )
-    assert len(calls) == (0 if prepacked else 1)
+    expected = decode_fusions.native_mla_context(
+        query, selected, kv, sink, 0.04, length_provider=None, metadata=None,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

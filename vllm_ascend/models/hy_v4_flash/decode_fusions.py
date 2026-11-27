@@ -33,65 +33,46 @@ def native_rms_norm(value, norm):
     return torch_npu.npu_rms_norm(value, gamma, eps)[0].to(dtype)
 
 
-def native_mla_context(query, selected, kv, sink, scale, *, length_provider, metadata):
-    """FIA owns QK/masking/softmax/PV; retain the FP32 sink using its LSE."""
-    from .fia_lengths import CompactFIAKV, compact_fia_rows
+def native_mla_context(query, selected, kv, sink, scale, *, length_provider, metadata, scores=None, query_fp32=None):
+    """Keep FP32 KV and sink normalization in the fused attention calculation.
 
+    The CANN MLA FIA ABI accepts only low-precision KV/output and cannot consume
+    a sink for this head dimension. Use the FP32 fusion instead of rounding KV
+    or correcting an already-rounded context. Reader fusion remains enabled.
+    """
+    from .fia_lengths import CompactFIAKV
+    from .precision_attention import fused_fp32_mla_context
+
+    invalid_mask = None
     if isinstance(kv, tuple):
-        # The C8 reader has already materialized the exact FIA input layouts.
-        nope, rope, _ = kv
+        nope, rope, mask = kv
+        values = torch.cat((nope[:, :, 0].float(), rope[:, :, 0].float()), dim=-1)
+        invalid_mask = mask
+        if isinstance(kv, CompactFIAKV) and scores is not None:
+            order = torch.argsort((selected < 0).to(torch.int32), dim=-1, stable=True)
+            scores = scores.gather(-1, order[:, None].expand(-1, scores.shape[1], -1))
     else:
-        keys = kv.to(query.dtype).unsqueeze(2)
-        nope = keys[..., :512].contiguous()
-        rope = keys[..., 512:].contiguous()
-    if not isinstance(kv, CompactFIAKV):
-        # Unsupported readers retain the original stable compaction path.
-        nope, rope = compact_fia_rows(selected, nope, rope)
-    kwargs = dict(
-        query=query[..., :512].unsqueeze(1).contiguous(),
-        key=nope,
-        value=nope,
-        query_rope=query[..., 512:].unsqueeze(1).contiguous(),
-        key_rope=rope,
-        num_query_heads=query.shape[1],
-        num_key_value_heads=1,
-        input_layout="BSND",
-        sparse_mode=0,
-        actual_seq_qlen=[1] * query.shape[0],
-        softmax_scale=scale,
-        return_softmax_lse=True,
-    )
-    kwargs.update(length_provider.resolve(metadata))
-    if query.device.type == "npu" and torch.npu.is_current_stream_capturing():
-        from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-
-        workspace_kwargs = {**kwargs, "actual_seq_kvlen": [selected.shape[1]] * query.shape[0]}
-        # Sequential FIA calls on one stream can reuse scratch storage. The
-        # provider is call-specific metadata, not a workspace shape identity.
-        workspace_key = (
-            "hy4.mla.fia.workspace",
-            tuple(kwargs["query"].shape),
-            tuple(nope.shape),
-            tuple(rope.shape),
-            query.dtype,
-            torch.npu.current_stream().npu_stream,
+        values = kv.float()
+    attention_query = query if query_fp32 is None else query_fp32
+    if query.device.type == "npu":
+        return fused_fp32_mla_context(
+            attention_query,
+            selected,
+            values,
+            sink,
+            scale,
+            invalid_mask=invalid_mask,
+            scores=scores,
+            output_dtype=query.dtype,
         )
-        workspace = get_capture_resource(
-            workspace_key,
-            lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(**workspace_kwargs),
-        )
-        output = torch.empty((query.shape[0], 1, query.shape[1], 512), dtype=query.dtype, device=query.device)
-        lse = torch.empty((query.shape[0], query.shape[1], 1, 1), dtype=torch.float32, device=query.device)
-        register_task(
-            torch_npu.npu_fused_infer_attention_score_v2.out,
-            {**kwargs, "workspace": workspace, "out": [output, lse]},
-            length_provider,
-        )
-    else:
-        output, lse = torch_npu.npu_fused_infer_attention_score_v2(**kwargs)
-    from .attention_fusions import fused_sink_context
-
-    return fused_sink_context(output.squeeze(1), lse, sink, selected)
+    # CPU execution is for reference tests; no CANN/Triton launch is possible.
+    if scores is None:
+        scores = torch.bmm(attention_query.float(), values.transpose(1, 2))
+    invalid = selected < 0 if invalid_mask is None else invalid_mask.reshape_as(selected)
+    logits = (scores * scale).masked_fill(invalid[:, None], -torch.inf)
+    logits = torch.cat((logits, sink[None, :, None].expand(query.shape[0], -1, 1)), -1)
+    probabilities = logits.softmax(-1)[..., :-1]
+    return torch.bmm(probabilities, values[..., :512]).to(query.dtype)
 
 
 def native_indexpool_rope(nope, even, odd, cos, sin, dtype):

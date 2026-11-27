@@ -240,9 +240,9 @@ def compact_fia_positions(positions):
     return output
 
 
-def empty_c8_fia_rows(queries, candidates, device):
-    latent = torch.empty((queries, candidates, 1, _LATENT), dtype=torch.bfloat16, device=device)
-    rope = torch.empty((queries, candidates, 1, _ROPE), dtype=torch.bfloat16, device=device)
+def empty_c8_fia_rows(queries, candidates, device, *, dtype=torch.bfloat16):
+    latent = torch.empty((queries, candidates, 1, _LATENT), dtype=dtype, device=device)
+    rope = torch.empty((queries, candidates, 1, _ROPE), dtype=dtype, device=device)
     mask = torch.empty((queries, 1, 1, candidates), dtype=torch.bool, device=device)
     return latent, rope, mask
 
@@ -250,15 +250,11 @@ def empty_c8_fia_rows(queries, candidates, device):
 def empty_compact_c8_fia_rows(queries, candidates, device):
     from .fia_lengths import CompactFIAKV
 
-    return CompactFIAKV(*empty_c8_fia_rows(queries, candidates, device))
+    return CompactFIAKV(*empty_c8_fia_rows(queries, candidates, device, dtype=torch.float32))
 
 
 def gather_compact_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
-    """Read stable-packed C8 directly into FIA layout; avoid BF16 KV repacking.
-
-    The raw reader stays unchanged, including its FP32 dequantization followed
-    by the BF16 store. Only the integer selection order changes before reading.
-    """
+    """Read stable-packed C8 in FP32, retaining the original dequantization."""
     from .fia_lengths import CompactFIAKV, compact_fia_rows
 
     if (
@@ -268,7 +264,7 @@ def gather_compact_c8_fia_rows(cache, block_table, block_size, positions, *, out
         or positions.dtype not in (torch.int32, torch.int64)
         or not 0 < positions.shape[1] <= _MAX_FIA_COMPACT_CANDIDATES
     ):
-        rows = gather_c8_fia_rows(cache, block_table, block_size, positions, output=output)
+        rows = gather_c8_fia_rows(cache, block_table, block_size, positions, output=output, dtype=torch.float32)
         nope, rope = compact_fia_rows(positions, rows[0], rows[1])
         rows[0].copy_(nope)
         rows[1].copy_(rope)
@@ -276,15 +272,15 @@ def gather_compact_c8_fia_rows(cache, block_table, block_size, positions, *, out
         rows[2].copy_((torch.arange(positions.shape[1], device=positions.device) >= count[:, None])[:, None, None])
         return CompactFIAKV(*rows)
     packed = compact_fia_positions(positions)
-    rows = gather_c8_fia_rows(cache, block_table, block_size, packed, output=output)
+    rows = gather_c8_fia_rows(cache, block_table, block_size, packed, output=output, dtype=torch.float32)
     return CompactFIAKV(*rows)
 
 
-def gather_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
+def gather_c8_fia_rows(cache, block_table, block_size, positions, *, output=None, dtype=torch.bfloat16):
     """Gather sparse rows directly into contiguous BF16 FIA K/rope and mask."""
     queries, candidates = positions.shape
     if output is None:
-        output = empty_c8_fia_rows(queries, candidates, cache.device)
+        output = empty_c8_fia_rows(queries, candidates, cache.device, dtype=dtype)
     count = positions.numel()
     if count:
         _read_c8_fia_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](

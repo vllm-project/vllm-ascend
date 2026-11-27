@@ -186,7 +186,11 @@ def select_pool_candidates(scores, visible, max_groups, ratio, budget):
     history = selected * ratio + offsets
     history = history.masked_fill(selected >= cutoff[:, None, None], -1).flatten(1)
     tail = cutoff[:, None] * ratio + offsets
-    return torch.cat((history, tail.masked_fill(tail > visible[:, None], -1)), dim=-1)
+    sparse = torch.cat((history, tail.masked_fill(tail > visible[:, None], -1)), dim=-1)
+    # Short rows have no sparse scores, but still need their complete history.
+    dense = torch.arange(sparse.shape[-1], device=visible.device).expand_as(sparse)
+    dense = dense.masked_fill(dense > visible[:, None], -1)
+    return torch.where((cutoff > budget)[:, None], sparse, dense)
 
 
 def select_paged_pool(query, weights, cache, table, visible, page_size, max_groups, ratio, budget):

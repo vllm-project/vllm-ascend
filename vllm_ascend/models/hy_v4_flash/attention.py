@@ -417,7 +417,8 @@ class FlashIndexPool(nn.Module):
         raw = raw[: groups * self.ratio].reshape(groups, self.ratio, INDEX_DIM)
         if not groups:
             return raw.new_empty((0, INDEX_DIM), dtype=torch.float32)
-        if is_decode_batch(get_flash_attention_metadata()):
+        decode_pool = is_decode_batch(get_flash_attention_metadata())
+        if decode_pool:
             from .index_pool_fusions import pool_norm
 
             if not hasattr(self, "_decode_pool_projection"):
@@ -432,10 +433,10 @@ class FlashIndexPool(nn.Module):
                 self.key_norm.weight,
                 self.eps,
             )
-            return self._encode_fp8(pooled, full_graph=full_graph)
         normalization = None
         if (
-            HAS_TRITON
+            not decode_pool
+            and HAS_TRITON
             and eager_prefill
             and self.use_eager_fp8_encoding
             and not full_graph
@@ -456,7 +457,7 @@ class FlashIndexPool(nn.Module):
             if values.is_contiguous() and probabilities.is_contiguous():
                 pooled, inverse_norm = pool_with_inverse_norm(values, probabilities, self.eps)
                 normalization = (self.key_norm.weight, inverse_norm)
-        if normalization is None:
+        if not decode_pool and normalization is None:
             # Both projections consume the same FP32 input. Materialize it once in prefill.
             pooled = pooled_keys(
                 raw.float() if eager_prefill else raw,
@@ -2342,6 +2343,8 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 self.scale,
                 length_provider=self._fia_length_provider(selected, token_start, graph_queries),
                 metadata=get_flash_attention_metadata(),
+                scores=scores,
+                query_fp32=query_fp32,
             )
             value = _head_bmm(context, wv)
             if out is None:

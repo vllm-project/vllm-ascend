@@ -19,6 +19,18 @@ from .pd_role import uses_prefill_ops
 ROUTER_TILE_ROWS = 64
 
 
+def rounded_moe_add_rms_norm(shared, routed, norm):
+    """Retain the expert sum's dtype boundary before the fused normalization.
+
+    AddRmsNorm normalizes its unrounded accumulator, although its residual
+    output is rounded. HY4's reference normalizes the rounded expert sum.
+    Keep the CANN fused operator, supplying an already-rounded sum so both
+    its accumulator and residual observe the reference value.
+    """
+    combined = shared + routed
+    return torch_npu.npu_add_rms_norm(combined, torch.zeros_like(combined), norm.weight, norm.variance_epsilon)[0]
+
+
 class _RouterWeightPreparation:
     def process_weights_after_loading(self, layer):
         weight_fp32 = layer.weight.detach()
@@ -110,7 +122,5 @@ class AscendFlashMoE(HYV4FlashMoE):
         flat = hidden_states.reshape(-1, original_shape[-1])
         router_logits, _ = self.gate(flat)
         shared, routed = self.experts(hidden_states=flat, router_logits=router_logits)
-        result = torch_npu.npu_add_rms_norm(
-            shared, routed, self.combine_output_norm.weight, self.combine_output_norm.variance_epsilon
-        )[0]
+        result = rounded_moe_add_rms_norm(shared, routed, self.combine_output_norm)
         return result.view(original_shape)

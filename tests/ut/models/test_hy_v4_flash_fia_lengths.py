@@ -64,47 +64,19 @@ def test_compaction_retains_order_and_zeros_all_invalid_rows():
 
 
 @pytest.mark.parametrize("tuple_kv", [False, True])
-def test_mask_free_fia_preserves_masked_attention_and_sink(tuple_kv, monkeypatch):
+def test_fp32_attention_preserves_kv_and_sink(tuple_kv):
     torch.manual_seed(1024)
-    query = torch.randn(3, 2, 576)
-    kv = torch.randn(3, 4, 576)
-    selected = torch.tensor([[-1, -1, -1, 0], [-1, 0, 1, -1], [-1, 0, 1, 2]])
+    query = torch.randn(3, 2, 576, dtype=torch.bfloat16)
+    kv = torch.randn(3, 4, 576, dtype=torch.float32)
+    selected = torch.tensor([[-1, -1, -1, 0], [-1, 0, 1, -1], [-1, -1, -1, -1]])
     sink = torch.tensor([0.3, -0.5])
     scale = 0.04
-    calls = []
-
-    def fia(**kwargs):
-        calls.append(kwargs)
-        assert kwargs.get("atten_mask") is None
-        assert kwargs["sparse_mode"] == 0
-        assert kwargs["actual_seq_qlen"] == [1, 1, 1]
-        assert kwargs["actual_seq_kvlen"] == [1, 2, 3]
-        contexts, lses = [], []
-        q = torch.cat((kwargs["query"], kwargs["query_rope"]), -1)[:, 0]
-        k = torch.cat((kwargs["key"], kwargs["key_rope"]), -1)[:, :, 0]
-        for row, length in enumerate(kwargs["actual_seq_kvlen"]):
-            logits = q[row] @ k[row, :length].T * kwargs["softmax_scale"]
-            contexts.append(logits.softmax(-1) @ kwargs["value"][row, :length, 0])
-            lses.append(logits.logsumexp(-1))
-        return torch.stack(contexts)[:, None], torch.stack(lses)[:, :, None, None]
-
-    def sink_context(output, lse, sink, selected):
-        return output * torch.sigmoid(lse.reshape(3, 2) - sink)[..., None]
-
-    monkeypatch.setattr(decode_fusions.torch_npu, "npu_fused_infer_attention_score_v2", fia)
-    monkeypatch.setattr(attention_fusions, "fused_sink_context", sink_context)
     rows = (kv[..., :512, None].transpose(-1, -2), kv[..., 512:, None].transpose(-1, -2), None) if tuple_kv else kv
     result = decode_fusions.native_mla_context(
-        query,
-        selected,
-        rows,
-        sink,
-        scale,
-        length_provider=FIALengthProvider("attn", 0, 3, 4, 4),
-        metadata=metadata([3], 3),
+        query, selected, rows, sink, scale, length_provider=None, metadata=None,
     )
-    logits = (query @ kv.transpose(-1, -2) * scale).masked_fill(selected[:, None] < 0, -torch.inf)
+    logits = (query.float() @ kv.transpose(-1, -2) * scale).masked_fill(selected[:, None] < 0, -torch.inf)
     denominator = torch.cat((logits, sink[None, :, None].expand(3, -1, -1)), -1).softmax(-1)
-    expected = denominator[..., :-1] @ kv[..., :512]
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-6)
-    assert len(calls) == 1
+    expected = (denominator[..., :-1] @ kv[..., :512]).to(query.dtype)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    assert torch.count_nonzero(result[2]) == 0
