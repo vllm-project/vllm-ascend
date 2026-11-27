@@ -24,9 +24,7 @@ def kv_connector_tree(connector: Any) -> Iterator[Any]:
 
 def needs_mamba_state_copy_after_load(connector: Any) -> bool:
     """Check whether any connector requires Mamba copying after its KV load."""
-    return any(
-        getattr(child, "requires_mamba_state_copy_after_load", False) for child in kv_connector_tree(connector)
-    )
+    return any(getattr(child, "requires_mamba_state_copy_after_load", False) for child in kv_connector_tree(connector))
 
 
 def maybe_wrap_c8_v_scale_connector(model_runner: Any, kv_cache_config: "KVCacheConfig", transfer_config: Any) -> None:
