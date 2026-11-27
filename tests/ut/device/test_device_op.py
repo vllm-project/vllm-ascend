@@ -6,7 +6,13 @@ import pytest
 import torch
 
 from vllm_ascend.attention.indexer import QLIMetadataBuffers, QLIMetadataConfig
-from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import (
+    ACL_HOST_REG_MAPPED,
+    ACL_HOST_REG_PINNED,
+    A5DeviceAdaptor,
+    Ascend310PDeviceAdaptor,
+    BaseDeviceAdaptor,
+)
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -59,9 +65,10 @@ def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
         op.assert_not_called()
 
 
-def test_host_registration_flags_follow_runtime_abi():
-    assert BaseDeviceAdaptor.host_register_flags() == 0x10000002
-    assert A5DeviceAdaptor.host_register_flags() == 0x2
+def test_host_registration_flags_are_mapped_only():
+    assert not ACL_HOST_REG_MAPPED & ACL_HOST_REG_PINNED
+    for adaptor in (BaseDeviceAdaptor, A5DeviceAdaptor, Ascend310PDeviceAdaptor):
+        assert adaptor.host_register_flags() == ACL_HOST_REG_MAPPED
 
 
 def test_deepseek_v41_backend_is_device_routed():

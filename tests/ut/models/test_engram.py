@@ -23,6 +23,7 @@ pytest.importorskip(
 from vllm.model_executor.model_loader import weight_utils
 from vllm.models.deepseek_v41.common import engram as upstream_engram
 
+from vllm_ascend.device.device_op import ACL_HOST_REG_MAPPED
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
@@ -151,6 +152,7 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
 
         def aclrtHostRegisterV2(self, pointer, count, flags):
             assert count == size and pointer.value % alignment == 0
+            assert flags == ACL_HOST_REG_MAPPED
             self.registered = pointer.value
             return 1 if failure == "register" else 0
 
