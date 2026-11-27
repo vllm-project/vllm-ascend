@@ -60,6 +60,16 @@ class MooncakeSFACompatibleConnector(MooncakePullConnector):
         state = getattr(self.connector_worker, "_sfa_pd_state", None)
         return dict(state.bindings) if state is not None else {}
 
+    def handle_preemptions(self, kv_connector_metadata) -> None:
+        """Publish SFA reservations at the existing pre-attention boundary.
+
+        Ascend calls this even without preemptions, before attention prepares
+        its slots. The later pre-forward call sees the same metadata; the SFA
+        worker binds it idempotently without starting READs or device copies.
+        """
+        super().handle_preemptions(kv_connector_metadata)
+        self.prepare_sparse_kv_offload(kv_connector_metadata)
+
     def prepare_copy_sfa_decode(self, input_batch, slots, block_tables, dense_fills, *, restore_tails: bool):
         prepare = getattr(self.connector_worker, "prepare_copy_sfa_decode", None)
         if prepare is None:

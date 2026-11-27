@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import worker as worker_module
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.adapter import MooncakeSFAPDState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.metadata import MooncakeSFAConnectorMetadata
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.worker import (
@@ -18,6 +20,58 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.worker import (
 from .mooncake_sfa_helpers import make_thread
 from .mooncake_v2.helpers import make_pp_metadata, make_transfer_metadata
 from .mooncake_v2.test_pull_worker import make_req_meta
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_preemption_boundary_binds_without_preemptions_and_preserves_committed_decode(monkeypatch, remote):
+    connector = object.__new__(MooncakeSFACompatibleConnector)
+    worker = object.__new__(MooncakeSFAConnectorWorker)
+    worker._sfa_pd_state = state = MooncakeSFAPDState(main_group_id=1)
+    connector.connector_worker = worker
+    metadata = MooncakeSFAConnectorMetadata({"request": 0})
+    if remote:
+        metadata.requests = {"request": make_req_meta()}
+    events = []
+
+    def handle_preemptions(_self, value):
+        assert value is metadata
+        assert not state.bindings
+        events.append("preemptions")
+
+    monkeypatch.setattr(MooncakePullConnector, "handle_preemptions", handle_preemptions)
+    connector.handle_preemptions(metadata)
+    assert events == ["preemptions"]
+    assert state.bindings == {"request": 0}
+    assert state.pending == {"request"}
+    assert state.received == (set() if remote else {"request"})
+
+    state.record_received({"request"}, set())
+    state.commit({"request"})
+    monkeypatch.setattr(MooncakePullConnector, "handle_preemptions", lambda _self, _metadata: None)
+    connector.handle_preemptions(metadata)
+    assert state.bindings == {"request": 0}
+    assert not state.pending and not state.received
+
+
+def test_failed_parent_preemption_does_not_publish_sfa_metadata(monkeypatch):
+    connector = object.__new__(MooncakeSFACompatibleConnector)
+    connector.connector_worker = MagicMock(spec=MooncakeSFAConnectorWorker)
+    parent = MagicMock(side_effect=RuntimeError("preemption failed"))
+    monkeypatch.setattr(MooncakePullConnector, "handle_preemptions", parent)
+    metadata = MooncakeSFAConnectorMetadata({"request": 0})
+    with pytest.raises(RuntimeError, match="preemption failed"):
+        connector.handle_preemptions(metadata)
+    parent.assert_called_once_with(metadata)
+    connector.connector_worker.prepare_sparse_kv_offload.assert_not_called()
+
+
+@pytest.mark.parametrize("worker_present", [False, True])
+def test_empty_preemption_step_needs_no_sfa_state_or_device_io(monkeypatch, worker_present):
+    connector = object.__new__(MooncakeSFACompatibleConnector)
+    worker = object.__new__(MooncakeSFAConnectorWorker) if worker_present else None
+    connector.connector_worker = worker
+    monkeypatch.setattr(MooncakePullConnector, "handle_preemptions", lambda _self, _metadata: None)
+    connector.handle_preemptions(MooncakeSFAConnectorMetadata())
 
 
 def test_sfa_facade_forwards_sparse_preparation_to_its_worker() -> None:
