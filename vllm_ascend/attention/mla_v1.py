@@ -169,8 +169,8 @@ class AscendMLAAttention(MLAAttention):
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
-        if model_type == "kimi_linear":
-            # Preserve the existing Kimi Linear cache head-count contract.
+        if model_type in ("kimi_linear", "glm_moe_dsa"):
+            # Use the upstream storage slot count for the cache layout.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
             spec

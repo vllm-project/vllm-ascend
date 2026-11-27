@@ -21,7 +21,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 @pytest.mark.parametrize(
     "model_type,heads",
     [
-        ("glm_moe_dsa", 12),
+        ("glm_moe_dsa", 1),
         ("glm4_moe_lite", 12),
         ("glm5_next", 12),
         ("glm5_next_text", 12),
