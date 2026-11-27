@@ -13,6 +13,7 @@ from flash_attn_npu_3 import (  # type: ignore[import-not-found,import-untyped]
     get_scheduler_metadata,
 )
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
+from vllm.config.cache import _layout_from_name
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -28,6 +29,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.kv_cache_layout import HEAD_MAJOR_KV_CACHE_LAYOUTS
 
 
 def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int]:
@@ -44,9 +46,11 @@ def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
     if config is None:
         config = get_current_vllm_config_or_none()
     if config is not None and getattr(config.cache_config, "kv_cache_layout", None) is not None:
-        return config.cache_config.get_resolved_kv_cache_layout().name in ("LBHNC", "HND", "BLHNC")
-    # Legacy runners and standalone callers may not have a resolved config.
-    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND", "BLHNC")
+        return config.cache_config.get_resolved_kv_cache_layout() in HEAD_MAJOR_KV_CACHE_LAYOUTS
+    # Legacy runners and standalone callers may not have a resolved config: the
+    # explicit choice, with the meaning upstream's alias map gives it.
+    requested = envs_vllm.VLLM_KV_CACHE_LAYOUT
+    return requested is not None and _layout_from_name(requested) in HEAD_MAJOR_KV_CACHE_LAYOUTS
 
 
 class AscendFlashAttentionBackend(AttentionBackend):

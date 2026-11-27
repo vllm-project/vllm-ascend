@@ -47,6 +47,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.kv_cache_layout import check_full_cudagraph_kv_layout
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
@@ -1595,6 +1596,13 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             cudagraph_mode,
         )
         compilation_config.cudagraph_mode = cudagraph_mode
+
+    # FULL (token-keyed) graphs over a head-major KV cache layout fail closed
+    # at init instead of on the device; do NOT silently downgrade the user's
+    # mode -- the supported choice is explicit. This is the layout the user
+    # asked for; the worker repeats the check on the layout the engine core
+    # finally adopts (NPUWorker.set_kv_cache_layout).
+    check_full_cudagraph_kv_layout(vllm_config)
 
 
 def _setup_compile_backend(
