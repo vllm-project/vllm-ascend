@@ -116,10 +116,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.ops.mmrs import (
-    SequenceParallelMMReduceScatterOp,
-    SequenceParallelQuantMMReduceScatterOp,
-)
+from vllm_ascend.ops.mmrs import SequenceParallelMMReduceScatterOp
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -1057,19 +1054,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # fuses only on long prefill batches (>= _MMRS_INT8_MIN_TOKENS).
         if self.use_sequence_parallel:
             o_proj = self.self_attn.o_proj
-            if SequenceParallelQuantMMReduceScatterOp.supports_layer(o_proj):
-                o_proj.custom_op = SequenceParallelQuantMMReduceScatterOp(
-                    o_proj,
-                    attention_layer_name=f"{prefix}.self_attn.attn",
-                    min_tokens=_MMRS_INT8_MIN_TOKENS,
-                )
-            else:
-                o_proj.custom_op = SequenceParallelMMReduceScatterOp(
-                    o_proj,
-                    attention_layer_name=f"{prefix}.self_attn.attn",
-                    min_tokens=_MMRS_MIN_TOKENS,
-                    max_tokens=_MMRS_MAX_TOKENS,
-                )
+            o_proj.custom_op = SequenceParallelMMReduceScatterOp.create(
+                o_proj,
+                attention_layer_name=f"{prefix}.self_attn.attn",
+                min_tokens=_MMRS_MIN_TOKENS,
+                max_tokens=_MMRS_MAX_TOKENS,
+                int8_min_tokens=_MMRS_INT8_MIN_TOKENS,
+            )
 
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(

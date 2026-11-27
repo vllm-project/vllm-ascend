@@ -634,3 +634,29 @@ def test_supports_layer_selects_only_w8a8_dynamic():
     assert mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(make_quant_layer())
     assert not mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(make_layer())
     assert not mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(SimpleNamespace(quant_method=None))
+
+
+def test_create_selects_the_int8_variant_for_w8a8(quant_harness):
+    op = mmrs.SequenceParallelMMReduceScatterOp.create(
+        quant_harness.layer,
+        ATTENTION_LAYER_NAME,
+        min_tokens=256,
+        max_tokens=16384,
+        int8_min_tokens=10240,
+    )
+    assert type(op) is mmrs.SequenceParallelQuantMMReduceScatterOp
+    assert op.min_tokens == 10240
+    assert op.max_tokens is None
+
+
+def test_create_selects_the_bf16_variant_otherwise(harness):
+    op = mmrs.SequenceParallelMMReduceScatterOp.create(
+        harness.layer,
+        ATTENTION_LAYER_NAME,
+        min_tokens=256,
+        max_tokens=16384,
+        int8_min_tokens=10240,
+    )
+    assert type(op) is mmrs.SequenceParallelMMReduceScatterOp
+    assert op.min_tokens == 256
+    assert op.max_tokens == 16384

@@ -67,6 +67,29 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
         else:
             logger.info_once("Layer MMRS disabled for %s: %s", self.prefix, self._static_reason)
 
+    @classmethod
+    def create(
+        cls,
+        layer,
+        attention_layer_name: str,
+        *,
+        min_tokens: int,
+        max_tokens: int | None,
+        int8_min_tokens: int,
+        int8_max_tokens: int | None = None,
+    ) -> "SequenceParallelMMReduceScatterOp":
+        """Select the op variant from the layer's quantization scheme.
+
+        A W8A8_DYNAMIC layer gets the INT8 variant with its own token
+        window; every other layer gets the unquantized BF16 variant. The
+        caller passes both windows and never branches on the scheme.
+        """
+        if SequenceParallelQuantMMReduceScatterOp.supports_layer(layer):
+            return SequenceParallelQuantMMReduceScatterOp(
+                layer, attention_layer_name, min_tokens=int8_min_tokens, max_tokens=int8_max_tokens
+            )
+        return cls(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=max_tokens)
+
     def _find_static_reason(self) -> str | None:
         """Collect the facts fixed after loading; None leaves fusion possible."""
         layer = self.layer
@@ -229,8 +252,8 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
         # Do not accept subclasses such as FP8/PDMix with different scale ABIs.
         return type(quant_method.quant_method) is AscendW8A8DynamicLinearMethod
 
-    def __init__(self, layer, attention_layer_name: str, *, min_tokens: int):
-        super().__init__(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=None)
+    def __init__(self, layer, attention_layer_name: str, *, min_tokens: int, max_tokens: int | None = None):
+        super().__init__(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=max_tokens)
         self._nd_weight_source: torch.Tensor | None = None
         self._nd_weight_version = -1
         self._nd_weight: torch.Tensor | None = None
