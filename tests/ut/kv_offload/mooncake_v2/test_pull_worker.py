@@ -1069,6 +1069,98 @@ def test_transfer_bucket_routes_each_request_to_one_complete_pcp_replica() -> No
     assert request_ids == {(0, 0): {"decode-a"}, (1, 0): {"decode-b"}}
 
 
+@pytest.mark.parametrize("local_layout", ["LBHNC", "BLHNC"])
+@pytest.mark.parametrize("remote_layout", ["LBHNC", "BLHNC"])
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(1, 1), (1, 2), (2, 1), (2, 4), (4, 2)])
+def test_head_major_transfer_copies_only_selected_blocks_and_layers(
+    local_layout, remote_layout, local_tp, remote_tp
+) -> None:
+    num_blocks, total_heads, tokens, dim = 6, 8, 16, 8
+    local_heads, remote_heads = total_heads // local_tp, total_heads // remote_tp
+    # Different layer counts make the two BLHNC block strides independent.
+    local_layers, remote_layers = 3, 4
+
+    def allocate(layout, layers, heads):
+        shape = (
+            (num_blocks, layers, heads, tokens, dim) if layout == "BLHNC" else (layers, num_blocks, heads, tokens, dim)
+        )
+        raw = torch.full((2, *shape), -1, dtype=torch.float32)
+        views = [[plane[:, i] if layout == "BLHNC" else plane[i] for plane in raw] for i in range(layers)]
+        return raw, views
+
+    remote_banks = [allocate(remote_layout, remote_layers, remote_heads) for _ in range(remote_tp)]
+    for rank, (raw, _) in enumerate(remote_banks):
+        raw.copy_(torch.arange(raw.numel()).reshape(raw.shape) + rank * raw.numel())
+    remote_caches = remote_banks[0][1]
+    remote = make_pp_metadata(
+        layer_names=[f"remote.{i}" for i in range(remote_layers)],
+        block_shapes=[[(remote_heads, tokens, dim)] * 2 for _ in range(remote_layers)],
+        block_strides=[[cache.stride(0) * cache.element_size() for cache in pair] for pair in remote_caches],
+        block_lens=[[remote_heads * tokens * dim * 4] * 2 for _ in range(remote_layers)],
+        tp_base_addrs={
+            rank: [[cache.data_ptr() for cache in pair] for pair in views]
+            for rank, (_, views) in enumerate(remote_banks)
+        },
+    )
+    # Reordered layer mapping leaves one local layer and all other blocks untouched.
+    layer_pairs = [(0, 3), (2, 1)]
+    block_pairs = [(1, 3), (2, 4)]
+    for local_rank in range(local_tp):
+        local_raw, local_caches = allocate(local_layout, local_layers, local_heads)
+        expected_raw, expected_caches = allocate(local_layout, local_layers, local_heads)
+        thread = make_thread(
+            tp_size=local_tp,
+            tp_rank=local_rank,
+            layer_names=[f"local.{i}" for i in range(local_layers)],
+            kv_cache_specs=[make_full_spec(num_kv_heads=local_heads)],
+            block_shapes=[[(local_heads, tokens, dim)] * 2 for _ in range(local_layers)],
+            block_lens=[[local_heads * tokens * dim * 4] * 2 for _ in range(local_layers)],
+            block_strides=[[cache.stride(0) * cache.element_size() for cache in pair] for pair in local_caches],
+            kv_caches_base_addr=[[cache.data_ptr() for cache in pair] for pair in local_caches],
+        )
+        for remote_rank, (remote_raw, remote_views) in enumerate(remote_banks):
+            head_start = max(local_rank * local_heads, remote_rank * remote_heads)
+            head_end = min((local_rank + 1) * local_heads, (remote_rank + 1) * remote_heads)
+            if head_start >= head_end:
+                continue
+            src: list[int] = []
+            dst: list[int] = []
+            lengths: list[int] = []
+            thread._append_spec_transfer_addresses(
+                0,
+                remote_pcp_rank=0,
+                remote_tp_rank=remote_rank,
+                remote_pcp_size=1,
+                remote_tp_size=remote_tp,
+                remote_dcp_size=1,
+                transfer_entries_by_layer={pair: [("request", [1, 2], [3, 4])] for pair in layer_pairs},
+                remote_metadata=remote,
+                src_list=src,
+                dst_list=dst,
+                length_list=lengths,
+            )
+            # Simulate transfer engine reads against the entire allocation, including guards.
+            local_bytes = local_raw.view(torch.uint8).reshape(-1)
+            remote_bytes = remote_raw.view(torch.uint8).reshape(-1)
+            for local_addr, remote_addr, length in zip(src, dst, lengths):
+                local_offset = local_addr - local_raw.data_ptr()
+                remote_offset = remote_addr - remote_raw.data_ptr()
+                assert 0 <= local_offset <= local_raw.nbytes - length
+                assert 0 <= remote_offset <= remote_raw.nbytes - length
+                local_bytes[local_offset : local_offset + length].copy_(
+                    remote_bytes[remote_offset : remote_offset + length]
+                )
+            local_slice = slice(head_start - local_rank * local_heads, head_end - local_rank * local_heads)
+            remote_slice = slice(head_start - remote_rank * remote_heads, head_end - remote_rank * remote_heads)
+            for local_layer, remote_layer in layer_pairs:
+                for part in range(2):
+                    for local_block, remote_block in block_pairs:
+                        expected_caches[local_layer][part][local_block, local_slice].copy_(
+                            remote_views[remote_layer][part][remote_block, remote_slice]
+                        )
+        torch.testing.assert_close(local_raw, expected_raw, atol=0, rtol=0)
+
+
 def test_attention_address_generation_handles_partial_head_overlap() -> None:
     thread = make_thread(
         tp_size=1,
