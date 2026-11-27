@@ -899,14 +899,3 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     checkpoint if used, prefix-caching settings, state dtypes, and convolution
     layout. Match TP sizes for Kimi and Qwen. Use the default `SD` layout for
     Kimi and for GLM when KDA head-shard counts differ across roles.
-
-    **Model-specific limits**
-
-    - For external prefix caching on **GLM-5.3-Flash (KDA)**, use AscendStore
-      with Memcache or Mooncake. Use `MultiConnector` to combine it with
-      direct P/D transfer.
-    - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
-      disabled. For P/D, match the integration version across roles.
-    - **Qwen3.x (GDN)** supports MTP, DSpark, and DFlash. Qwen3.8 checkpoints
-      require a Qwen3.5-compatible GDN architecture. The value-head count
-      must be divisible by the key-head count.
