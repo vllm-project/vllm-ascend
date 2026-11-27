@@ -9,6 +9,44 @@ import torch
 from vllm_ascend.models.qwen4_exp import qsa
 
 
+def test_qsa_dispatch_only_clears_graph_padding(monkeypatch):
+    seen = []
+
+    def gbsa(*args, **kwargs):
+        output = args[8]
+        seen.append(output.clone())
+        output.fill_(7)
+        return output
+
+    monkeypatch.setattr(qsa, "qsa_gbsa_attention", gbsa)
+    impl = object.__new__(qsa.AscendQSAImpl)
+    layer = SimpleNamespace(
+        topk_indices_buffer=torch.zeros(4, 8, dtype=torch.int32),
+        indexer=SimpleNamespace(token_topk=4, compress_ratio=1),
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        qsa_request_plan=None,
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+    )
+    output = torch.full((4, 1, 2), 3.0)
+
+    result = impl._dispatch_qsa(
+        layer,
+        torch.zeros(4, 1, 2),
+        (torch.zeros(1), torch.zeros(1)),
+        metadata,
+        output,
+        torch.zeros(4, dtype=torch.int32),
+        torch.arange(4),
+        torch.tensor([2], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(seen[0], torch.full_like(seen[0], 3.0))
+    torch.testing.assert_close(result[:2], torch.full_like(result[:2], 7.0))
+    torch.testing.assert_close(result[2:], torch.zeros_like(result[2:]))
+
+
 def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatch):
     order = []
     main = SimpleNamespace(num_actual_tokens=2, slot_mapping=torch.arange(2))
