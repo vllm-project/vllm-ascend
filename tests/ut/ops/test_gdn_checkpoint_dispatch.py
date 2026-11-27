@@ -157,7 +157,9 @@ def test_chunk_forward_only_returns_converted_intermediates_when_requested(monke
     monkeypatch.setattr(chunk, "solve_tril", lambda **kwargs: kwargs["A"])
     monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda **kwargs: (q, v))
     monkeypatch.setattr(chunk, "chunk_gated_delta_rule_fwd_h", lambda **kwargs: (h, v_new, initial))
-    monkeypatch.setattr(chunk, "SUPPRESS_LEVEL", suppress_level)
+    # SUPPRESS_LEVEL moved into the function body, so the mock targets the
+    # defining module -- same pattern as the #19210 mock follow-up.
+    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.utils.SUPPRESS_LEVEL", suppress_level)
     monkeypatch.setattr(
         torch.ops._C_ascend, "chunk_fwd_o_vllm", lambda *args, **kwargs: v.transpose(1, 2).contiguous(), raising=False
     )

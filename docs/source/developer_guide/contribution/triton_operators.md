@@ -47,6 +47,7 @@ Some operators replace a Triton kernel or host wrapper *defined in upstream vLLM
 - [ ] Update `EXPECTED_OVERRIDE_COUNT` in the test file to the new table size.
 - [ ] Run `TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut/test_triton_kernel_overrides.py` and make it green.
 - [ ] Warmup: raw-kernel values keep compiling before graph capture; plain-callable values compile lazily on first launch. Register the impl's own warmup variants as described in [Triton JIT warmup on Ascend](../Design_Documents/triton_jit_warmup.md).
+- [ ] Keep table value modules import-side-effect free: no device calls and no imports that initialize the device at module top level. The worker hook imports the whole table before the device is selected, so a module-level import of an upstream module with import-time device queries (for example `vllm.third_party.flash_linear_attention.ops.utils`) wakes the NPU too early -- defer such imports into the function body. `tests/e2e/pull_request/one_card/test_kernel_override_table_import.py` fails if any table import wakes the NPU.
 - [ ] Host helpers that upstream kernels evaluate inside `@triton.jit` bodies at compile time (for example `triton.next_power_of_2`) cannot go through the table: `KernelOverride` is a runtime callable that the Triton compiler rejects. Keep such shims in `vllm_ascend/patch/worker/patch_triton.py` under its stated retirement plan.
 
 The table's module docstring in `vllm_ascend/triton_kernel_overrides.py` is the reference text for these rules.
