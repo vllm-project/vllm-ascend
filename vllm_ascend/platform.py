@@ -1303,15 +1303,6 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         additional_config = dict(additional_config)
         additional_config["eplb_config"] = eplb_config
         vllm_config.additional_config = additional_config
-    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false"
-    ).lower() in ("true", "1"):
-        logger.warning(
-            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-            "additional_config.eplb_config supports only %s.",
-            sorted(_V2_EPLB_CONFIG_FIELDS),
-        )
     load_collection_phase = eplb_config.get("load_collection_phase", "all")
     # Disabled drafts inherit this target-only setting but never collect
     # EPLB load. Keep target validation strict and preserve other checks.

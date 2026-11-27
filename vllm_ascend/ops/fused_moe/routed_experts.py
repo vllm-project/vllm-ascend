@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 from collections.abc import Iterable
-from types import SimpleNamespace
 
 import torch
 import torch_npu
@@ -63,7 +62,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
-        self.dynamic_eplb = False
         self.lora_context = None
         self._lora_routing = None
 
@@ -129,7 +127,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if use_megamoe or self.dynamic_eplb:
+            if use_megamoe:
                 if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
                     logger.warning_once(
                         "Unquantized MoE weights are not supported by the A5 mega moe "
@@ -169,7 +167,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=QuantType.NONE,
-                dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -185,7 +182,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.use_mega_moe:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
@@ -194,11 +190,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
         else:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
@@ -323,20 +314,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return hidden_states
 
 
-def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_interval: int) -> bool:
-    """Whether EPLB should retain a separate expert-load vector per step."""
-    return dynamic_eplb and policy_type == 3 and collection_interval > 1
-
-
-def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
-    """Build the minimal config view consumed by init_eplb_config."""
-    return SimpleNamespace(
-        expert_map_path=eplb_config.expert_map_path,
-        dynamic_eplb=eplb_config.dynamic_eplb,
-        num_redundant_experts=num_redundant_experts,
-    )
-
-
 def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
     if tensor.device.type != "npu":
@@ -439,12 +416,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self.dynamic_eplb = False
-        self.multi_stage = False
-        self.load_counter = None
-        self.num_iter = None
-        self.moe_load: torch.Tensor | None = None
-        self.log2phy: torch.Tensor | None = None
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
@@ -498,10 +469,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 raise ValueError("Every Ascend EPLB expert row must be flattenable without a copy.") from exc
         return flattened_weights
 
-    def get_eplb_parameter(self, name: str):
-        """Return an expert parameter from the refactored weight owner."""
-        return getattr(self, name)
-
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
         """Return the global-to-local map used by Ascend MoE execution.
@@ -513,19 +480,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         """
         return getattr(self, "_expert_map", None)
 
-    def get_log2phy_map(self) -> torch.Tensor | None:
-        return self.log2phy
-
     @property
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
-
-    def clear_moe_load(self) -> None:
-        assert self.moe_load is not None
-        self.moe_load.zero_()
-        if self.multi_stage:
-            assert self.load_counter is not None
-            self.load_counter.zero_()
 
     @property
     def quant_type(self) -> QuantType:
@@ -549,9 +506,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
-        if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
-
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
             num_shared_experts = 0
@@ -669,28 +623,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 is_sequence_parallel=self.moe_config.is_sequence_parallel,
                 all_gather_mask=all_gather_mask,
             )
-
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
-            assert self.moe_load is not None
-            if self.multi_stage:
-                assert self.load_counter is not None and self.num_iter is not None
-                cur_iter = torch.remainder(self.load_counter, self.num_iter)
-                self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
-                )
-                self.load_counter.add_(1)
-            else:
-                self.moe_load.add_(local_load)
 
         assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
