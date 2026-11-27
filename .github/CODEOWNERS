@@ -205,7 +205,7 @@
 # /vllm_ascend/models/__init__.py
 # /vllm_ascend/models/common/
 # /vllm_ascend/models/layer/
-/vllm_ascend/models/qwen4_exp/ @shaopeng-666
+/vllm_ascend/models/qwen4_exp/ @shaopeng-666 @Nothing-98 @Karryking3
 /vllm_ascend/models/minimax_m3 @realliujiaxu @CXY-Katrina
 /vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
