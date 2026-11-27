@@ -468,8 +468,9 @@ class AscendEplbState(_eplb_state.EplbState):
         self._slot_active.zero_()
         self._slot_out_of_phase.zero_()
         self._physical_load_sample_slots.fill_(-1)
-        if getattr(self, "_slot_gathered", None) is not None:
-            self._slot_gathered.fill_(-1)
+        slot_gathered = getattr(self, "_slot_gathered", None)
+        if slot_gathered is not None:
+            slot_gathered.fill_(-1)
         self._num_recorded_load_steps = 0
         self._load_stats_window_start_index = 0
         self._load_stats_window_write_index = 0
@@ -511,9 +512,10 @@ class AscendEplbState(_eplb_state.EplbState):
         self._slot_active[index] = int(active)
         self._slot_out_of_phase[index] = int(active and not self._load_collection_phase_matched)
         self._physical_load_sample_slots[index] = self.expert_load_window_step
-        if getattr(self, "_slot_gathered", None) is not None:
+        slot_gathered = getattr(self, "_slot_gathered", None)
+        if slot_gathered is not None:
             # Device to device only: the value is read once per rearrangement.
-            self._slot_gathered[index].copy_(self.allgather_record_tensor)
+            slot_gathered[index].copy_(self.allgather_record_tensor)
         if self._num_recorded_load_steps < self.expert_load_window_size:
             self._num_recorded_load_steps += 1
         else:
@@ -601,8 +603,9 @@ class AscendEplbState(_eplb_state.EplbState):
         """
         active, out_of_phase = flags
         included = (active > 0) & (out_of_phase == 0)
-        if getattr(self, "_slot_gathered", None) is not None:
-            gathered = self._slot_gathered[self._ordered_load_step_indices()].cpu()
+        slot_gathered = getattr(self, "_slot_gathered", None)
+        if slot_gathered is not None:
+            gathered = slot_gathered[self._ordered_load_step_indices()].cpu()
             included = torch.where(gathered >= 0, gathered > 0, included)
         return included
 
