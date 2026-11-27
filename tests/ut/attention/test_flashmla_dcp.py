@@ -211,8 +211,8 @@ def runtime(monkeypatch):
         query_capacity=None,
         max_requests=8,
         pcp_size=1,
-        a3_adapter=None,
         sliding_window=None,
+        a3_adapter=None,
     ):
         impl = SimpleNamespace(
             a3_mla_adapter=a3_adapter,

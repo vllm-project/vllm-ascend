@@ -73,18 +73,25 @@ def prepare_draft_fia_lengths(
     return result
 
 
-def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool]:
+def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool, bool]:
+    """Return the draft architecture and whether all MLA groups use FlashMLA or the A3 sink."""
     backend = _get_graph_update_backend(attn_groups)
     if issubclass(backend, AscendMLABackend):
-        mla_groups = [
-            group for groups in attn_groups for group in groups if issubclass(group.backend, AscendMLABackend)
+        builders = [
+            group.get_metadata_builder(0)
+            for groups in attn_groups
+            for group in groups
+            if issubclass(group.backend, AscendMLABackend)
         ]
-        return "MLA", bool(mla_groups) and all(
-            getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+        use_a3 = all(getattr(builder, "use_a3_mla_sink", False) for builder in builders)
+        use_flashmla = all(
+            getattr(builder, "flashmla_state", None) is not None and not getattr(builder, "use_a3_mla_sink", False)
+            for builder in builders
         )
+        return "MLA", bool(builders) and use_flashmla, bool(builders) and use_a3
     if issubclass(backend, AscendAttentionBackend):
-        return "GQA", False
-    return None, False
+        return "GQA", False, False
+    return None, False, False
 
 
 def install_ascend_dflash_input_preparation() -> None:
@@ -395,7 +402,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             if not windowed_flashmla_layers.isdisjoint(group.layer_names)
         )
         install_ascend_dflash_input_preparation()
-        self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
+        self.attn_architecture, self.use_flashmla, _ = detect_draft_attn_architecture(self.attn_groups)
 
     def propose(
         self,

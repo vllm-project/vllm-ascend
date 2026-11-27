@@ -33,19 +33,18 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
-from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    detect_draft_attn_architecture,
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
     prepare_draft_fia_lengths,
@@ -259,28 +258,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
-            backend = _get_graph_update_backend(self.attn_groups)
-            if issubclass(backend, AscendMLABackend):
-                self.attn_architecture = "MLA"
-                # Check whether all MLA groups use FlashMLA.
-                mla_groups = [
-                    group
-                    for groups in self.attn_groups
-                    for group in groups
-                    if issubclass(group.backend, AscendMLABackend)
-                ]
-                self.use_flashmla = bool(mla_groups) and all(
-                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
-                    and not getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
-                    for group in mla_groups
-                )
-                self.use_a3_mla_sink = bool(mla_groups) and all(
-                    getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False) for group in mla_groups
-                )
-            elif issubclass(backend, AscendAttentionBackend):
-                self.attn_architecture = "GQA"
-            else:
-                self.attn_architecture = None
+            self.attn_architecture, self.use_flashmla, self.use_a3_mla_sink = detect_draft_attn_architecture(
+                self.attn_groups
+            )
             install_ascend_dflash_input_preparation()
 
     def _prepare_draft_dcp_metadata_inputs(

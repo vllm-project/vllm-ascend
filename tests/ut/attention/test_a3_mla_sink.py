@@ -9,6 +9,8 @@ import ast
 import importlib.util
 import math
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -381,12 +383,17 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
         "FlashMLACurrent",
         "FlashMLADecode",
         "FlashMLAMetadataBuilder",
+        "FLASHMLA_NON_CAUSAL_MASK_MODE",
+        "FLASHMLA_CAUSAL_MASK_MODE",
+        "FLASHMLA_BAND_MASK_MODE",
     }
     scope = dict(
         torch=torch,
         dataclass=dataclass,
         replace=replace,
         Any=Any,
+        Iterator=Iterator,
+        contextmanager=contextmanager,
         FlashMLAImpl=type("UnusedA5", (), {}),
         QuantFlashMLAImpl=type("UnusedQuant", (), {}),
         A3MLAAdapter=sink.A3MLAAdapter,
@@ -653,7 +660,11 @@ def test_dspark_does_not_read_host_lengths_when_a3_selected(dcp):
         "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py",
         "AscendDSparkSpeculator",
         "_prepare_draft_dcp_metadata_inputs",
-        {"torch": torch},
+        ast_symbols(
+            "vllm_ascend/worker/v2/spec_decode/dflash/speculator.py",
+            {"prepare_draft_fia_lengths"},
+            {"torch": torch, "Any": Any},
+        ),
     )
     # No input buffers or DCP manager are provided: touching either fails.
     instance = SimpleNamespace(use_a3_mla_sink=True, use_flashmla=False, attn_architecture="MLA", use_dcp=dcp)

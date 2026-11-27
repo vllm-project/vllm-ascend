@@ -65,6 +65,24 @@ else:
 REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not supported by the paired vLLM version")
 
 
+@pytest.mark.parametrize(
+    ("a3_sinks", "expected"),
+    [([True], (False, True)), ([False], (True, False)), ([True, False], (False, False))],
+)
+def test_mla_provider_requires_uniform_draft_groups(monkeypatch, a3_sinks, expected):
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    monkeypatch.setattr(AscendMLABackend, "get_impl_cls", staticmethod(lambda: object))
+    groups = [
+        SimpleNamespace(
+            backend=AscendMLABackend,
+            get_metadata_builder=MagicMock(return_value=SimpleNamespace(flashmla_state=object(), use_a3_mla_sink=sink)),
+        )
+        for sink in a3_sinks
+    ]
+    assert dflash_module.detect_draft_attn_architecture([groups]) == ("MLA", *expected)
+
+
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail):
@@ -189,7 +207,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.attn_architecture, speculator.use_flashmla = dflash_module.detect_draft_attn_architecture([[group]])
+    speculator.attn_architecture, speculator.use_flashmla, _ = dflash_module.detect_draft_attn_architecture([[group]])
     # vLLM main exposes max_model_len as a read-only view of vllm_config.
     speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
     speculator.draft_max_seq_len = 1024
@@ -662,7 +680,7 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     speculator.max_num_tokens = 8
     speculator.draft_kv_cache_group_ids = [0, 1]
     speculator.draft_attn_layer_names = active_layers
-    speculator.attn_groups = [[SimpleNamespace(backend=AscendAttentionBackend)]]
+    speculator.attn_groups = [[SimpleNamespace(backend=AscendAttentionBackend, layer_names=["draft.0", "draft.1"])]]
     speculator.model = SimpleNamespace()
     speculator.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     backends = {name: object() for name in ("draft.0", "draft.1")}

@@ -309,10 +309,7 @@ def test_dflash_graph_params_use_actual_captured_token_sizes(monkeypatch, needs_
     set_params = MagicMock()
     monkeypatch.setattr(aclgraph_module, "set_draft_graph_params", set_params)
 
-    query_shape = (
-        {"decode_query_len": 7} if aclgraph_module.vllm_version_is("0.33.0") else {"decode_query_lens": {7: 3}}
-    )
-    manager = DFlashAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, **query_shape)
+    manager = DFlashAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, {7: 3})
 
     assert manager.capture_sizes == ([14, 21] if needs_capture else [])
     if needs_capture:

@@ -280,7 +280,7 @@ def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
             supports=lambda capability: has_mla_flash and capability is HardwareCapability.MLA_FLASH
         ),
     )
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()) if ops_available else None)
 
     assert impl._can_use_flashmla()

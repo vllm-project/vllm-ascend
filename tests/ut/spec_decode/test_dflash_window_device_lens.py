@@ -64,7 +64,7 @@ def test_windowed_mla_draft_layers(monkeypatch, impl_cls, causal, band, error):
         ]
         for name, state in states.items()
     ]
-    monkeypatch.setattr(dflash_speculator_module, "detect_draft_attn_architecture", lambda _: ("MLA", band))
+    monkeypatch.setattr(dflash_speculator_module, "detect_draft_attn_architecture", lambda _: ("MLA", band, False))
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[*layers, "target"])])
     monkeypatch.setattr(DFlashSpeculator, "set_attn", lambda *args: None)
     monkeypatch.setattr(dflash_speculator_module, "get_layers_from_vllm_config", lambda *args: layers)
