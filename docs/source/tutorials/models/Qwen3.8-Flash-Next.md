@@ -648,9 +648,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
-    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
     export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
@@ -675,10 +673,6 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --pipeline-parallel-size 4 \
         --data-parallel-size 1 \
-        --data-parallel-address "${local_ip}" \
-        --data-parallel-rpc-port 19345 \
-        --master-addr "${local_ip}" \
-        --master-port 29450 \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -710,8 +704,6 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
     unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
@@ -735,9 +727,6 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
         --data-parallel-address "${local_ip}" \
-        --data-parallel-rpc-port 19346 \
-        --master-addr "${local_ip}" \
-        --master-port 29460 \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
