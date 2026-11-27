@@ -299,30 +299,19 @@ def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, mod
     assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
 
 
-def test_owner_graph_writes_global_wkv_and_uses_local_attention_shape():
+def test_owner_graph_uses_global_context_and_local_attention_shape(monkeypatch):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.max_num_reqs = 32
-    speculator.max_num_tokens = 256
-    speculator.num_speculative_steps = 5
     speculator._owner_pcp_size = 4
-    speculator._owner_wkv_staging = torch.zeros(256, 3, 2)
-    speculator.context_positions = torch.arange(256)
-    speculator._context_slot_mappings = torch.arange(512).view(2, 256)
-    speculator._layer_group_idx = [0, 1, 0]
     speculator.supports_decode_metadata_update = True
     speculator._update_draft_decode_metadata = MagicMock()
-    store_context_wkv = MagicMock()
-    speculator.model = SimpleNamespace(store_context_wkv=store_context_wkv)
+    prepare_context = MagicMock()
+    monkeypatch.setattr(DSparkSpeculator, "_prepare_graph_forward", prepare_context)
 
     metadata = {"draft.0": object()}
     speculator._prepare_owner_graph_forward(8, metadata)
 
-    store_context_wkv.assert_called_once()
-    wkv, positions, slots = store_context_wkv.call_args.args
-    assert wkv.shape == (192, 3, 2)
-    assert wkv.data_ptr() == speculator._owner_wkv_staging.data_ptr()
-    torch.testing.assert_close(positions, speculator.context_positions[:192])
-    torch.testing.assert_close(slots, list(speculator._context_slot_mappings[[0, 1, 0], :192].unbind(0)))
+    prepare_context.assert_called_once_with(32, None)
     speculator._update_draft_decode_metadata.assert_called_once_with(metadata, 8)
 
 

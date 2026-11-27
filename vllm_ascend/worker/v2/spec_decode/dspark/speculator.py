@@ -28,7 +28,6 @@ from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -203,36 +202,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 register_graph_params=False,
             )
             self._owner_graph_manager.update_stream = self.update_stream
-            model = self.model.model
-            self._owner_wkv_staging = torch.zeros(
-                self._num_graph_context_tokens(self.max_num_reqs),
-                model.num_dspark_layers,
-                model.config.head_dim,
-                dtype=self.dtype,
-                device=self.device,
-            )
-
-    def dispatch_owner_graph(
-        self, input_batch: InputBatch, num_speculative_tokens: int | None
-    ) -> BatchExecutionDescriptor | None:
-        manager = self._owner_graph_manager
-        if (
-            manager is None
-            or input_batch.is_dummy
-            or num_speculative_tokens == 0
-            or input_batch.num_reqs < self._owner_pcp_size
-            or input_batch.is_prefilling_np[: input_batch.num_reqs].any()
-            or input_batch.num_tokens > self._num_graph_context_tokens(input_batch.num_reqs)
-        ):
-            return None
-        # All PCP groups use the same bucket even when their real request counts differ.
-        owner_capacity = cdiv(input_batch.num_reqs, self._owner_pcp_size)
-        desc = manager.dispatch(owner_capacity, owner_capacity * self.num_query_per_req, self.num_query_per_req, 0)
-        return desc if desc.cg_mode == CUDAGraphMode.FULL else None
-
-    def project_owner_wkv(self, aux_hidden_states: list[torch.Tensor]) -> torch.Tensor:
-        context_states = self.model.combine_hidden_states(torch.cat(aux_hidden_states, dim=-1))
-        return self.model.project_context_wkv(context_states)
 
     def capture(self) -> None:
         super().capture()
@@ -260,14 +229,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return min(self.max_num_reqs, num_query_reqs * self._owner_pcp_size)
 
     def _prepare_owner_graph_forward(self, num_reqs: int, attn_metadata: dict[str, Any] | None) -> None:
-        # Each owner refreshes the committed context for every request so the
-        # next step can change owners. Only draft queries use the local shape.
-        num_context = self._num_graph_context_tokens(self._owner_context_reqs(num_reqs))
-        self.model.store_context_wkv(
-            self._owner_wkv_staging[:num_context],
-            self.context_positions[:num_context],
-            [self._context_slot_mappings[group_idx, :num_context] for group_idx in self._layer_group_idx],
-        )
+        # The captured query shape is local, while every group refreshes the
+        # committed context of all requests so the next step can change owners.
+        super()._prepare_graph_forward(self._owner_context_reqs(num_reqs), None)
         if attn_metadata is not None and self.supports_decode_metadata_update:
             self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
@@ -544,6 +508,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self,
         batch_desc: BatchExecutionDescriptor,
         input_batch: InputBatch,
+        last_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
@@ -602,14 +567,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 query_rows=query_rows,
                 num_query_reqs=num_local_reqs,
             )
-        num_tokens = input_batch.num_tokens
-        num_context = self._num_graph_context_tokens(self._owner_context_reqs(batch_desc.num_reqs))
-        self._context_slot_mappings[:, num_tokens:num_context].fill_(PAD_SLOT_ID)
-        wkv_input = self._owner_wkv_staging[:num_tokens]
-        if self.pcp_manager.draft_wkv_batch_desc is not None:
-            self.pcp_manager.finish_draft_wkv_gather(wkv_input)
-        else:
-            wkv_input.copy_(self.project_owner_wkv(aux_hidden_states))
+        if aux_hidden_states is None:
+            aux_hidden_states = self.pcp_manager.finish_draft_aux_restore()
+        self._prepare_graph_replay(
+            input_batch,
+            self._owner_context_reqs(batch_desc.num_reqs),
+            last_hidden_states,
+            aux_hidden_states,
+            num_rejected,
+            False,
+        )
         if self.supports_decode_metadata_update:
             self._map_kernel_block_tables()
         self._prepare_eplb_forward(num_local_reqs * self.num_query_per_req)
@@ -637,14 +604,26 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        if self._owner_graph_manager is not None and not dummy_run and not is_profile:
-            batch_desc = self.pcp_manager.draft_wkv_batch_desc
-            if batch_desc is None:
-                batch_desc = self.dispatch_owner_graph(input_batch, num_speculative_tokens)
-            if batch_desc is not None:
+        if (
+            self._owner_graph_manager is not None
+            and not dummy_run
+            and not is_profile
+            and num_speculative_tokens != 0
+            and input_batch.num_reqs >= self._owner_pcp_size
+            and not input_batch.is_prefilling_np[: input_batch.num_reqs].any()
+            and input_batch.num_tokens <= self._num_graph_context_tokens(input_batch.num_reqs)
+        ):
+            # Every PCP group selects the same bucket, including when the
+            # last few groups have one fewer real request.
+            owner_capacity = cdiv(input_batch.num_reqs, self._owner_pcp_size)
+            batch_desc = self._owner_graph_manager.dispatch(
+                owner_capacity, owner_capacity * self.num_query_per_req, self.num_query_per_req, 0
+            )
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
                 return self._propose_owner_drafts(
                     batch_desc,
                     input_batch,
+                    last_hidden_states,
                     aux_hidden_states,
                     num_sampled,
                     num_rejected,
@@ -676,6 +655,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_speculative_tokens = None
         self.input_batch = input_batch
         assert self.input_batch is not None
+        if aux_hidden_states is None and self.pcp_manager is not None:
+            aux_hidden_states = self.pcp_manager.finish_draft_aux_restore()
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay
         # metadata must use the same count without mutating the target batch.

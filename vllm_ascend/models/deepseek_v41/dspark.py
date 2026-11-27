@@ -319,13 +319,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.main_norm(self.main_proj(aux_hidden_states))
 
-    def project_context_wkv(self, context_states: torch.Tensor) -> torch.Tensor:
-        return self.context_wkv_proj(context_states).view(
-            context_states.shape[0],
-            self.num_dspark_layers,
-            self.config.head_dim,
-        )
-
     def _project_shared_kv(
         self,
         kv: torch.Tensor,
@@ -349,25 +342,23 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         # Profiling omits slot mappings, but must still execute this projection
         # so its workspace is included in the memory profile.
-        wkv = self.project_context_wkv(context_states)
-        if context_slot_mapping is not None:
-            self.store_context_wkv(wkv, context_positions, context_slot_mapping)
+        all_kv = self.context_wkv_proj(context_states).view(
+            context_states.shape[0],
+            self.num_dspark_layers,
+            self.config.head_dim,
+        )
+        if context_slot_mapping is None:
+            return
 
-    def store_context_wkv(
-        self,
-        wkv: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None],
-    ) -> None:
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
-        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), wkv.unbind(1), strict=True)):
-            slots = context_slot_mapping[layer_idx]
-            if slots is None:
+        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+            layer_context_slot_mapping = context_slot_mapping[layer_idx]
+            if layer_context_slot_mapping is None:
                 continue
             attn = layer.self_attn
             shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
-            self._store_standard_swa_kv(shared_kv, slots, attn)
+            self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
@@ -519,17 +510,6 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(aux_hidden_states)
-
-    def project_context_wkv(self, context_states: torch.Tensor) -> torch.Tensor:
-        return self.model.project_context_wkv(context_states)
-
-    def store_context_wkv(
-        self,
-        wkv: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None],
-    ) -> None:
-        self.model.store_context_wkv(wkv, context_positions, context_slot_mapping)
 
     def precompute_and_store_context_kv(
         self,

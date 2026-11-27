@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -136,10 +135,9 @@ class AscendPCPManager(PCPManager):
     # The batch restore_for_sampling handed to sampling and the speculator.
     _sampling_global_batch: InputBatch | None = None
     _staged_owner_drafts: torch.Tensor | None = None
-    draft_wkv_batch_desc: BatchExecutionDescriptor | None = None
-    _draft_wkv_stream: torch.npu.Stream | None = None
-    _pending_draft_wkv_aux: list[torch.Tensor] | None = None
-    _draft_wkv_gather: tuple[torch.Tensor, torch.distributed.Work] | None = None
+    _draft_aux_stream: torch.npu.Stream | None = None
+    _pending_draft_aux: list[torch.Tensor] | None = None
+    _draft_aux_gathers: list[tuple[torch.Tensor, torch.distributed.Work]] | None = None
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
@@ -235,35 +233,47 @@ class AscendPCPManager(PCPManager):
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self._dispatch_prefill_runs_as_decode_np = None
 
-    def enable_draft_wkv_overlap(self) -> None:
-        self._draft_wkv_stream = torch.npu.Stream(device=self.device)
+    def enable_draft_aux_overlap(self) -> None:
+        self._draft_aux_stream = torch.npu.Stream(device=self.device)
 
-    def start_draft_wkv_gather(self, project_wkv: Callable[[list[torch.Tensor]], torch.Tensor]) -> None:
-        """Project rank-local target rows and gather their WKV after target logits."""
-        aux_states = self._pending_draft_wkv_aux
+    def start_draft_aux_restore(self) -> None:
+        """Submit aux gathers after target logits communication has been enqueued."""
+        aux_states = self._pending_draft_aux
         if aux_states is None:
             return
-        self._pending_draft_wkv_aux = None
-        stream = self._draft_wkv_stream
+        self._pending_draft_aux = None
+        stream = self._draft_aux_stream
         stream.wait_stream(torch.npu.current_stream())
         group = get_pcp_group().device_group
+        gathers = []
+        self._draft_aux_gathers = gathers
         with torch.npu.stream(stream):
             for states in aux_states:
                 states.record_stream(stream)
-            local_wkv = project_wkv(aux_states)
-            gathered = local_wkv.new_empty((local_wkv.shape[0] * self.pcp_world_size, *local_wkv.shape[1:]))
-            work = torch.distributed.all_gather_into_tensor(gathered, local_wkv, group=group, async_op=True)
-            self._draft_wkv_gather = gathered, work
+                local_states = states.contiguous()
+                gathered = local_states.new_empty(
+                    (local_states.shape[0] * self.pcp_world_size, *local_states.shape[1:])
+                )
+                work = torch.distributed.all_gather_into_tensor(gathered, local_states, group=group, async_op=True)
+                gathers.append((gathered, work))
 
-    def finish_draft_wkv_gather(self, output: torch.Tensor) -> None:
-        """Restore scheduler row order directly into the owner graph input."""
-        gathered, work = self._draft_wkv_gather
-        work.wait()
-        gathered.record_stream(torch.npu.current_stream())
-        restore_idx = self._hidden_restore_idx[: output.shape[0]]
-        torch.index_select(gathered, 0, restore_idx, out=output)
-        self._draft_wkv_gather = None
-        self.draft_wkv_batch_desc = None
+    def _wait_draft_aux_gathers(self) -> list[torch.Tensor]:
+        gathers = self._draft_aux_gathers
+        stream = torch.npu.current_stream()
+        for gathered, work in gathers:
+            work.wait()
+            gathered.record_stream(stream)
+        self._draft_aux_gathers = None
+        return [gathered for gathered, _ in gathers]
+
+    def finish_draft_aux_restore(self) -> list[torch.Tensor] | None:
+        """Join the aux gather at its first consumer and return compact global rows."""
+        self.start_draft_aux_restore()
+        if self._draft_aux_gathers is None:
+            return None
+        gathered_states = self._wait_draft_aux_gathers()
+        restore_idx = self._hidden_restore_idx[: self._sampling_global_batch.num_tokens]
+        return [states.index_select(0, restore_idx) for states in gathered_states]
 
     def bind_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -408,6 +418,9 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
+        if self._draft_aux_gathers is not None:
+            self._wait_draft_aux_gathers()
+        self._pending_draft_aux = None
         prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
         effective_is_prefilling = apply_prefill_as_decode_mask(input_batch.is_prefilling_np, prefill_runs_as_decode)
         partition_input = input_batch
@@ -712,13 +725,18 @@ class AscendPCPManager(PCPManager):
 
         Aux hidden states feed only the speculator. Sharded drafts (Eagle3)
         consume them in the target's rank-local layout, next to the local
-        last hidden states. A DSpark owner graph gathers projected WKV from
-        these rows; replicated drafts consume globally restored aux states.
+        last hidden states; replicated drafts (DSpark) consume them globally.
         """
         assert self._global_batch is not None
         unpadded = self._restore_unpadded_global_batch()
-        if self.draft_wkv_batch_desc is not None:
-            self._pending_draft_wkv_aux = aux_hidden_states
+        if (
+            self._draft_aux_stream is not None
+            and aux_hidden_states is not None
+            and unpadded
+            and self._global_batch.num_reqs >= self.pcp_world_size
+            and not self._global_batch.is_prefilling_np[: self._global_batch.num_reqs].any()
+        ):
+            self._pending_draft_aux = aux_hidden_states
             aux_hidden_states = None
         if self._is_draft_prefill_sharded:
             # Keep local aux states for the sharded draft; only sampling needs

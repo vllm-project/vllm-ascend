@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -248,26 +247,11 @@ def test_owner_drafts_merge_in_scheduler_order_after_owner_changes(monkeypatch):
             assert manager._staged_owner_drafts is None
 
 
-@pytest.mark.parametrize(
-    ("has_prefill", "num_spec_tokens", "cg_mode", "overlap"),
-    [
-        (False, 2, CUDAGraphMode.FULL, True),
-        (True, 2, CUDAGraphMode.FULL, False),
-        (False, 0, CUDAGraphMode.FULL, False),
-        (False, 2, CUDAGraphMode.NONE, False),
-    ],
-)
-def test_wkv_gather_is_joined_after_target_sampling(monkeypatch, has_prefill, num_spec_tokens, cg_mode, overlap):
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_aux_gather_is_joined_after_target_sampling(monkeypatch, has_prefill):
     manager = object.__new__(pcp_module.AscendPCPManager)
-    spec = object.__new__(module.AscendDSparkSpeculator)
-    spec._owner_pcp_size = 2
-    spec.num_query_per_req = 3
-    spec.num_speculative_steps = 2
-    spec.max_num_tokens = 16
-    desc = SimpleNamespace(cg_mode=cg_mode)
-    spec._owner_graph_manager = SimpleNamespace(dispatch=lambda *_: desc)
     manager.pcp_world_size = 2
-    batch = SimpleNamespace(num_reqs=2, num_tokens=3, is_dummy=False, is_prefilling_np=np.array([False, has_prefill]))
+    batch = SimpleNamespace(num_reqs=2, num_tokens=3, is_prefilling_np=np.array([False, has_prefill]))
     manager._global_batch = batch
     manager._hidden_restore_idx = torch.tensor([0, 2, 1, 3])
     manager._restore_unpadded_global_batch = lambda: True
@@ -275,8 +259,8 @@ def test_wkv_gather_is_joined_after_target_sampling(monkeypatch, has_prefill, nu
     logits_stream = object()
     device_group = object()
     calls = []
-    wkv_stream = SimpleNamespace(wait_stream=lambda producer: calls.append(("producer", producer)))
-    manager._draft_wkv_stream = wkv_stream
+    aux_stream = SimpleNamespace(wait_stream=lambda producer: calls.append(("producer", producer)))
+    manager._draft_aux_stream = aux_stream
     monkeypatch.setattr(torch.npu, "current_stream", lambda: logits_stream)
     monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, stream: None)
@@ -296,32 +280,25 @@ def test_wkv_gather_is_joined_after_target_sampling(monkeypatch, has_prefill, nu
 
         return SimpleNamespace(wait=wait)
 
-    def project(context_states):
-        calls.append("project")
-        return context_states.unsqueeze(1)
-
-    spec.model = SimpleNamespace(combine_hidden_states=lambda states: states, project_context_wkv=project)
     monkeypatch.setattr(pcp_module.PCPManager, "restore_for_sampling", restore)
     monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", gather)
     aux = [torch.tensor([[1], [2]]), torch.tensor([[3], [4]])]
-    manager.draft_wkv_batch_desc = spec.dispatch_owner_graph(batch, num_spec_tokens)
-    assert manager.draft_wkv_batch_desc is (desc if overlap else None)
     _, eager_aux, global_batch = manager.restore_for_sampling(torch.zeros(3, 1), aux)
     assert global_batch is batch
-    assert calls == [("restore", not overlap)]
+    assert calls == [("restore", has_prefill)]
 
     # The target's logits hook runs before sampling, while the draft joins later.
-    manager.start_draft_wkv_gather(spec.project_owner_wkv)
+    manager.start_draft_aux_restore()
     calls.append("sample")
-    if overlap:
-        assert eager_aux is None
-        expected_calls = [("restore", False), ("producer", logits_stream), "project", "gather", "sample"]
-        assert calls == expected_calls
-        staging = torch.full((4, 1, 2), -1)
-        manager.finish_draft_wkv_gather(staging[: batch.num_tokens])
-        assert calls == [*expected_calls, "wait"]
-        torch.testing.assert_close(staging, torch.tensor([[[1, 3]], [[11, 13]], [[2, 4]], [[-1, -1]]]))
-        assert manager.draft_wkv_batch_desc is None
-    else:
+    if has_prefill:
         torch.testing.assert_close(eager_aux, aux)
         assert calls == [("restore", True), "sample"]
+        assert manager.finish_draft_aux_restore() is None
+    else:
+        assert eager_aux is None
+        expected_calls = [("restore", False), ("producer", logits_stream), "gather", "gather", "sample"]
+        assert calls == expected_calls
+        restored = manager.finish_draft_aux_restore()
+        assert calls == [*expected_calls, "wait", "wait"]
+        torch.testing.assert_close(restored, [torch.tensor([[1], [11], [2]]), torch.tensor([[3], [13], [4]])])
+        assert manager.finish_draft_aux_restore() is None

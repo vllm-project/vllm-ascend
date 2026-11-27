@@ -393,8 +393,7 @@ def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
     assert load_calls[1][1].data_ptr() == loaded_weight.data_ptr()
 
 
-@pytest.mark.parametrize("project_before_store", [False, True])
-def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, project_before_store):
+def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     projection_calls = []
     rope_calls = []
     rope = object()
@@ -416,12 +415,12 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, project_before_
 
     projected = []
     stored = []
-    model = DeepseekV41DSparkModel.__new__(DeepseekV41DSparkModel)
-    torch.nn.Module.__init__(model)
-    model.context_wkv_proj = StackedProjection()
-    model.num_dspark_layers = 3
-    model.config = SimpleNamespace(head_dim=4)
-    model.layers = layers
+    model = SimpleNamespace(
+        context_wkv_proj=StackedProjection(),
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+    )
 
     def project_shared_kv(kv, positions, attn, rope=None):
         projected.append((kv.clone(), positions, attn, rope))
@@ -434,14 +433,14 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, project_before_
     model._store_standard_swa_kv = store_standard_swa_kv
     context_states = torch.zeros(2, 5)
     positions = torch.tensor([7, 8])
-    slot_mappings = [torch.tensor([0, -1]), None, torch.tensor([4, -1])]
+    slot_mappings = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
 
-    if project_before_store:
-        wkv = model.project_context_wkv(context_states)
-        assert not rope_calls and not stored
-        model.store_context_wkv(wkv, positions, slot_mappings)
-    else:
-        model.precompute_and_store_context_kv(context_states, positions, slot_mappings)
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(
+        model,
+        context_states,
+        positions,
+        slot_mappings,
+    )
 
     assert len(projection_calls) == 1
     assert projection_calls[0] is context_states
