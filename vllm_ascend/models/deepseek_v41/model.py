@@ -1266,7 +1266,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         shared_config = get_ascend_config().shared_engram
-        remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
+        remote_engram = (
+            shared_config if shared_config is not None and shared_config.backend in ("a2", "a5", "a5-cann") else None
+        )
         remote_reader = None
         if remote_engram is not None and self.has_engram:
             if self.engram_layout is None or not cpu_offload or not self.engram_dp_shared_memory:
@@ -1276,7 +1278,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 "safetensors",
             ) or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy"):
                 raise ValueError("shared_engram requires lazy safetensors loading")
-            from .engram.shared_rdma import RemoteReader, capacity_for_batch
+            from .engram.shared_rdma import capacity_for_batch
 
             max_tokens = max(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1287,14 +1289,29 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 remote_engram.capacity, max_tokens, layer_head_counts, get_tensor_model_parallel_world_size()
             )
 
-            remote_reader = RemoteReader(
-                self.engram_weight_root,
-                remote_engram.endpoint,
-                capacity=capacity,
-                library_path=remote_engram.library_path,
-                listen_port=remote_engram.listen_port,
-                local_comm_res=remote_engram.local_comm_res,
-            )
+            if remote_engram.backend == "a5-cann":
+                if get_tensor_model_parallel_world_size() != 1:
+                    raise ValueError("a5-cann requires tensor parallel size 1 for a complete table")
+                from .engram.shared_cann import CANNReader
+
+                remote_reader = CANNReader(
+                    self.engram_weight_root,
+                    remote_engram.endpoint,
+                    capacity=capacity,
+                    readers=remote_engram.readers,
+                    rank_base=remote_engram.rank_base,
+                )
+            else:
+                from .engram.shared_rdma import RemoteReader
+
+                remote_reader = RemoteReader(
+                    self.engram_weight_root,
+                    remote_engram.endpoint,
+                    capacity=capacity,
+                    library_path=remote_engram.library_path,
+                    listen_port=remote_engram.listen_port,
+                    local_comm_res=remote_engram.local_comm_res,
+                )
         self._engram_remote_reader = remote_reader
         shared_pool_endpoint = (
             shared_config.endpoint if shared_config is not None and shared_config.backend == "a3" else None
@@ -1593,7 +1610,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     for table in tables
                 ):
                     raise ValueError("Shared remote Engram layers require one uniform reader/head layout")
-                cpu_hashes = reader.copy_hashes(gathered, *layout)
+                cpu_hashes = None if getattr(reader, "device_only", False) else reader.copy_hashes(gathered, *layout)
                 direct = output_buffers is not None and tables[0].dp_size == 1 and tables[0].tp_size == 1
                 if not direct:
                     batch_values = reader.lookup_layers(tables, gathered, cpu_hashes)

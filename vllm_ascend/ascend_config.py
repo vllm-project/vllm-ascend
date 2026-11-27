@@ -443,12 +443,14 @@ class SharedEngramConfig:
     """Shared Engram owner and per-rank receive capacity."""
 
     model_config = ConfigDict(extra="forbid")
-    backend: Literal["a2", "a3", "a5"]
+    backend: Literal["a2", "a3", "a5", "a5-cann"]
     endpoint: str
     capacity: int = 65536
     library_path: str | None = None
     listen_port: int | None = None
     local_comm_res: str | None = None
+    readers: int | None = None
+    rank_base: int = 1
 
     @model_validator(mode="before")
     @classmethod
@@ -459,6 +461,11 @@ class SharedEngramConfig:
             defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
             if any(name in options and options[name] != default for name, default in defaults.items()):
                 raise ValueError("A3 does not accept A2/A5 shared Engram options")
+        if isinstance(options, dict) and options.get("backend") == "a5-cann":
+            # The CANN reader creates its own side group; HIXL options do not apply.
+            defaults = {"library_path": None, "listen_port": None, "local_comm_res": None}
+            if any(name in options and options[name] != default for name, default in defaults.items()):
+                raise ValueError("a5-cann does not accept HIXL shared Engram options")
         return data
 
     @model_validator(mode="after")
@@ -472,6 +479,13 @@ class SharedEngramConfig:
             raise ValueError("shared Engram listen_port must be in [1, 65535]")
         if self.listen_port is not None and self.local_comm_res:
             raise ValueError("listen_port and local_comm_res are mutually exclusive")
+        if self.backend == "a5-cann":
+            if self.readers is not None and not 1 <= self.readers <= 8:
+                raise ValueError("a5-cann readers must be in [1, 8]")
+            if not 1 <= self.rank_base <= 8:
+                raise ValueError("a5-cann rank_base must be in [1, 8]")
+        elif self.readers is not None or self.rank_base != 1:
+            raise ValueError("readers and rank_base are only valid for a5-cann")
         return self
 
 
@@ -792,7 +806,7 @@ class AscendConfig:
 
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
-        if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
+        if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5", "a5-cann"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
             os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")

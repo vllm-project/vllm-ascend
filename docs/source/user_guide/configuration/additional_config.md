@@ -75,6 +75,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+| `shared_engram`                     | dict | `None`  | External owner-backed Engram tables. `backend` selects `a2`/`a3`/`a5` (HIXL) or `a5-cann` (A5 CANN side group). See [Shared host Engram over HIXL](../feature_guide/shared_engram_rdma.md) and [Shared host Engram over the A5 CANN side group](../feature_guide/shared_engram_cann.md). |
 
 The details of each configuration option are as follows:
 
