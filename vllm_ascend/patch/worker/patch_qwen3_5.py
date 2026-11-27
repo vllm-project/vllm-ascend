@@ -127,7 +127,9 @@ def enable_dense_sp(vllm_config=None) -> bool:
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
-    return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
+    return "qwen3_5" in (getattr(attention.config, "model_type", None) or "") and hasattr(
+        attention.rotary_emb, "mrope_section"
+    )
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):

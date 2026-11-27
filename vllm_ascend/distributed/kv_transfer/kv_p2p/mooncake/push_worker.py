@@ -236,7 +236,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if self.kv_transfer_config.is_kv_producer:
             self._device = torch.npu.current_device()
             self._layer_indices = {name: i for i, name in enumerate(self.transfer_metadata.layer_names)}
-            model_type = self.vllm_config.model_config.hf_text_config.model_type
+            model_type = getattr(getattr(self.vllm_config.model_config, "hf_text_config", None), "model_type", None)
             num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
             self._layer_index_by_name: dict[str, tuple[str, int]] = {}
             for name in self._layer_indices:

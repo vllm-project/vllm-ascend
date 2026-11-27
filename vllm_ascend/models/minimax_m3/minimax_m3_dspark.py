@@ -254,7 +254,7 @@ def draft_hf_override(hf_config):
     # module-level callable remains picklable for workers.
     # HFConfigParser probes callables with an empty sentinel config before
     # loading the real checkpoint. Preserve its source config class selection.
-    if hf_config.model_type.startswith("dummy_"):
+    if (getattr(hf_config, "model_type", None) or "").startswith("dummy_"):
         return hf_config
     from transformers import MiniMaxM3VLTextConfig as MiniMaxM3TextConfig
 

@@ -1581,7 +1581,7 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    if model_config.hf_config.model_type == "deepseek_v4":
+    if getattr(model_config.hf_config, "model_type", None) == "deepseek_v4":
         # CacheConfig resolves an omitted --block-size on its own default above, so
         # block_size cannot be None here.
         if cache_config.block_size not in [32, 64, 128]:
