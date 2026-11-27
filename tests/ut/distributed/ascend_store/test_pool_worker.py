@@ -41,8 +41,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreLayerSendingThread,
+    LayerBatchBuilder,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBatchReqMeta,
     LayerBlockRange,
     LayerTransferTask,
     SharedBlockData,
@@ -449,14 +453,15 @@ class TestPCPPoolWorker(unittest.TestCase):
 
 
 class TestDFlashLayerwiseKV(unittest.TestCase):
-    def make_worker(self, kv_role="kv_both", reuse=False):
+    def make_worker(self, kv_role="kv_both", reuse=False, draft_method="dflash"):
         target_names = [f"model.layers.{layer}.attn" for layer in range(4)]
-        draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
+        draft_suffix = "self_attn.swa_cache" if draft_method == "dspark" else "attn"
+        draft_names = [f"draft.layers.{layer}.{draft_suffix}" for layer in range(4, 6)]
         spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
         plan = SimpleNamespace(
             kv_cache_groups=[KVCacheGroupSpec(target_names + draft_names, spec)],
             prefix_cache_retention_interval=None,
-            dflash_draft_layer_names=tuple(draft_names),
+            **{f"{draft_method}_draft_layer_names": tuple(draft_names)},
         )
         if reuse:
             layout = SimpleNamespace(
@@ -551,6 +556,106 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
         worker.current_layer = 1
         with self.assertRaisesRegex(RuntimeError, "Target KV hooks"):
             worker.load_dflash_draft_kv()
+
+    def test_dspark_saves_after_propose_with_or_without_query_hooks(self):
+        for num_speculative_tokens in (0, 7):
+            with self.subTest(num_speculative_tokens=num_speculative_tokens):
+                worker = self.make_worker(draft_method="dspark")
+                sender = MagicMock(spec=KVCacheStoreLayerSendingThread)
+                worker.kv_send_thread = sender
+                sender.build_shared_data.return_value = SharedBlockData(
+                    block_ids_arr=np.asarray([0, 1]),
+                    block_gvas_arr=np.asarray([100, 200]),
+                    req_ids=["r1"],
+                    is_last_chunks=[True],
+                    save_keys=["key0", "key1"],
+                )
+                metadata = AscendConnectorMetadata(set())
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = connector.can_put = True
+                connector.connector_worker = worker
+                connector._loaded_layer = None
+                connector._mamba_state = None
+                connector.has_connector_metadata = lambda: True
+                connector._get_connector_metadata = MagicMock(return_value=metadata)
+                worker.layer_save_tasks = [[LayerTransferTask(layer_id=layer, block_ranges=[])] for layer in range(6)]
+                worker._build_shared_save_data()
+                for layer in range(4):
+                    connector.save_kv_layer(f"model.layers.{layer}.attn", None, None)
+                connector.finish_forward()
+                with patch.object(worker, "_wait_for_final_layer_save"):
+                    if num_speculative_tokens:
+                        # DSpark attention and its SWA cache use different names.
+                        with patch.object(worker, "wait_for_layer_load") as load:
+                            for layer in range(4, 6):
+                                name = f"draft.layers.{layer}.self_attn.attn"
+                                connector.wait_for_layer_load(name)
+                                connector.save_kv_layer(name, None, None)
+                            load.assert_not_called()
+                    self.assertEqual(worker.kv_send_thread.add_request.call_count, 4)
+                    connector.wait_for_save()
+                    connector.wait_for_save()
+                submitted = [call.args[0][0] for call in worker.kv_send_thread.add_request.call_args_list]
+                self.assertEqual([task.layer_id for task in submitted], list(range(6)))
+                self.assertEqual(submitted[-1].write_finish_keys, ["key0", "key1"])
+                self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1] * 6)
+                # Exercise the actual sender publication path, mocking device I/O.
+                order = []
+                sender.save_disabled = threading.Event()
+                sender.sync_save_events = worker.sync_save_events
+                sender.write_results = {}
+                sender.max_transfer_blocks = sender.max_transfer_bytes = 0
+                builder = MagicMock()
+                builder.build_addrs.return_value = LayerBatchReqMeta(
+                    req_ids=["r1"],
+                    layer_id=0,
+                    addr_array=np.asarray([10, 20]),
+                    size_array=np.asarray([16, 16]),
+                    gvas_array=np.asarray([100, 200]),
+                )
+                sender.group_builders = [builder]
+                sender._batch_copy_with_limits = MagicMock(
+                    side_effect=lambda *args, order=order: order.append("copy") or 0
+                )
+                sender.m_store = MagicMock()
+                sender.m_store.batch_write_finish.side_effect = lambda *args, order=order: (
+                    order.append("finish") or [0, 0]
+                )
+                for task in submitted:
+                    self.assertTrue(KVCacheStoreLayerSendingThread._copy_gva_layers(sender, [task]))
+                self.assertEqual(order, ["copy"] * 6 + ["finish"])
+                sender.m_store.batch_write_finish.assert_called_once_with(["key0", "key1"], [0, 0])
+                self.doCleanups()
+
+    def test_dspark_companion_cache_keeps_draft_ownership(self):
+        worker = self.make_worker(draft_method="dspark")
+        worker.configure_dspark_prefix_cache(MagicMock())
+        self.assertIsNone(worker._dflash_draft_start_layer)
+        self.assertFalse(worker.dflash_draft_layer_names)
+        self.assertFalse(worker.dflash_draft_layer_indices)
+        self.assertEqual(worker.num_layers, 4)
+
+    def test_dspark_no_forward_and_load_only_do_not_save(self):
+        worker = self.make_worker(kv_role="kv_consumer", draft_method="dspark")
+        with patch.object(worker, "wait_for_layer_load") as load:
+            worker.load_dflash_draft_kv()
+            load.assert_not_called()
+        self.assertFalse(worker._dflash_save_pending)
+        worker.current_layer = worker.next_layer_to_submit = 4
+        restored = []
+        worker.external_slot_release_waiter = restored.append
+        worker.load_dflash_draft_kv()
+        worker.save_dflash_draft_kv(AscendConnectorMetadata(set()))
+        self.assertEqual(restored, [4, 5])
+        worker.kv_send_thread.add_request.assert_not_called()
+        self.assertTrue(all(event.record.call_count == 0 for event in worker.sync_save_events))
+
+    def test_dspark_reuse_keeps_draft_outside_ordinary_pool(self):
+        worker = self.make_worker(draft_method="dspark", reuse=True)
+        self.assertIsNone(worker._dflash_draft_start_layer)
+        self.assertFalse(worker.dflash_draft_layer_names)
+        self.assertFalse(worker.dflash_draft_layer_indices)
+        self.assertEqual(worker.num_layers, 4)
 
 
 class TestLayerwiseAttentionSave(unittest.TestCase):
