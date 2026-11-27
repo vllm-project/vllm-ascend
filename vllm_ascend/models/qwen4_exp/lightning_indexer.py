@@ -92,14 +92,18 @@ def qsa_select_paged_tokens_lightning_v2(
     lengths = attn_metadata.seq_lens[:requests]
     compressed_lengths = getattr(attn_metadata, "qsa_compressed_lengths", None)
     residual_lengths = getattr(attn_metadata, "qsa_residual_lengths", None)
-    if compressed_lengths is None or residual_lengths is None:
+    cu_seqlens_q = getattr(attn_metadata, "qsa_cu_seqlens_q", None)
+    prepared_rows = int(getattr(attn_metadata, "qsa_num_live_tokens", attn_metadata.num_actual_tokens))
+    if compressed_lengths is None or residual_lengths is None or cu_seqlens_q is None or rows != prepared_rows:
         compressed_lengths = lengths.floor_divide(compress_ratio)
         residual_lengths = lengths.remainder(compress_ratio)
+        cu_seqlens_q = attn_metadata.query_start_loc[: requests + 1].clamp_max(rows)
     else:
         compressed_lengths = compressed_lengths[:requests]
         residual_lengths = residual_lengths[:requests]
+        cu_seqlens_q = cu_seqlens_q[: requests + 1]
     common = dict(
-        cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
+        cu_seqlens_q=cu_seqlens_q,
         seqused_k=compressed_lengths,
         cmp_residual_k=residual_lengths,
         layout_q="TND",
@@ -111,7 +115,6 @@ def qsa_select_paged_tokens_lightning_v2(
     # MRV2 prepares one schedule outside the layer loop. A caller that trims
     # the query further must regenerate it for the new boundary instead.
     metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
-    prepared_rows = int(getattr(attn_metadata, "qsa_num_live_tokens", attn_metadata.num_actual_tokens))
     if metadata is None or rows != prepared_rows:
         metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
             query.shape[1],

@@ -758,6 +758,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             buffers = {
                 "compressed_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
                 "residual_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "cu_seqlens_q": torch.empty(max_requests + 1, dtype=torch.int32, device=device),
                 "score_weights": torch.full(
                     (max_tokens, index_heads),
                     score_weight,
@@ -771,14 +772,18 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         requests = compressed_metadata.seq_lens.shape[0]
         prepare_qsa_lengths(
             compressed_metadata.seq_lens,
+            compressed_metadata.query_start_loc,
             buffers["compressed_lengths"],
             buffers["residual_lengths"],
+            buffers["cu_seqlens_q"],
             requests,
+            rows,
             int(layer.indexer.compress_ratio),
         )
         compressed_metadata.qsa_num_live_tokens = rows
         compressed_metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
         compressed_metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        compressed_metadata.qsa_cu_seqlens_q = buffers["cu_seqlens_q"]
         compressed_metadata.qsa_score_weights = buffers["score_weights"]
 
         request_plan = getattr(main_metadata, "qsa_request_plan", None)

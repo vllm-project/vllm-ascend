@@ -8,17 +8,24 @@ from vllm.triton_utils import tl, triton
 @triton.jit
 def _prepare_qsa_lengths_kernel(
     lengths,
+    query_start_loc,
     compressed_lengths,
     residual_lengths,
+    cu_seqlens_q,
     requests,
+    rows,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < requests
-    values = tl.load(lengths + offsets, mask=mask, other=0).to(tl.int32)
-    tl.store(compressed_lengths + offsets, values // COMPRESS_RATIO, mask=mask)
-    tl.store(residual_lengths + offsets, values % COMPRESS_RATIO, mask=mask)
+    length_mask = offsets < requests
+    values = tl.load(lengths + offsets, mask=length_mask, other=0).to(tl.int32)
+    tl.store(compressed_lengths + offsets, values // COMPRESS_RATIO, mask=length_mask)
+    tl.store(residual_lengths + offsets, values % COMPRESS_RATIO, mask=length_mask)
+
+    boundary_mask = offsets <= requests
+    boundaries = tl.load(query_start_loc + offsets, mask=boundary_mask, other=0).to(tl.int32)
+    tl.store(cu_seqlens_q + offsets, tl.minimum(boundaries, rows), mask=boundary_mask)
 
 
 @triton.jit
@@ -71,24 +78,30 @@ def prepare_qsa_visible_lengths(
 
 def prepare_qsa_lengths(
     lengths: torch.Tensor,
+    query_start_loc: torch.Tensor,
     compressed_lengths: torch.Tensor,
     residual_lengths: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
     requests: int,
+    rows: int,
     compress_ratio: int = 4,
 ) -> None:
-    """Prepare LightningIndexer quotient and remainder arrays in one launch."""
+    """Prepare all request-sized LightningIndexer inputs in one launch."""
     if requests < 0 or requests > lengths.shape[0]:
         raise ValueError("QSA prepared request count exceeds length capacity")
     if compressed_lengths.shape[0] < requests or residual_lengths.shape[0] < requests:
         raise ValueError("QSA prepared length buffers are too small")
-    if requests == 0:
-        return
+    if query_start_loc.shape[0] < requests + 1 or cu_seqlens_q.shape[0] < requests + 1:
+        raise ValueError("QSA prepared query-boundary buffers are too small")
     block = 128
-    _prepare_qsa_lengths_kernel[(triton.cdiv(requests, block),)](
+    _prepare_qsa_lengths_kernel[(triton.cdiv(requests + 1, block),)](
         lengths,
+        query_start_loc,
         compressed_lengths,
         residual_lengths,
+        cu_seqlens_q,
         requests,
+        rows,
         COMPRESS_RATIO=compress_ratio,
         BLOCK=block,
         num_warps=1,
