@@ -52,6 +52,16 @@ class _Norm(nn.Module):
         del z
         return hidden_states
 
+    def forward_oot(
+        self,
+        hidden_states: torch.Tensor,
+        z: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        del z
+        output.copy_(hidden_states)
+        return output
+
 
 class _OutputProjection(nn.Module):
     def forward(self, hidden_states: torch.Tensor):
@@ -128,7 +138,7 @@ def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
         patch.object(
             torch.ops.vllm,
             "qwen_gdn_attention_core_norm_with_output",
-            side_effect=lambda qkv, _b, _a, out, _prefix, _packed: core(
+            side_effect=lambda qkv, _b, _a, _z, out, _prefix, _packed: core(
                 qkv, None, None, out, None, None
             ),
         ),
