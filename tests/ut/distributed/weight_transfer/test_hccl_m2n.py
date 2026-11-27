@@ -31,6 +31,7 @@ from vllm_ascend.distributed.weight_transfer.hccl_m2n_engine import (
     _TransferSession,
     _validate_hccl_transfer_plan,
 )
+from vllm_ascend.distributed.weight_transfer.hccl_m2n_packed import plan_batches, transfer_packed_parameters
 from vllm_ascend.distributed.weight_transfer.hccl_m2n_transport import plan_rank_transfers, transfer_parameter
 
 
@@ -326,13 +327,105 @@ def test_replicated_source_distributes_load_across_params():
             assert len(pieces) == (1 if rank == sender else 0)
 
 
-class _FakeStream:
-    def __init__(self, device=None):
-        self.device = device
+def test_plan_batches_packs_mixed_dtypes_within_budget():
+    src = M2NLayout(M2NMesh((1, 1), 0), None)
+    metas = [
+        M2NParamMeta("w0", torch.bfloat16, (4, 4), src),  # 32B
+        M2NParamMeta("norm0", torch.float32, (4,), src),  # 16B
+        M2NParamMeta("w1", torch.bfloat16, (4, 4), src),  # 32B
+        M2NParamMeta("big", torch.float32, (8, 8), src),  # 256B
+        M2NParamMeta("w2", torch.int8, (16,), src),  # 16B
+    ]
+    assert plan_batches(metas, max_bytes=96) == (range(0, 3), range(3, 4), range(4, 5))
+
+
+class _FakeEvent:
+    def __init__(self):
         self.synced = 0
 
     def synchronize(self):
         self.synced += 1
+
+
+class _FakeStream:
+    def __init__(self, device=None):
+        self.device = device
+        self.events: list[_FakeEvent] = []
+        self.synced = 0
+
+    def record_event(self):
+        event = _FakeEvent()
+        self.events.append(event)
+        return event
+
+    def wait_event(self, event):
+        pass
+
+    def synchronize(self):
+        self.synced += 1
+
+
+def test_packed_transfer_mixed_dtypes_and_noncontiguous_slices(monkeypatch):
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(Stream=_FakeStream, stream=lambda _: nullcontext()),
+        raising=False,
+    )
+    src = M2NLayout(M2NMesh((1, 2), 0), (-1, 0))
+    dst = M2NLayout(M2NMesh((1, 4), 2), (-1, 1))
+    tensors = [
+        torch.arange(32, dtype=torch.float32).reshape(4, 8),
+        torch.arange(32, dtype=torch.bfloat16).reshape(4, 8),
+        torch.arange(32, dtype=torch.int8).reshape(4, 8),
+    ]
+    metas = [M2NParamMeta(f"p{i}", t.dtype, tuple(t.shape), src) for i, t in enumerate(tensors)]
+    batches = plan_batches(metas, max_bytes=1024)
+    assert batches == (range(0, 3),)
+
+    queues: dict[tuple[int, int], Queue[torch.Tensor]] = {(s, d): Queue() for s in range(2) for d in range(2, 6)}
+    for rank in range(2):
+        pieces = [plan_rank_transfers(m.shape, src, dst, rank, param_index=i) for i, m in enumerate(metas)]
+        shards = [t.chunk(2, dim=0)[rank] for t in tensors]
+        comm_stream = _FakeStream()
+        list(
+            transfer_packed_parameters(
+                cast(Any, _MemoryP2P(rank, queues)),
+                cast(Any, _FakeStream()),
+                iter(shards),
+                pieces,
+                batches,
+                send=True,
+                comm_stream=cast(Any, comm_stream),
+            )
+        )
+        assert comm_stream.synced == 1
+
+    for rank in range(2, 6):
+        pieces = [plan_rank_transfers(m.shape, src, dst, rank, param_index=i) for i, m in enumerate(metas)]
+        expected = [t.chunk(4, dim=1)[rank - 2] for t in tensors]
+        received_bufs = [torch.zeros_like(e) for e in expected]
+        main_stream = _FakeStream()
+        comm_stream = _FakeStream()
+        out = list(
+            transfer_packed_parameters(
+                cast(Any, _MemoryP2P(rank, queues)),
+                cast(Any, main_stream),
+                iter(received_bufs),
+                pieces,
+                batches,
+                send=False,
+                comm_stream=cast(Any, comm_stream),
+                needs_host_sync=[False] * len(metas),
+            )
+        )
+        for got, exp in zip(out, expected):
+            torch.testing.assert_close(got, exp)
+        # Direct-write batches skip per-batch host event waits and drain once at the end.
+        assert all(ev.synced == 0 for ev in main_stream.events)
+        assert main_stream.synced == 1
+        assert comm_stream.synced == 1
+    assert all(q.empty() for q in queues.values())
 
 
 def test_per_module_nd_and_precast_fallback_preserves_other_direct_modules(monkeypatch):
