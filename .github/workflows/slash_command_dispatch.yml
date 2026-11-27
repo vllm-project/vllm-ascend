@@ -43,6 +43,8 @@ jobs:
             revert
             weekly
             wait-feedback
+            ignore-owner
+            ignore-owner-clear
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -102,5 +104,15 @@ jobs:
                 "command": "wait-feedback",
                 "permission": "none",
                 "issue_type": "issue"
+              },
+              {
+                "command": "ignore-owner",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "ignore-owner-clear",
+                "permission": "none",
+                "issue_type": "pull-request"
               }
             ]

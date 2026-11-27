@@ -79,6 +79,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
+        self.use_a3_mla_sink: bool = False
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -270,7 +271,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     if issubclass(group.backend, AscendMLABackend)
                 ]
                 self.use_flashmla = bool(mla_groups) and all(
-                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                    and not getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
+                    for group in mla_groups
+                )
+                self.use_a3_mla_sink = bool(mla_groups) and all(
+                    getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False) for group in mla_groups
                 )
             elif issubclass(backend, AscendAttentionBackend):
                 self.attn_architecture = "GQA"
@@ -293,7 +299,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu")
         needs_host_lengths = not self.use_flashmla if self.attn_architecture == "MLA" else self.use_dcp
-        if not needs_host_lengths:
+        if getattr(self, "use_a3_mla_sink", False) or not needs_host_lengths:
             return None, is_prefilling
 
         # FULL replay rebuilds metadata for the same prepared draft batch.
@@ -339,7 +345,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             )
-            attn_metadata = self._build_uniform_attn_metadata(
+            attn_metadata = super()._build_uniform_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
@@ -349,6 +355,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             )
 
         return [attn_metadata]
+
+    def _build_uniform_attn_metadata(self, batch_desc: BatchExecutionDescriptor, *args, **kwargs):
+        # propose() discards this result for FULL replay. The graph manager
+        # refreshes A3 schedules through build_draft_attn_metadatas instead.
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and getattr(self, "use_a3_mla_sink", False):
+            return None
+        return super()._build_uniform_attn_metadata(batch_desc, *args, **kwargs)
 
     def _build_attn_metadata(
         self,

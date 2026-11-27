@@ -531,9 +531,6 @@ class DecoderReplayState:
                 context = get_forward_context()
                 # The replay tail continues the outer forward's MoE dispatch order.
                 context.moe_layer_index = outer.moe_layer_index
-                context.additional_kwargs["eplb_heat_collection_status"] = outer.additional_kwargs.get(
-                    "eplb_heat_collection_status", False
-                )
                 replay_mask = context.additional_kwargs.get("mc2_mask")
                 if replay_mask is not None:
                     replay_mask[self.num_actual_tokens :].fill_(False)

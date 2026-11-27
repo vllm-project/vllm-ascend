@@ -348,18 +348,18 @@ def test_mc2_stays_isolated_from_ep_even_when_pg_options_match(module_env):
     assert first.device_group is not second.device_group
 
 
-def test_dynamic_eplb_stays_separate_from_ep_when_pg_options_differ(module_env):
+def test_groups_stay_separate_from_ep_when_pg_options_differ(module_env):
     default_hccl_pg_options = module_env.utils_module.create_hccl_pg_options.return_value
 
     def fake_create_hccl_pg_options(group_name: str):
-        if group_name == "dynamic_eplb":
+        if group_name == "custom_group":
             return {"hccl_config": {"hccl_buffer_size": 512}}
         return default_hccl_pg_options
 
     module_env.utils_module.create_hccl_pg_options.side_effect = fake_create_hccl_pg_options
 
     first = _make_group(module_env, group_name="ep")
-    second = _make_group(module_env, group_name="dynamic_eplb")
+    second = _make_group(module_env, group_name="custom_group")
 
     hccl_calls = _calls_with_backend(module_env, "hccl")
 
@@ -628,5 +628,29 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
         call(device_group),
         call(cpu_group),
     ]
+    assert not hasattr(group, "cpu_group")
+    assert not hasattr(group, "device_group")
+
+
+def test_destroy_without_backend_attribute_releases_groups_in_order(module_env):
+    """Regression for #21966.
+
+    Upstream builds a coordinator with ``GroupCoordinator.__new__`` so
+    ``backend`` is never assigned. ``destroy()`` must not raise
+    ``AttributeError`` and must still release the communicator before the
+    process groups it depends on.
+    """
+    group = module_env.module.GroupCoordinatorPatch.__new__(module_env.module.GroupCoordinatorPatch)
+    events: list[str] = []
+
+    group.device_communicator = SimpleNamespace(destroy=lambda: events.append("communicator"))
+    group.device_group = object()
+    group.cpu_group = object()
+    group.mq_broadcaster = None
+    module_env.destroy_process_group.side_effect = lambda _group: events.append("process_group")
+
+    group.destroy()
+
+    assert events == ["communicator", "process_group", "process_group"]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
