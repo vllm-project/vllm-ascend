@@ -489,7 +489,14 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         & (end_position >= COMPRESS_RATIO - 1)
         & (compressed_slot >= 0)
     )
+    half_rope: tl.constexpr = rotary_dim // 2
+    partner_dims = tl.where(
+        dims < half_rope,
+        dims + half_rope,
+        tl.where(dims < rotary_dim, dims - half_rope, dims),
+    )
     accumulator = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+    partner_accumulator = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
     for group_offset in tl.range(0, COMPRESS_RATIO):
         position = end_position - (COMPRESS_RATIO - 1 - group_offset)
@@ -513,6 +520,35 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
             other=0.0,
         ).to(tl.float32)
         accumulator += tl.where(use_raw[:, None], raw_values, compressor_state_values)
+        partner_raw_values = tl.load(
+            raw_keys_ptr
+            + raw_row[:, None] * stride_raw_row
+            + partner_dims[None, :] * stride_raw_dim,
+            mask=(
+                valid_row
+                & use_raw
+                & (raw_row >= query_row_start)
+                & (raw_row < query_row_end)
+                & (raw_row < num_rows)
+            )[:, None]
+            & (partner_dims < HEAD_DIM)[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        partner_state_values = tl.load(
+            compressor_state_cache_ptr
+            + tl.maximum(compressor_state_block, 0).to(tl.int64)[:, None]
+            * stride_compressor_state_block
+            + (safe_position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
+            + partner_dims[None, :] * stride_compressor_state_dim,
+            mask=(valid_row & ~use_raw & valid_compressor_state_block)[:, None]
+            & (partner_dims < HEAD_DIM)[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        partner_accumulator += tl.where(
+            use_raw[:, None],
+            partner_raw_values,
+            partner_state_values,
+        )
 
     first_position = end_position - COMPRESS_RATIO + 1
     safe_first_position = tl.maximum(first_position, 0)
@@ -533,7 +569,22 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
     )
     variance = tl.sum(pooled * pooled, axis=1) / HEAD_DIM
     normalized = (pooled * tl.rsqrt(variance[:, None] + norm_eps) * weight[None, :]).to(tl.bfloat16)
-    half_rope: tl.constexpr = rotary_dim // 2
+    partner_pooled = (partner_accumulator / COMPRESS_RATIO).to(tl.bfloat16).to(
+        tl.float32
+    )
+    partner_weight = (
+        tl.load(
+            norm_weight_ptr + partner_dims,
+            mask=partner_dims < HEAD_DIM,
+            other=0,
+        ).to(tl.float32)
+        + 1.0
+    )
+    partner = (
+        partner_pooled
+        * tl.rsqrt(variance[:, None] + norm_eps)
+        * partner_weight[None, :]
+    ).to(tl.bfloat16)
     offsets = dims % half_rope
     axis = tl.where(
         (offsets % 3 == 1) & (offsets < 3 * mrope_section_h),
@@ -605,13 +656,6 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         mask=valid_row[:, None] & (dims < rotary_dim)[None, :],
         other=0,
     ).to(tl.float32)
-    partner_dims = tl.where(
-        dims < half_rope,
-        dims + half_rope,
-        tl.where(dims < rotary_dim, dims - half_rope, dims),
-    )
-    partner_indices = partner_dims[None, :] + tl.zeros((BLOCK_M, 1), dtype=tl.int32)
-    partner = tl.gather(normalized, partner_indices, axis=1)
     product_cos = (normalized * cos).to(tl.bfloat16)
     product_sin = (partner * sin).to(tl.bfloat16)
     rotated = (
