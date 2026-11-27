@@ -885,29 +885,28 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     **Shared requirements**
 
     RecoverSSM is experimental. Validate accuracy and performance on your
-    workload before deployment. Enable speculative decoding, disable stochastic
-    rounding, and use Mamba cache mode `align` with prefix caching or `none`
-    without it.
+    workload before deployment. Enable speculative decoding and disable
+    stochastic rounding. With prefix caching, use Mamba cache mode `align`
+    and a block size of at least `K + 1`. Without prefix caching, use `none`.
 
-    For direct prefill/decode (P/D) transfer, use `MooncakeConnectorV2` or
-    `MooncakePullConnector`. Enable RecoverSSM on both roles and match the model
-    weights, speculative method and window, draft checkpoint if used,
-    prefix-caching settings, state dtypes, and convolution layout. Use the
-    default `SD` layout on both roles for Kimi or for GLM deployments with
-    different KDA head-shard counts.
+    Set `PP=DCP=1` and `PCP=1` for GLM and Qwen. GLM prefill KV producers
+    can use `PCP>1`. The GLM KDA head count must be divisible by `TP × PCP`,
+    and both Qwen key- and value-head counts must be divisible by `TP`.
+
+    For direct prefill/decode (P/D) transfer, use `MooncakePullConnector` or
+    the default pull mode of `MooncakeConnectorV2`. Enable RecoverSSM on both
+    roles and match the model weights, speculative method and window, draft
+    checkpoint if used, prefix-caching settings, state dtypes, and convolution
+    layout. Match TP sizes for Kimi and Qwen. Use the default `SD` layout for
+    Kimi and for GLM when KDA head-shard counts differ across roles.
 
     **Model-specific limits**
 
-    - **GLM-5.3-Flash (KDA)** requires `PP=1` and `DCP=1`.
-      `PCP>1` is supported only on prefill KV producers, where the KDA head
-      count must be divisible by `TP × PCP`. For external prefix caching,
-      use AscendStore with Memcache or Mooncake. Use `MultiConnector` to
-      combine it with direct P/D transfer.
+    - For external prefix caching on **GLM-5.3-Flash (KDA)**, use AscendStore
+      with Memcache or Mooncake. Use `MultiConnector` to combine it with
+      direct P/D transfer.
     - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
-      disabled. For P/D, match the integration version and TP size across roles.
-    - **Qwen3.x (GDN)** requires a Qwen3.5-compatible GDN architecture for
-      Qwen3.8 checkpoints. Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`.
-      The TP size must divide both the key- and value-head counts. The value-head
-      count must be divisible by the key-head count. In `align` mode, use a Mamba
-      block size of at least `K + 1`. For P/D, match the TP size and use Mooncake
-      pull mode (`use_layerwise=false`).
+      disabled. For P/D, match the integration version across roles.
+    - **Qwen3.x (GDN)** supports MTP, DSpark, and DFlash. Qwen3.8 checkpoints
+      require a Qwen3.5-compatible GDN architecture. The value-head count
+      must be divisible by the key-head count.
