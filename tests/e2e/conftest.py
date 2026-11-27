@@ -22,6 +22,7 @@ import copy
 import functools
 import gc
 import hashlib
+import importlib
 import json
 import logging
 import multiprocessing
@@ -78,47 +79,118 @@ adapt_patch(False)
 # in-process registration matches the engine across device families: the
 # hook installs the 310P sampler dispatch instead of the NPU Triton table
 # on 310P. Engine-based e2e still registers in its subprocess via the hook.
-from vllm_ascend.platform import NPUPlatform  # noqa E402
-
-NPUPlatform.register_triton_kernel_overrides()
-
-# Routing tripwire for the four raw-swap entries (values that are
-# themselves @triton.jit kernels): after registration the defining
-# module's attribute must be our own kernel -- the raw swap installs it
-# directly, never wrapped (production resolves these kernels through
-# exactly those module attributes, see worker/v2/model_states/
-# mamba_hybrid.py for the precopy consumer). If an assert fires, a
-# table value stopped being a Triton kernel and the dispatcher
-# silently wrapped it in KernelOverride instead. Two skips: the 310P
-# family never installs the table (it gets the sampler dispatch
-# instead), and a Triton-less environment mirrors the platform hook's
-# HAS_TRITON guard and skips registration entirely.
 from vllm.triton_utils import HAS_TRITON  # noqa E402
 from vllm_ascend.device.hardware_profile import (  # noqa E402
     DeviceAdaptorFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.platform import NPUPlatform  # noqa E402
 
+
+def _resolve_override_site(key: str) -> tuple[Any, str]:
+    """Return the (host, attribute) one table key targets.
+
+    Mirrors the dispatcher's key resolution: the last dotted segment is
+    the attribute name, and an uppercase module part names a class
+    mount (module path plus class).
+    """
+    module_part, attr = key.rsplit(".", 1)
+    parts = module_part.split(".")
+    if parts[-1][:1].isupper():
+        return getattr(importlib.import_module(".".join(parts[:-1])), parts[-1]), attr
+    return importlib.import_module(module_part), attr
+
+
+def _snapshot_override_originals() -> set[int] | None:
+    """Identity snapshot of the table's originals, taken before registration.
+
+    Returns None when the table is not going to be installed (310P family
+    or Triton-less), mirroring the platform hook's registration gates.
+    Only ids are kept, so the snapshot itself holds no originals alive.
+    """
+    if not HAS_TRITON or (get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.COMPATIBILITY):
+        return None
+    # Imported here (not at module level) for the same reason as in the
+    # tripwire below: gated environments never pull the FLA/KDA chain.
+    from vllm_ascend.triton_kernel_overrides import TRITON_KERNEL_OVERRIDES
+
+    original_ids: set[int] = set()
+    for key in TRITON_KERNEL_OVERRIDES:
+        host, attr = _resolve_override_site(key)
+        original_ids.add(id(getattr(host, attr)))
+    return original_ids
+
+
+def _assert_kernel_overrides_installed() -> None:
+    """Every table entry must be installed at its defining site."""
+    # Imported here (not at module level) so 310P and Triton-less
+    # environments never pull the override table and its FLA/KDA import
+    # chain; the platform hook gates registration the same way.
+    from vllm.triton_utils.dispatcher import KernelOverride
+
+    from vllm_ascend.triton_kernel_overrides import TRITON_KERNEL_OVERRIDES
+
+    for key, impl in TRITON_KERNEL_OVERRIDES.items():
+        host, attr = _resolve_override_site(key)
+        installed = getattr(host, attr)
+        if hasattr(impl, "arg_names"):
+            # Raw swap: the dispatcher installs the kernel directly, never
+            # wrapped, so the site must hold our kernel object.
+            assert installed is impl, f"{key}: raw-swap value not installed directly: {installed!r}"
+        else:
+            # Plain callable: the dispatcher wraps it in a KernelOverride.
+            assert isinstance(installed, KernelOverride) and installed.func is impl, (
+                f"{key}: no KernelOverride delegating to the impl: {installed!r}"
+            )
+
+
+def _assert_no_originals_remain(original_ids: set[int]) -> None:
+    """No module namespace may still hold a pre-registration original.
+
+    The rebind at registration time covers every reference that existed
+    then, and setattr covers imports made after registration, so any
+    surviving original means a rebind missed its site -- that is the
+    failure mode behind registration-order concerns. Only module-level
+    namespaces are checked; instance attributes (e.g. warmup owners)
+    are covered by the e2e warmup path. The dispatcher's registry keeps
+    its originals inside a dict value, not as a module attribute, so it
+    does not trip this check.
+    """
+    for module in list(sys.modules.values()):
+        namespace = getattr(module, "__dict__", None)
+        if not isinstance(namespace, dict):
+            continue
+        for attr, value in list(namespace.items()):
+            if id(value) in original_ids:
+                raise AssertionError(
+                    f"{getattr(module, '__name__', module)}.{attr} still holds a pre-registration original"
+                )
+
+
+_original_ids = _snapshot_override_originals()
+NPUPlatform.register_triton_kernel_overrides()
+
+# Routing tripwire over the whole override table: after registration,
+# every entry's defining-module attribute must carry our
+# implementation. Values that are themselves @triton.jit kernels are
+# swapped in directly (never wrapped), so the attribute must be our
+# kernel -- if not, a table value stopped being a Triton kernel and the
+# dispatcher silently wrapped it in KernelOverride instead. Plain
+# callables are wrapped, so the attribute must be a KernelOverride
+# delegating to our implementation (production resolves these names
+# through exactly those module attributes, see worker/v2/model_states/
+# mamba_hybrid.py for the precopy consumer). The no-originals sweep then
+# turns the ordering argument into a machine check: in this process the
+# conftest registers late (pytest has already imported most of the tree),
+# which is the worst case for stale references, and no module may hold
+# one after registration. Two skips: the 310P family never installs the
+# table (it gets the sampler dispatch instead), and a Triton-less
+# environment mirrors the platform hook's HAS_TRITON guard and skips
+# registration entirely.
 if HAS_TRITON and (get_current_hardware_profile().device_adaptor_family is not DeviceAdaptorFamily.COMPATIBILITY):
-    import vllm.v1.worker.gpu.sample.logprob as logprob_mod  # noqa E402
-    import vllm.v1.worker.gpu.sample.thinking_budget as thinking_budget_mod  # noqa E402
-    import vllm.v1.worker.mamba_utils as mamba_utils  # noqa E402
-
-    from vllm_ascend.ops.triton.mamba.precopy import (  # noqa E402
-        precopy_mamba_align_fused_kernel,
-    )
-    from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import (  # noqa E402
-        _fill_logprob_token_ids_kernel,
-    )
-    from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa E402
-        _load_effective_token_ascend,
-        _update_committed_marker_cache_kernel_ascend,
-    )
-
-    assert mamba_utils.precopy_mamba_align_fused_kernel is precopy_mamba_align_fused_kernel
-    assert logprob_mod._fill_logprob_token_ids_kernel is _fill_logprob_token_ids_kernel
-    assert thinking_budget_mod._load_effective_token is _load_effective_token_ascend
-    assert thinking_budget_mod._update_committed_marker_cache_kernel is _update_committed_marker_cache_kernel_ascend
+    _assert_kernel_overrides_installed()
+    if _original_ids is not None:
+        _assert_no_originals_remain(_original_ids)
 
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
