@@ -1399,7 +1399,12 @@ class NPUWorker(GPUWorker):
         num_tokens = self.model_runner.decode_query_len
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+            # Idle ranks receive peer expert tokens. Creating warmup adapters
+            # here would overwrite their resident real adapters, then evict
+            # them when the dummy run exits.
+            self.model_runner._dummy_run(
+                num_tokens, uniform_decode=True, skip_gdn_state_update=True, num_active_loras=0
+            )
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
