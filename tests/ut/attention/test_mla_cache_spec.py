@@ -208,33 +208,6 @@ def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blo
         assert floating_dtypes == (torch.bfloat16, torch.bfloat16)
 
 
-@pytest.mark.parametrize(
-    ("use_flashmla", "strided_supported", "model_type", "expected_layout"),
-    [
-        (True, False, "deepseek_v3", "token_interleaved"),
-        (False, True, "deepseek_v3", "component_major"),
-        (False, False, "deepseek_v3", "plane_major"),
-        (False, False, "kimi_linear", "component_major"),
-    ],
-)
-def test_pure_mla_owner_selects_plane_major_when_strided_cache_is_unavailable(
-    monkeypatch, use_flashmla, strided_supported, model_type, expected_layout
-):
-    impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.fa_quant_layer = False
-    impl.use_flashmla = use_flashmla
-    layer = _make_owner(impl, AscendMLABackend)
-    source = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
-    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
-    monkeypatch.setattr(mla_v1, "enable_sfa", lambda _: False)
-    monkeypatch.setattr(mla_v1, "supports_strided_mla_cache", lambda *_: strided_supported)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type=model_type)),
-    )
-    spec = layer.get_kv_cache_spec(config)
-    assert spec.mla_cache_layout == expected_layout
-
-
 def test_sfa_owner_reuses_execution_width_without_customizing(monkeypatch):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.enable_sparse_sfa_c8 = True

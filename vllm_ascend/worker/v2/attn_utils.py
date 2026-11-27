@@ -75,6 +75,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
+    supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -873,9 +874,13 @@ def _uses_single_raw_mla_cache(
         # PCP gathers and sharded-decode writes still use the legacy
         # preprocessing contract. Keep their allocation compatible with it.
         return False
-    # Pure MLA models allocate through unified_allocate_kv_cache; only fused
-    # FlashMLA drafts under legacy SFA targets still use this single-raw path.
-    return bool(getattr(impl, "use_flashmla", False))
+    if getattr(impl, "use_flashmla", False):
+        # The external reader retains its fused-cache contract, including
+        # DCP. Native FIA continues to follow the dependency's exclusions.
+        return True
+    if enable_sfa(vllm_config):
+        return False
+    return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 
 def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
@@ -1410,35 +1415,6 @@ def create_cache_component_views(
     return views
 
 
-def create_plane_major_component_views(
-    raw_tensor: torch.Tensor,
-    cache_shapes: Sequence[tuple[int, ...]],
-    cache_dtypes: Sequence[torch.dtype],
-) -> list[torch.Tensor]:
-    """Create contiguous per-component planes within one contiguous layer slice."""
-    base = raw_tensor.storage_offset() * raw_tensor.element_size()
-    offset = base
-    views = []
-    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
-        itemsize = get_dtype_size(dtype)
-        if offset % itemsize:
-            raise ValueError(f"Cache component placement is not aligned to {dtype}.")
-        component_bytes = math.prod(shape) * itemsize
-        if offset - base + component_bytes > raw_tensor.nbytes:
-            raise ValueError("Cache view exceeds the backing allocation")
-        dense_strides = tuple(math.prod(shape[dim + 1 :]) for dim in range(len(shape)))
-        views.append(
-            torch.as_strided(
-                raw_tensor.view(dtype),
-                shape,
-                dense_strides,
-                storage_offset=offset // itemsize,
-            )
-        )
-        offset += component_bytes
-    return views
-
-
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1483,9 +1459,6 @@ def create_kv_cache_runtime_views(
                 ),
             )
 
-            is_plane_major = getattr(spec, "mla_cache_layout", None) == "plane_major"
-            if is_plane_major and descriptor.block_stride != spec.page_size_bytes:
-                raise ValueError("Plane-major MLA cache views require contiguous per-layer pages.")
             if cache_shapes and cache_shapes[0][0] != num_blocks:
                 runtime_blocks = cache_shapes[0][0]
                 if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
@@ -1496,10 +1469,7 @@ def create_kv_cache_runtime_views(
                 if block_stride % kernel_blocks_per_manager:
                     raise ValueError("Physical pages must split into whole kernel slots.")
                 block_stride //= kernel_blocks_per_manager
-            if is_plane_major:
-                components = create_plane_major_component_views(raw_cache, cache_shapes, dtypes)
-            else:
-                components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
+            components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
             format_views = getattr(group.backend, "format_runtime_views", None)
             caches[name] = format_views(spec, components) if format_views is not None else components
     for name, target in shared_layers.items():
@@ -1542,62 +1512,6 @@ def unified_allocate_kv_cache(
     )
 
 
-_UNIFIED_KV_CACHE_MODEL_TYPES = frozenset(
-    (
-        "deepseek_v4",
-        "deepseek_v41",
-        "deepseek_v41_text",
-        "kimi_linear",
-    )
-)
-
-_PURE_MLA_UNIFIED_MODEL_TYPES = frozenset(
-    (
-        "deepseek_v2",
-        "deepseek_v3",
-        "deepseek_mtp",
-        "kimi_k2",
-        "kimi_k25",
-        "glm4_moe_lite",
-    )
-)
-
-
-def _uses_unified_kv_cache_allocation(
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-) -> bool:
-    """Whether ``allocate_kv_cache_main`` should use the unified descriptor path."""
-    model_config = getattr(vllm_config, "model_config", None)
-    text_config = getattr(model_config, "hf_text_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    text_model_type = getattr(text_config, "model_type", None)
-    if text_model_type in _UNIFIED_KV_CACHE_MODEL_TYPES:
-        return True
-
-    hf_model_type = getattr(hf_config, "model_type", None)
-    if text_model_type not in _PURE_MLA_UNIFIED_MODEL_TYPES and hf_model_type not in _PURE_MLA_UNIFIED_MODEL_TYPES:
-        return False
-    if enable_sfa(vllm_config):
-        return False
-    if getattr(vllm_config, "additional_config", None) and KVPPConfig.from_vllm_config(vllm_config).size > 1:
-        return False
-    if get_layerwise_reuse_layout(kv_cache_config) is not None:
-        return False
-    if kv_cache_config.kv_cache_groups and not kv_cache_config.kv_cache_tensors:
-        return False
-    if len({descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}) > 1:
-        return False
-    if any(descriptor.layer_stride == 0 for descriptor in kv_cache_config.kv_cache_tensors):
-        return False
-
-    specs = _get_layer_kv_cache_specs(kv_cache_config)
-    return not any(
-        is_hidden_state_cache_spec(spec) or getattr(spec, "store_on_host", False) or (type(spec) is MLAAttentionSpec)
-        for spec in specs.values()
-    )
-
-
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1616,7 +1530,8 @@ def allocate_kv_cache_main(
     if allocate is not None:
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
-    if _uses_unified_kv_cache_allocation(vllm_config, kv_cache_config):
+    model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
@@ -2012,13 +1927,29 @@ def _reshape_kv_cache_v2(
                 )
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
-                # FlashMLA consumes one token-fused tensor with
-                # [nope | rope] in the trailing 576 lanes of every token.
-                kv_caches[layer_name] = make_page_strided_cache_view(
+
+                attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if attn_impl.use_flashmla:
+                    # FlashMLA consumes one token-fused tensor with
+                    # [nope | rope] in the trailing 576 lanes of every token.
+                    fused_cache = make_page_strided_cache_view(
+                        single_raw_mla_cache,
+                        (*component_shape, fused_dim),
+                        kv_cache_spec.dtype,
+                        slot_bytes,
+                    )
+                    kv_caches[layer_name] = fused_cache
+                    continue
+
+                # FIA keeps each component internally contiguous and puts
+                # the hybrid-page padding only in the leading block stride.
+                kv_caches[layer_name] = _reshape_combined_mla_kv_cache(
                     single_raw_mla_cache,
-                    (*component_shape, fused_dim),
+                    (*component_shape, nope_dim),
+                    (*component_shape, rope_dim),
                     kv_cache_spec.dtype,
-                    slot_bytes,
+                    kv_cache_spec.page_size_bytes,
+                    kernel_blocks_per_manager,
                 )
                 continue
 
