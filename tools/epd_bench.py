@@ -51,26 +51,10 @@ ERROR_EXIT_CODE = 2
 REGRESSION_EXIT_CODE = 1
 STAGE_PERCENTILE_EXACT = "exact"
 STAGE_PERCENTILE_BUCKET = "prometheus_bucket_upper_bound"
+METRICS_FETCH_TIMEOUT_SECONDS = 30.0
+P50_QUANTILE = 0.50
+P99_QUANTILE = 0.99
 
-BENCHMARK_KEYS = (
-    "successful_requests",
-    "failed_requests",
-    "benchmark_duration_s",
-    "total_input_tokens",
-    "total_generated_tokens",
-    "request_throughput_rps",
-    "output_token_throughput",
-    "total_token_throughput",
-    "mean_ttft_ms",
-    "median_ttft_ms",
-    "p99_ttft_ms",
-    "mean_tpot_ms",
-    "median_tpot_ms",
-    "p99_tpot_ms",
-    "mean_itl_ms",
-    "median_itl_ms",
-    "p99_itl_ms",
-)
 INT_KEYS = frozenset(
     {
         "successful_requests",
@@ -135,6 +119,9 @@ _OFFLINE_THROUGHPUT_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+# One source of truth: every parsed field is also a report key, in parse order.
+BENCHMARK_KEYS = tuple(_TEXT_FIELD_PATTERNS)
+
 _STAGE_TOTAL_PATTERN = re.compile(
     r'^epd_stage_seconds_(sum|count)\{stage="([^"]+)"\}\s+([-+]?[\d.eE]+)$',
     re.MULTILINE,
@@ -184,8 +171,8 @@ def _stage_summary(values: list[float]) -> dict[str, float | int]:
     return {
         "count": count,
         "mean_ms": sum(ordered) / count * MILLISECONDS_PER_SECOND,
-        "p50_ms": _percentile_value(ordered, 0.50) * MILLISECONDS_PER_SECOND,
-        "p99_ms": _percentile_value(ordered, 0.99) * MILLISECONDS_PER_SECOND,
+        "p50_ms": _percentile_value(ordered, P50_QUANTILE) * MILLISECONDS_PER_SECOND,
+        "p99_ms": _percentile_value(ordered, P99_QUANTILE) * MILLISECONDS_PER_SECOND,
         "min_ms": ordered[0] * MILLISECONDS_PER_SECOND,
         "max_ms": ordered[-1] * MILLISECONDS_PER_SECOND,
     }
@@ -258,8 +245,8 @@ def parse_proxy_metrics(text: str) -> dict[str, dict[str, float | int | None]]:
             # The exporter may expose only part of the histogram; a missing sum
             # stays unmeasured instead of turning into 0.0.
             "mean_ms": stage_sum / count * MILLISECONDS_PER_SECOND if count and stage_sum is not None else None,
-            "p50_ms": _bucket_percentile(ordered_buckets, 0.50),
-            "p99_ms": _bucket_percentile(ordered_buckets, 0.99),
+            "p50_ms": _bucket_percentile(ordered_buckets, P50_QUANTILE),
+            "p99_ms": _bucket_percentile(ordered_buckets, P99_QUANTILE),
         }
     return stages
 
@@ -289,7 +276,12 @@ def compare_with_tolerance(
     baseline: Any,
     tol: float = DEFAULT_TOLERANCE,
 ) -> dict[str, Any]:
-    """Compare current vs baseline metrics; lower latency is better."""
+    """Compare current vs baseline metrics; lower latency is better.
+
+    A metric is reported as "missing" when either side has no number. A zero
+    baseline is treated as missing too, because a relative delta against it is
+    undefined.
+    """
     current_metrics = _metrics_view(current)
     baseline_metrics = _metrics_view(baseline)
     comparisons: list[dict[str, Any]] = []
@@ -466,7 +458,7 @@ def _fetch_text(url: str) -> str:
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"unsupported metrics endpoint URL {url!r}: only http and https are supported")
     connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    connection = connection_cls(parsed.hostname, parsed.port, timeout=30)
+    connection = connection_cls(parsed.hostname, parsed.port, timeout=METRICS_FETCH_TIMEOUT_SECONDS)
     try:
         path = parsed.path or "/"
         if parsed.query:
