@@ -3,10 +3,10 @@
 Speculative decoding can reduce inter-token latency in memory-bound inference.
 This guide covers Model Runner V2 on Ascend.
 
-vLLM Ascend uses a **proposer-verifier** architecture. The Ascend components
-are in `vllm_ascend/worker/v2/spec_decode/`.
+The Ascend components for drafting and verification are in
+`vllm_ascend/worker/v2/spec_decode/`.
 
-1. The **proposer** generates draft tokens using a method such as n-gram
+1. The **speculator** generates draft tokens using a method such as n-gram
    matching or a neural draft model.
 2. The **target model** scores the draft tokens in one decode step. The
    **rejection sampler** applies the configured verification strategy to decide
@@ -555,7 +555,7 @@ using entropy computed after request sampling settings.
 Set `"rejection_sample_method":"synthetic"` to
 benchmark the verifier at controlled acceptance rates.
 
-Set exactly one of these fields alongside the proposer settings.
+Set exactly one of these fields in `speculative_config`.
 
 - `synthetic_acceptance_rates` is a non-increasing list of `K` probabilities
     in `[0, 1]`. The probability at position `i` covers accepting the prefix
@@ -628,7 +628,7 @@ upstream vLLM.
 
 ### Dynamic Speculative Decoding
 
-Add `num_speculative_tokens_per_batch_size` to the existing proposer config.
+Add `num_speculative_tokens_per_batch_size` to `speculative_config`.
 Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
 range. A draft length of 0 disables drafting for that range.
 
