@@ -46,11 +46,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.dspark.aux_states import ProjectedDraftAuxStates
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
 )
+from vllm_ascend.worker.v2.spec_decode.dspark.aux_states import ProjectedDraftAuxStates
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -112,7 +112,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             self._aux_staging = None
         return True
 
-
     @torch.inference_mode()
     def project_pcp_aux_states(self, aux_hidden_states: list[torch.Tensor]) -> torch.Tensor:
         if not getattr(self, "_pcp_aux_projection_enabled", False):
@@ -133,7 +132,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if result.shape != expected:
             raise ValueError("Draft projection must return complete features for the same token rows.")
         return result.contiguous()
-
 
     def _store_hidden_states(
         self,
@@ -161,7 +159,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         else:
             # Older paired vLLM versions expose the original three-arg hook.
             super()._store_hidden_states(num_tokens, last_hidden_states, aux_hidden_states)
-
 
     def load_draft_model(
         self,

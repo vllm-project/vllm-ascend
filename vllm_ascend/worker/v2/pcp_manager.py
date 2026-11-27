@@ -250,7 +250,6 @@ class AscendPCPManager(PCPManager):
         # compact-global-batch handling. Do not implement a second gather here.
         return self.restore_hidden_states(local_context_states)
 
-
     def bind_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
@@ -640,7 +639,7 @@ class AscendPCPManager(PCPManager):
             self.vllm_config.speculative_config is not None
             and self.is_decode_sharded
             and self._global_batch is not None
-            and not self._global_batch.is_dummy
+            and not getattr(self._global_batch, "is_dummy", False)
         )
 
     def _expose_unpadded_global_batch(self, global_batch: InputBatch) -> InputBatch:
@@ -675,7 +674,7 @@ class AscendPCPManager(PCPManager):
             getattr(self, "_draft_aux_speculator", None) is not None
             and self.is_last_pp_rank
             and aux_hidden_states
-            and not self._global_batch.is_dummy
+            and not getattr(self._global_batch, "is_dummy", False)
         ):
             # Keep sampling's main hidden states separate from draft context.
             local_aux = aux_hidden_states
