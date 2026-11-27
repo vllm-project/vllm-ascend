@@ -73,7 +73,7 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
             packed = torch_npu.npu_convert_weight_to_int4pack(unpacked.to(torch.int32))
             weight.data = packed.reshape(experts, input_size, output_size // _INT4_VALUES_PER_INT32)
             # CANN A4W4 GMM consumes FP32 scale bits in the low half of INT64.
-            scale.data = scale.data.reshape(experts, output_size).contiguous().view(torch.int32).to(torch.int64)
+            scale.data = scale.data.to(torch.float32).reshape(experts, output_size).contiguous().view(torch.int32).to(torch.int64)
 
     def _gmm(self, mlp_compute_input, hidden_states, token_scale, prefix):
         layer = mlp_compute_input.layer
