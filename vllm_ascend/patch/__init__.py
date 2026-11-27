@@ -400,13 +400,6 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 15. File: platform/patch_mla_prefill_backend.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   REMOVED: upstream vLLM v0.32.0 exposes the official
-#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
-#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
-#   from `vllm_ascend/attention/mla_prefill.py`.
-#
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
@@ -529,7 +522,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 21b. File: platform/patch_torch_utils.py**
+# ** 22. File: platform/patch_torch_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
 #    Why:
@@ -544,22 +537,6 @@
 #       Pending upstream vLLM support; requested in review of vllm-ascend #20311.
 #    Future Plan:
 #       Remove this patch after the NPU branch is available upstream.
-#
-# ** 22. File: platform/patch_tool_choice_none_content.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
-#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
-#    Why:
-#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
-#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
-#       expect those empty fields to be omitted so clients see `tool_calls=None`.
-#    How：
-#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
-#       empty `tool_calls` lists from `message` / `delta` objects.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/44105
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 23. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -684,27 +661,6 @@
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
 #
-# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
-#      `forward`, `make_empty_intermediate_tensors`
-#    Why:
-#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
-#       hidden states are collected from specific target model layers (e.g.,
-#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
-#       PP rank (where the drafter runs) only sees a subset of aux states, causing
-#       `combine_hidden_states` to fail with a k-axis shape mismatch.
-#    How：
-#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
-#       transparently pass aux hidden states through IntermediateTensors across PP
-#       stages. Each PP stage carries forward all aux states from previous stages,
-#       and the last PP rank merges them into a single list for the drafter.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
-#    Future Plan:
-#       Remove this patch once upstream Eagle3 supports collecting aux hidden
-#       states that span PP stages without cross-stage propagation.
-#
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -809,10 +765,6 @@
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend dispatch path for this
 #       fused attention preparation.
-#
-#
-# ** 11. File: worker/patch_mm_input_norm.py (removed) **
-# vLLM #62767 keeps the processor-derived normalization buffers nonpersistent.
 #
 # ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1496,32 +1448,6 @@
 #       No upstream PR yet; vLLM #52162 still passes the global request count.
 #    Future Plan:
 #       Remove once upstream dispatches sharded PCP decode with local counts.
-#
-# ** 33. File: platform/patch_vision.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
-#    Why:
-#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
-#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
-#       which does not distinguish scenarios and requires eps > 0 in all cases.
-#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
-#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
-#       positive".
-#    How：
-#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
-#       The patch is guarded with contextlib.suppress(ImportError) so it does
-#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
-#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
-#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
-#       removing running_mean/running_var. That commit is included in the target
-#       16cfe728; on those versions FusedInputNorm.forward is used as-is
-#       (multiply-add).
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/50411
-#       https://github.com/vllm-project/vllm/pull/51734
-#    Future Plan:
-#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
-#       (which, like upstream, allows eps >= 0 for inference).
 #
 # ** 34. File: worker/patch_worker_profiler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
