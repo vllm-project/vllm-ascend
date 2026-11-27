@@ -11,22 +11,41 @@ class LaunchSpec(NamedTuple):
     block_m: int
 
 
+# Smaller BASE tiles expose more parallel work at short M and reduce UB pressure.
 BM_BASE16 = 16
+
+# For N128, choose persistent BM32 at one quarter of a vector-core wave.
+# The cutoff reflects near parity with BASE16 at M289 and a gain at M639 on P=40.
 BM_HOIST = 32
 HOIST_QUARTER_WAVE_DIVISOR = 4
+
+# Keep the general BASE16 path within its existing BN512 envelope.
 BASE16_MAX_N_GROUP = 512
+
+# Match the resource budget used to validate the wide tiles. The UB getter
+# can supply the platform default when the driver does not report a capacity.
 MIN_FULL_TILE_UB_BYTES = 192 * 1024
 WIDE_FT_VECTOR_CORES = 40
 WIDE_FT_MIN_N_GROUP = 257
 WIDE_FT_MAX_N_GROUP = 8192
+# FP16 pre-gate RMSNorm was validated at BN1024 with BASE BM4.
 WIDE_FP16_BLOCK_N = 1024
+
+# The empirical wide HOIST cutoff comes from ceil(20449 / 40) at a measured
+# gain point. Rounded rows per core are a workload proxy for parameter reuse.
 _WIDE_HOIST_MIN_ROWS_PER_CORE = 512
 _MAX_I32_OFFSET = (1 << 31) - 1
 
 WideRmsMode = Literal["bf16_post_gate", "fp16_pre_gate"]
 
-# UB budget is checked before consulting these tile choices. Each pair gives
-# the BASE and HOIST row tile for gated BF16 RMSNorm, by rounded column width.
+# Each entry gives (BASE BM, HOIST BM) for BF16 RMSNorm with post-gating.
+# BN is N_group rounded up to a power of two. One FP32 intermediate takes
+# 4 * BN bytes per row or 4 * BM * BN bytes per tile. Peak UB also depends
+# on live gate and reduction temporaries, alignment and buffer reuse, so the
+# table uses compile and device results to qualify tiles.
+#
+# The BN2048, BN4096 and BN8192 probes started with 8192 elements per tile.
+# BN8192 uses BASE BM1 because HOIST BM1 overflowed UB in the B4 compile probe.
 _WIDE_BF16_ROW_TILES = MappingProxyType({512: (16, 8), 1024: (4, 4), 2048: (4, 4), 4096: (2, 2), 8192: (1, None)})
 
 
