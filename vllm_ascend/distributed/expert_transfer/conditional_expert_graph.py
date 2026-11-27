@@ -55,8 +55,8 @@ class ConditionalExpertGraph:
         try:
             library = ctypes.CDLL("libascendcl.so")
             return cls(device, library)
-        except (OSError, AttributeError):
-            # Older CANN and torch_npu builds can still capture fixed groups.
+        except (OSError, AttributeError, ImportError):
+            # Fixed-group capture is available without the conditional graph runtime.
             return None
 
     def __init__(self, device: torch.device, library: ctypes.CDLL):

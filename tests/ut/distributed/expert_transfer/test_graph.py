@@ -77,7 +77,7 @@ def test_graph_capacity_includes_speculative_and_padding_rows():
     assert graph._candidates[(3, 0)] == [descs[2]]
 
 
-@pytest.mark.parametrize("runtime_error", [None, OSError, AttributeError])
+@pytest.mark.parametrize("runtime_error", [None, OSError, AttributeError, ModuleNotFoundError])
 def test_wide_graph_capture_selects_conditional_when_runtime_supports_it(native_runtime, monkeypatch, runtime_error):
     manager = ExpertOffloadManager()
     manager.bindings = {"layer": SimpleNamespace(top_k=2, num_slots=2)}
@@ -91,6 +91,8 @@ def test_wide_graph_capture_selects_conditional_when_runtime_supports_it(native_
     def initialize(runtime, device, library):
         if runtime_error is AttributeError:
             raise AttributeError("missing conditional API")
+        if runtime_error is ModuleNotFoundError:
+            raise ModuleNotFoundError("missing acl module", name="acl")
         runtime.capture_stream = capture_stream
 
     monkeypatch.setattr(ConditionalExpertGraph, "__init__", initialize)
