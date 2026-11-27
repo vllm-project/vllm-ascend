@@ -2,7 +2,7 @@
 # Extracted with vllm-project/recipes@cb7c0e949bcb2bf580fcbd0d1d4e2e69ebf502ee.
 
 meta:
-  date_updated: "2026-11-26"
+  date_updated: "2026-11-27"
   hardware:
     # verified: the four-node DP4/TP8 pool came up completely, /health returned
     # 200, and both a single request and 8 concurrent requests returned 200.
@@ -83,20 +83,19 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     # npu: unsupported keeps the brand-level default off (the base lists
-    # pd_cluster, so absence would fail open); the specific ascend_910b key
-    # overrides it for the A2 preset lane.
+    # pd_cluster, so absence would fail open); the specific hardware keys
+    # override it for the preset lanes.
     npu: unsupported
     # The A2 4P+4D lane is offered through the `ascend_pd_a2` preset below
     # (tutorial §5.2 "A2 series" tab); the plain pools stay selectable on
     # ascend_910b without a preset (schema caveat: the floor does not gate
     # connector choice and `unsupported` would disable the preset too), so
     # the notes direct users to the preset.
-    # ascend_910c stays unavailable: the tutorial's A3 PD lane is a
-    # PP2+PCP8 engine, and native PCP inside a pd_cluster preset requires
-    # the vLLM Router with NIXL (validator: "PD prefill: native PCP
-    # requires vLLM Router with the NIXL connector") — not expressible as
-    # an Ascend-Router/Mooncake preset today.
     ascend_910b: supported
+    # The A3 2P+2D lane is offered through the `ascend_pd_a3` preset below
+    # (tutorial §5.2 "A3 series" tab, experimental external-DP rendering —
+    # see the preset runbook for the rendering-vs-tutorial differences).
+    ascend_910c: supported
   # Validated topology is a co-located multi-node pool, not prefill/decode
   # disaggregation: all four nodes form one DP group with one local DP rank
   # each, so this declares the cross-node DEP combination.
@@ -110,6 +109,8 @@ strategy_min_gpus:
   # A2 PD lane (ascend_910b) needs four nodes per pool.
   ascend_910c:
     multi_node_tp_dp: 32
+    # The A3 PD lane (pd_cluster) needs the same four-node total (2+2).
+    pd_cluster: 64
   ascend_910b:
     pd_cluster: 64
 
@@ -625,6 +626,214 @@ presets:
                 dp_size: '{decode_dp_size}'
                 tp_size: 8
 
+  ascend_pd_a3:
+    label: "0813-W4A8 PD (A3, 2P+2D, experimental)"
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    remove_args:
+      # Guard: drop --data-parallel-hybrid-lb; the builder emits it on
+      # multi-node DEP pools and the tutorial PD commands do not carry it
+      # (MooncakeConnectorV2 here is the KV connector, unrelated).
+      - '--data-parallel-hybrid-lb'
+      # The base_args carry --kv-cache-dtype fp8; the validated PD commands
+      # pass no kv-cache-dtype flag.
+      - '--kv-cache-dtype'
+    workload: 'Prefill/decode separation (2P+2D, experimental external-DP rendering), 2+2 Atlas 800 A3 nodes, Mooncake'
+    source:
+      label: "DeepSeek-V4-Pro tutorial, section 5.2 (A3 series tab)"
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
+      key: dsv4pro-a3-w4a8-pd-2p2d
+      revision: "2026-11-27"
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+      model_revision: master
+    runbook: |
+      ## Evidence and versions
+
+      - Source: tutorial §5.2 "A3 series" tab, transcribed value-by-value
+        (2 Prefill nodes + 2 Decode nodes, each an
+        Atlas 800 A3 (128 GB x 8, 16 devices per node); weights
+        DeepSeek-V4-Pro-0813-w4a8, DSpark draft
+        included in the checkpoint, 5 speculative tokens)
+      - Image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3 (the 0813-w4a8
+        checkpoint is listed for 2x A3 in tutorial §3.1)
+      - Checkpoint: Eco-Tech/DeepSeek-V4-Pro-0813-w4a8 (ModelScope, master)
+      - Validation status: **experimental, not validated end-to-end**;
+        rendering verified against the official builder
+
+      ## Transcription notes
+
+      This preset is an experimental external-DP rendering of the tutorial
+      lane, not a replay of the tutorial commands. The renderer (recipes
+      PR #1276) emits external-DP Prefill engines with PP1, so the
+      tutorial's single PP2+PCP8 engine per pool (layer partition
+      "32,29") is rendered as four independent DP ranks with
+      `--prefill-context-parallel-size 8` instead: each Prefill rank owns
+      `tp x pcp` = 8 NPUs and the layer split no longer applies. The KV
+      metadata follows the rendered topology (prefill dp 4 / decode
+      dp 32) rather than the tutorial's engine-shaped values (1 / 16).
+      The decode pool renders as DP32 at TP1 (one rank per NPU) where
+      the tutorial decodes with TP2.
+      The `--served-model-name dsv4` rename is omitted, matching the
+      recipe family treatment (page curls use the variant model_id).
+      Runtime prerequisite: each local Prefill rank needs
+      `tp x pcp` = 8 NPUs; images that assign one NPU per rank cannot run
+      this shape, so use an image verified for multi-NPU Prefill ranks.
+
+      Flags and env injected by the builder's strategy/base layers are
+      builder defaults, not part of the transcription. The tutorial
+      deploys Mooncake and the PD proxy outside the engine commands.
+
+      ## Startup order
+
+      Fill the rendered $PREFILL_NODE_n / $DECODE_NODE_n / $IFACE_NAME /
+      $ROUTER_PORT addresses, start the two Prefill nodes and then the
+      two Decode nodes, and finally run the Ascend Router proxy command
+      on the proxy host; verify /health on every rank before sending
+      requests.
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: dep
+        tp: 1
+        pcp: 8
+        args:
+          - '--enable-expert-parallel'
+          - '--max-model-len'
+          - '150000'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--max-num-seqs'
+          - '16'
+          - '--block-size'
+          - '32'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--enable-chunked-prefill'
+          - '--no-disable-hybrid-kv-cache-manager'
+          - '--enable-prefix-caching'
+          - '--enforce-eager'
+          - '--quantization'
+          - ascend
+          - '--tokenizer-mode'
+          - deepseek_v4
+          - '--attention_config.indexer_kv_dtype'
+          - int8
+          - '--tool-call-parser'
+          - deepseek_v4
+          - '--enable-auto-tool-choice'
+          - '--reasoning-parser'
+          - deepseek_v4
+          - '--trust-remote-code'
+          - '--seed'
+          - '1024'
+          - '--model-loader-extra-config'
+          - '{"enable_multithread_load": true, "num_threads": 128}'
+          - '--speculative-config'
+          - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: AIV
+          HCCL_BUFFSIZE: '1024'
+          HCCL_CONNECT_TIMEOUT: '1200'
+          HCCL_EXEC_TIMEOUT: '3600'
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 4
+                tp_size: 1
+                pp_size: 1
+              decode:
+                dp_size: 32
+                tp_size: 1
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 1
+        args:
+          - '--enable-expert-parallel'
+          - '--max-model-len'
+          - '150000'
+          - '--max-num-batched-tokens'
+          - '180'
+          - '--max-num-seqs'
+          - '30'
+          - '--block-size'
+          - '32'
+          - '--gpu-memory-utilization'
+          - '0.95'
+          - '--enable-chunked-prefill'
+          - '--no-disable-hybrid-kv-cache-manager'
+          - '--no-enable-prefix-caching'
+          - '--async-scheduling'
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--quantization'
+          - ascend
+          - '--tokenizer-mode'
+          - deepseek_v4
+          - '--attention_config.indexer_kv_dtype'
+          - int8
+          - '--tool-call-parser'
+          - deepseek_v4
+          - '--enable-auto-tool-choice'
+          - '--reasoning-parser'
+          - deepseek_v4
+          - '--trust-remote-code'
+          - '--seed'
+          - '1024'
+          - '--model-loader-extra-config'
+          - '{"enable_multithread_load": true, "num_threads": 128}'
+          - '--speculative-config'
+          - '{"method":"dspark","num_speculative_tokens":5}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true}}'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: AIV
+          HCCL_BUFFSIZE: '1800'
+          HCCL_CONNECT_TIMEOUT: '1200'
+          HCCL_EXEC_TIMEOUT: '3600'
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            kv_port: '30100'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 4
+                tp_size: 1
+                pp_size: 1
+              decode:
+                dp_size: 32
+                tp_size: 1
+
 notes:
   - title: "Ascend 910C: use the W4A8-MTP (ASCEND) variant"
     when: { hardware: [ascend_910c] }
@@ -647,15 +856,22 @@ notes:
   - title: "Prefill/decode separation on Ascend"
     when: { hardware: [ascend_910b, ascend_910c] }
     body: |
-      PD separation on Atlas 800I A2 is offered as the opt-in
-      **0813-W4A8 PD (A2, 4P+4D)** preset transcribed from tutorial §5.2.
-      Select the preset when deploying PD — the plain `pd_cluster` pool
-      renders the base recipe's generic topology, which is not the
-      validated Ascend route. The tutorial's A3 PD lane (2P+2D, one PP2
-      engine with PCP8 spread over two nodes) cannot be preset-rendered
-      today: native PCP inside a preset requires the vLLM Router with the
-      NIXL connector rather than the Ascend Router with Mooncake — follow
-      the tutorial's §5.2 "A3 series" commands there for now. The tutorial
-      also documents a 950DT PD lane (outside this overlay's hardware
-      scope) and §5.3 KV-cache-pool variants; an upstream schema request
-      for preset-expressible PCP is planned.
+      PD separation is offered through two opt-in presets transcribed from
+      tutorial §5.2 — select the preset when deploying PD, since the plain
+      `pd_cluster` pool renders the base recipe's generic topology, which
+      is not the validated Ascend route:
+
+      - **0813-W4A8 PD (A2, 4P+4D)** on Atlas 800I A2 (`ascend_910b`).
+      - **0813-W4A8 PD (A3, 2P+2D, experimental)** on Atlas 800 A3
+        (`ascend_910c`). The renderer (recipes PR #1276) emits external-DP
+        Prefill engines with PP1, so this preset renders four DP ranks
+        with `--prefill-context-parallel-size 8` rather than the
+        tutorial's single PP2+PCP8 engine (layer partition "32,29"), and
+        the KV metadata follows the rendered topology. It has **not been
+        validated end-to-end**; each Prefill rank needs `tp x pcp` = 8
+        NPUs, so an image verified for multi-NPU Prefill ranks is
+        required — the tutorial's §5.2 "A3 series" commands remain the
+        reference for the validated engine shape.
+
+      The tutorial also documents a 950DT PD lane (outside this overlay's
+      hardware scope) and §5.3 KV-cache-pool variants.
