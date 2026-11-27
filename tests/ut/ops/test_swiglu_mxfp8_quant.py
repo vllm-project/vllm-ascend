@@ -12,7 +12,9 @@ def test_swiglu_mxfp8_quant_applies_deepseek_clamp_before_quantization():
     quantized = torch.empty((1, 2), dtype=torch.float8_e4m3fn)
     scale = torch.empty((1, 1), dtype=torch.float8_e8m0fnu)
 
-    with patch("vllm_ascend.ops.activation.torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scale)) as quant:
+    with patch(
+        "vllm_ascend.ops.activation.torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scale), create=True
+    ) as quant:
         actual_quantized, actual_scale = swiglu_clamp_and_mxfp8_quant(x, clamp_limit=10.0)
 
     gate = x[:, :2].clamp(max=10.0)
