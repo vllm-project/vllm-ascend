@@ -261,7 +261,7 @@
 /vllm_ascend/eplb @freyfwt
 
 # observability
-# /vllm_ascend/observability
+/vllm_ascend/observability @djh95 @alex7092
 /vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
 /vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
