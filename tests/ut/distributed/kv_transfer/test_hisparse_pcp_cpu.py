@@ -558,6 +558,7 @@ def test_bf16_staged_prefill_reuses_paged_sfa_with_pcp_padding(monkeypatch):
         hisparse_for_capture=False,
         req_id_per_token=torch.tensor([0, 0, 0, 0], dtype=torch.int32),
         query_start_loc=torch.tensor([2], dtype=torch.int32),
+        prefill_valid_token_mask=torch.tensor([[True], [True], [False], [False]]),
         prefill=NS(host_staging_plan=NS(block_size=16)),
         block_size=16,
     )
