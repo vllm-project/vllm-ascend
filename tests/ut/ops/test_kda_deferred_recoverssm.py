@@ -38,7 +38,9 @@ from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     kda_recoverssm_verify,
 )
 
-DEVICE = torch.device("npu:6")
+# The physical card is chosen with ASCEND_RT_VISIBLE_DEVICES; the first
+# visible device is ordinal 0 (e.g. ASCEND_RT_VISIBLE_DEVICES=7 -> npu:0).
+DEVICE = torch.device("npu:0")
 torch.npu.set_device(DEVICE)  # kernel launch uses current device, not DEVICE
 DTYPE = torch.bfloat16
 HEADS = 2          # A2 UB overflow mitigation: smaller heads*value_dim
