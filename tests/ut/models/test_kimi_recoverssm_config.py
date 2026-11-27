@@ -105,10 +105,20 @@ def test_parallel_sizes_are_not_rejected_by_kimi_validator(pp, pcp, dcp):
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
-@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize(
+    ("connector", "role"),
+    [
+        ("MooncakeConnectorV2", "kv_producer"),
+        ("MooncakeConnectorV2", "kv_consumer"),
+        ("MooncakePullConnector", "kv_producer"),
+        ("MooncakePullConnector", "kv_consumer"),
+        ("DecodeBenchConnector", "kv_both"),
+        ("CustomConnector", "kv_consumer"),
+    ],
+)
 @pytest.mark.parametrize("prefix_caching", [False, True])
-def test_recoverssm_accepts_mooncake_roles(connector, role, prefix_caching):
+def test_recoverssm_accepts_kv_transfer_with_sd_layout(connector, role, prefix_caching, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
     config = make_config()
     config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
     config.cache_config.enable_prefix_caching = prefix_caching
@@ -116,11 +126,10 @@ def test_recoverssm_accepts_mooncake_roles(connector, role, prefix_caching):
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
-@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
-def test_recoverssm_mooncake_requires_sd_conv_layout(connector, role, monkeypatch):
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector", "DecodeBenchConnector"])
+def test_recoverssm_kv_transfer_requires_sd_conv_layout(connector, monkeypatch):
     config = make_config()
-    config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     with pytest.raises(ValueError, match="requires SD convolution cache layout"):
         validate_request_indexed_kda_recoverssm(config)
@@ -150,9 +159,9 @@ def make_pooled_config(role="kv_consumer"):
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("layerwise", [False, True])
-@pytest.mark.parametrize("backend", ["memcache", "MEMCACHE"])
+@pytest.mark.parametrize("backend", ["memcache", "mooncake"])
 @pytest.mark.parametrize("pool_first", [False, True])
-def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, layerwise, backend, pool_first, monkeypatch):
+def test_recoverssm_accepts_pooled_kv_transfer(role, layerwise, backend, pool_first, monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
     config = make_pooled_config(role)
     children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
@@ -162,46 +171,7 @@ def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, layerwise, back
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize(
-    "children",
-    [
-        None,
-        [],
-        [None],
-        [{"kv_connector": "MooncakeConnectorV2"}],
-        [{"kv_connector": "MooncakeConnectorV2"}, {"kv_connector": ["AscendStoreConnector"]}],
-        [{"kv_connector": "MooncakeConnectorV2"}, {"kv_connector": "MooncakeConnectorV2"}],
-        [
-            {"kv_connector": "MooncakeConnectorV2"},
-            {"kv_connector": "AscendStoreConnector"},
-            {"kv_connector": "MooncakeConnectorV2"},
-        ],
-    ],
-)
-def test_recoverssm_rejects_invalid_multi_connector_children(children):
-    config = make_pooled_config()
-    config.kv_transfer_config.kv_connector_extra_config["connectors"] = children
-    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 and AscendStoreConnector"):
-        validate_request_indexed_kda_recoverssm(config)
-
-
-@pytest.mark.parametrize("extra_config", [None, [], "invalid"])
-def test_recoverssm_rejects_malformed_multi_connector_config(extra_config):
-    config = make_pooled_config()
-    config.kv_transfer_config.kv_connector_extra_config = extra_config
-    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 and AscendStoreConnector"):
-        validate_request_indexed_kda_recoverssm(config)
-
-
-@pytest.mark.parametrize("store_options", [{"backend": "mooncake"}, {"backend": 1}, {}, None])
-def test_recoverssm_requires_memcache_pooling(store_options):
-    config = make_pooled_config()
-    config.kv_transfer_config.kv_connector_extra_config["connectors"][1]["kv_connector_extra_config"] = store_options
-    with pytest.raises(ValueError, match="requires MemCache pooling"):
-        validate_request_indexed_kda_recoverssm(config)
-
-
-def test_recoverssm_memcache_requires_sd_conv_layout(monkeypatch):
+def test_recoverssm_multi_connector_requires_sd_conv_layout(monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     with pytest.raises(ValueError, match="requires SD convolution cache layout"):
         validate_request_indexed_kda_recoverssm(make_pooled_config())
@@ -210,21 +180,6 @@ def test_recoverssm_memcache_requires_sd_conv_layout(monkeypatch):
 def test_recoverssm_without_transfer_allows_dim_first_layout(monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     validate_request_indexed_kda_recoverssm(make_config())
-
-
-@pytest.mark.parametrize(
-    ("connector", "role", "prefix", "message"),
-    [
-        ("OtherConnector", "kv_consumer", False, "MooncakeConnectorV2 or MooncakePullConnector"),
-    ],
-)
-def test_recoverssm_rejects_unverified_transfer(connector, role, prefix, message):
-    config = make_config()
-    config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
-    config.cache_config.enable_prefix_caching = prefix
-    config.cache_config.mamba_cache_mode = "align" if prefix else "none"
-    with pytest.raises(ValueError, match=message):
-        validate_request_indexed_kda_recoverssm(config)
 
 
 @pytest.mark.parametrize("text_config_cls", [KimiLinearConfig, KimiK31TextConfig])
