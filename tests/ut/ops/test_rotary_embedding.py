@@ -487,7 +487,7 @@ class TestAscendMRotaryEmbeddingForwardOOT:
         assert key_out is key
 
     @pytest.mark.parametrize("mrope_section", [[16, 24, 24], [8, 12, 12]])
-    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("vllm_ascend.ops.rotary_embedding.supports_triton", lambda: False)
     @patch("torch_npu.npu_mrope", create=True)
     def test_whitelisted_sections_use_npu_mrope(self, mock_npu_mrope, mrope_section):
         """Qwen2.5-VL uses [16, 24, 24] and MinerU2.5 (Qwen2-VL) uses
@@ -507,7 +507,7 @@ class TestAscendMRotaryEmbeddingForwardOOT:
         assert query_out is query
         assert key_out is key
 
-    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("vllm_ascend.ops.rotary_embedding.supports_triton", lambda: False)
     @patch("torch_npu.npu_mrope", create=True)
     def test_1d_positions_degrade_to_standard_rope_section(self, mock_npu_mrope):
         """1D positions are not multimodal: the section degrades to
@@ -523,7 +523,7 @@ class TestAscendMRotaryEmbeddingForwardOOT:
         mock_npu_mrope.assert_called_once()
         assert mock_npu_mrope.call_args.kwargs["mrope_section"] == [0, 0, 0]
 
-    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("vllm_ascend.ops.rotary_embedding.supports_triton", lambda: False)
     @patch("torch_npu.npu_mrope", create=True)
     def test_cos_sin_cache_dtype_follows_query(self, mock_npu_mrope):
         """The cache is converted to the query dtype before npu_mrope, and
