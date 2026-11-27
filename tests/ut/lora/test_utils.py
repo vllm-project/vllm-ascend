@@ -15,6 +15,7 @@
 
 import vllm.lora.utils as lora_utils
 
+from vllm_ascend.lora.deepseek_v4 import AscendCompressorLinearWithLoRA, AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.lora.fused_moe import AscendFusedMoE3DWithLoRA, AscendFusedMoEWithLoRA
 from vllm_ascend.lora.utils import (
     AscendColumnParallelLinearWithLoRA,
@@ -33,6 +34,8 @@ def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
         refresh_all_lora_classes()
         classes = list(lora_utils._all_lora_classes)
         expected_prefix = [
+            AscendCompressorLinearWithLoRA,
+            AscendDeepseekV4GroupedWoAWithLoRA,
             AscendRowParallelLinearWithLoRA,
             AscendColumnParallelLinearWithLoRA,
             AscendMergedColumnParallelLinearWithLoRA,

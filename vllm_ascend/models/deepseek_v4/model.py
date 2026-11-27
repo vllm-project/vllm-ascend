@@ -97,6 +97,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
+from vllm_ascend.models.deepseek_v4.grouped_wo_a import AscendDeepseekV4GroupedWoA
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
@@ -533,7 +534,7 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.kv_norm = RMSNorm(self.head_dim, self.norm_eps)
-        self.wo_a = ColumnParallelLinear(
+        self.wo_a = AscendDeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * config.o_lora_rank,
             bias=False,
@@ -665,6 +666,7 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
+            output_projection_owner=self,
         )
 
     def forward(

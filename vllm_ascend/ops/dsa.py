@@ -20,12 +20,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+from weakref import ref
 
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -74,8 +76,14 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        output_projection_owner: nn.Module | None = None,
     ) -> None:
         nn.Module.__init__(self)
+        # Keep the canonical owner outside the module tree: registering a
+        # parent here would create a cycle and duplicate projection names.
+        self._output_projection_owner_ref = (
+            ref(output_projection_owner) if output_projection_owner is not None else None
+        )
         self.dim = dim
         self.n_heads = n_heads
         self.scale = scale
@@ -174,6 +182,22 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     attn_metadata = forward_context.attn_metadata
+
+    # A fully qualified LoRA target can replace only the model's canonical
+    # projection, leaving this wrapper's aliases unchanged. Resolve from that
+    # owner before both profiling and inference; legacy callers use this layer.
+    owner_ref = getattr(self, "_output_projection_owner_ref", None)
+    projection_owner = self if owner_ref is None else owner_ref()
+    if projection_owner is None:
+        raise RuntimeError("The DSA output projection owner has been released.")
+    for name in ("wo_a", "wo_b"):
+        projection = getattr(projection_owner, name)
+        local_projection = getattr(self, name)
+        # Explicit alias targets remain valid when only the local alias was
+        # wrapped. A wrapped canonical projection takes precedence otherwise.
+        if not isinstance(projection, BaseLayerWithLoRA) and isinstance(local_projection, BaseLayerWithLoRA):
+            projection = local_projection
+        setattr(self.dsa_attn.impl, name, projection)
 
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a

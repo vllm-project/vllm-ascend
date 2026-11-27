@@ -9,6 +9,8 @@ Argument semantics and adapter file layout follow the [vLLM LoRA guide](https://
 ## Supported Hardware
 
 LoRA on vLLM-Ascend is supported on Atlas 300I Duo, Atlas A2, and Atlas A3.
+On Ascend 950, DeepSeek V4's FP8 `wo_a` projection accepts BF16 LoRA adapters
+with the default `--max-lora-rank 16`.
 
 LoRA applies to both dense models and mixture-of-experts (MoE) models. The base model stays frozen. Each request selects an adapter by the `name` registered at startup. The current MoE support status is as follows:
 
@@ -18,6 +20,56 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 | W8A8 dynamic quantization | Supported | Supported |
 
 Other MoE quantization methods, Fused MC2, and EPLB are not supported with LoRA.
+
+### DeepSeek V4 projections
+
+DeepSeek V4 applies adapters to `compressor.wkv`, `compressor.wgate`,
+`indexer.compressor.wkv`, `indexer.compressor.wgate`, and `wo_a`. Requests using
+different adapters can share a batch with base-model requests. For `wo_a`,
+LoRA-A is shared across attention groups and LoRA-B contains each group's
+output rows. With `--fully-sharded-loras`, this projection retains a full
+LoRA-A on each tensor-parallel rank because the groups consume different inputs.
+
+Adapter files must use Ascend's `self_attn` module names. For example, the
+supported projection names in layer 2 are:
+
+| Projection | Adapter module name |
+| --- | --- |
+| Grouped output | `model.layers.2.self_attn.wo_a` |
+| Main compressor KV | `model.layers.2.self_attn.compressor.wkv` |
+| Main compressor gate | `model.layers.2.self_attn.compressor.wgate` |
+| Indexer compressor KV | `model.layers.2.self_attn.indexer.compressor.wkv` |
+| Indexer compressor gate | `model.layers.2.self_attn.indexer.compressor.wgate` |
+
+Append `.lora_A.weight` or `.lora_B.weight` to these names for the stored
+adapter tensor keys. The PEFT prefix `base_model.model.` is optional; for
+example, `base_model.model.model.layers.2.self_attn.wo_a.lora_A.weight`.
+Replace the layer index with the layer containing the trained projection.
+
+The adapter loader does not automatically convert upstream DeepSeek V4
+`.attn.` names to `.self_attn.`. Convert both A and B tensor keys before
+loading such an adapter, preserving their values and shapes, and update any
+corresponding full names or name patterns in `adapter_config.json`. Changing
+only `target_modules` does not rename stored tensors: an `.attn.wo_a` key can
+pass suffix validation but its weights will not reach the Ascend module.
+
+The deployment filter `--lora-target-modules` accepts leaf names such as
+`wo_a`, `wkv`, and `wgate`, or exact full module names from the table. Use a
+full name to select one compressor projection; `compressor.wkv` alone does
+not match. Full targets must use `self_attn` and omit the PEFT prefix and
+`.lora_A.weight` / `.lora_B.weight` suffixes.
+
+DeepSeek V4 LoRA requires `--prefill-context-parallel-size 1`,
+`--decode-context-parallel-size 1`, and
+`finegrained_tp_config.oproj_tensor_parallel_size=1` in `--additional-config`
+(their defaults). Other values fail at initialization because these token
+exchanges do not carry adapter mappings. Standard tensor parallelism is
+independent of this restriction.
+
+With `--enable-lora`, DeepSeek V4 automatically disables DSA multi-stream
+overlap, even when `multistream_dsv4_dsa_overlap` is `true` in
+`--additional-config`. This keeps concurrent adapter operations from interfering
+with one another and can reduce throughput.
 
 ## LoRA Parameters
 

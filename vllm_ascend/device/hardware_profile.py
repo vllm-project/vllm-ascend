@@ -149,7 +149,7 @@ class HardwareCapability(Enum):
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
     LOCAL_KV_COMM_RESOURCE = auto()
-    # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
+    # BGMV/SGMV are built with VLLM_ENABLE_ATB_AND_DIRECT_KERNELS on A2/A3.
     LORA_CUSTOM_OPS = auto()
     # Use the token-fused MLA cache protocol for eligible FlashMLA models.
     MLA_FLASH = auto()
@@ -538,7 +538,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
-                    HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
