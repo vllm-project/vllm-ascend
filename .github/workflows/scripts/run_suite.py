@@ -337,6 +337,8 @@ def _save_timing_json(
 
 
 def _guard_upstream_dynamo_cleanup() -> None:
+    # TODO: Remove this workaround and its call once vllm-ascend and the
+    # upstream-test CI image use matching torch/torch-npu versions >= 2.13.0.
     # vLLM #68790 added this test-only cleanup hook from a newer PyTorch.
     # Keep the fixture active when the API is available in the runner image.
     conftest = Path("tests/conftest.py")
