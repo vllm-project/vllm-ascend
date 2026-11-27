@@ -69,7 +69,7 @@ tests/e2e/pull_request/
 ├── four_card/         # Four card tests → A3 NPU x4 runner
 ```
 
-310P tests use a `_310p` filename under the corresponding card directory:
+310P tests use a subdirectory whose name contains `_310p` under the corresponding card directory:
 
 ```text
 tests/e2e/pull_request/one_card/_310p/   # 310P single card

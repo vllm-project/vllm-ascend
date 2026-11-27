@@ -363,6 +363,31 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
         assert selected_tables.shape[0] == padded - num_decodes
 
 
+def test_pcp_adapts_ascend_hisparse_connector(monkeypatch):
+    from vllm_ascend.hisparse import pcp
+    from vllm_ascend.hisparse.connector import HiSparseConnector
+
+    connector = ActiveKVConnector.__new__(ActiveKVConnector)
+    connector.kv_connector = HiSparseConnector.__new__(HiSparseConnector)
+    connector.kv_connector.connector_worker = object()
+    runner = NS(
+        kv_connector=connector,
+        pcp_manager=object(),
+        kv_cache_config=NS(host_group_ids=[0]),
+        block_tables=object(),
+        speculator=NS(),
+    )
+    prepare_staging = Mock()
+    wrapper = Mock()
+    monkeypatch.setattr(pcp, "prepare_pcp_mirror_staging", prepare_staging)
+    monkeypatch.setattr(pcp, "PCPHiSparseConnector", wrapper)
+
+    assert pcp.adapt_pcp_hisparse_connector(runner) is wrapper.return_value
+    prepare_staging.assert_called_once_with(connector.kv_connector.connector_worker)
+    wrapper.assert_called_once_with(connector, runner.pcp_manager, runner.block_tables, 0)
+    assert runner.speculator.hisparse_pcp_connector is wrapper.return_value
+
+
 def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
 
