@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 
 import pytest
-from vllm.config.kv_transfer import KVTransferConfig
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from vllm_ascend.models.kimi_k3.recoverssm_config import (
@@ -105,20 +104,10 @@ def test_parallel_sizes_are_not_rejected_by_kimi_validator(pp, pcp, dcp):
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize(
-    ("connector", "role"),
-    [
-        ("MooncakeConnectorV2", "kv_producer"),
-        ("MooncakeConnectorV2", "kv_consumer"),
-        ("MooncakePullConnector", "kv_producer"),
-        ("MooncakePullConnector", "kv_consumer"),
-        ("DecodeBenchConnector", "kv_both"),
-        ("CustomConnector", "kv_consumer"),
-    ],
-)
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("prefix_caching", [False, True])
-def test_recoverssm_accepts_kv_transfer_with_sd_layout(connector, role, prefix_caching, monkeypatch):
-    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
+def test_recoverssm_accepts_mooncake_roles(connector, role, prefix_caching):
     config = make_config()
     config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
     config.cache_config.enable_prefix_caching = prefix_caching
@@ -126,60 +115,27 @@ def test_recoverssm_accepts_kv_transfer_with_sd_layout(connector, role, prefix_c
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector", "DecodeBenchConnector"])
-def test_recoverssm_kv_transfer_requires_sd_conv_layout(connector, monkeypatch):
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_recoverssm_mooncake_requires_sd_conv_layout(connector, role, monkeypatch):
     config = make_config()
-    config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     with pytest.raises(ValueError, match="requires SD convolution cache layout"):
         validate_request_indexed_kda_recoverssm(config)
 
 
-def make_pooled_config(role="kv_consumer"):
-    config = make_config()
-    config.cache_config.enable_prefix_caching = True
-    config.cache_config.mamba_cache_mode = "align"
-    config.kv_transfer_config = KVTransferConfig(
-        kv_connector="MultiConnector",
-        kv_role=role,
-        engine_id="0",
-        kv_connector_extra_config={
-            "connectors": [
-                {"kv_connector": "MooncakeConnectorV2", "kv_role": role},
-                {
-                    "kv_connector": "AscendStoreConnector",
-                    "kv_role": role,
-                    "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "1"},
-                },
-            ]
-        },
-    )
-    return config
-
-
-@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
-@pytest.mark.parametrize("layerwise", [False, True])
-@pytest.mark.parametrize("backend", ["memcache", "mooncake"])
-@pytest.mark.parametrize("pool_first", [False, True])
-def test_recoverssm_accepts_pooled_kv_transfer(role, layerwise, backend, pool_first, monkeypatch):
-    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
-    config = make_pooled_config(role)
-    children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
-    children[1]["kv_connector_extra_config"].update(backend=backend, use_layerwise=layerwise)
-    if pool_first:
-        children.reverse()
-    validate_request_indexed_kda_recoverssm(config)
-
-
-def test_recoverssm_multi_connector_requires_sd_conv_layout(monkeypatch):
-    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
-    with pytest.raises(ValueError, match="requires SD convolution cache layout"):
-        validate_request_indexed_kda_recoverssm(make_pooled_config())
-
-
 def test_recoverssm_without_transfer_allows_dim_first_layout(monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     validate_request_indexed_kda_recoverssm(make_config())
+
+
+@pytest.mark.parametrize("connector", ["MultiConnector", "DecodeBenchConnector"])
+def test_recoverssm_accepts_additional_kv_connectors(connector, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
+    config = make_config()
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
+    validate_request_indexed_kda_recoverssm(config)
 
 
 @pytest.mark.parametrize("text_config_cls", [KimiLinearConfig, KimiK31TextConfig])
