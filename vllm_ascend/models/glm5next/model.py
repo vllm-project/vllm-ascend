@@ -604,6 +604,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
         self.config = config
+        self.num_redundant_experts = vllm_config.parallel_config.eplb_config.num_redundant_experts
 
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
@@ -835,6 +836,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
                 num_experts=self.config.n_routed_experts,
+                num_redundant_experts=self.num_redundant_experts,
             )
         else:
             expert_params_mapping = []
@@ -897,28 +899,30 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for idx, (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in enumerate(expert_params_mapping):
+                is_expert_weight = False
+                for param_name, weight_name, expert_id, expert_shard_id in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
                         continue
-                    param = params_dict[name]
+                    param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
-                    weight_loader(
+                    success = weight_loader(
                         param,
                         loaded_weight,
-                        name,
+                        name_mapped,
                         expert_id=expert_id,
                         shard_id=expert_shard_id,
+                        return_success=True,
                     )
-                    break
+                    if success:
+                        name = name_mapped
+                        break
                 else:
+                    if is_expert_weight:
+                        continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict and not _is_linear_attn(self.config):  # noqa: E501
                         continue
