@@ -1283,6 +1283,33 @@ class BaseKVPoolWorker(ABC):
         )
         return StoreLookupResult(hit)
 
+    def _probe_single_group_prefix(
+        self, token_len: int, block_hashes: list[BlockHash] | list[str]
+    ) -> StoreLookupResult | None:
+        prefix_lookup = getattr(self.m_store, "prefix_block_lookup", None)
+        if (
+            prefix_lookup is None
+            or self.use_layerwise
+            or self.use_hybrid
+            or self.num_kv_cache_groups != 1
+            or self.group_uses_align_state[0]
+        ):
+            return None
+
+        # Only complete, aligned blocks can contribute to the legacy prefix.
+        block_size = self.token_database.get_block_size(0)
+        limit = max(0, min(token_len, self.max_model_len)) // block_size
+        hashes = get_block_hashes(block_hashes, block_size, self.hash_block_size)[:limit]
+        if not hashes:
+            return StoreLookupResult(0)
+        prefix = self.token_database._get_key_prefix(0)
+        rank_prefixes = tuple(self._expand_lookup_keys_by_rank([prefix], 0))
+        hit_blocks = prefix_lookup(rank_prefixes, hashes)
+        if hit_blocks is None:
+            return None
+        hit_tokens = hit_blocks * block_size
+        return StoreLookupResult(hit_tokens - hit_tokens % self.cache_transfer_granularity)
+
     def lookup_scheduler(
         self,
         token_len: int,
@@ -1313,6 +1340,10 @@ class BaseKVPoolWorker(ABC):
             )
             if coordinator_hit is not None:
                 return coordinator_hit
+            if not use_layerwise and kv_cache_group_ids == [0]:
+                prefix_hit = self._probe_single_group_prefix(token_len, block_hashes)
+                if prefix_hit is not None:
+                    return prefix_hit
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 

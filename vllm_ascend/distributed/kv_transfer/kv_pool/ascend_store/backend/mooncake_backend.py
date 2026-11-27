@@ -3,6 +3,7 @@ import functools
 import json
 import os
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -22,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MIN,
     Backend,
     BatchResultShapeError,
+    PrefixBlockLookup,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
@@ -49,6 +51,25 @@ MOONCAKE_LAYERWISE_CLIENT_METHODS = (
     "batch_get_session_end",
 )
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+
+
+def _pack_lookup_hashes(hashes: Sequence[bytes | str]) -> bytes | None:
+    """Pack uniform digests while preserving the exact spelling of legacy keys."""
+    digests = []
+    for value in hashes:
+        if isinstance(value, str):
+            try:
+                digest = bytes.fromhex(value)
+            except ValueError:
+                return None
+            if digest.hex() != value:
+                return None
+        else:
+            digest = value
+        if not digest or (digests and len(digest) != len(digests[0])):
+            return None
+        digests.append(digest)
+    return b"".join(digests)
 
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
@@ -419,6 +440,7 @@ class MooncakeBackend(Backend):
         self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
+        self._key_probers: dict[tuple[tuple[str, ...], int], Any] = {}
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
         # ASCEND_GLOBAL_RESOURCE_CONFIG: dual-protocol / RoCE Store path where the store
@@ -621,6 +643,43 @@ class MooncakeBackend(Backend):
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, sizes)
+
+    @property
+    def prefix_block_lookup(self) -> PrefixBlockLookup | None:
+        # Lazy Store setup also resolves prefetch options. Check both at lookup time.
+        if (
+            not self._store_initialized
+            or self._prefetch_conf.enabled
+            or not callable(getattr(self.store, "create_key_prober", None))
+        ):
+            return None
+        return self._probe_prefix_blocks
+
+    def _probe_prefix_blocks(self, rank_prefixes: tuple[str, ...], hashes: Sequence[bytes | str]) -> int | None:
+        if not hashes or not rank_prefixes:
+            return 0
+        packed = _pack_lookup_hashes(hashes)
+        if packed is None:
+            return None
+
+        hash_len = len(packed) // len(hashes)
+        cache_key = (rank_prefixes, hash_len)
+        prober = self._key_probers.get(cache_key)
+        if prober is None:
+            if any("{hash}" in prefix for prefix in rank_prefixes):
+                return None
+            templates = [prefix + "{hash}" for prefix in rank_prefixes]
+            assert self.store is not None
+            prober = self.store.create_key_prober([templates], hash_len)
+            self._key_probers[cache_key] = prober
+
+        (states,) = prober.is_exist(packed)
+        num_ranks = len(rank_prefixes)
+        if len(states) != len(hashes) * num_ranks:
+            raise BatchResultShapeError("Incomplete Store KeyProber existence response")
+        # Status bytes are block-major. A missing or failed rank ends the prefix.
+        hit_keys = len(states) - len(states.lstrip(b"\x01"))
+        return hit_keys // num_ranks
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
