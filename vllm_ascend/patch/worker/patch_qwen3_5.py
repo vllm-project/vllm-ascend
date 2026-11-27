@@ -228,7 +228,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            in_proj_input, hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj, use_sp)
+            hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj, use_sp, is_gdn)
 
         if use_sp:
             # Attention (full and GDN) needs the full token sequence; the
@@ -237,10 +237,10 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states, qkvz_input=in_proj_input)
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
-                hidden_states=hidden_states if in_proj_input is None else in_proj_input,
+                hidden_states=hidden_states,
                 positions=positions,
             )
         else:

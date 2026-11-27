@@ -381,7 +381,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        qkvz_input: QuantizedActivation | None = None,
         output: torch.Tensor = None,
     ):
         """
@@ -390,10 +389,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
-        qkvz_in = hidden_states if qkvz_input is None else qkvz_input
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
-            mixed_qkv, _ = self.in_proj_qkv(qkvz_in)
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
@@ -402,7 +400,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)
+                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
@@ -414,7 +412,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 b = b.contiguous()
                 a = a.contiguous()
             else:
-                projected_states_qkvz, _ = self.in_proj_qkvz(qkvz_in)
+                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
                 num_tokens = projected_states_qkvz.size(0)
 
