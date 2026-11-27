@@ -19,8 +19,16 @@ import importlib.util
 import sys
 from types import ModuleType
 
-# Build metadata is generated during installation and absent in source-only CI.
-_build_info = importlib.import_module("vllm_ascend._build_info")
+# Build metadata is generated during installation and absent in source-only CI
+# and editable checkouts before the first build.
+try:
+    _build_info = importlib.import_module("vllm_ascend._build_info")
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm_ascend._build_info":
+        raise
+    _build_info = ModuleType("vllm_ascend._build_info")
+    setattr(_build_info, "__device_type__", None)
+    setattr(_build_info, "__soc_version__", "")
 
 
 def _build_supports_triton() -> bool:

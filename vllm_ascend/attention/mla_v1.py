@@ -73,7 +73,6 @@ from vllm_ascend.compilation.updatable_graph import get_capture_resource, regist
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, SlidingWindowMLASpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
-<<<<<<< HEAD
 from vllm_ascend.device.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
