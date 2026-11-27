@@ -41,6 +41,14 @@
 # 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
 
 ARG OS_IMAGE=cr.kylinos.cn/kylin/kylin-server-init:v10sp3-2403
+
+# 下面这个 stage 不会被构建，只用于让 CI 的版本提取逻辑读到 CANN 版本号：
+# .github/workflows/_nightly_image_build.yaml 的 read_cann_version 从
+# `FROM .../cann:<版本>-...` 这行文本里解析版本并拼进镜像 tag。本镜像的 CANN 是
+# 直接装在麒麟系统内的（没有 cann 基镜像），因此用这一行承载 9.1.0。
+# 注意：它必须在真正的 FROM 之前、且不被任何 stage 引用，BuildKit 才不会去拉取它。
+FROM swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-openeuler24.03-py3.12 AS cann_version_meta
+
 FROM ${OS_IMAGE}
 
 ARG PYTHON_VERSION=3.12.4
