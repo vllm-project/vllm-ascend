@@ -185,6 +185,12 @@ print_summary() {
   fi
 }
 
+all_tests_skipped() {
+  local log_file="$1"
+  grep -Eq '[0-9]+ skipped' "${log_file}" &&
+    ! grep -Eq '[0-9]+ (passed|failed|errors?)' "${log_file}"
+}
+
 run_pytest_target() {
   local target="$1"
   test_index=$((test_index + 1))
@@ -226,7 +232,17 @@ run_pytest_target() {
   fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
-    test_results+=("${target}|PASSED|${log_file}")
+    if all_tests_skipped "${log_file}"; then
+      # pytest exits 0 when every test is skipped. Treat that as a failure so
+      # a gate-blocked run cannot report a green job.
+      test_results+=("${target}|SKIPPED|${log_file}")
+      echo "::error title=No tests executed::${target} was skipped; see ${log_file}"
+      if [ "${overall_status}" -eq 0 ]; then
+        overall_status=6
+      fi
+    else
+      test_results+=("${target}|PASSED|${log_file}")
+    fi
   elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
     # A collection skip can yield exit 5 even when the target is valid.
     test_results+=("${target}|SKIPPED|${log_file}")

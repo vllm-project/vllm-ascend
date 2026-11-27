@@ -27,6 +27,8 @@ QUERIES_METRIC = "vllm:external_prefix_cache_queries"
 LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
 DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
 MEMCACHE_TRANSFER_GATE_TIMEOUT_S = 120
+MEMCACHE_TRANSFER_GATE_ATTEMPTS = 3
+MEMCACHE_TRANSFER_GATE_RETRY_DELAY_S = 5
 HIXL_TOPOLOGY_GATE_TIMEOUT_S = 30
 NPU_SMI_TIMEOUT_S = 10
 GATE_ERROR_LINE_LIMIT = 8
@@ -99,6 +101,14 @@ def _hugepages_total() -> str:
         if line.startswith("HugePages_Total:"):
             return line.split(":", 1)[1].strip()
     return "?"
+
+
+def _shm_size_mb() -> str:
+    try:
+        stat = os.statvfs("/dev/shm")
+    except OSError:
+        return "?"
+    return str(stat.f_blocks * stat.f_frsize // (1024 * 1024))
 
 
 def _package_version(name: str) -> str:
@@ -200,33 +210,57 @@ def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
         f"full_mesh={env.get('TEST_MF_TRANSPORT_FULL_MESH', '<unset>')} "
         f"4k_page={env['MF_HYBM_ENABLE_4K_PAGE']} "
         f"memfabric={_package_version('memfabric_hybrid')} "
-        f"ulimit_l={_memlock_mb()}MB hugepages={_hugepages_total()}",
+        f"ulimit_l={_memlock_mb()}MB hugepages={_hugepages_total()} shm={_shm_size_mb()}MB",
         flush=True,
     )
-    started = time.monotonic()
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=MEMCACHE_TRANSFER_GATE_TIMEOUT_S,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        _skip_memcache_gate(
-            f"memcache transfer gate: {protocol} did not finish in "
-            f"{MEMCACHE_TRANSFER_GATE_TIMEOUT_S}s; blocked in HYBM init or the first copy "
-            f"({fingerprint})"
-        )
-    elapsed = time.monotonic() - started
-    if completed.returncode != 0:
-        output = (completed.stdout + completed.stderr).strip().splitlines()
-        matched = [line for line in output if any(key in line for key in GATE_ERROR_KEYWORDS)]
-        tail = (matched[-GATE_ERROR_LINE_LIMIT:] + output[-GATE_TAIL_LINE_LIMIT:])[-GATE_TAIL_LINE_LIMIT:]
-        _skip_memcache_gate(
-            f"memcache transfer gate failed rc={completed.returncode} after {elapsed:.1f}s "
-            f"({fingerprint}): " + " / ".join(tail)
-        )
+    # The A5 full-mesh path has an intermittent init/copy crash, so one failed
+    # benchmark is not proof of a broken data plane. Retry before skipping.
+    last_failure = ""
+    for attempt in range(1, MEMCACHE_TRANSFER_GATE_ATTEMPTS + 1):
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=MEMCACHE_TRANSFER_GATE_TIMEOUT_S,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            last_failure = (
+                f"{protocol} did not finish in {MEMCACHE_TRANSFER_GATE_TIMEOUT_S}s; "
+                "blocked in HYBM init or the first copy"
+            )
+            print(
+                f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} "
+                f"timed out after {elapsed:.1f}s",
+                flush=True,
+            )
+        else:
+            elapsed = time.monotonic() - started
+            if completed.returncode == 0:
+                print(
+                    f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} "
+                    f"passed in {elapsed:.1f}s",
+                    flush=True,
+                )
+                return
+            output = (completed.stdout + completed.stderr).strip().splitlines()
+            matched = [line for line in output if any(key in line for key in GATE_ERROR_KEYWORDS)]
+            tail = (matched[-GATE_ERROR_LINE_LIMIT:] + output[-GATE_TAIL_LINE_LIMIT:])[-GATE_TAIL_LINE_LIMIT:]
+            last_failure = f"rc={completed.returncode} after {elapsed:.1f}s: " + " / ".join(tail)
+            print(
+                f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} failed "
+                f"{last_failure}",
+                flush=True,
+            )
+        if attempt < MEMCACHE_TRANSFER_GATE_ATTEMPTS:
+            time.sleep(MEMCACHE_TRANSFER_GATE_RETRY_DELAY_S)
+    _skip_memcache_gate(
+        f"memcache transfer gate failed {MEMCACHE_TRANSFER_GATE_ATTEMPTS} attempts "
+        f"({fingerprint}): {last_failure}"
+    )
 
 
 @dataclass(frozen=True)
