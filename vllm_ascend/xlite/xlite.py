@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
+from functools import partial
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import regex as re
@@ -68,6 +69,7 @@ from vllm_ascend.xlite.utils import (
     is_dummy_tensor,
     set_dummy_tensor,
     transform_deq_scale,
+    transform_weights,
 )
 
 if TYPE_CHECKING:
@@ -365,8 +367,12 @@ class XliteModelBase(ABC):
     def _main_block_table(self, common: Any) -> torch.Tensor:
         """Main KV group's kernel-granularity block table via the upstream AttentionGroup mapping."""
         groups = self._kv_cache_groups()
+        if not groups:
+            raise ValueError("xlite: no KV cache groups available")
         main = getattr(self, "_main_attn_group", lambda kv_groups: kv_groups[0])(groups)
-        gid = next(i for i, g in enumerate(groups) if g is main)
+        gid = next((i for i, g in enumerate(groups) if g is main), None)
+        if gid is None:
+            raise ValueError("xlite: main KV cache group not found")
         for group_list in getattr(self.npu_runner, "attn_groups", None) or []:
             if not group_list or group_list[0].kv_cache_group_id != gid:
                 continue
@@ -994,9 +1000,10 @@ class HybridXliteBase(StandardXliteModel):
             raise TypeError("xlite hybrid: structured adapters require a named KV cache mapping")
         by_layer: defaultdict[int, list[Any]] = defaultdict(list)
         for name, cache in kv_caches.items():
-            layer_id = extract_layer_index(name)
-            if layer_id < 0:
-                raise ValueError(f"xlite: cannot resolve the owning layer from KV cache name {name!r}.")
+            try:
+                layer_id = extract_layer_index(name)
+            except (AssertionError, ValueError) as exc:
+                raise ValueError(f"xlite: cannot resolve the owning layer from KV cache name {name!r}.") from exc
             by_layer[layer_id].append(cache)
         result: list[tuple[torch.Tensor, ...]] = []
         for layer in range(self.xlite_config.n_layers):
@@ -1370,6 +1377,20 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
         xlite_config.q_lora_rank = hf_config.q_lora_rank
         xlite_config.kv_lora_rank = hf_config.kv_lora_rank
         xlite_config.softmax_scale = (hf_config.qk_nope_head_dim + hf_config.qk_rope_head_dim) ** -0.5
+        # GLM5 YaRN uses mscale_all_dim; replace super()'s DeepseekV3 legacy mscale result.
+        rope_params = getattr(hf_config, "rope_parameters", None) or {}
+        if not getattr(hf_config, "mla_use_nope", False):
+            rope_type = rope_params.get("rope_type")
+            if rope_type is None:
+                raise ValueError("xlite glm5next: non-NoPE checkpoint requires rope_parameters['rope_type']")
+            if rope_type != "default" and rope_params.get("apply_yarn_scaling", True):
+                from vllm.model_executor.models.deepseek_v2 import yarn_get_mscale
+
+                mscale = yarn_get_mscale(
+                    float(rope_params["factor"]),
+                    float(rope_params.get("mscale_all_dim", False)),
+                )
+                xlite_config.softmax_scale *= mscale * mscale
 
         # MHC residual mixing (hc_mult / hc_sinkhorn_iters, same names as in config.json).
         xlite_config.hc_mult = hf_config.hc_mult
@@ -1463,11 +1484,17 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
         source: str,
         mask: Sequence[bool] | None,
         slices: Mapping[str, tuple[int, int]],
+        post: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> dict[str, list[torch.Tensor]]:
-        """Split one plain (non-matmul) fused source into per-slot row windows, one layer walk."""
+        """Split one plain fused source into per-slot row windows in one layer walk; apply ``post`` to real slices."""
         fused = get_layer_weights(layers, source, mask=mask)
+
+        def _slice(t: torch.Tensor, start: int, length: int) -> torch.Tensor:
+            t = _ensure_nd(t)[start : start + length].contiguous()
+            return post(t) if post is not None else t
+
         return {
-            slot: [_ensure_nd(w)[start : start + length].contiguous() for w in fused]
+            slot: transform_weights(fused, partial(_slice, start=start, length=length))
             for slot, (start, length) in slices.items()
         }
 
@@ -1509,9 +1536,15 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
             "linear_k_conv1d": (lp, lp),
             "linear_v_conv1d": (2 * lp, lp),
         }
-        fused_conv = self.get_sliced_weights(layers, "self_attn.conv1d.weight", kda_mask, conv_slices)
+        fused_conv = self.get_sliced_weights(
+            layers,
+            "self_attn.conv1d.weight",
+            kda_mask,
+            conv_slices,
+            post=lambda w: w.to(self.dtype).contiguous(),
+        )
         for slot, weights in fused_conv.items():
-            setattr(xlite_model, slot, [w.to(self.dtype).contiguous() for w in weights])
+            setattr(xlite_model, slot, weights)
         # rc2 stores A_log as [1, 1, local_heads, 1]; the C++ reference consumes 1-D [local_heads].
         self._bind_plain_slots(
             layers,
@@ -1536,11 +1569,18 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
             quantized=self.quantization,
         )
         # wk_weights_proj is fused [idx_hd, hidden] wk + [n_head, hidden] weights_proj; keep [N, K].
-        wk_proj = get_layer_weights(layers, "self_attn.indexer.wk_weights_proj.weight", mask=mla_mask)
-        xlite_model.index_wk = [_to_fp32(_ensure_nd(w)[:idx_hd, :].contiguous() if w.ndim >= 2 else w) for w in wk_proj]
-        xlite_model.index_weights_proj = [
-            _to_fp32(_ensure_nd(w)[idx_hd:, :].contiguous() if w.ndim >= 2 else w) for w in wk_proj
-        ]
+        index_slices = {
+            "index_wk": (0, idx_hd),
+            "index_weights_proj": (idx_hd, self.hf_text_config.index_n_heads),
+        }
+        for slot, weights in self.get_sliced_weights(
+            layers,
+            "self_attn.indexer.wk_weights_proj.weight",
+            mla_mask,
+            index_slices,
+            post=_to_fp32,
+        ).items():
+            setattr(xlite_model, slot, weights)
         # native validates the APE as fp32 [kpool, head_dim]; all indexer params cast to fp32.
         self._bind_plain_slots(
             layers,

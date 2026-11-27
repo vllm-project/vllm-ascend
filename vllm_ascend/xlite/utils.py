@@ -32,45 +32,56 @@ from xlite._C import Model, ModelConfig
 _MISSING = object()
 """Unique sentinel for missing attributes in this module."""
 _DUMMY_TENSOR = torch.empty(0)
-"""Placeholder tensor for padding missing attributes in :meth:`get_layer_weights`."""
+"""Current placeholder substituted for missing or masked tensors."""
+_DUMMY_ATTR = "_xlite_dummy"
+"""Attribute set on dummy placeholders so they remain identifiable after rebinding."""
 
 
 def set_dummy_tensor(tensor: torch.Tensor) -> None:
-    """Rebind the module-level :data:`_DUMMY_TENSOR` placeholder.
+    """Rebind the module-level placeholder and tag the new tensor.
 
-    :func:`get_layer_weights` reads :data:`_DUMMY_TENSOR` as a bare name, which resolves against this module's globals
-    at call time. Rebinding must therefore mutate *this* module's namespace: a ``from ... import _DUMMY_TENSOR``
-    followed by a plain reassignment in another module only rebinds that module's local copy and
-    leaves the placeholder here unchanged.
+    Consumers that resolve :data:`_DUMMY_TENSOR` through this module's globals see the new value. Tagging the object
+    keeps previously issued placeholders recognisable as dummy tensors after later rebinds.
 
     Args:
-        tensor (torch.Tensor): The new placeholder tensor, typically a zero-element tensor allocated on the target
-            device and in the model dtype.
+        tensor (torch.Tensor): The new placeholder tensor, typically allocated on the target device and in the model
+            dtype.
     """
     global _DUMMY_TENSOR
     _DUMMY_TENSOR = tensor
+    setattr(tensor, _DUMMY_ATTR, True)
 
 
 def is_dummy_tensor(tensor: torch.Tensor) -> bool:
-    """Check whether ``tensor`` is the :data:`_DUMMY_TENSOR` placeholder.
+    """Check whether ``tensor`` is a dummy placeholder.
 
-    A tensor is considered dummy when it is either the exact placeholder object (same :meth:`data_ptr`) or an empty
-    tensor (``numel() == 0``). The two conditions cover both the default ``torch.empty(0)`` placeholder and any
-    non-empty placeholder (e.g. ``torch.empty(1, ...)``) rebound via :func:`set_dummy_tensor`, so callers do not need
-    to know which shape the placeholder currently has.
+    A tensor is dummy when it is empty (``numel() == 0``) or was tagged by :func:`set_dummy_tensor`. The object marker
+    survives later rebinds of the module-level :data:`_DUMMY_TENSOR`.
 
     Args:
         tensor (torch.Tensor): The tensor to test.
 
     Returns:
-        bool: True if ``tensor`` is the dummy placeholder (by identity or by being empty).
+        bool: True if ``tensor`` is a dummy placeholder.
     """
-    return tensor.numel() == 0 or tensor.data_ptr() == _DUMMY_TENSOR.data_ptr()
+    return tensor.numel() == 0 or bool(getattr(tensor, _DUMMY_ATTR, False))
 
 
 def has_real_tensor(tensors: Sequence[torch.Tensor]) -> bool:
     """Check whether any tensor in the sequence is a real (non-dummy) tensor."""
     return any(not is_dummy_tensor(t) for t in tensors)
+
+
+def transform_weight(tensor: torch.Tensor, transform: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    """Apply ``transform`` to a real weight, leaving dummy placeholders untouched."""
+    return tensor if is_dummy_tensor(tensor) else transform(tensor)
+
+
+def transform_weights(
+    tensors: Sequence[torch.Tensor], transform: Callable[[torch.Tensor], torch.Tensor]
+) -> list[torch.Tensor]:
+    """Apply ``transform`` to real weights while preserving dummy placeholders."""
+    return [transform_weight(tensor, transform) for tensor in tensors]
 
 
 class _TensorRepr:
@@ -383,7 +394,7 @@ def get_layer_weights(
 
             Cannot be specified at the same time as `mask`.
         post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
-            each retrieved tensor before returning the final list of weights.
+            each retrieved tensor before returning the final list of weights. Dummy placeholders are left unchanged.
         check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
             any tensor is not contiguous, a ValueError is raised. Default is True.
         **kwargs: Additional keyword arguments for future extensions.
@@ -431,7 +442,7 @@ def get_layer_weights(
             )
 
         if post_processor:
-            weights = [post_processor(weight) for weight in weights]
+            weights = transform_weights(weights, post_processor)
         if check_is_contiguous and not all(weight.is_contiguous() for weight in weights):
             raise ValueError("xlite: Found non-contiguous tensor in the retrieved weights.")
 
@@ -488,19 +499,23 @@ def slot_transform(slot: MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
     """Apply the slot's row contract to one weight/side tensor (slice, then repack, then cast)."""
     if tensor.ndim == 0 or tensor.numel() == 0:
         return tensor
-    if slot.row_slice is not None:
-        start, length = slot.row_slice
-        tensor = _ensure_nd(tensor)[start : start + length].contiguous()
-    if slot.row_repack is not None:
-        tensor = slot.row_repack(tensor)
-    if slot.weight_dtype is not None:
-        tensor = _ensure_nd(tensor).to(slot.weight_dtype)
-    return tensor
+
+    def _apply(t: torch.Tensor) -> torch.Tensor:
+        if slot.row_slice is not None:
+            start, length = slot.row_slice
+            t = _ensure_nd(t)[start : start + length].contiguous()
+        if slot.row_repack is not None:
+            t = slot.row_repack(t)
+        if slot.weight_dtype is not None:
+            t = _ensure_nd(t).to(slot.weight_dtype)
+        return t
+
+    return transform_weight(tensor, _apply)
 
 
 def slot_deq_transform(slot: MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
     """Slot row contract followed by the fixpipe repack, for deq_scale-like side tensors."""
-    return transform_deq_scale(slot_transform(slot, tensor))
+    return transform_weight(tensor, lambda t: transform_deq_scale(slot_transform(slot, t)))
 
 
 def init_matmul_weights(
