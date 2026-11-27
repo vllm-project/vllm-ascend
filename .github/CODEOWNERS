@@ -150,6 +150,7 @@
 /vllm_ascend/core/recompute_scheduler.py @nwpu-zxr
 
 # kv cache
+/vllm_ascend/hisparse/ @zhenwenqi2024 @weiguihua2 @Esir98 @LifeOfCoffee
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
 /vllm_ascend/core/kv_cache_dtype_handlers.py @kunpengW-code @lcfenglinwan
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
