@@ -265,6 +265,7 @@ def test_partial_failure_cleans_state_and_allows_recapture(manager):
     manager.model.prepare_encoder_cudagraph_capture_inputs.side_effect = prepare
     manager.capture(graph_pool=object())
     assert manager.is_captured()
+    manager.clear()
     manager.capture(graph_pool=object())
     assert len(manager._get_graph_set()) == 2
 

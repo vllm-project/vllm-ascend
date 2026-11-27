@@ -327,7 +327,6 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         self.update_stream: torch.npu.Stream | None = None
 
     def capture(self, graph_pool: Any | None = None):
-        self.clear()
         encoder_graph_pool = graph_pool if graph_pool is not None else current_platform.get_global_graph_pool()
         self.graph_pool = encoder_graph_pool
 
@@ -366,8 +365,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         )
 
         values = capture_inputs.values
-        # The base capture loop visits budgets largest-first, independently
-        # for every path and capture-axis combination.
+        # The base capture loop visits budgets largest-first.
         share_key = (path, axis_keys)
         shared = self._shared_input_buffers.get(share_key)
         if shared is None:
@@ -433,16 +431,13 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             graph_meta.max_frames_per_batch,
             path,
         )
-        # Check capacity before copying anything or updating FIA tasks. Older
-        # supported vLLM versions do not yet provide _replay_exceeds_capture.
+        # Check replay capacity before copying buffers.
         if any(
             src is not None and src.ndim > 0 and src.shape[0] > buf.shape[0]
             for key, buf in graph_meta.input_buffers.items()
             for src in (replay.values.get(key),)
         ):
             self.graph_misses += num_items
-            # v0.34.0 and the verified vLLM commit assert that a selected
-            # graph returns a tensor. Fall back here to honor that contract.
             with torch.inference_mode():
                 return self.model.encoder_eager_forward(mm_kwargs, path=path)
 
