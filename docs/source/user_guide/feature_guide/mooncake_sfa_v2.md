@@ -176,10 +176,12 @@ probe does not remove these completion and failure-lifetime guarantees.
 
 The common Pull receiver retains its ordinary address planner and submits
 ranges directly to the transfer engine. The SFA receiver inherits the request
-queue, remote metadata handling, block mapping, executor task aggregation,
-failure reporting and completion loop. It specializes address planning and
-bucket execution to partition shared Host destinations, retain target identities,
-append hot/tail reads and execute through the staging reader.
+queue, remote metadata handling, block mapping, failure reporting and completion
+loop. It overrides the existing `_submit_transfer_group()` to bind request
+context to each executor task, retaining partial-submission bookkeeping. It
+specializes address planning and bucket execution to partition shared Host
+destinations, retain target identities, append hot/tail reads and execute through
+the staging reader.
 
 The remaining shared interfaces have the following responsibilities:
 
@@ -199,13 +201,14 @@ initialization hook is needed in the public scheduler.
 
 Target identities and hot/tail request context are local SFA planning data,
 not additions to the P/D wire handshake or public bucket signature. The receiver
-keeps the current batch available to executor tasks until they have joined and
-all landing work has drained, then clears the context before the next batch.
-This depends on the inherited receiver processing one batch at a time; overlapping
-batches would require explicit per-task context instead.
+snapshots the request mapping into each submitted task, so queued transfers keep
+their own metadata while the receive loop advances. Each task's Future completes
+only after its READ and Host landing have stopped. The inherited request/batch
+queue processors and Future tracking continue to report completion.
 
-The common receiver has no SFA block-group, target-view, additional-read or
-landing hooks. The SFA address planner and bucket therefore contain some
-ordinary planning and execution code that must be reviewed when the public
-implementation changes. Physical registration rules, shared Host ownership,
-device destinations and landing-before-completion ordering are retained.
+The common receiver has no task-context binding, SFA block-group, target-view,
+additional-read or landing hooks. The SFA submission method, address planner and
+bucket therefore contain some ordinary planning and execution code that must be
+reviewed when the public implementation changes. Physical registration rules,
+shared Host ownership, device destinations and landing-before-completion ordering
+are retained.

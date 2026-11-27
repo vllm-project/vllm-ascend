@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future
 from functools import partial
 from typing import Any
 
@@ -22,6 +23,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_ci
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
+    MooncakeTransferMetadataGroups,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
@@ -55,10 +57,69 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
             raise ValueError("Mooncake V2 SFA PD hot/tail reads require a producer without context parallelism")
         return metadata
 
-    def _get_transfer_bucket_runner(self, requests: dict[str, ReqMeta]):
-        # Futures may outlive the receive loop's current queue item. Borrow a
-        # private mapping per submission instead of sharing mutable batch state.
-        return partial(self._execute_tp_transfer_bucket, requests=dict(requests))
+    def _submit_transfer_group(
+        self,
+        remote_engine_id: str,
+        remote_metadata: MooncakeTransferMetadataGroups,
+        requests: dict[str, ReqMeta],
+        selection_index_offset: int = 0,
+    ) -> tuple[dict[Future[None], tuple[int, int, int, set[str]]], Exception | None]:
+        """Submit SFA buckets with request context retained by each task.
+
+        Keep submission bookkeeping aligned with the common implementation;
+        only SFA binds metadata needed for hot/tail reads to each bucket.
+        The inherited queue processors and Future tracking own completion.
+        """
+        transfer_block_ids_by_spec: dict[
+            str,
+            dict[
+                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
+                list[tuple[int, list[int], list[int]]],
+            ],
+        ] = {}
+        future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
+        submission_error: Exception | None = None
+        try:
+            # A queued task can outlive this queue item. Retain its own request
+            # mapping instead of borrowing mutable state from the receive loop.
+            run_bucket = partial(self._execute_tp_transfer_bucket, requests=dict(requests))
+            tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
+            layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
+            for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
+                pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
+                transfer_block_buckets, request_ids_by_remote_rank = self._build_transfer_block_buckets(
+                    pp_metadata,
+                    layer_pairs,
+                    tp_rank_groups_by_pp_rank[remote_pp_rank],
+                    remote_metadata.pcp_size,
+                    remote_metadata.dcp_size,
+                    requests,
+                    transfer_block_ids_by_spec,
+                    selection_index_offset=selection_index_offset,
+                )
+                for (remote_pcp_rank, remote_tp_rank), transfer_entries_by_spec in transfer_block_buckets.items():
+                    request_ids = request_ids_by_remote_rank[(remote_pcp_rank, remote_tp_rank)]
+                    future = self.executor.submit(
+                        run_bucket,
+                        remote_pp_rank,
+                        remote_pcp_rank,
+                        remote_tp_rank,
+                        remote_metadata.pcp_size,
+                        remote_metadata.tp_size,
+                        remote_metadata.dcp_size,
+                        pp_metadata,
+                        transfer_entries_by_spec,
+                    )
+                    future_to_task[future] = (
+                        remote_pp_rank,
+                        remote_pcp_rank,
+                        remote_tp_rank,
+                        request_ids,
+                    )
+        except Exception as exc:
+            submission_error = exc
+
+        return future_to_task, submission_error
 
     def _wait_for_pending_landing(self) -> None:
         while True:

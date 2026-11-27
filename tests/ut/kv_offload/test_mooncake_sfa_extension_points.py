@@ -160,11 +160,12 @@ def _prepare_sfa_receive(thread, pp_ranks=(0,)):
     return remote, seen
 
 
-def test_executor_tasks_keep_private_request_context_after_queue_advances():
+@pytest.mark.parametrize("pp_ranks", [(0,), (0, 1)])
+def test_executor_tasks_keep_private_request_context_after_queue_advances(pp_ranks):
     reader = MagicMock()
     reader.batch_transfer_sync_read.return_value = 0
     thread = make_thread(staging_reader=reader)
-    remote, seen = _prepare_sfa_receive(thread)
+    remote, seen = _prepare_sfa_receive(thread, pp_ranks=pp_ranks)
     entered, release = threading.Event(), threading.Event()
     first, second = {"first": make_req_meta()}, {"second": make_req_meta()}
     original_first = dict(first)
@@ -188,8 +189,32 @@ def test_executor_tasks_keep_private_request_context_after_queue_advances():
         blocker.result(timeout=5)
         for future in [*first_tasks, *second_tasks]:
             future.result(timeout=5)
-    assert seen == [({"first"}, original_first), ({"second"}, second)]
+    assert seen == [({"first"}, original_first)] * len(pp_ranks) + [({"second"}, second)] * len(pp_ranks)
     reader.drain_pending_landing.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["request", "batch"])
+def test_sfa_submission_preserves_request_selection_offsets(mode):
+    reader = MagicMock()
+    reader.batch_transfer_sync_read.return_value = 0
+    thread = make_thread(staging_reader=reader, pull_transfer_mode=mode)
+    _prepare_sfa_receive(thread)
+    build_buckets = thread._build_transfer_block_buckets
+    offsets = []
+
+    def record_offset(*args, selection_index_offset=0, **kwargs):
+        offsets.append(selection_index_offset)
+        return build_buckets(*args, selection_index_offset=selection_index_offset, **kwargs)
+
+    thread._build_transfer_block_buckets = record_offset
+    thread.add_requests("engine", {"a": make_req_meta(), "b": make_req_meta()})
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        thread.executor = executor
+        thread._process_next()
+
+    assert offsets == ([0, 1] if mode == "request" else [0])
+    assert sorted(thread.finished_requests.get_nowait() for _ in range(2)) == [("a", False), ("b", False)]
+    assert thread.request_queue.unfinished_tasks == 0
 
 
 @pytest.mark.parametrize("mode", ["request", "batch"])

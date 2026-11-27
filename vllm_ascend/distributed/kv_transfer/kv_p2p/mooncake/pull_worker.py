@@ -657,10 +657,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         head_index = tp_rank // replication_size
         return head_index, head_index + 1
 
-    def _get_transfer_bucket_runner(self, requests: dict[str, ReqMeta]) -> Callable[..., None]:
-        """Bind task-local context without changing submission or completion."""
-        return self._execute_tp_transfer_bucket
-
     def _submit_transfer_group(
         self,
         remote_engine_id: str,
@@ -689,7 +685,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
         submission_error: Exception | None = None
         try:
-            run_bucket = self._get_transfer_bucket_runner(requests)
             tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
             layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
             for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
@@ -707,7 +702,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 for (remote_pcp_rank, remote_tp_rank), transfer_entries_by_spec in transfer_block_buckets.items():
                     request_ids = request_ids_by_remote_rank[(remote_pcp_rank, remote_tp_rank)]
                     future = self.executor.submit(
-                        run_bucket,
+                        self._execute_tp_transfer_bucket,
                         remote_pp_rank,
                         remote_pcp_rank,
                         remote_tp_rank,
