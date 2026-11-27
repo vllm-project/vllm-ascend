@@ -32,11 +32,6 @@ RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
-def recoverssm_replays(requests: int) -> bool:
-    """Whether a deferred RecoverSSM verify replays the previous step's commit
-    in the same pass (else: flush + verify)."""
-    return requests > 0
-
 
 @triton.jit
 def _kda_l2_normalize(vector):
@@ -262,7 +257,7 @@ def _kda_recoverssm_verify_kernel(
                                 ALIGN_MODE,
                             )
                 else:
-                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=2):
+                    for reverse_offset in range(0, tl.minimum(commit_len, SPEC_QUERY_LEN)):
                         final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
                             replay_correction_ptr,
                             replay_kg_ptr,
@@ -310,7 +305,7 @@ def _kda_recoverssm_verify_kernel(
                         boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
                         tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
-    for token_offset in tl.range(0, query_len, num_stages=2):
+    for token_offset in range(tl.maximum(query_len - 1, 0)):
         token = bos + token_offset
         q = tl.load(
             q_ptr + token * stride_q_token + pid_h * K + offs_k,
@@ -346,11 +341,74 @@ def _kda_recoverssm_verify_kernel(
         tl.static_assert(raw_beta.dtype == tl.float32)
         correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
         out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
-        # The post-update state of the last token is never read (the loop
-        # ends and the checkpoint was already stored by the replay), so
-        # skip its rank-1 update.
-        if token_offset < query_len - 1:
-            state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
+        state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
+        tl.store(
+            out_ptr + token * stride_out_token + pid_h * V + offs_v,
+            out,
+            mask=mask_v,
+        )
+
+        correction_ptr = (
+            correction_cache_ptr
+            + record_row * stride_correction_block
+            + pid_h * stride_correction_head
+            + token_offset * stride_correction_pos
+        )
+        tl.store(
+            correction_ptr + offs_v * stride_correction_dim,
+            correction,
+            mask=mask_v,
+        )
+        if pid_v == 0:
+            kg_ptr = kg_cache_ptr + record_row * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            tl.store(
+                kg_ptr + offs_k * stride_kg_dim,
+                k,
+                mask=mask_k,
+            )
+            tl.store(
+                kg_ptr + (K + offs_k) * stride_kg_dim,
+                raw_g,
+                mask=mask_k,
+            )
+
+    if query_len > 0:
+        token_offset = query_len - 1
+        token = bos + token_offset
+        q = tl.load(
+            q_ptr + token * stride_q_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        k = tl.load(
+            k_ptr + token * stride_k_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        v = tl.load(
+            v_ptr + token * stride_v_token + pid_h * V + offs_v,
+            mask=mask_v,
+            other=0.0 if mask_v is not None else None,
+        ).to(tl.float32)
+        raw_g = tl.load(
+            raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        raw_beta = tl.load(
+            raw_beta_ptr + token * stride_beta_token + pid_h,
+        ).to(tl.float32)
+
+        q = _kda_l2_normalize(q) * (K**-0.5)
+        normalized_k = _kda_l2_normalize(k)
+        gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+        tl.static_assert(gate.dtype == tl.float32)
+        decay = tl.exp(gate)
+        weighted_k = normalized_k * decay
+        weighted_q = q * decay
+        tl.static_assert(raw_beta.dtype == tl.float32)
+        correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+        out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         tl.store(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
@@ -651,18 +709,14 @@ def _accumulate_kda_commit_step(
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
     if ALIGN_MODE:
-        # Non-crossing requests carry boundary_recovery_len == 0 and a null
-        # boundary page: their boundary accumulation is a no-op, so skip the
-        # dead [BV, BK] work instead of computing it and selecting it away.
-        if boundary_recovery_len > 0:
-            before_boundary = token_offset < boundary_recovery_len
-            boundary_k = normalized_k * boundary_decay
-            boundary_correction = tl.where(
-                before_boundary,
-                tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
-                boundary_correction,
-            )
-            boundary_decay *= tl.where(before_boundary, decay, 1.0)
+        before_boundary = token_offset < boundary_recovery_len
+        boundary_k = normalized_k * boundary_decay
+        boundary_correction = tl.where(
+            before_boundary,
+            tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
+            boundary_correction,
+        )
+        boundary_decay *= tl.where(before_boundary, decay, 1.0)
     return final_decay, final_correction, boundary_decay, boundary_correction
 
 
@@ -1873,7 +1927,6 @@ def _prepare_flush_plan_kernel(
 __all__ = [
     "KDARecoverSSMCommitContext",
     "kda_recoverssm_verify",
-    "recoverssm_replays",
     "_defer_commit_kernel",
     "_prepare_flush_plan_kernel",
 ]

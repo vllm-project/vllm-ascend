@@ -47,7 +47,7 @@ import time
 import torch
 
 from test_kda_deferred_recoverssm import DEVICE, DTYPE, _make_context
-from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify, recoverssm_replays
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 PRESETS = {
     # Tiny: launch-overhead dominated, useful as a sanity check.
@@ -529,12 +529,10 @@ def main() -> None:
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
         print(f"{'batch':>6} {'heads*batch':>12} {'flush+verify':>14} "
-              f"{'fused':>10} {'saving':>10} {'saving%':>8} {'code picks':>12}")
+              f"{'fused':>10} {'saving':>10} {'saving%':>8}")
         for b, hb, t_stock, t_fused in rows:
-            choice = "fused" if recoverssm_replays(b) else "flush"
             print(f"{b:6d} {hb:12d} {t_stock:14.3f} {t_fused:10.3f} "
-                  f"{t_stock - t_fused:10.3f} {(1 - t_fused / t_stock) * 100:7.1f}% "
-                  f"{choice:>12}")
+                  f"{t_stock - t_fused:10.3f} {(1 - t_fused / t_stock) * 100:7.1f}%")
         wins = [b for b, _, t_stock, t_fused in rows if t_fused < t_stock]
         if wins:
             print(f"\nfused wins from batch={min(wins)} "
