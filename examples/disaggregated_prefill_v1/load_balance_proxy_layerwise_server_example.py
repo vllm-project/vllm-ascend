@@ -215,6 +215,13 @@ class LayerwiseScheduler:
                 self._push_heap(role, key)
         self.worker_loads = {}
 
+    def register_worker(self):
+        """Give each process incarnation an identity independent of its port slot."""
+        with self._lock:
+            worker_token = uuid.uuid4().hex
+            self.worker_loads[worker_token] = {}
+            return worker_token
+
     def _heap_entry(self, role, key):
         server = self._servers[role][key]
         priority = server.active_tokens
@@ -239,9 +246,12 @@ class LayerwiseScheduler:
             server.active_kv_cache = max(0.0, server.active_kv_cache - load)
         self._push_heap(role, key)
 
-    def reserve(self, worker_id, role, load):
+    def reserve(self, worker_token, role, load):
         role = ServerRole(role)
         with self._lock:
+            worker_loads = self.worker_loads.get(worker_token)
+            if worker_loads is None:
+                raise RuntimeError("Worker incarnation is no longer active")
             heap = self._heaps[role]
             while heap:
                 _, _, seq, key = heapq.heappop(heap)
@@ -254,22 +264,27 @@ class LayerwiseScheduler:
             if role is ServerRole.PREFILL:
                 server.active_kv_cache += load
             self._push_heap(role, key)
-            loads = self.worker_loads.setdefault(worker_id, {}).setdefault((role, key), [0.0, 0.0])
+            loads = worker_loads.setdefault((role, key), [0.0, 0.0])
             loads[0] += load
             if role is ServerRole.PREFILL:
                 loads[1] += load
             return key
 
-    def release(self, worker_id, role, key, load, kv_cache=False):
+    def release(self, worker_token, role, key, load, kv_cache=False):
         role = ServerRole(role)
         with self._lock:
-            loads = self.worker_loads[worker_id][role, key]
+            worker_loads = self.worker_loads.get(worker_token)
+            if worker_loads is None:
+                return  # Cleanup already released this incarnation's reservations.
+            loads = worker_loads[role, key]
             loads[int(kv_cache)] -= load
             self._release_load(role, key, load, active_tokens=not kv_cache, kv_cache=kv_cache)
 
-    def release_worker(self, worker_id):
+    def release_worker(self, worker_token):
         with self._lock:
-            for (role, key), (tokens, kv_cache) in self.worker_loads.pop(worker_id, {}).items():
+            # Removing the identity under the same lock fences already-received
+            # Manager RPCs that execute after cleanup, even after process.join().
+            for (role, key), (tokens, kv_cache) in self.worker_loads.pop(worker_token, {}).items():
                 self._release_load(role, key, tokens, active_tokens=True)
                 self._release_load(role, key, kv_cache, kv_cache=True)
 
@@ -282,13 +297,13 @@ LayerwiseManager.register("Scheduler", LayerwiseScheduler)
 
 
 class ProxyState:
-    def __init__(self, prefiller_instances, decoder_instances, scheduler=None, worker_id=0):
+    def __init__(self, prefiller_instances, decoder_instances, scheduler=None, worker_token=None):
         self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
         self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
         self.scheduler = (
             scheduler if scheduler is not None else LayerwiseScheduler(prefiller_instances, decoder_instances)
         )
-        self.worker_id = worker_id
+        self.worker_token = worker_token if worker_token is not None else self.scheduler.register_worker()
         self.prefiller_indices = {server_key(h, p): i for i, (h, p) in enumerate(prefiller_instances)}
         self.decoder_indices = {server_key(h, p): i for i, (h, p) in enumerate(decoder_instances)}
         self.req_to_prefiller = {}
@@ -343,26 +358,26 @@ class ProxyState:
             self.metaserver_dispatch_tasks.pop(parent_request_id, None)
 
     def select_prefiller(self, token_count):
-        key = self.scheduler.reserve(self.worker_id, ServerRole.PREFILL, token_count)
+        key = self.scheduler.reserve(self.worker_token, ServerRole.PREFILL, token_count)
         return self.prefiller_indices[key]
 
     def release_prefiller(self, idx, token_count):
         server = self.prefillers[idx]
-        self.scheduler.release(self.worker_id, ServerRole.PREFILL, server_key(server.host, server.port), token_count)
+        self.scheduler.release(self.worker_token, ServerRole.PREFILL, server_key(server.host, server.port), token_count)
 
     def release_prefiller_kv(self, idx, token_count):
         server = self.prefillers[idx]
         self.scheduler.release(
-            self.worker_id, ServerRole.PREFILL, server_key(server.host, server.port), token_count, kv_cache=True
+            self.worker_token, ServerRole.PREFILL, server_key(server.host, server.port), token_count, kv_cache=True
         )
 
     def select_decoder(self, token_count):
-        key = self.scheduler.reserve(self.worker_id, ServerRole.DECODE, token_count)
+        key = self.scheduler.reserve(self.worker_token, ServerRole.DECODE, token_count)
         return self.decoder_indices[key]
 
     def release_decoder(self, idx, token_count):
         server = self.decoders[idx]
-        self.scheduler.release(self.worker_id, ServerRole.DECODE, server_key(server.host, server.port), token_count)
+        self.scheduler.release(self.worker_token, ServerRole.DECODE, server_key(server.host, server.port), token_count)
 
     # Omni_infer's calculate_input_scores function
     def calculate_prefill_scores(self, request_length: int) -> float:
@@ -465,7 +480,7 @@ async def lifespan(app: FastAPI):
         global_args.prefiller_instances,
         global_args.decoder_instances,
         getattr(app.state, "scheduler", None),
-        getattr(app.state, "worker_id", 0),
+        getattr(app.state, "worker_token", None),
     )
     print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
     try:
@@ -477,7 +492,7 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(*tasks, return_exceptions=True)
         for server in proxy_state.prefillers + proxy_state.decoders:
             await server.client.aclose()
-        proxy_state.scheduler.release_worker(proxy_state.worker_id)
+        proxy_state.scheduler.release_worker(proxy_state.worker_token)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -906,13 +921,13 @@ class WorkerServer(uvicorn.Server):
             self.ready.set()
 
 
-def run_worker(args, scheduler, worker_id, ready):
+def run_worker(args, scheduler, worker_id, worker_token, ready):
     """Both listeners run on this worker's event loop and share its request state."""
     global global_args
     global_args = args
     args.metaserver_port = args.port + 1 + worker_id
     app.state.scheduler = scheduler
-    app.state.worker_id = worker_id
+    app.state.worker_token = worker_token
     logging.basicConfig(level=logging.INFO)
     with ExitStack() as stack:
         public = stack.enter_context(bind_listener(args.host, args.port, reuse_port=True))
@@ -932,14 +947,16 @@ def run_worker(args, scheduler, worker_id, ready):
 
 def start_worker(ctx, args, scheduler, worker_id, stopping):
     ready = ctx.Event()
-    process = ctx.Process(target=run_worker, args=(args, scheduler, worker_id, ready))
+    worker_token = scheduler.register_worker()
+    process = ctx.Process(target=run_worker, args=(args, scheduler, worker_id, worker_token, ready))
     process.start()
     deadline = time.monotonic() + WORKER_START_TIMEOUT
     while not ready.wait(WORKER_POLL_INTERVAL):
         if process.exitcode is not None or stopping.is_set() or time.monotonic() >= deadline:
             stop_workers([process])
+            scheduler.release_worker(worker_token)
             raise RuntimeError(f"Layerwise proxy worker {worker_id} failed to start")
-    return process
+    return process, worker_token
 
 
 def stop_workers(processes):
@@ -975,15 +992,15 @@ def run_workers(args):
                 for worker_id in range(args.workers):
                     processes.append(start_worker(ctx, args, scheduler, worker_id, stopping))
                 while not stopping.wait(WORKER_POLL_INTERVAL):
-                    for worker_id, process in enumerate(processes):
+                    for worker_id, (process, worker_token) in enumerate(processes):
                         if process.exitcode is not None:
                             process.join()
-                            scheduler.release_worker(worker_id)
+                            scheduler.release_worker(worker_token)
                             replacement = start_worker(ctx, args, scheduler, worker_id, stopping)
                             process.close()
                             processes[worker_id] = replacement
             finally:
-                stop_workers(processes)
+                stop_workers([process for process, _ in processes])
     finally:
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)

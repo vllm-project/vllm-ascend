@@ -16,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -199,42 +200,72 @@ def test_embedded_parser_handles_split_utf8_and_malformed_frames():
 def test_scheduler_keeps_kv_pressure_until_release():
     scheduler = proxy.LayerwiseScheduler([("p", 1), ("p", 2)], [("d", 1)])
     for _ in range(32):
-        first = scheduler.reserve(0, "prefill", 100)
-        second = scheduler.reserve(1, "prefill", 1)
+        workers = [scheduler.register_worker() for _ in range(3)]
+        first = scheduler.reserve(workers[0], "prefill", 100)
+        second = scheduler.reserve(workers[1], "prefill", 1)
         assert first != second
-        scheduler.release(0, "prefill", first, 100)
+        scheduler.release(workers[0], "prefill", first, 100)
         # P tokens are finished but its KV reservation still contributes load.
-        assert scheduler.reserve(2, "prefill", 1) == second
-        for worker_id in range(3):
-            scheduler.release_worker(worker_id)
-    assert scheduler.reserve(0, "prefill", 1) == first
+        assert scheduler.reserve(workers[2], "prefill", 1) == second
+        for worker_token in workers:
+            scheduler.release_worker(worker_token)
+    assert scheduler.reserve(scheduler.register_worker(), "prefill", 1) == first
 
 
-def test_shared_load_and_dead_worker_cleanup():
+@pytest.mark.parametrize("delayed_role", ["prefill", "decode"])
+def test_shared_load_and_dead_worker_cleanup(delayed_role):
     scheduler = proxy.LayerwiseScheduler([("p", 1), ("p", 2)], [("d", 1), ("d", 2)])
-    p0 = scheduler.reserve(0, "prefill", 100)
-    p1 = scheduler.reserve(1, "prefill", 100)
-    d0 = scheduler.reserve(0, "decode", 100)
-    d1 = scheduler.reserve(1, "decode", 100)
+    workers = [scheduler.register_worker() for _ in range(2)]
+    old_worker = workers[0]
+    p0 = scheduler.reserve(old_worker, "prefill", 100)
+    p1 = scheduler.reserve(workers[1], "prefill", 100)
+    d0 = scheduler.reserve(old_worker, "decode", 100)
+    d1 = scheduler.reserve(workers[1], "decode", 100)
     assert p0 != p1 and d0 != d1
-    scheduler.release(0, "prefill", p0, 100)
-    scheduler.release_worker(0)
-    assert scheduler.prefillers[p0].active_tokens == 0
-    assert scheduler.prefillers[p0].active_kv_cache == 0
-    assert scheduler.decoders[d0].active_tokens == 0
-    assert scheduler.prefillers[p1].active_tokens == 100
-    assert scheduler.reserve(0, "decode", 100) == d0
-    scheduler.release(1, "prefill", p1, 100)
-    scheduler.release(1, "prefill", p1, 100, kv_cache=True)
-    scheduler.release(1, "decode", d1, 100)
-    scheduler.release_worker(0)
-    scheduler.release_worker(1)
+    scheduler.release(old_worker, "prefill", p0, 100)
+    started = threading.Event()
+
+    def delayed_reserve():
+        started.set()
+        return scheduler.reserve(old_worker, delayed_role, 100)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Model a Manager RPC received before exit but waiting for the lock.
+        with scheduler._lock:
+            pending = pool.submit(delayed_reserve)
+            assert started.wait(timeout=5)
+            scheduler.release_worker(old_worker)
+            assert scheduler.prefillers[p0].active_tokens == 0
+            assert scheduler.prefillers[p0].active_kv_cache == 0
+            assert scheduler.decoders[d0].active_tokens == 0
+            assert scheduler.prefillers[p1].active_tokens == 100
+            # The replacement occupies the same port slot with a new identity.
+            workers[0] = scheduler.register_worker()
+            assert workers[0] != old_worker
+            assert scheduler.reserve(workers[0], "prefill", 100) == p0
+            assert scheduler.reserve(workers[0], "decode", 100) == d0
+        with pytest.raises(RuntimeError, match="no longer active"):
+            pending.result(timeout=5)
+
+    # Late release/cleanup from the old incarnation cannot debit its replacement.
+    scheduler.release(old_worker, "prefill", p0, 100)
+    scheduler.release(old_worker, "prefill", p0, 100, kv_cache=True)
+    scheduler.release(old_worker, "decode", d0, 100)
+    scheduler.release_worker(old_worker)
+    assert old_worker not in scheduler.worker_loads
+    assert scheduler.prefillers[p0].active_tokens == scheduler.prefillers[p0].active_kv_cache == 100
+    assert scheduler.decoders[d0].active_tokens == 100
+    scheduler.release(workers[1], "prefill", p1, 100)
+    scheduler.release(workers[1], "prefill", p1, 100, kv_cache=True)
+    scheduler.release(workers[1], "decode", d1, 100)
+    for worker_token in workers:
+        scheduler.release_worker(worker_token)
     assert all(server.active_tokens == server.active_kv_cache == 0 for server in scheduler.prefillers.values())
     assert all(server.active_tokens == 0 for server in scheduler.decoders.values())
 
 
-def _reserve_from_process(scheduler, worker_id, result):
-    result.put(scheduler.reserve(worker_id, "decode", 100))
+def _reserve_from_process(scheduler, worker_token, result):
+    result.put(scheduler.reserve(worker_token, "decode", 100))
 
 
 def test_load_is_shared_across_processes():
@@ -243,9 +274,10 @@ def test_load_is_shared_across_processes():
         scheduler = manager.Scheduler([("p", 1)], [("d", 1), ("d", 2)])
         result = ctx.Queue()
         chosen = []
+        workers = [scheduler.register_worker() for _ in range(2)]
         try:
-            for worker_id in range(2):
-                process = ctx.Process(target=_reserve_from_process, args=(scheduler, worker_id, result))
+            for worker_token in workers:
+                process = ctx.Process(target=_reserve_from_process, args=(scheduler, worker_token, result))
                 process.start()
                 try:
                     chosen.append(result.get(timeout=10))
@@ -254,8 +286,11 @@ def test_load_is_shared_across_processes():
                 finally:
                     proxy.stop_workers([process])
             assert chosen[0] != chosen[1]
-            scheduler.release_worker(0)
-            assert scheduler.reserve(0, "decode", 100) == chosen[0]
+            scheduler.release_worker(workers[0])
+            replacement = scheduler.register_worker()
+            with pytest.raises(RuntimeError, match="no longer active"):
+                scheduler.reserve(workers[0], "decode", 100)
+            assert scheduler.reserve(replacement, "decode", 100) == chosen[0]
         finally:
             result.close()
             result.join_thread()
