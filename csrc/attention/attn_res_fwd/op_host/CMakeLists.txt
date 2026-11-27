@@ -15,7 +15,7 @@ if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
         attn_res_fwd_def.cpp
     )
-    if(CONDITION_UNIT STREQUAL "ascend950")
+    if(CONDITION_UNIT STREQUAL "ascend950" OR CONDITION_UNIT STREQUAL "ascend960dt")
         add_ops_compile_options(
             OP_NAME AttnResFwd
             OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel

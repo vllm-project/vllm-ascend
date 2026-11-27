@@ -10,13 +10,18 @@
 
 /*!
  * \file attn_res_fwd_apt.cpp
- * \brief Shared AttnResFwd entry for A2/A3 (arch22) and A5 (arch35).
+ * \brief Shared AttnResFwd entry for A2/A3 (arch22), A5 (arch35), and 960DT (arch92).
  */
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
 #include "arch22/attn_res_fwd_reload.h"
 #include "arch22/attn_res_fwd_resident.h"
 #include "arch22/attn_res_fwd_cooperative.h"
 #include "arch22/attn_res_fwd_token_group.h"
+#elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 920
+#include "arch92/attn_res_fwd_reload.h"
+#include "arch92/attn_res_fwd_resident.h"
+#include "arch92/attn_res_fwd_cooperative.h"
+#include "arch92/attn_res_fwd_token_group.h"
 #else
 #include "arch35/attn_res_fwd_reload.h"
 #include "arch35/attn_res_fwd_resident.h"

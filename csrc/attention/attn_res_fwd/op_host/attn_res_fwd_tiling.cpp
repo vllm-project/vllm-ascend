@@ -70,7 +70,9 @@ void AttnResFwdTiling::InitCompileInfo()
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
     const auto socVersion = ascendcPlatform.GetSocVersion();
-    compileInfo_.regBase = socVersion == platform_ascendc::SocVersion::ASCEND950;
+    const auto npuArch = ascendcPlatform.GetCurNpuArch();
+    compileInfo_.regBase = socVersion == platform_ascendc::SocVersion::ASCEND950 ||
+        npuArch == platform_ascendc::NpuArch::DAV_9201;
     compileInfo_.supportsCooperative = socVersion == platform_ascendc::SocVersion::ASCEND910B ||
         socVersion == platform_ascendc::SocVersion::ASCEND910_93 || compileInfo_.regBase;
     if (compileInfo_.aivNum <= 0) {
