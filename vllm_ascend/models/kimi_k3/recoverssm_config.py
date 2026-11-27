@@ -56,15 +56,16 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
     if transfer.kv_connector == "MultiConnector":
         extra_config = transfer.kv_connector_extra_config
         children = extra_config.get("connectors") if isinstance(extra_config, dict) else None
-        if (
-            not isinstance(children, list)
-            or not all(isinstance(child, dict) for child in children)
-            or [child.get("kv_connector") for child in children] != ["MooncakeConnectorV2", "AscendStoreConnector"]
-        ):
-            raise ValueError(
-                "Kimi RecoverSSM MultiConnector requires MooncakeConnectorV2 followed by AscendStoreConnector"
-            )
-        store_config = children[1].get("kv_connector_extra_config", {})
+        connectors = {}
+        if isinstance(children, list) and len(children) == 2:
+            connectors = {
+                child["kv_connector"]: child
+                for child in children
+                if isinstance(child, dict) and isinstance(child.get("kv_connector"), str)
+            }
+        if connectors.keys() != {"MooncakeConnectorV2", "AscendStoreConnector"}:
+            raise ValueError("Kimi RecoverSSM MultiConnector requires MooncakeConnectorV2 and AscendStoreConnector")
+        store_config = connectors["AscendStoreConnector"].get("kv_connector_extra_config", {})
         backend = store_config.get("backend") if isinstance(store_config, dict) else None
         if not isinstance(backend, str) or backend.lower() != "memcache":
             raise ValueError("Kimi RecoverSSM MultiConnector requires MemCache pooling")

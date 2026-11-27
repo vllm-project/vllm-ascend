@@ -151,19 +151,37 @@ def make_pooled_config(role="kv_consumer"):
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("layerwise", [False, True])
 @pytest.mark.parametrize("backend", ["memcache", "MEMCACHE"])
-def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, layerwise, backend, monkeypatch):
+@pytest.mark.parametrize("pool_first", [False, True])
+def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, layerwise, backend, pool_first, monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
     config = make_pooled_config(role)
-    store_config = config.kv_transfer_config.kv_connector_extra_config["connectors"][1]["kv_connector_extra_config"]
-    store_config.update(backend=backend, use_layerwise=layerwise)
+    children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+    children[1]["kv_connector_extra_config"].update(backend=backend, use_layerwise=layerwise)
+    if pool_first:
+        children.reverse()
     validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize("children", [None, [], [None], [{"kv_connector": "MooncakeConnectorV2"}]])
-def test_recoverssm_rejects_incomplete_multi_connector(children):
+@pytest.mark.parametrize(
+    "children",
+    [
+        None,
+        [],
+        [None],
+        [{"kv_connector": "MooncakeConnectorV2"}],
+        [{"kv_connector": "MooncakeConnectorV2"}, {"kv_connector": ["AscendStoreConnector"]}],
+        [{"kv_connector": "MooncakeConnectorV2"}, {"kv_connector": "MooncakeConnectorV2"}],
+        [
+            {"kv_connector": "MooncakeConnectorV2"},
+            {"kv_connector": "AscendStoreConnector"},
+            {"kv_connector": "MooncakeConnectorV2"},
+        ],
+    ],
+)
+def test_recoverssm_rejects_invalid_multi_connector_children(children):
     config = make_pooled_config()
     config.kv_transfer_config.kv_connector_extra_config["connectors"] = children
-    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 followed by AscendStoreConnector"):
+    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 and AscendStoreConnector"):
         validate_request_indexed_kda_recoverssm(config)
 
 
@@ -171,7 +189,7 @@ def test_recoverssm_rejects_incomplete_multi_connector(children):
 def test_recoverssm_rejects_malformed_multi_connector_config(extra_config):
     config = make_pooled_config()
     config.kv_transfer_config.kv_connector_extra_config = extra_config
-    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 followed by AscendStoreConnector"):
+    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 and AscendStoreConnector"):
         validate_request_indexed_kda_recoverssm(config)
 
 
