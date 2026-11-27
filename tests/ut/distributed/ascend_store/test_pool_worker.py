@@ -287,11 +287,15 @@ class TestSchedulerKeyProber(unittest.TestCase):
         return SimpleNamespace(is_exist=is_exist)
 
     def assert_lookup_matches(self, hashes, expected, token_len=64):
-        self.backend.store = self.old_sdk
-        self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
-        self.batch_exists.reset_mock()
-        self.backend.store = self.sdk
-        self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
+        with patch.object(self.worker, "_build_lookup_keys", wraps=self.worker._build_lookup_keys) as build_keys:
+            self.backend.store = self.old_sdk
+            self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
+            build_keys.assert_called_once_with(token_len, hashes, 0)
+            self.batch_exists.reset_mock()
+            build_keys.reset_mock()
+            self.backend.store = self.sdk
+            self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
+            build_keys.assert_not_called()
         self.batch_exists.assert_not_called()
 
     def test_prefix_across_all_ranks(self):
@@ -322,6 +326,13 @@ class TestSchedulerKeyProber(unittest.TestCase):
         prefix = self.worker.token_database._get_key_prefix(0)
         self.states[prefix + self.hashes[1].hex()] = 0
         self.assert_lookup_matches(self.hashes, 0)
+
+    def test_partial_rank_hit_rounds_down_to_transfer_alignment(self):
+        self.worker.cache_transfer_granularity = 32
+        keys, _, _ = self.worker._build_lookup_keys(64, self.hashes, 0)
+        rank_keys = self.worker._expand_lookup_keys_by_rank(keys, 0)
+        self.states[rank_keys[-1]] = 0
+        self.assert_lookup_matches(self.hashes, 32)
 
     def test_rebuilds_for_new_hash_width_or_key_prefix(self):
         self.assert_lookup_matches(self.hashes, 64)
