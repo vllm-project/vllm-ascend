@@ -1035,7 +1035,9 @@ class BaseDeviceAdaptor:
         try:
             from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
         except ImportError:  # vLLM before the fla package moved to vllm/third_party
-            from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+            from vllm.model_executor.layers.fla.ops.l2norm import (  # type: ignore[import-not-found]
+                l2norm_fwd,
+            )
         # q/k L2 norm is applied here instead of inside the kernel: requesting
         # use_qk_l2norm_in_kernel=True (or state_v_first=True) routes the call
         # into the Ascend950-only "prepare" path of the fused op, which aclnn
