@@ -245,6 +245,9 @@ class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
+    conv1d: ColumnParallelLinear
+    recoverssm_records: AscendKDARecords | None
+
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
     use_contiguous_conv_indices = True
