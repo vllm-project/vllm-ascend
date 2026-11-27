@@ -23,12 +23,11 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.platforms import current_platform
-
 # Upstream model and QSA import each other; initialize the model first when
 # this submodule is imported directly, independently of lazy package exports.
 from vllm.models.qwen4_exp.amd import model as _upstream_model  # noqa: F401
 from vllm.models.qwen4_exp.amd import qsa as upstream_qsa
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
@@ -51,7 +50,11 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_norm_mrope_store,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_key_position_rows as qsa_store_key_position_rows_fused,
 )
 
@@ -479,9 +482,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             if can_fuse_norm_rope
             else None
         )
-        if rotary_cache is not None and self._fused_compression_eligible(
-            token_k, rotary_cache, compressed_cache
-        ):
+        if rotary_cache is not None and self._fused_compression_eligible(token_k, rotary_cache, compressed_cache):
             qsa_compress_norm_mrope_store(
                 token_k[:num_tokens],
                 position_rows,

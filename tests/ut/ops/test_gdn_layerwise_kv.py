@@ -138,9 +138,7 @@ def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
         patch.object(
             torch.ops.vllm,
             "qwen_gdn_attention_core_norm_with_output",
-            side_effect=lambda qkv, _b, _a, _z, out, _prefix, _packed: core(
-                qkv, None, None, out, None, None
-            ),
+            side_effect=lambda qkv, _b, _a, _z, out, _prefix, _packed: core(qkv, None, None, out, None, None),
         ),
         patch.object(torch.ops.vllm, "pcp_scatter_tokens", side_effect=lambda rows, *_: rows[[0, 3]]),
     ):

@@ -244,6 +244,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
     projected_gate = projected_q + 20
+
     def project_into_gate(qkv_arg, positions_arg, gate_out=None):
         assert qkv_arg is qkv
         assert positions_arg is positions
