@@ -77,7 +77,7 @@ def test_done_accepts_only_matching_ack_without_retry(producer, done_params, mon
 
 
 def test_done_stops_after_bounded_attempts(producer, done_params, monkeypatch):
-    sockets = [Mock() for _ in range(5)]
+    sockets = [Mock() for _ in range(push_worker._DONE_ACK_MAX_ATTEMPTS)]
     for socket in sockets:
         socket.recv.side_effect = Again()
     make_socket = Mock(side_effect=sockets)
