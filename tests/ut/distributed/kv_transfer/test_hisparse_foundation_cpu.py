@@ -49,39 +49,6 @@ from vllm_ascend.hisparse.c8 import (
 from vllm_ascend.ops.triton import sfa_indexer_store
 
 
-@pytest.mark.parametrize("descriptor_count,chunk_sizes", [(3, [3]), (5, [4, 1])])
-def test_hisparse_dma_uses_host_to_device_direction_only_for_restore(monkeypatch, descriptor_count, chunk_sizes):
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
-
-    from vllm_ascend.hisparse.backend import _install_worker_dma_hooks
-
-    backend = AscendHiSparseBackend()
-    monkeypatch.setattr(backend, "_D2H_BATCH_LIMIT", 4)
-    descriptors = torch.zeros(descriptor_count, dtype=torch.int64)
-    submissions = []
-
-    def submit(src, dst, sizes, direction, *, prefer_small_async):
-        submissions.append((src.numel(), direction, prefer_small_async))
-
-    def restore(worker, fail):
-        worker.backend.swap_blocks_batch(descriptors, descriptors, descriptors)
-        if fail:
-            raise RuntimeError("mock restore failure")
-
-    monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", submit, raising=False)
-    monkeypatch.setattr(HiSparseConnectorWorker, "_init_dma", lambda worker: None)
-    monkeypatch.setattr(HiSparseConnectorWorker, "invalidate_blocks", lambda worker, block_ids, indices: None)
-    monkeypatch.setattr(HiSparseConnectorWorker, "_restore_pages", restore)
-    _install_worker_dma_hooks()
-
-    with pytest.raises(RuntimeError, match="mock restore failure"):
-        HiSparseConnectorWorker._restore_pages(NS(backend=backend), True)
-    backend.swap_blocks_batch(descriptors, descriptors, descriptors)
-
-    small_batch = len(chunk_sizes) == 1
-    assert submissions == [(size, direction, small_batch) for direction in (0, 1) for size in chunk_sizes]
-
-
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
 def prepare_workspaces(request):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager

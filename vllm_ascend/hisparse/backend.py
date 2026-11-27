@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import importlib
-from contextvars import ContextVar
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
@@ -16,9 +15,6 @@ from vllm.v1.hisparse.backend import HiSparseBackend
 if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-
-_restore_dma: ContextVar[bool] = ContextVar("ascend_hisparse_restore_dma", default=False)
 
 
 def _install_worker_dma_hooks() -> None:
@@ -58,21 +54,6 @@ def _install_worker_dma_hooks() -> None:
             return original_invalidate(worker, block_ids, request_state_indices)
 
     HiSparseConnectorWorker.invalidate_blocks = invalidate
-
-    original_restore = HiSparseConnectorWorker._restore_pages
-
-    @wraps(original_restore)
-    def restore(worker, transfers):
-        if not isinstance(worker.backend, AscendHiSparseBackend):
-            return original_restore(worker, transfers)
-        # The upstream backend callback passes addresses without copy direction.
-        token = _restore_dma.set(True)
-        try:
-            return original_restore(worker, transfers)
-        finally:
-            _restore_dma.reset(token)
-
-    HiSparseConnectorWorker._restore_pages = restore
 
 
 def _allocate_resolver_workspace(runtime: HiSparseRuntime):
@@ -247,16 +228,15 @@ class AscendHiSparseBackend(HiSparseBackend):
         if count > limit and any(t.ndim != 1 or t.size(0) != count or not t.is_contiguous() for t in (src, dst, sizes)):
             raise ValueError("HiSparse D2H split requires equal-length contiguous descriptor arrays.")
         submit = torch.ops._C_ascend.swap_blocks_batch
-        direction = 0 if _restore_dma.get() else 1
         try:
             if count <= limit:
-                submit(src, dst, sizes, direction, prefer_small_async=True)
+                submit(src, dst, sizes, 1, prefer_small_async=True)
                 return
             for start in range(0, count, limit):
                 end = min(start + limit, count)
                 # Keep every chunk on Core's current DMA stream and on the batch API.
-                submit(src[start:end], dst[start:end], sizes[start:end], direction, prefer_small_async=False)
-            logger.info_once("[hisparse] Oversized DMA descriptor batch submitted in bounded chunks.", scope="process")
+                submit(src[start:end], dst[start:end], sizes[start:end], 1, prefer_small_async=False)
+            logger.info_once("[hisparse] Oversized D2H descriptor batch submitted in bounded chunks.", scope="process")
         except BaseException:
             # Core publishes its completion only after this method returns. Retain
             # the original storage in the process-cached backend on an uncertain
