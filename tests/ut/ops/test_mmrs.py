@@ -445,7 +445,6 @@ def quant_harness():
             mmrs.torch_npu, "get_npu_format", return_value=mmrs.ACL_FORMAT_FRACTAL_ND, create=True
         ) as weight_format,
         patch.object(mmrs.torch_npu, "npu_mm_reduce_scatter_base", create=True),
-        patch.object(mmrs.torch_npu, "npu_format_cast", create=True) as format_cast,
         patch.object(mmrs.DeviceOperator, "npu_mm_reduce_scatter_base") as fused,
         patch.object(mmrs, "sp_reduce_scatter") as reduce_scatter,
     ):
@@ -473,8 +472,6 @@ def quant_harness():
             weight = x2.float() * kwargs["x2_scale"].reshape(-1)[None, :]
             return scatter(dequant.matmul(weight).to(kwargs["output_dtype"]))
 
-        # The NZ-to-ND cast is value-preserving.
-        format_cast.side_effect = lambda weight, fmt: weight.clone()
         layer.quant_method.quant_method.prepare_input_for_overlap = Mock(side_effect=prepare)
         layer.quant_method.apply = Mock(side_effect=projection)
         fused.side_effect = fused_projection
@@ -491,7 +488,6 @@ def quant_harness():
             projection=projection,
             scatter=scatter,
             weight_format=weight_format,
-            format_cast=format_cast,
         )
 
 
@@ -547,22 +543,20 @@ def test_quant_short_batch_stays_on_fallback(quant_harness):
     h.reduce_scatter.assert_called_once()
 
 
-def test_quant_nz_weight_converted_to_nd_once(quant_harness):
+def test_quant_nz_weight_fuses_without_conversion(quant_harness):
+    # An NZ weight (weight_nz_mode=2) goes to the fused kernel as-is: no
+    # conversion, nothing cached.
     h = quant_harness
     h.weight_format.return_value = ACL_FORMAT_FRACTAL_NZ
     x = torch.ones(4096, 256, dtype=torch.bfloat16)
     torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
     assert h.fused.call_count == 1
-    h.format_cast.assert_called_once_with(h.layer.weight, mmrs.ACL_FORMAT_FRACTAL_ND)
-    # The ND copy is cached across forwards.
-    nd_weight = h.fused.call_args.args[1]
-    h.op.run(x)
-    h.format_cast.assert_called_once()
-    assert h.fused.call_args.args[1] is nd_weight
-    # In-place mutation rebuilds the copy on the next fused call.
+    assert h.fused.call_args.args[1] is h.layer.weight
+    # In-place mutation is visible on the very next fused call.
     h.layer.weight.fill_(2)
-    h.op.run(x)
-    assert h.format_cast.call_count == 2
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    assert h.fused.call_count == 2
+    assert h.fused.call_args.args[1] is h.layer.weight
 
 
 @pytest.mark.parametrize(
@@ -660,45 +654,3 @@ def test_create_selects_the_bf16_variant_otherwise(harness):
     assert type(op) is mmrs.SequenceParallelMMReduceScatterOp
     assert op.min_tokens == 256
     assert op.max_tokens == 16384
-
-
-def test_quant_nd_cache_invalidated_after_data_copy_reload(quant_harness):
-    h = quant_harness
-    h.weight_format.return_value = ACL_FORMAT_FRACTAL_NZ
-    x = torch.ones(4096, 256, dtype=torch.bfloat16)
-    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
-    h.format_cast.assert_called_once()
-    nd_weight = h.fused.call_args.args[1]
-
-    # The upstream in-place reload writes through param.data.copy_(...) and
-    # restores the original Parameter: identity and _version stay unchanged,
-    # so the op keeps serving the stale copy until told explicitly.
-    h.layer.weight.data.copy_(torch.full((256, 32), 2, dtype=torch.int8))
-    assert h.layer.weight._version == 0
-    h.op.run(x)
-    assert h.fused.call_args.args[1] is nd_weight
-    h.format_cast.assert_called_once()
-
-    # The reload caller invalidates the derived cache; the next fused call
-    # reconverts from the live weight and sees the reloaded values.
-    h.op.invalidate_weight_cache()
-    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
-    assert h.format_cast.call_count == 2
-    assert h.fused.call_args.args[1] is not nd_weight
-
-
-def test_invalidate_weight_caches_walks_installed_custom_ops(quant_harness):
-    h = quant_harness
-    h.op._nd_weight_source = h.layer.weight
-    h.op._nd_weight_version = 0
-    h.op._nd_weight = torch.ones(256, 32, dtype=torch.int8)
-
-    class Holder(torch.nn.Module):
-        pass
-
-    model = Holder()
-    model.o_proj = Holder()
-    model.o_proj.custom_op = h.op
-    mmrs.SequenceParallelQuantMMReduceScatterOp.invalidate_weight_caches(model)
-    assert h.op._nd_weight is None
-    assert h.op._nd_weight_source is None

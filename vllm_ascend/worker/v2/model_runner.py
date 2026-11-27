@@ -19,7 +19,7 @@
 
 import inspect
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -109,7 +109,6 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_step,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
-from vllm_ascend.ops.mmrs import SequenceParallelQuantMMReduceScatterOp
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
@@ -376,23 +375,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
-
-    def reload_weights(
-        self,
-        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
-        weights_path: str | None = None,
-        is_checkpoint_format: bool = True,
-    ) -> None:
-        super().reload_weights(weights_iterator, weights_path, is_checkpoint_format)
-        # The upstream in-place reload writes through param.data.copy_(...)
-        # and restores the original Parameters, so neither their identity nor
-        # their _version changes; derived INT8 MMRS weight caches cannot
-        # observe the reload and are invalidated explicitly (the reload
-        # contract leaves derived state to the caller).
-        SequenceParallelQuantMMReduceScatterOp.invalidate_weight_caches(self.get_model())
-        draft_model = self.get_draft_model()
-        if draft_model is not None:
-            SequenceParallelQuantMMReduceScatterOp.invalidate_weight_caches(draft_model)
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):

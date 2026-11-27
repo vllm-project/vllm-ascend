@@ -235,11 +235,10 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
     dimension, and long prefills are exactly where fusion pays off).
 
     The loaded INT8 weight is [K, N] after ModelSlim's transpose and may be
-    cast to NZ (weight_nz_mode=2). This CANN version rejects NZ MMRS
-    operands, so the fused path converts an NZ weight back to ND once and
-    caches the value-preserving copy; the cache rebuilds when the weight is
-    replaced or mutated in place, and is invalidated explicitly on an
-    in-place reload (which preserves Parameter identity and _version).
+    cast to NZ (weight_nz_mode=2). The fused kernel accepts both ND and NZ
+    operands, so the loaded weight is passed through as-is on every fused
+    call (no conversion, nothing cached): a replaced or in-place-mutated
+    weight is seen on the very next call.
     """
 
     REQUIRED_CAPABILITY = HardwareCapability.MM_REDUCE_SCATTER_INT8
@@ -255,9 +254,6 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
 
     def __init__(self, layer, attention_layer_name: str, *, min_tokens: int, max_tokens: int | None = None):
         super().__init__(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=max_tokens)
-        self._nd_weight_source: torch.Tensor | None = None
-        self._nd_weight_version = -1
-        self._nd_weight: torch.Tensor | None = None
 
     def _quant_weight_reason(self) -> str | None:
         if not self.supports_layer(self.layer):
@@ -283,44 +279,13 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
             and torch_npu.get_npu_format(weight) in (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ)
         )
 
-    def _nd_weight_for_fusion(self) -> torch.Tensor:
-        """Return an ND copy of the loaded INT8 weight, converting NZ once."""
-        weight = self.layer.weight
-        if self._nd_weight_source is weight and self._nd_weight_version == weight._version:
-            return self._nd_weight
-        nd_weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_ND)
-        self._nd_weight_source = weight
-        self._nd_weight_version = weight._version
-        self._nd_weight = nd_weight
-        return nd_weight
-
-    def invalidate_weight_cache(self) -> None:
-        """Drop the converted ND weight; the next fused call reconverts."""
-        self._nd_weight_source = None
-        self._nd_weight_version = -1
-        self._nd_weight = None
-
-    @classmethod
-    def invalidate_weight_caches(cls, model: torch.nn.Module) -> None:
-        """Drop the ND conversion caches of the ops installed on *model*.
-
-        The upstream in-place reload writes through ``param.data.copy_(...)``
-        and restores the original Parameter, so neither its identity nor its
-        ``_version`` changes and the cache key cannot observe the reload. The
-        reload contract leaves invalidating derived state to the caller; the
-        model runner routes it here.
-        """
-        for module in model.modules():
-            custom_op = getattr(module, "custom_op", None)
-            if isinstance(custom_op, cls):
-                custom_op.invalidate_weight_cache()
-
     def _run_fused(self, input_: torch.Tensor) -> torch.Tensor:
         """INT8 dynamic-quant MM + ReduceScatter through the fused path.
 
         Only real rows are quantized; zero INT8 rows with scale one are
         exact zeros, matching the zero padding sp_reduce_scatter applies to
-        the GEMM result. _can_fuse has already validated weight and scale.
+        the GEMM result. _can_fuse has already validated weight and scale;
+        the loaded weight goes to the kernel as-is in its ND or NZ layout.
         """
         logger.info_once("Layer MMRS fused path active")
         scheme = self.quant_method.quant_method
@@ -332,14 +297,11 @@ class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
         if padding:
             quantized = F.pad(quantized, (0, 0, 0, padding))
             token_scale = F.pad(token_scale, (0, 0, 0, padding), value=1.0)
-        weight = self.layer.weight
-        if torch_npu.get_npu_format(weight) == ACL_FORMAT_FRACTAL_NZ:
-            weight = self._nd_weight_for_fusion()
         # comm_mode is left to the device adaptor's per-platform default,
         # same as the BF16 path.
         return DeviceOperator.npu_mm_reduce_scatter_base(
             quantized,
-            weight,
+            self.layer.weight,
             self.hcom,
             self.tp_size,
             reduce_op="sum",

@@ -35,7 +35,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.ops.mmrs import SequenceParallelMMReduceScatterOp, SequenceParallelQuantMMReduceScatterOp
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -2883,20 +2882,3 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
             runner.shutdown()
         assert first.close_host_offload.call_count == 2
         assert runner._shared_engram_shutdown_pending == []
-
-
-def test_reload_weights_invalidates_mmrs_nd_weight_caches():
-    runner = _make_runner()
-    model = torch.nn.Module()
-    model.o_proj = torch.nn.Module()
-    quant_op = Mock(spec=SequenceParallelQuantMMReduceScatterOp)
-    model.o_proj.custom_op = quant_op
-    model.plain_proj = torch.nn.Module()
-    bf16_op = Mock(spec=SequenceParallelMMReduceScatterOp)
-    model.plain_proj.custom_op = bf16_op
-    runner.model = model
-    with patch.object(GPUModelRunner, "reload_weights", return_value=None) as parent_reload:
-        runner.reload_weights()
-    parent_reload.assert_called_once_with(None, None, True)
-    quant_op.invalidate_weight_cache.assert_called_once()
-    assert bf16_op.mock_calls == []
