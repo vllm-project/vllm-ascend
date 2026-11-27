@@ -2525,6 +2525,7 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.supports_triton", return_value=True),
         patch(
             "vllm_ascend.ops.triton.query_gather_prep.prep_query_head_major",
             side_effect=lambda nope, rope: torch.cat((nope, rope), dim=-1).transpose(0, 1).contiguous(),

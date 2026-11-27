@@ -110,7 +110,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
@@ -121,6 +120,7 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
     shared_expert_tp_enable,
+    supports_triton,
 )
 
 if TYPE_CHECKING:
@@ -557,9 +557,7 @@ class NPUWorker(GPUWorker):
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
+        if supports_triton():
             import torch_npu._inductor  # noqa: F401
 
         gc.collect()
@@ -601,8 +599,11 @@ class NPUWorker(GPUWorker):
         self._init_worker_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        # Initialize device properties used by triton kernels.
-        init_device_properties_triton()
+        # Import Triton only after both hardware and software capability checks.
+        if supports_triton():
+            from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+            init_device_properties_triton()
 
         return device
 

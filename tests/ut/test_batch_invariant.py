@@ -27,7 +27,7 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
     def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self, dtype):
@@ -47,7 +47,7 @@ class TestBatchInvariant:
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_reduce_sum_uses_native_operator_for_cpu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
@@ -96,7 +96,7 @@ class TestBatchInvariant:
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
 
     @patch("vllm_ascend.batch_invariant.torch_npu")
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_enable_batch_invariant_mode_ascendc_path(self, mock_torch_npu):
         """Test enable_batch_invariant_mode with AscendC ops available"""
@@ -130,7 +130,7 @@ class TestBatchInvariant:
 
     @patch("vllm_ascend.batch_invariant.torch")
     @patch("vllm_ascend.batch_invariant.torch_npu")
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_enable_batch_invariant_mode_rebinds_fia_workspace_query(self, mock_torch_npu, mock_torch):
         """The FIA workspace query must follow the batch-invariant kernel"""
@@ -144,7 +144,7 @@ class TestBatchInvariant:
 
     @patch("vllm_ascend.batch_invariant.torch")
     @patch("vllm_ascend.batch_invariant.torch_npu")
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_enable_batch_invariant_mode_keeps_workspace_query_without_bi_symbol(self, mock_torch_npu, mock_torch):
         """Older batch_invariant_ops builds have no query; bind a stub that fails loudly"""
@@ -159,7 +159,7 @@ class TestBatchInvariant:
             bound()
         assert "cudagraph_mm_encoder" in str(excinfo.value)
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", True)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: True)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
     @patch("vllm_ascend.batch_invariant.torch_npu")
     def test_enable_batch_invariant_mode_triton_path(self, mock_torch_npu):
@@ -190,7 +190,7 @@ class TestBatchInvariant:
         mock_library.impl.assert_any_call("aten::softmax", batch_invariant.softmax_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::_softmax", batch_invariant.softmax_batch_invariant, "NPU")
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.supports_triton", new=lambda: False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
     def test_enable_batch_invariant_mode_no_backend(self):
         """Test enable_batch_invariant_mode with no backends available"""
@@ -214,7 +214,7 @@ class TestBatchInvariant:
         import vllm.envs as envs
 
         envs.VLLM_BATCH_INVARIANT = batch_invariant_enabled
-        batch_invariant.HAS_TRITON = has_backend
+        batch_invariant.supports_triton = MagicMock(return_value=has_backend)
         batch_invariant.HAS_ASCENDC_BATCH_INVARIANT = has_backend
         batch_invariant.override_envs_for_invariance = MagicMock()
         batch_invariant.enable_batch_invariant_mode = MagicMock()

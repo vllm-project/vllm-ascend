@@ -94,18 +94,52 @@ def query_prep(monkeypatch):
     return module.prep_query_head_major
 
 
-def test_sfa_remap_propagates_triton_failure(sparse_remap):
+@pytest.mark.parametrize("triton_supported,is_npu", [(True, True), (True, False), (False, True), (False, False)])
+def test_sfa_remap_propagates_triton_failure(monkeypatch, sparse_remap, triton_supported, is_npu):
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sfa_cp.supports_triton", lambda: triton_supported)
+    monkeypatch.setattr(torch.Tensor, "is_npu", property(lambda self: is_npu), raising=False)
     sparse_remap.side_effect = RuntimeError("remap failed")
-    with pytest.raises(RuntimeError, match="remap failed"):
-        _make_impl(0)._remap_sparse_indices(torch.zeros(1, 8, dtype=torch.int32))
+    indices = torch.tensor([[0, 2, 1, 3, 4, 6, -1, 5]], dtype=torch.int32)
+    if triton_supported and is_npu:
+        with pytest.raises(RuntimeError, match="remap failed"):
+            _make_impl(0)._remap_sparse_indices(indices)
+        sparse_remap.assert_called_once_with(indices, 2, 0, 2)
+    else:
+        actual = _make_impl(0)._remap_sparse_indices(indices)
+        torch.testing.assert_close(actual, torch.tensor([[0, 1, 2, 3, -1, -1, -1, -1]], dtype=torch.int32))
+        sparse_remap.assert_not_called()
 
 
-def test_sfa_query_prep_propagates_triton_failure(query_prep):
+@pytest.mark.parametrize("triton_supported", [False, True])
+def test_sfa_query_prep_propagates_triton_failure(monkeypatch, query_prep, triton_supported):
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sfa_cp.supports_triton", lambda: triton_supported)
     impl = _make_impl(0)
     impl.dcp_group = object()
     query_prep.side_effect = RuntimeError("query prep failed")
-    with pytest.raises(RuntimeError, match="query prep failed"):
-        impl._start_dcp_query_gather(torch.zeros(1, 2, 4), torch.zeros(1, 2, 0))
+    query = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+    rope = torch.empty(1, 2, 0)
+    if triton_supported:
+        with pytest.raises(RuntimeError, match="query prep failed"):
+            impl._start_dcp_query_gather(query, rope)
+        query_prep.assert_called_once_with(query, rope)
+    else:
+        handle = Mock()
+        with (
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group",
+                return_value=SimpleNamespace(world_size=1),
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async",
+                side_effect=lambda tensor, group: (torch.cat((tensor, tensor)), handle),
+            ) as gather,
+        ):
+            context = impl._start_dcp_query_gather(query, rope)
+        gather.assert_called_once()
+        assert gather.call_args.args[1] is impl.dcp_group
+        assert context.handle is handle
+        torch.testing.assert_close(context.gathered, torch.cat((query, query), dim=1).transpose(0, 1))
+        query_prep.assert_not_called()
 
 
 def test_sfa_dcp_sparse_indices_are_compacted_per_owner_rank() -> None:
@@ -276,6 +310,11 @@ def test_dcp_query_gather_preserves_distinct_head_shards():
     gathered = torch.cat((send, send + 1000), dim=0)
     with (
         patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=pcp_size)),
+        patch.object(sfa_cp, "supports_triton", return_value=True),
+        patch(
+            "vllm_ascend.ops.triton.query_gather_prep.prep_query_head_major",
+            side_effect=lambda q, rope: torch.cat((q, rope), dim=-1).transpose(0, 1).contiguous(),
+        ),
         patch.object(sfa_cp, "all_gather_async", return_value=(gathered, None)) as gather,
     ):
         context = impl._start_dcp_query_gather(q, rope)

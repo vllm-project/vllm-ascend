@@ -6,8 +6,10 @@ from vllm import envs
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
 
-import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
-from vllm_ascend.utils import enable_sfa
+from vllm_ascend.utils import enable_sfa, supports_triton
+
+if supports_triton():
+    import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 
 
 def get_cp_max_num_reqs(vllm_config: Any) -> int:

@@ -93,6 +93,25 @@ def get_max_replicated_pcp_prefill(pcp_size: int) -> int:
     return 3 * pcp_size - 1
 
 
+@functools.cache
+def supports_triton() -> bool:
+    """Return whether Triton kernels may run on this installation.
+
+    Upstream ``HAS_TRITON`` only describes the Python environment. 310P does
+    not support Triton-Ascend, so an accidentally installed package must not
+    make the inference path import, compile, or launch Triton kernels.
+
+    The hardware profile and installed backend are fixed for this process.
+    Cache discovery so each kernel launch does not repeat the Python imports.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.TRITON_KERNELS):
+        return False
+
+    from vllm.triton_utils import HAS_TRITON
+
+    return HAS_TRITON
+
+
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.
 

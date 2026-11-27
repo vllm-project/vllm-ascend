@@ -11,7 +11,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
-from vllm_ascend.ops.triton.muls_add import muls_add_triton
+from vllm_ascend.utils import supports_triton
+
+if supports_triton():
+    from vllm_ascend.ops.triton.muls_add import muls_add_triton
 
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
@@ -297,10 +300,11 @@ direct_register_custom_op(
     dispatch_key="PrivateUse1",
 )
 
-direct_register_custom_op(
-    op_name="muls_add",
-    op_func=muls_add_triton,
-    fake_impl=_muls_add_impl_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
+if supports_triton():
+    direct_register_custom_op(
+        op_name="muls_add",
+        op_func=muls_add_triton,
+        fake_impl=_muls_add_impl_fake,
+        mutates_args=[],
+        dispatch_key="PrivateUse1",
+    )

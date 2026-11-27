@@ -16,13 +16,13 @@
 #
 
 import torch
-from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
+from vllm_ascend.utils import supports_triton
 
-if HAS_TRITON:
+if supports_triton():
     from vllm.model_executor.layers.rotary_embedding import mrope_vit_setup
 
     # vLLM v0.32.0 has only the legacy function; its fix lives on the release branch.

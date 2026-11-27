@@ -35,6 +35,14 @@
 #   How: Size each child's device slice using TP * PP * PCP.
 #   Related PR: https://github.com/vllm-project/vllm/pull/69664
 #   Future plan: Remove once both the release and verified-main pins include the fix.
+# * device/triton_gate.py (platform/model pre-registration):
+#   Target: vllm.model_executor.models.registry._ModelRegistry.inspect_model_cls.
+#   Why: ModelConfig inspects lazy model modules before the platform config hook;
+#        those modules may import Triton implementations at module scope on 310P.
+#   How: Reject known Triton-only architectures before delegating to inspection,
+#        preserving native and supported-hardware registry behavior.
+#   Future plan: Remove when upstream inspection invokes verify_model_arch before
+#                importing a model, as its model-loading path already does.
 # --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.

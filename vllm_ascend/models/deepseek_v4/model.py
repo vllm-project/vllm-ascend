@@ -100,12 +100,12 @@ from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
-from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    supports_triton,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -117,6 +117,15 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 sequence_parallel_chunk = sp_shard
+
+
+def _muls_add(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
+    """Use the fused Triton op when available, with a 310P torch fallback."""
+    if supports_triton():
+        from vllm_ascend.ops.triton.mul_add import muls_add_triton
+
+        return muls_add_triton(x, y, scale)
+    return x * scale + y
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -435,16 +444,12 @@ class DeepseekV4MoE(nn.Module):
                 if not self.is_rocm_aiter_moe_enabled:
                     if self.shared_experts is not None:
                         assert shared_output is not None
-                        final_hidden_states = muls_add_triton(
-                            final_hidden_states, shared_output, self.routed_scaling_factor
-                        )
+                        final_hidden_states = _muls_add(final_hidden_states, shared_output, self.routed_scaling_factor)
                     else:
                         final_hidden_states *= self.routed_scaling_factor
             elif self.shared_experts is not None:
                 assert shared_output is not None
-                final_hidden_states = muls_add_triton(
-                    shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor
-                )
+                final_hidden_states = _muls_add(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
         else:
             final_hidden_states = fused_moe_out
 

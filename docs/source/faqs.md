@@ -405,3 +405,27 @@ from storage again.
 Steps 2 and 3 are most effective right before a (re)start, because weight
 loading fills the page cache again and compaction recovers the blocks only for a
 short while.
+
+### 27. Why is a Triton optimization disabled on 310P?
+
+Atlas 300I DUO and Atlas 200I Pro use the 310P compatibility path and do not
+support Triton Ascend. vLLM Ascend therefore disables Triton kernels from the
+hardware capability profile before worker patches, custom-op registration, or
+kernel warmup runs. Installing `triton` or `triton-ascend` does not enable those
+kernels on 310P.
+
+When a native implementation exists, vLLM Ascend selects it automatically. A
+Triton-only configuration is either skipped with a warning (for example, a
+graph fusion pass) or rejected during initialization with a supported
+alternative in the error message. For example, use `ngram` instead of
+`ngram_gpu` for 310P speculative decoding. Do not install Triton to work around
+these messages; verify that the environment uses a 310P build and select the
+documented 310P implementation instead.
+
+Use `dtype="float16"` for 310P models whose configuration defaults to BF16.
+If ACL graph capture exhausts stream resources, follow FAQ 17 and reduce capture
+coverage or concurrency, or use `enforce_eager=True` while diagnosing the issue.
+For a small text-generation smoke test, start with `max_model_len=128`,
+`max_num_seqs=1`, and `max_num_batched_tokens=128`, then validate eager and
+supported ACL graph modes separately. These settings are not a hardware
+concurrency limit or a recommended production configuration.

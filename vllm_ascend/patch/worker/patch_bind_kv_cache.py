@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.model_executor.layers.attention import Attention
@@ -6,7 +7,12 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
-from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
+from vllm_ascend.utils import supports_triton
+
+if TYPE_CHECKING:
+    from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
+
+    _UnpackingCacheLayer = DeepseekV41CacheLayer | AscendStep5CSATailRing | AscendStep5SparseSummaryCacheLayer
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -68,7 +74,13 @@ def bind_kv_cache_to_layers(
     allocates per-layer (k, v) tuples, so assign the raw allocation directly,
     matching the Ascend bind_kv_cache patch above.
     """
-    unpacking_layers = (DeepseekV41CacheLayer, AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
+    unpacking_layers: tuple[type[_UnpackingCacheLayer], ...] = (DeepseekV41CacheLayer,)
+    if supports_triton():
+        # Step5 imports Triton kernels. Keep ordinary cache binding available
+        # in workers that cannot load those implementations, including 310P.
+        from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
+
+        unpacking_layers += (AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
         if isinstance(layer, unpacking_layers):

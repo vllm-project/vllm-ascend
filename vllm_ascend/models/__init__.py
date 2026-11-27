@@ -1,7 +1,13 @@
 from vllm import ModelRegistry
 
+from vllm_ascend.device.triton_gate import install_model_registry_gate
+
 
 def register_model():
+    # This entry point is also loaded in registry-inspection subprocesses.
+    # Guard cold ModelConfig construction before any lazy model is imported.
+    install_model_registry_gate(ModelRegistry)
+
     ModelRegistry.register_model(
         "Lfm2VlForConditionalGeneration",
         "vllm_ascend.models.lfm2_vl:AscendLfm2VLForConditionalGeneration",
