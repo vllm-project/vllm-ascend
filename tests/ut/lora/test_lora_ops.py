@@ -38,18 +38,18 @@ def test_bgmv_shrink_forwards_scale_in_kernel_order() -> None:
 
 
 def test_bgmv_expand_uses_full_output_width_and_drops_add_inputs() -> None:
-    expand = Mock(return_value="expand")
+    expand = Mock(return_value=None)
     inputs = torch.ones(2, 8)
     weights = torch.ones(3, 16, 8)
     output = torch.zeros(2, 16)
     indices = torch.tensor([1, 0])
     with _patch_c_ascend(bgmv_expand=expand):
-        assert lora_ops.bgmv_expand(inputs, weights, output, indices, add_inputs=False) == "expand"
+        assert lora_ops.bgmv_expand(inputs, weights, output, indices, add_inputs=False) is output
     expand.assert_called_once_with(inputs, weights, indices, output, 0, 16)
 
 
 def test_bgmv_expand_slice_forwards_offset_and_size() -> None:
-    expand = Mock(return_value="slice")
+    expand = Mock(return_value=None)
     inputs = torch.ones(2, 8)
     weights = torch.ones(3, 4, 8)
     output = torch.zeros(2, 12)
@@ -57,14 +57,14 @@ def test_bgmv_expand_slice_forwards_offset_and_size() -> None:
     with _patch_c_ascend(bgmv_expand=expand):
         assert (
             lora_ops.bgmv_expand_slice(inputs, weights, output, indices, slice_offset=4, slice_size=4, add_inputs=False)
-            == "slice"
+            is output
         )
     expand.assert_called_once_with(inputs, weights, indices, output, 4, 4)
 
 
 def test_sgmv_wrappers_drop_unused_batch_metadata() -> None:
     shrink = Mock(return_value="sgmv_shrink")
-    expand = Mock(return_value="sgmv_expand")
+    expand = Mock(return_value=None)
     inputs = torch.ones(4, 8)
     a_weights = torch.ones(2, 16, 8)
     b_weights = torch.ones(2, 32, 16)
@@ -88,7 +88,7 @@ def test_sgmv_wrappers_drop_unused_batch_metadata() -> None:
                 4,
                 add_inputs=True,
             )
-            == "sgmv_expand"
+            is expand_out
         )
         assert (
             lora_ops.sgmv_expand_slice(
@@ -105,7 +105,7 @@ def test_sgmv_wrappers_drop_unused_batch_metadata() -> None:
                 slice_size=16,
                 add_inputs=True,
             )
-            == "sgmv_expand"
+            is expand_out
         )
     shrink.assert_called_once_with(inputs, a_weights, indices, seq_len, output, 0.25)
     assert expand.call_args_list[0].args == (inputs, b_weights, indices, seq_len, expand_out, 0, 32)

@@ -82,6 +82,18 @@ def test_sp_reduce_scatter_appends_zero_rows_with_cat(set_tp, monkeypatch: pytes
     assert cat_calls[0][1] == 0
 
 
+def test_sp_reduce_scatter_single_rank_returns_fresh_output(set_tp, monkeypatch: pytest.MonkeyPatch):
+    set_tp(1, 0)
+    monkeypatch.setattr(sp_module, "_custom_collective", lambda name, value: None)
+    monkeypatch.setattr(sp_module, "tensor_model_parallel_reduce_scatter", lambda value, dim: value)
+    x = torch.arange(8).view(2, 4)
+
+    out = sp_module._ascend_sp_reduce_scatter_impl(x)
+
+    torch.testing.assert_close(out, x)
+    assert out.data_ptr() != x.data_ptr()
+
+
 def test_sp_padding_mask_pads_true_rows(set_tp):
     set_tp(4, 3)
     is_padding = torch.tensor([False, True, False])

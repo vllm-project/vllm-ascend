@@ -396,7 +396,9 @@ def test_final_output_never_all_reduces_sequence_shards(
         assert result is reduced_states
         all_reduce.assert_called_once_with(states)
     else:
-        assert result is states
+        torch.testing.assert_close(result, states)
+        if not is_sequence_parallel:
+            assert result.data_ptr() != states.data_ptr()
         all_reduce.assert_not_called()
 
 
@@ -442,7 +444,9 @@ def test_shared_output_reduction_depends_on_weight_layout(
         assert result is reduced_output
         all_reduce.assert_called_once_with(shared_output)
     else:
-        assert result is shared_output
+        torch.testing.assert_close(result, shared_output)
+        if mode is SharedExpertParallelMode.TENSOR_PARALLEL:
+            assert result.data_ptr() != shared_output.data_ptr()
         all_reduce.assert_not_called()
 
 

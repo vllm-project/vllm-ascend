@@ -207,19 +207,6 @@ class QuantizedAllReduce:
                 self.world_size,
                 self.device_type.name,
             )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[QAR-SKIP] reason=unsupported_group group=%s world_size=%d shape=%s dtype=%s "
-                    "numel=%d min_numel=%d",
-                    self.group_name,
-                    self.world_size,
-                    tuple(input_.shape),
-                    input_.dtype,
-                    input_.numel(),
-                    self.min_numel,
-                )
-            dist.all_reduce(input_, group=self.group)
-            return input_
         if reason is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -232,8 +219,10 @@ class QuantizedAllReduce:
                     input_.numel(),
                     self.min_numel,
                 )
-            dist.all_reduce(input_, group=self.group)
-            return input_
+            # HCCL reduces in place. Preserve the input to vLLM's out-of-place all_reduce op.
+            output = input_.clone()
+            dist.all_reduce(output, group=self.group)
+            return output
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

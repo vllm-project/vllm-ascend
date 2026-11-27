@@ -81,8 +81,12 @@ class TestMxfp8AllReduce(unittest.TestCase):
                     patch.object(mx.dist, "all_to_all_single") as exchange,
                     patch.object(mx.dist, "all_gather_into_tensor") as gather,
                 ):
-                    self.assertIs(wrapper.all_reduce(source), source)
-                plain.assert_called_once_with(source, group=wrapper.group)
+                    result = wrapper.all_reduce(source)
+                self.assertIsNot(result, source)
+                if source.numel():
+                    self.assertNotEqual(result.data_ptr(), source.data_ptr())
+                torch.testing.assert_close(result, source)
+                plain.assert_called_once_with(result, group=wrapper.group)
                 exchange.assert_not_called()
                 gather.assert_not_called()
                 wrapper.quantize_op.assert_not_called()
@@ -181,7 +185,23 @@ class TestMxfp8AllReduce(unittest.TestCase):
             list(pool.map(worker, range(size)))
 
 
-class TestQuantizedBackendSelection(unittest.TestCase):
+class TestNPUCommunicatorAllReduce(unittest.TestCase):
+    def test_plain_all_reduce_preserves_input(self):
+        comm = comm_module.NPUCommunicator.__new__(comm_module.NPUCommunicator)
+        comm.quantized_ar = None
+        comm.device_group = MagicMock()
+        source = torch.ones(4, 128)
+
+        def reduce_in_place(tensor, group):
+            self.assertIs(group, comm.device_group)
+            tensor.mul_(2)
+
+        with patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place):
+            result = comm.all_reduce(source)
+
+        torch.testing.assert_close(source, torch.ones_like(source))
+        torch.testing.assert_close(result, torch.full_like(source, 2))
+
     def test_int8_and_mxfp8_select_separate_backends(self):
         def initialize(comm, cpu_group, device, device_group, unique_name, **kwargs):
             comm.device_group = device_group

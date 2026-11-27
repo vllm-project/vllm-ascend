@@ -55,6 +55,7 @@ def _pad_to_ep_local_size(x: torch.Tensor, max_local_size: int) -> torch.Tensor:
 
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
     """EP communication only: EP all_gather followed by unpad according to the DP token distribution."""
+    input_tensor = x
     forward_context = get_forward_context()
     dp_metadata = forward_context.dp_metadata
     ep_group = get_ep_group()
@@ -64,8 +65,10 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
         # all_gather requires equal-length inputs on every rank: pad to
         # max_local_size first, then trim back to each rank's real local size.
         x = _pad_to_ep_local_size(x, max_local_size)
-    # need to unpad from ep size
     x = ep_group.all_gather(x, 0)
+    # Copy a single-rank result before any trimming, which can return a view of it.
+    if x is input_tensor:
+        x = x.clone(memory_format=torch.contiguous_format)
     if dp_metadata is not None:
         if local_sizes is not None:
             # Uniform SP layout (ceil-div + repeat_interleave, the common
@@ -98,7 +101,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
+def _maybe_pad_and_reduce(x: torch.Tensor) -> torch.Tensor:
     """EP communication only: pad according to the DP token distribution, then EP reduce_scatter."""
     forward_context = get_forward_context()
 
@@ -150,6 +153,12 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     return ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
 
 
+def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
+    output = _maybe_pad_and_reduce(x)
+    # The single-rank bypass can return x, so give the custom op an independent output.
+    return x.clone(memory_format=torch.contiguous_format) if output is x else output
+
+
 def _routed_output_is_reduced(layer_name: str) -> bool:
     runner = get_forward_context().no_compile_layers[layer_name]
     is_sequence_parallel = runner.moe_config.is_sequence_parallel
@@ -165,20 +174,18 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
     states: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """Reduce routed/final output only if dispatch has not already reduced it."""
-    if _routed_output_is_reduced(layer_name):
-        return states
-    return tensor_model_parallel_all_reduce(states)
+    """Reduce routed output as needed and return independent storage even when communication is skipped."""
+    output = states if _routed_output_is_reduced(layer_name) else tensor_model_parallel_all_reduce(states)
+    return states.clone() if output is states else output
 
 
 def _maybe_all_reduce_shared_expert_impl(
     shared_output: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """Reduce shared TP output separately when routed output is already reduced."""
-    if _routed_output_is_reduced(layer_name):
-        return tensor_model_parallel_all_reduce(shared_output)
-    return shared_output
+    """Reduce shared TP output if routed output is already reduced, and keep the result independent."""
+    output = tensor_model_parallel_all_reduce(shared_output) if _routed_output_is_reduced(layer_name) else shared_output
+    return shared_output.clone() if output is shared_output else output
 
 
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor) -> torch.Tensor:
@@ -228,17 +235,20 @@ def _rope_forward_oot_impl_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     cos_sin_cache: torch.Tensor,
-    head_dim: int,
+    head_size: int,
     rotary_dim: int,
     is_neox_style: bool = True,
     offsets: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if offsets is not None:
+        raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
         raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
-    if out_dtype is not None:
-        return torch.empty_like(query, dtype=out_dtype), torch.empty_like(key, dtype=out_dtype)
-    return query, key
+    return (
+        torch.empty_like(query, dtype=out_dtype, memory_format=torch.contiguous_format),
+        torch.empty_like(key, dtype=out_dtype, memory_format=torch.contiguous_format),
+    )
 
 
 def _muls_add_impl_fake(
@@ -268,7 +278,7 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="maybe_all_reduce_tensor_model_parallel",
     op_func=_maybe_all_reduce_tensor_model_parallel_impl,
-    fake_impl=lambda states, layer_name: states,
+    fake_impl=lambda states, layer_name: torch.empty_like(states),
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
@@ -276,7 +286,7 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="maybe_all_reduce_shared_expert",
     op_func=_maybe_all_reduce_shared_expert_impl,
-    fake_impl=lambda shared_output, layer_name: shared_output,
+    fake_impl=lambda shared_output, layer_name: torch.empty_like(shared_output),
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

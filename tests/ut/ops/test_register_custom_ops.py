@@ -144,7 +144,8 @@ def test_sp_ep_fake_shapes_follow_uneven_local_chunks(monkeypatch):
     assert reduced.shape == (3, 4)
 
 
-def test_rope_fake_uses_requested_output_dtype():
+@pytest.mark.parametrize("out_dtype", [None, torch.float8_e4m3fn])
+def test_rope_fake_returns_fresh_outputs(out_dtype):
     positions = torch.arange(2)
     query = torch.empty(2, 128, dtype=torch.bfloat16)
     key = torch.empty(2, 64, dtype=torch.bfloat16)
@@ -156,13 +157,30 @@ def test_rope_fake_uses_requested_output_dtype():
         torch.empty(16, 64, dtype=torch.bfloat16),
         64,
         64,
-        out_dtype=torch.float8_e4m3fn,
+        out_dtype=out_dtype,
     )
 
     assert query_out.shape == query.shape
     assert key_out.shape == key.shape
-    assert query_out.dtype == torch.float8_e4m3fn
-    assert key_out.dtype == torch.float8_e4m3fn
+    assert query_out.dtype == (out_dtype or query.dtype)
+    assert key_out.dtype == (out_dtype or key.dtype)
+    assert query_out.data_ptr() != query.data_ptr()
+    assert key_out.data_ptr() != key.data_ptr()
+
+
+def test_single_rank_ep_collectives_return_fresh_outputs(monkeypatch):
+    group = SimpleNamespace(
+        world_size=1,
+        all_gather=lambda x, dim: x,
+        reduce_scatter=lambda x, dim: x,
+    )
+    monkeypatch.setattr(custom_ops, "get_ep_group", lambda: group)
+    monkeypatch.setattr(custom_ops, "get_forward_context", lambda: SimpleNamespace(dp_metadata=None))
+    x = torch.arange(8).view(2, 4)
+    for collective in (custom_ops._maybe_all_gather_and_maybe_unpad_impl, custom_ops._maybe_pad_and_reduce_impl):
+        output = collective(x)
+        torch.testing.assert_close(output, x)
+        assert output.data_ptr() != x.data_ptr()
 
 
 @pytest.mark.parametrize("dp_size,pcp_size,sp_size", [(1, 2, 2), (2, 1, 2), (2, 2, 2), (2, 2, 4)])

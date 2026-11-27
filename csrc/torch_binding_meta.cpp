@@ -48,19 +48,17 @@ c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
-at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                        int64_t slice_offset, int64_t slice_size) {
-    at::Tensor y_out = at::empty_like(y);
-    return y_out;
-}
+// LoRA kernels update the values in the output buffer without changing its metadata.
+void bgmv_shrink_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, double) {}
 
-at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
-                        at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
-    at::Tensor y_out = at::empty_like(y);
-    return y_out;
-}
+void bgmv_expand_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t, int64_t) {}
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+void sgmv_shrink_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, double) {}
+
+void sgmv_expand_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t,
+                      int64_t) {}
+
+void mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0,
@@ -86,17 +84,16 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
     c10::optional<bool> enable_inner_out,
-    at::Tensor &q_out0,
-    at::Tensor &kv_cache_out0,
-    at::Tensor &q_out1,
-    at::Tensor &kv_cache_out1,
-    at::Tensor &inner_out
+    at::Tensor &,
+    at::Tensor &,
+    at::Tensor &,
+    at::Tensor &,
+    at::Tensor &
     )
 {
     TORCH_CHECK(
         cos.has_value() == sin.has_value(),
         "mla_preprocess requires cos and sin to both be tensors or both be None.");
-    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
 #endif
@@ -215,7 +212,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
 
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
-std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
+void dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -227,14 +224,12 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out,
-    at::Tensor& expert_token_nums,
+    at::Tensor&,
+    at::Tensor&,
     const c10::optional<at::Tensor> &x_active_mask,
     double swiglu_limit,
     int64_t world_size
-) {
-    return {out, expert_token_nums};
-}
+) {}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
@@ -1846,9 +1841,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
-    // Bgmv expand
+    ops.impl("bgmv_shrink", &vllm_ascend::meta::bgmv_shrink_meta);
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
-    // Sgmv expand
+    ops.impl("sgmv_shrink", &vllm_ascend::meta::sgmv_shrink_meta);
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
