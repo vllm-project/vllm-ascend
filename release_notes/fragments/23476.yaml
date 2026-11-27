@@ -1,0 +1,6 @@
+pr: 23476
+entries:
+  - category: performance
+    text: >-
+      Base-model-only requests to a MoE LoRA deployment now skip expert adapter
+      updates when no data-parallel rank is using an adapter.
