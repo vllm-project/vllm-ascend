@@ -1,0 +1,4 @@
+pr: 22808
+entries:
+  - category: feature
+    text: GLM-5.3 can now use the HND KV cache layout with DFlash speculative decoding in disaggregated prefill and decode deployments.
