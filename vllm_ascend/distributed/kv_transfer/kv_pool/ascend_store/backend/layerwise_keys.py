@@ -15,6 +15,7 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    kvpp_size: int = 1
 
     def make_full_key(
         self,
@@ -37,6 +38,8 @@ class LayerwiseKeyBuilder:
 
     def make_hit_check_keys(self, group_id: int, block_hash: str, num_ranks: int) -> list[str]:
         """Require every distinct shard on every PP stage."""
+        if self.kvpp_size > 1:
+            num_ranks = self.kvpp_size
         pcp_size = self.pcp_size if group_id in self.pcp_sharded_group_ids else 1
         return [
             self.make_full_key(group_id, block_hash, rank, stage, pcp_rank, dcp_rank)

@@ -45,7 +45,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | PCP | ✅ Supported | Caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` or `MooncakePushConnector` (Experimental). Enable KVPP only on the prefill node. |
-| KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
+| KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`. See below for whole-block and layerwise settings. |
 | Mooncake layerwise KV pooling | 🟠 Experimental | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
@@ -126,7 +126,9 @@ Configure the memcache SDK and MetaService as described in [KV Cache Pool (Ascen
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
 ```
 
-The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false` and `discard_partial_chunks=true` (the default). KV events and consumer write-back are not supported with KVPP.
+The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes. For whole-block transfers, use `use_layerwise=false` and keep `discard_partial_chunks=true` (the default). KV events and consumer write-back are not supported with KVPP.
+
+For experimental layerwise Memcache pooling, set `use_layerwise=true` in the AscendStore connector and leave `load_async` unset. Each rank saves and restores its owned layers, and prefix lookup requires all owners across all PP stages. Use one full-attention KV cache group and at least one target layer per KVPP rank in each stage. Omit `layerwise_num_shared_buffers` because KVPP owners keep their layers in persistent buffers. Layerwise KVPP uses a separate pool namespace for its cache layout.
 
 ### Mooncake Layerwise Pooling
 
@@ -165,7 +167,7 @@ Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector
         "kv_connector_extra_config": {
           "backend": "memcache",
           "lookup_rpc_port": "0",
-          "use_layerwise": false
+          "use_layerwise": true
         }
       }
     ]

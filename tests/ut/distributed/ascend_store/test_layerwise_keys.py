@@ -21,6 +21,38 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_memcache_kvpp_lookup_matches_all_pp_and_pcp_writers(self):
+        config = self.make_config(pp_size=2)
+        config.model_config.get_total_num_hidden_layers = lambda: 78
+        config.parallel_config.tensor_parallel_size = 1
+        config.parallel_config.prefill_context_parallel_size = 8
+        config.additional_config = {"enable_kvpp": True}
+        args = {
+            "vllm_config": config,
+            "kv_cache_config": self.make_cache_config(1),
+            "model_name": "glm",
+            "use_hybrid": False,
+            "grouped_block_size": [16],
+        }
+        with patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"}):
+            builder = MemcacheBackend.bind_layerwise_keys(**args)
+            config.parallel_config.rank = 15
+            peer = MemcacheBackend.bind_layerwise_keys(**args)
+            config.additional_config = {"enable_kvpp": False}
+            replicated = MemcacheBackend.bind_layerwise_keys(**args)
+        with patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "36,42"}):
+            config.additional_config = {"enable_kvpp": True}
+            repartitioned = MemcacheBackend.bind_layerwise_keys(**args)
+
+        keys = builder.make_hit_check_keys(0, "hash", num_ranks=1)
+        self.assertEqual(
+            keys,
+            [peer.make_full_key(0, "hash", rank, stage) for stage in range(2) for rank in range(8)],
+        )
+        self.assertEqual(len(set(keys)), 16)
+        self.assertTrue(set(keys).isdisjoint(replicated.make_hit_check_keys(0, "hash", 1)))
+        self.assertTrue(set(keys).isdisjoint(repartitioned.make_hit_check_keys(0, "hash", 1)))
+
     def test_attention_keys_share_pcp_replicas(self):
         for pp_size in (1, 2):
             for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):

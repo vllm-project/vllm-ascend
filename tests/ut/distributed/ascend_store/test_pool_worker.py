@@ -848,6 +848,56 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    @patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"})
+    def test_memcache_layerwise_tasks_follow_registered_kvpp_owners(self):
+        for stage, (start, num_layers) in enumerate(((0, 42), (42, 36))):
+            sizes = [num_layers // 8 + (rank < num_layers % 8) for rank in range(8)]
+            names = [f"model.layers.{layer}.attn" for layer in range(start, start + num_layers)]
+            spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+            caches = {name: torch.zeros((4, 16, 8)) for name in names}
+            for rank in range(8):
+                with self.subTest(stage=stage, rank=rank):
+                    cache_config = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(names, spec)], num_blocks=4)
+                    worker = make_worker(
+                        self,
+                        use_mla=True,
+                        use_kvpp=True,
+                        pcp_rank=rank,
+                        pcp_size=8,
+                        pp_rank=stage,
+                        pp_size=2,
+                        pp_partition=[42, 36],
+                        num_layers=num_layers,
+                        kv_cache_config=cache_config,
+                        use_layerwise=True,
+                        extra_config={"backend": "memcache"},
+                    )
+                    worker._transfer_threads_started = True
+                    worker.register_kv_caches(caches)
+                    worker._data_plane.prepare_sessions = MagicMock(return_value={})
+                    request = ReqMeta(
+                        req_id="req",
+                        token_len_chunk=32,
+                        block_ids=[1, 2],
+                        block_hashes=["h0", "h1"],
+                        can_save=True,
+                        load_spec=LoadSpec(0, 16, True),
+                    )
+                    worker.process_layer_data([request])
+
+                    first = sum(sizes[:rank])
+                    expected = list(range(first, first + sizes[rank]))
+                    builder = worker._build_group_layer_builders()[0]
+                    for task_lists in (worker.layer_save_tasks, worker.layer_load_tasks):
+                        tasks = [task for layer_tasks in task_lists for task in layer_tasks]
+                        self.assertEqual([task.layer_id for task in tasks], expected)
+                        for task in tasks:
+                            addrs, _, _ = builder._build_transfer_arrays(
+                                np.array([0]), np.array([1024]), task.layer_idx_in_group
+                            )
+                            self.assertEqual(addrs.tolist(), [caches[names[task.layer_id]].data_ptr()])
+                    self.doCleanups()
+
     def test_load_completion_is_shared_and_reset_at_step_binding(self):
         worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
         worker._global_to_local_layer = {9: 0, 10: 1}
