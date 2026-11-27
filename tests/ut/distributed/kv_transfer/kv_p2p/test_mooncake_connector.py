@@ -2939,6 +2939,31 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertFalse(delay_free)
         self.assertIsNone(params)
 
+    def test_request_finished_stopped_returns_params_and_retains_blocks(self):
+        request = self._make_remote_decode_request(prompt_len=1)
+        request.status = RequestStatus.FINISHED_STOPPED
+        request.output_token_ids = [123]
+
+        delay_free, params = self.scheduler.request_finished(request, ([10],))
+
+        self.assertTrue(delay_free)
+        self.assertEqual(params["remote_block_ids"], ([10],))
+        self.assertEqual(params["remote_request_id"], request.request_id)
+        self.assertEqual(params["last_token_id"], 123)
+        self.assertTrue(params["do_remote_prefill"])
+        self.assertFalse(params["do_remote_decode"])
+        self.assertIn(request.request_id, self.scheduler._reqs_need_send)
+
+    def test_request_finished_failed_producer_does_not_build_remote_params(self):
+        for status in (RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR):
+            with self.subTest(status=status):
+                request = self._make_remote_decode_request(prompt_len=1)
+                request.status = status
+                request.output_token_ids = []
+
+                self.assertEqual(self.scheduler.request_finished(request, ([10],)), (False, None))
+                self.assertNotIn(request.request_id, self.scheduler._reqs_need_send)
+
     def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
         request = MockRequest(
             "req1",

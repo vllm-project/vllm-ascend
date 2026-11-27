@@ -993,6 +993,36 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertEqual(params["num_prompt_blocks"], 2)
         self.assertIn("req1", scheduler._reqs_need_send)
 
+    def test_request_finished_stopped_returns_params_and_retains_blocks(self):
+        scheduler = self._make_scheduler()
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(129)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_STOPPED,
+        )
+        request.output_token_ids = [123]
+
+        delay_free, params = scheduler.request_finished_all_groups(request, ([10], [100, 101]))
+
+        self.assertTrue(delay_free)
+        self.assertEqual(params["remote_block_ids"], ([10], [100, 101]))
+        self.assertEqual(params["remote_request_id"], request.request_id)
+        self.assertEqual(params["last_token_id"], 123)
+        self.assertTrue(params["do_remote_prefill"])
+        self.assertFalse(params["do_remote_decode"])
+        self.assertIn(request.request_id, scheduler._reqs_need_send)
+
+    def test_request_finished_failed_producer_does_not_build_remote_params(self):
+        scheduler = self._make_scheduler()
+        for status in (RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR):
+            with self.subTest(status=status):
+                request = MockRequest("req1", [1], kv_transfer_params={"do_remote_decode": True}, status=status)
+                request.output_token_ids = []
+
+                self.assertEqual(scheduler.request_finished_all_groups(request, ([10], [100])), (False, None))
+                self.assertNotIn(request.request_id, scheduler._reqs_need_send)
+
     def test_request_finished_uses_num_prompt_tokens(self):
         scheduler = self._make_scheduler()
         request = MockRequest(
