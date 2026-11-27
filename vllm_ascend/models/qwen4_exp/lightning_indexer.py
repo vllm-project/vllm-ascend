@@ -40,7 +40,6 @@ def qsa_select_paged_tokens_lightning_v2(
     compress_ratio: int,
     out: torch.Tensor | None = None,
     *,
-    out_initialized: bool = False,
     main_key: torch.Tensor | None = None,
     main_value: torch.Tensor | None = None,
     main_key_cache: torch.Tensor | None = None,
@@ -79,8 +78,11 @@ def qsa_select_paged_tokens_lightning_v2(
     output_width = token_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
-    if not out_initialized:
-        out.fill_(-1)
+    # Packing only writes the entries that are visible for each query row.
+    # Reset the rest before every real selection so stale/empty values cannot
+    # be interpreted as GBSA block indices.  MTP reuse bypasses this function
+    # through ``skip_topk`` and therefore keeps the step-0 selection intact.
+    out.fill_(-1)
     if not rows:
         return out
 

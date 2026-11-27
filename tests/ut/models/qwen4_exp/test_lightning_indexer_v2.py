@@ -178,8 +178,7 @@ def test_cross_layer_prepared_inputs_are_reused(selector):
     metadata.qsa_residual_lengths = torch.tensor([1, 2, 0], dtype=torch.int32)
     metadata.qsa_cu_seqlens_q = torch.tensor([0, 2, 4, 6], dtype=torch.int32)
     metadata.qsa_score_weights = torch.full((8, 4), 0.125, dtype=torch.float32)
-    inputs["out"].fill_(-1)
-    inputs["out_initialized"] = True
+    inputs["out"].fill_(123)
 
     module.qsa_select_paged_tokens_lightning_v2(**inputs)
 
@@ -191,3 +190,6 @@ def test_cross_layer_prepared_inputs_are_reused(selector):
     assert kwargs["cu_seqlens_q"].data_ptr() == metadata.qsa_cu_seqlens_q.data_ptr()
     args = bindings.lightning_indexer_v2.call_args.args
     assert args[2].data_ptr() == metadata.qsa_score_weights.data_ptr()
+    # Prepared metadata/weights are reusable, but the selection output is not:
+    # packing leaves row-dependent unused columns untouched.
+    assert not torch.any(inputs["out"] == 123)

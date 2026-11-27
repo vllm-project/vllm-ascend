@@ -555,7 +555,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
-            out_initialized=out is not None,
             main_key=main_key,
             main_value=main_value,
             main_key_cache=main_key_cache,
