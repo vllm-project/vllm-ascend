@@ -156,7 +156,6 @@ def make_attention_cache_case(packed):
 
     from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
-    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 
     specs, layers = {}, {}
     for index, dims, packed_dim in ((9, (8, 4), 16), (10, (4, 4), 24), (11, (8, 4), 16)):
@@ -167,15 +166,13 @@ def make_attention_cache_case(packed):
             head_size=packed_dim if packed else sum(dims),
             dtype=torch.int8 if packed else torch.bfloat16,
             cache_sparse_sfa_c8=packed,
-            kv_lora_rank=dims[0],
-            qk_rope_head_dim=dims[1],
         )
         layer = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(layer)
         layer.kv_lora_rank, layer.qk_rope_head_dim = dims
         layer.num_heads = 1
         layer.kv_sharing_target_layer_name = None
-        layer.get_attn_backend = lambda: AscendSFABackend if packed else AscendMLABackend
+        layer.get_attn_backend = lambda: AscendMLABackend
         layers[name] = layer
     name = indexer_name(9)
     specs[name] = AscendSFAIndexerCacheSpec(

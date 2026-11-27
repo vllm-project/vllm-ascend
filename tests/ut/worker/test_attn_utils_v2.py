@@ -47,7 +47,6 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_config_builder import (
@@ -277,20 +276,10 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
         dtype=torch.bfloat16,
         store_on_host=True,
     )
-    indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-    indexer_spec = AscendSFAIndexerCacheSpec(
-        block_size=128, num_kv_heads=1, head_size=4, dtype=torch.int8, scale_dim=1, scale_dtype=torch.float32
-    )
     config = KVCacheConfig(
         num_blocks=3,
-        kv_cache_tensors=[
-            _make_kv_cache_tensor(3 * item.page_size_bytes, [owner], item.page_size_bytes)
-            for owner, item in ((name, spec), (indexer_name, indexer_spec))
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=[owner], kv_cache_spec=item)
-            for owner, item in ((name, spec), (indexer_name, indexer_spec))
-        ],
+        kv_cache_tensors=[_make_kv_cache_tensor(3 * spec.page_size_bytes, [name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
     )
     layer = SimpleNamespace(
         get_attn_backend=lambda: SparseAttentionBackend,
@@ -322,10 +311,8 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
         assert offload_config is sparse_cfg
         return marker
 
-    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
-    layers = {name: layer, indexer_name: SimpleNamespace(get_attn_backend=lambda: AscendSFAIndexerBackend)}
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {name: layer})
     monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(sparse_kv_offload_config=sparse_cfg))
     monkeypatch.setattr(attn_utils, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (4, 2))
@@ -333,12 +320,7 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
     monkeypatch.setattr(attn_utils, "allocate_kv_cache_tensors_for_sparse_kv_offload", allocate)
     monkeypatch.setattr(attn_utils, "reshape_kv_cache_tensors_for_sparse_kv_offload", reshape)
 
-    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [2, 128])
-    assert caches[name] is marker
-    keys, scales = caches[indexer_name]
-    assert keys.shape == (3, 128, 1, 4) and scales.shape == (3, 128, 1, 1)
-    assert keys.is_contiguous() and scales.is_contiguous()
-    assert scales.dtype == torch.float32 and scales.data_ptr() == keys.data_ptr() + keys.nbytes
+    assert attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [2])[name] is marker
     assert calls == [(48, 24, 2 * 1024 * 1024, 0, False)]
 
 
@@ -1413,36 +1395,6 @@ def test_k26_basic_mla_preserves_strided_views(k26_basic_mla):
     assert torch.equal(torch.as_tensor(first_cache.untyped_storage(), dtype=torch.int8), reference)
 
 
-def test_non_kimi_mla_planner_uses_stored_heads(k26_basic_mla):
-    _, config, layers = k26_basic_mla
-    config.model_config.hf_config.model_type = config.model_config.hf_text_config.model_type = "deepseek_v3"
-    specs = attn_utils.get_kv_cache_spec(config)
-    spec = AscendMLAAttentionSpec.merge(list(specs.values()))
-    group = KVCacheGroupSpec(layer_names=list(layers), kv_cache_spec=spec)
-    plan = get_kv_cache_config_from_groups(config, [group], 3 * len(layers) * spec.page_size_bytes)
-    assert spec.num_heads == spec.num_kv_heads == 1
-    assert plan.kv_cache_tensors[0].block_stride == spec.page_size_bytes
-    caches = attn_utils.allocate_kv_cache_main(plan, torch.device("cpu"), None, [128])
-    for nope, rope in caches.values():
-        assert nope.shape == (3, 128, 1, 512) and rope.shape == (3, 128, 1, 64)
-        assert nope.untyped_storage().data_ptr() == rope.untyped_storage().data_ptr()
-
-
-def test_k26_mooncake_v1_keeps_contiguous_planes(k26_basic_mla, monkeypatch):
-    _, config, layers = k26_basic_mla
-    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV1")
-    config.cache_config.cache_dtype = "auto"
-    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
-    spec = AscendMLAAttentionSpec.merge(list(attn_utils.get_kv_cache_spec(config).values()))
-    group = KVCacheGroupSpec(layer_names=list(layers), kv_cache_spec=spec)
-    plan = get_kv_cache_config_from_groups(config, [group], 3 * len(layers) * spec.page_size_bytes)
-    caches = attn_utils.allocate_kv_cache_main(plan, torch.device("cpu"), None, [128])
-    for nope, rope in caches.values():
-        assert nope.shape == (3, 128, 1, 512) and rope.shape == (3, 128, 1, 64)
-        assert nope.is_contiguous() and rope.is_contiguous()
-        assert nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr()
-
-
 @pytest.mark.parametrize("feature", ["speculative", "pd", "writer", "block_outer"])
 def test_k26_basic_mla_keeps_legacy_path(k26_basic_mla, feature):
     config, vllm_config, layers = k26_basic_mla
@@ -1570,13 +1522,13 @@ def test_k3_unified_allocator_preserves_runtime_views(
 
 @pytest.mark.parametrize(
     ("model_type", "expected_num_heads"),
-    [("kimi_linear", 1), ("deepseek_v3", 1)],
+    [("kimi_linear", 1), ("deepseek_v3", 12)],
 )
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
 @pytest.mark.parametrize("dspark_active", [False, True])
-def test_unified_mla_cache_spec_uses_physical_heads(
+def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
 ):
     source_spec = MLAAttentionSpec(
@@ -3212,8 +3164,8 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
-    assert specs["fa"].num_heads == specs["fa"].num_kv_heads == 1
-    assert specs["sfa"].num_heads == specs["sfa"].num_kv_heads == 1
+    assert specs["fa"].num_heads == 64
+    assert specs["sfa"].num_heads == 64
     assert specs["sfa"].cache_sparse_sfa_c8 is True
 
     mla_spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
@@ -3483,8 +3435,6 @@ def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
         num_kv_heads=1,
         head_size=nope_dim + rope_dim,
         dtype=dtype,
-        kv_lora_rank=nope_dim,
-        qk_rope_head_dim=rope_dim,
         indexes_kv_by_block_stride=True,
     )
     mamba_spec = MambaSpec(
@@ -3512,23 +3462,47 @@ def test_hybrid_mla_manager_pages_do_not_alias_other_mamba_blocks(
             for name, spec in ((mla_name, mla_spec), (mamba_name, mamba_spec))
         ],
     )
-    layers = {
-        mla_name: SimpleNamespace(get_attn_backend=lambda: AscendMLABackend),
-        mamba_name: SimpleNamespace(get_attn_backend=lambda: KimiKDAHostMetadataBackend),
-    }
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(), kv_transfer_config=None, additional_config={})
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
-    caches = attn_utils.allocate_kv_cache_main(
-        kv_cache_config, torch.device("cpu"), None, [kernel_block_size, manager_block_size]
+    layer = _make_mla_layer()
+    layer.kv_lora_rank = nope_dim
+    layer.qk_rope_head_dim = rope_dim
+    layer.impl.dtype = dtype
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
     )
-    nope, rope = caches[mla_name]
-    conv_state, ssm_state = caches[mamba_name]
-    backing = torch.as_tensor(nope.untyped_storage(), dtype=torch.int8)
-    assert backing.numel() == backing_bytes
-    mla_raw = backing[raw_offset_bytes : raw_offset_bytes + layer_bytes]
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {mla_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    # Use the real allocator's shared backing and retain sentinel regions before
+    # and after the original slice.
+    raw_caches = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    mla_raw, mamba_raw = raw_caches[mla_name], raw_caches[mamba_name]
+    assert isinstance(mla_raw, torch.Tensor) and isinstance(mamba_raw, torch.Tensor)
+    assert mla_raw.data_ptr() == mamba_raw.data_ptr()
+    assert mla_raw.storage_offset() == raw_offset_bytes
+    backing = torch.as_strided(mla_raw, size=(backing_bytes,), stride=(1,), storage_offset=0)
     backing.fill_(42)
+    nope, rope = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendMLABackend,
+                layer_names=[mla_name],
+                kv_cache_spec=mla_spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kv_cache_raw_tensors=raw_caches,
+        cache_dtype="auto",
+        kernel_block_sizes=[kernel_block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )[mla_name]
+    conv_state, ssm_state = attn_utils._reshape_mamba_kv_cache(mamba_raw, mamba_spec)
 
     kernel_blocks_per_manager = manager_block_size // kernel_block_size
     first_kernel_block = 4 * kernel_blocks_per_manager
