@@ -92,6 +92,7 @@ def get_max_replicated_pcp_prefill(pcp_size: int) -> int:
     # From 3P on, the P tails all fit even when the head width rounds up.
     return 3 * pcp_size - 1
 
+
 @functools.cache
 def supports_triton() -> bool:
     """Return whether Triton kernels may run on this installation.

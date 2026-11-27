@@ -27,8 +27,8 @@ except ModuleNotFoundError as exc:
     if exc.name != "vllm_ascend._build_info":
         raise
     _build_info = ModuleType("vllm_ascend._build_info")
-    setattr(_build_info, "__device_type__", None)
-    setattr(_build_info, "__soc_version__", "")
+    _build_info.__device_type__ = None
+    _build_info.__soc_version__ = ""
 
 
 def _build_supports_triton() -> bool:
