@@ -68,6 +68,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. Supported fused modes (`1`, `2`, and `3`) fall back to `0` when the target model or MTP draft uses per-layer SwiGLU limits. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
+| `sfa_cache_layout` | str | `"contiguous"` | Main SFA cache layout for GLM-5.2/5.3. `"contiguous"` stores all NoPE blocks together, followed by all RoPE blocks. `"block_interleaved"` places NoPE and RoPE together in each block. Both modes place quantized indexer keys and scales together in each kernel block. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
@@ -77,6 +78,8 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
+
+`sfa_cache_layout` applies to MRV2's single SFA cache group with layer-private storage, including the default layout and HND. KVPP, offload, and draft configurations with separate or non-SFA groups use their existing allocation paths. For prefill/decode disaggregation, configure the same mode at both ends. Use a fresh external cache namespace when changing the stored layout.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

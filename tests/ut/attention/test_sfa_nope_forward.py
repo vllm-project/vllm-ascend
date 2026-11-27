@@ -115,6 +115,67 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
     assert torch.equal(backing, before)
 
 
+def test_split_exec_kv_writes_page_components_at_their_physical_stride(monkeypatch):
+    block_size, latent_dim, rope_dim = 4, 8, 2
+    latent_elements = block_size * latent_dim
+    page_elements = block_size * (latent_dim + rope_dim) + 8
+    backing = torch.full((3, page_elements), -1.0)
+    latent = backing[:, :latent_elements].view(3, block_size, 1, latent_dim)
+    rope = backing[:, latent_elements : latent_elements + block_size * rope_dim].view(3, block_size, 1, rope_dim)
+    cache = (latent, rope)
+    values = torch.arange(4 * (latent_dim + rope_dim), dtype=backing.dtype).view(4, -1)
+    slots = torch.tensor([3, 4, -1, 10], dtype=torch.int32)
+
+    def scatter(cache, rows, slots):
+        for slot, row in zip(slots.tolist(), rows):
+            if slot >= 0:
+                cache[slot // block_size, slot % block_size, 0] = row.reshape(-1)
+
+    monkeypatch.setattr(sparse_mla, "write_dsa_cache", scatter)
+    monkeypatch.setattr(sparse_mla.torch_npu, "npu_rms_norm", lambda x, weight, epsilon: (x + 10, None), raising=False)
+    impl = SimpleNamespace(
+        pcp_enabled=False,
+        num_kv_heads=1,
+        qk_rope_head_dim=rope_dim,
+        kv_lora_rank=latent_dim,
+        kv_a_layernorm=SimpleNamespace(weight=torch.ones(latent_dim), variance_epsilon=1e-5),
+        rope_single=lambda x, cos, sin: x + 20,
+        enable_sparse_sfa_turboquant=False,
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_hif8=False,
+    )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
+    AscendSFAImpl.exec_kv(impl, values, None, None, cache, slots, None)
+    expected = torch.full_like(backing, -1)
+    for slot, row in zip(slots.tolist(), values):
+        if slot >= 0:
+            block, token = divmod(slot, block_size)
+            expected[block, token * latent_dim : (token + 1) * latent_dim] = row[:latent_dim] + 10
+            start = latent_elements + token * rope_dim
+            expected[block, start : start + rope_dim] = row[latent_dim:] + 20
+    torch.testing.assert_close(backing, expected)
+
+
+def test_contiguous_split_exec_kv_keeps_fused_writer(monkeypatch):
+    cache = (torch.empty(3, 4, 1, 8), torch.empty(3, 4, 1, 2))
+    slots = torch.tensor([3, 4, -1], dtype=torch.int64)
+    values = torch.randn(len(slots), 10)
+    impl = SimpleNamespace(
+        num_kv_heads=1,
+        qk_rope_head_dim=2,
+        kv_lora_rank=8,
+        kv_a_layernorm=SimpleNamespace(weight=torch.ones(8), variance_epsilon=1e-5),
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+    )
+    fused = MagicMock()
+    monkeypatch.setattr(sparse_mla.torch_npu, "npu_kv_rmsnorm_rope_cache", fused, raising=False)
+    AscendSFAImpl._exec_kv_local(impl, values, None, None, cache, slots, None)
+    fused.assert_called_once()
+    assert fused.call_args.args[4] is slots
+    assert fused.call_args.args[5] is cache[1] and fused.call_args.args[6] is cache[0]
+
+
 class _Linear:
     def __init__(self, weight: torch.Tensor) -> None:
         self.weight = weight

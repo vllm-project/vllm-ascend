@@ -434,12 +434,18 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     )
 
 
-def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_c4_cache_write_preserves_packed_bytes(monkeypatch, interleaved):
     indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
     indexer.enable_sparse_li_c4 = True
     indexer.enable_sparse_li_c8 = False
-    key_cache = torch.full((2, 128, 1, 64), 23, dtype=torch.uint8)
-    scale_bytes = torch.full((2, 128, 1, 2, 2), 23, dtype=torch.uint8)
+    if interleaved:
+        pages = torch.full((2, 128 * (64 + 4)), 23, dtype=torch.uint8)
+        key_cache = pages[:, : 128 * 64].view(2, 128, 1, 64)
+        scale_bytes = pages[:, 128 * 64 :].view(2, 128, 1, 2, 2)
+    else:
+        key_cache = torch.full((2, 128, 1, 64), 23, dtype=torch.uint8)
+        scale_bytes = torch.full((2, 128, 1, 2, 2), 23, dtype=torch.uint8)
     indexer.k_cache = SimpleNamespace(kv_cache=(key_cache, scale_bytes.view(torch.float8_e8m0fnu)))
     packed_key = torch.arange(3 * 64, dtype=torch.uint8).view(3, 64)
     scale = torch.arange(12, dtype=torch.uint8).view(3, 2, 2)
@@ -450,20 +456,77 @@ def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
 
     def scatter(cache, indices, updates):
         assert cache.dtype == updates.dtype == torch.uint8
-        cache[indices.flatten()] = updates
+        cache[tuple(indices.T)] = updates
 
     scatter_op = Mock(side_effect=scatter)
     monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter_op)
 
-    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots)
+    coordinates = torch.stack((slots // 128, slots % 128), dim=-1)
+    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots, coordinates)
 
     expected_key = torch.full_like(key_cache, 23).view(-1, 64)
     expected_scale = torch.full_like(scale_bytes, 23).view(-1, 2, 2)
     expected_key[slots] = packed_key
     expected_scale[slots] = scale
-    assert torch.equal(key_cache.view(-1, 64), expected_key)
-    assert torch.equal(scale_bytes.view(-1, 2, 2), expected_scale)
+    assert torch.equal(key_cache.reshape(-1, 64), expected_key)
+    assert torch.equal(scale_bytes.reshape(-1, 2, 2), expected_scale)
     assert scatter_op.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("dtype", "head_size", "scale_dtype", "scale_dim", "component_widths"),
+    [
+        (torch.bfloat16, 128, torch.int8, 0, [(256,)]),
+        (torch.int8, 128, torch.float16, 1, [(128,), (2,)]),
+        (torch.float8_e4m3fn, 128, torch.float32, 1, [(128,), (4,)]),
+        (torch.uint8, 64, torch.float8_e8m0fnu, 4, [(64,), (2, 2)]),
+    ],
+)
+def test_indexer_runtime_shapes_include_kernel_pages_and_replicas(
+    dtype, head_size, scale_dtype, scale_dim, component_widths
+):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+        cache_sparse_li_c4=scale_dim == 4,
+        cache_sparse_li_c8=scale_dim == 1,
+        sfa_dcp_replicated_indexer_size=2,
+    )
+    shapes = AscendSFAIndexerBackend.get_runtime_shapes(spec, 3, layout=None, kernel_block_size=128)
+    assert shapes == tuple((12, 1, 128, *width) for width in component_widths)
+
+
+def test_indexer_fused_decode_writes_use_bound_page_strides(monkeypatch):
+    block, width, pages = 128, 128, 3
+    backing = torch.empty((pages, block * (width + 2)), dtype=torch.int8)
+    key = backing[:, : block * width].view(pages, block, 1, width)
+    scale = backing[:, block * width :].view(torch.float16).view(pages, block, 1, 1)
+    indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    torch.nn.Module.__init__(indexer)
+    indexer.k_cache = SimpleNamespace(kv_cache=(key, scale))
+    indexer._use_fused_cache_store = True
+    indexer.use_pcp = False
+    values, scales = torch.ones(2, width, dtype=torch.int8), torch.ones(2)
+    monkeypatch.setattr(indexer, "forward_k", lambda *args, **kwargs: (values, scales, None))
+    store = Mock()
+    monkeypatch.setattr(indexer_module, "store_indexer_key_scale", store)
+    slots = torch.tensor([block - 1, block + 3])
+    metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots, num_actual_tokens=2, num_decode_tokens=2)
+    indexer.forward(values, values, values, metadata, compute_topk=False)
+    store.assert_called_once_with(
+        values,
+        scales,
+        slots,
+        key,
+        scale,
+        block_size=block,
+        key_block_stride=block * (width + 2),
+        scale_block_stride=block * (width + 2) // 2,
+    )
 
 
 @pytest.mark.parametrize("query_lengths,key_lengths", [([2, 3], [2, 3]), ([1, 1], [31, 65])])

@@ -78,7 +78,8 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
-RuntimeComponentShape = tuple[int, int, int, int]
+# Block, head, token and page-internal content dimensions, with the last in bytes.
+RuntimeComponentShape = tuple[int, ...]
 KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
 
 

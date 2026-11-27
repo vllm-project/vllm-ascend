@@ -1453,6 +1453,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
+    vllm_config.model_config.hf_text_config = vllm_config.model_config.hf_config
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
         deepseek_v4_indexer.AscendDeepseekV4IndexerCache
     )
@@ -1516,7 +1517,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         allocate=None,
     ) -> dict[str, Any]:
         assert allocate is None
-        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
+        return attn_utils.allocate_kv_cache_main(_kv_cache_config, _device, _layout, _kernel_block_sizes)
 
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],

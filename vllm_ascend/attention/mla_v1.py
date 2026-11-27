@@ -47,6 +47,7 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -66,7 +67,11 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    is_glm_dsa_cache_model,
+    supports_component_major_mla_pd,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_context_rows, load_mla_cache_rows_by_slots
@@ -168,13 +173,17 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        is_glm_sfa = is_glm_dsa_cache_model(vllm_config) and issubclass(self.attn_backend, AscendSFABackend)
         storage_heads = self.num_heads
-        if model_type == "kimi_linear":
-            # Preserve the existing Kimi Linear cache head-count contract.
+        if model_type == "kimi_linear" or is_glm_sfa:
+            # Core computes the pool's layer and block strides from the physical
+            # latent head count. The attention layer still owns its query heads.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
             spec
         )
+        if is_glm_sfa and not (use_sfa_c8 or use_sfa_turboquant):
+            values["rope_cache_dim"] = self.qk_rope_head_dim
         speculative_config = getattr(vllm_config, "speculative_config", None)
         draft_config = getattr(speculative_config, "draft_model_config", None)
         if (

@@ -1,0 +1,8 @@
+pr: 23337
+entries:
+  - category: feature
+    text: >-
+      On GLM-5.2 and GLM-5.3 with Model Runner V2, the main sparse attention cache
+      defaults to contiguous NoPE and RoPE components. Set
+      `--additional-config '{"sfa_cache_layout":"block_interleaved"}'` to place both
+      components together in each block. Use the same layout on prefill and decode workers.

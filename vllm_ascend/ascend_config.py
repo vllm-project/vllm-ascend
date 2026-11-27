@@ -709,6 +709,7 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
+    sfa_cache_layout: Literal["contiguous", "block_interleaved"] = "contiguous"
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
