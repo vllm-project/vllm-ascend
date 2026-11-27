@@ -19,7 +19,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability
 
 def _selector_impl(**attrs):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    vars(impl).update(attrs)
+    impl.__dict__.update(attrs)
     return impl
 
 
@@ -91,7 +91,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         "get_current_hardware_profile",
         lambda: SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH),
     )
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _config: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _config: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
     monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
 
@@ -138,7 +138,7 @@ def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
         use_pcp=False,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
 
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
@@ -148,6 +148,12 @@ def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
     config.speculative_config = SimpleNamespace(method="dspark")
     impl._is_k3_dspark_draft = True
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.use_pcp = True
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.use_pcp = False
+    impl.enable_kv_nz = True
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.enable_kv_nz = False
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
@@ -181,7 +187,7 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
         use_pcp=False,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
 
@@ -225,7 +231,7 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
         use_pcp=False,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
     monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=pcp_size))
     if model_type == "kimi_k31":

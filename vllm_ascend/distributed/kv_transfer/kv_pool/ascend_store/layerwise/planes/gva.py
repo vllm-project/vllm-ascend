@@ -430,7 +430,9 @@ class GvaDataPlane(LayerwiseDataPlane):
             if size and size > 0 and any(address > 0 for address in info.gva_list()):
                 readable_indices.append(index)
             else:
-                if info is None and missing_keys is not None:
+                # A missing or empty public entry can still have a saved page
+                # under this request's private key.
+                if missing_keys is not None and size == 0:
                     missing_keys.add(key)
                 logger.warning("load_gvas: key=%s has no readable GVA", key)
 

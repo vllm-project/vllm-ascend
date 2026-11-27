@@ -134,10 +134,13 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     )
     for name in (
         "supports_prolog_v3_dtype",
+        "_supports_prolog_v3_ops",
+        "_supports_prolog_v3_input_size",
         "_supports_strided_mla_projection",
         "supports_prolog_v3_writer",
         "_validate_mla_cache_layout",
         "_cache_requires_prolog_v3_writer",
+        "_unpack_prolog_decode_q",
         "mla_preprocess_prolog_v3",
         "_get_dcp_current_kv_workspace",
         "forward",
@@ -375,3 +378,166 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow(page
     assert writer[0].data_ptr() == buffers[0].data_ptr()
     with pytest.raises(RuntimeError, match="scheduled token rows"):
         impl._prolog_v3_writer_workspace(161, views, torch.arange(161))
+
+
+@pytest.mark.parametrize("fallback", [None, "mixed", "over_capacity", "current_kv", "non_bf16", "dcp"])
+def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallback):
+    tokens, heads, prolog_heads = 3, 2, 4
+    bf16, fp8 = torch.bfloat16, torch.float8_e4m3fn
+    history = torch.full((2, 128, 1, 576), -8.0).to(fp8)
+    flash = SimpleNamespace(
+        slots=torch.tensor([1, 128, -1]),
+        query=torch.zeros(tokens, heads, 576).to(fp8),
+        adapter=SimpleNamespace(attention=Mock(return_value=(torch.ones(heads, tokens, 512), None))),
+        block_table=object(),
+        cache_lens=object(),
+        cu=object(),
+        used_q=object(),
+        schedule=object(),
+        attn_mask=None,
+    )
+    cos = sin = torch.ones(tokens, 64, dtype=bf16)
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        num_decodes=2,
+        num_prefills=int(fallback == "mixed"),
+        num_decode_tokens=tokens,
+        slot_mapping=torch.tensor([0, 2, 3]),
+        external_flashmla=flash,
+        decode=SimpleNamespace(cos=cos, sin=sin),
+    )
+
+    def prolog(**kw):
+        assert kw["token_x"].shape == (tokens, 8)
+        assert kw["weight_quant_mode"] == kw["query_quant_mode"] == kw["kv_cache_quant_mode"] == 0
+        assert kw["quant_scale_ckv"] is None
+        assert kw["kv_cache"].dtype == kw["kr_cache"].dtype == bf16
+        torch.testing.assert_close(kw["cache_index"], torch.arange(tokens))
+        kv_values = torch.arange(1, tokens + 1, dtype=bf16).view(tokens, 1, 1)
+        kw["kv_cache"].flatten(0, 1)[:tokens].copy_(kv_values)
+        kw["kr_cache"].flatten(0, 1)[:tokens].copy_(kv_values + 3)
+        q_nope = torch.full((tokens, prolog_heads, 512), 50, dtype=bf16)
+        q_rope = torch.full((tokens, prolog_heads, 64), 50, dtype=bf16)
+        q_nope[:, :heads] = 1
+        q_rope[:, :heads] = 2
+        return q_nope, q_rope, None, None, None
+
+    def static_quant(x, scale, offset, dtype, axis, div_mode):
+        assert offset is None and axis == -1 and not div_mode and dtype == fp8
+        assert x.dtype == torch.float32 and x.is_contiguous()
+        return (x.float() * scale).to(fp8)
+
+    def dynamic_quant(x, *, dst_type):
+        assert x.dtype == bf16 and x.is_contiguous() and dst_type == fp8
+        torch.testing.assert_close(x[..., :512], torch.ones_like(x[..., :512]))
+        torch.testing.assert_close(x[..., 512:], torch.full_like(x[..., 512:], 4.0))
+        return x.to(fp8), torch.arange(1, 1 + x.size(0) * x.size(1), dtype=torch.float32).view(x.shape[:2])
+
+    npu = SimpleNamespace(
+        npu_mla_prolog_v3=Mock(side_effect=prolog),
+        npu_quantize=Mock(side_effect=static_quant),
+        npu_dynamic_quant=Mock(side_effect=dynamic_quant),
+    )
+    scope = {
+        "torch": torch,
+        "torch_npu": npu,
+        "_EXTRA_CTX": SimpleNamespace(num_tokens=tokens),
+        "notify_kv_cache_written": Mock(),
+        "cdiv": lambda x, y: (x + y - 1) // y,
+        "DeviceOperator": SimpleNamespace(reshape_and_cache=Mock(side_effect=scatter)),
+        "record_attention_compute_start": Mock(),
+        "maybe_save_kv_layer_to_connector": Mock(),
+        "wait_for_kv_layer_from_connector": Mock(),
+        "DecodeMLAPreprocessResult": SimpleNamespace,
+    }
+    weights = dict.fromkeys(("weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr"), object())
+    norm = SimpleNamespace(weight=SimpleNamespace(data=object()), variance_epsilon=1e-6)
+    impl = SimpleNamespace(
+        layer_name="mla",
+        layerwise_kv_cache_hook=None,
+        num_heads=heads,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        use_flashmla=True,
+        use_quant_flashmla=True,
+        use_pcp=False,
+        use_dcp=False,
+        is_pcp_decode_sharded=False,
+        fa_quant_layer=True,
+        enable_mlapo=False,
+        use_output_gate=False,
+        _quant_flashmla_prolog_workspace=(
+            torch.empty(1, 128, 1, 512, dtype=bf16),
+            torch.empty(1, 128, 1, 64, dtype=bf16),
+            torch.arange(tokens - int(fallback == "over_capacity")),
+        ),
+        _quant_flashmla_writer_scales=(torch.ones(64), torch.full((512,), 2.0)),
+        fak_descale_float=torch.tensor([0.5]),
+        _prolog_v3_weights={"num_heads": prolog_heads},
+        q_a_layernorm=norm,
+        kv_a_layernorm=norm,
+        _prepare_prolog_v3_token=lambda x: (x, {"weight_quant_mode": 0}, weights),
+        _flatten_prolog_rope_table=lambda x, _: x,
+        get_num_actual_tokens=lambda m: m.num_actual_tokens,
+        _decode_requires_current_kv=lambda m: fallback == "current_kv",
+        _prefill_requires_current_kv=lambda m: False,
+        _cache_requires_prolog_v3_writer=lambda cache: False,
+        _uses_strided_kv_adapter=lambda: False,
+        _mla_preprocess=Mock(return_value=(None, None, None)),
+        _v_up_proj=lambda latent: torch.ones(tokens, heads * 128),
+        o_proj=lambda x, **_: (x,),
+    )
+    for name in ("_quantize_flashmla_query", "_quantize_flashmla_kv_rows"):
+        load(MLA, name, scope)
+    for name in (
+        "_forward_external_flashmla",
+        "_unpack_prolog_decode_q",
+        "_preprocess_quant_flashmla_with_prolog",
+        "_prolog_v3_writer_workspace",
+        "_run_prolog_v3",
+        "_validate_mla_cache_layout",
+        "forward",
+    ):
+        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
+
+    if fallback == "dcp":
+        impl.use_dcp = True
+        impl._decode_requires_current_kv = lambda _: True
+        impl.reorg_decode_q = Mock(side_effect=lambda *parts: tuple(torch.cat([part] * 8, dim=1) for part in parts))
+        impl._forward_external_flashmla = Mock(return_value=torch.zeros(tokens, heads * 128))
+    dtype = torch.float32 if fallback == "non_bf16" else bf16
+    output = torch.empty(tokens, heads * 128, dtype=dtype)
+    assert impl.forward("mla", torch.zeros(tokens, 8, dtype=dtype), history, metadata, output) is output
+    if fallback == "dcp":
+        impl.reorg_decode_q.assert_called_once()
+        result = impl._forward_external_flashmla.call_args.args[0]
+        assert result.ql_nope.shape == (tokens, heads * 8, 512)
+        assert result.q_pe.shape == (tokens, heads * 8, 64)
+        assert result.dequant_scale_q_nope.shape == (tokens, heads * 8)
+        # The last slot is non-owned in history but participates in current attention.
+        torch.testing.assert_close(result.current_k_nope[-1].float(), torch.full((1, 512), 6.0))
+        torch.testing.assert_close(result.current_k_pe[-1].float(), torch.full((1, 64), 6.0))
+        torch.testing.assert_close(history[0, 0, 0].float(), torch.full((576,), -8.0))
+        return
+    if fallback is not None:
+        impl._mla_preprocess.assert_called_once()
+        npu.npu_mla_prolog_v3.assert_not_called()
+        return
+
+    impl._mla_preprocess.assert_not_called()
+    npu.npu_mla_prolog_v3.assert_called_once()
+    assert npu.npu_quantize.call_count == 2
+    scope["notify_kv_cache_written"].assert_called_once_with("mla")
+    passed_query, passed_cache = flash.adapter.attention.call_args.args
+    assert passed_query.is_contiguous() and passed_cache is history and passed_query is not flash.query
+    torch.testing.assert_close(passed_query.float()[..., :512], torch.ones(tokens, heads, 512))
+    torch.testing.assert_close(passed_query.float()[..., 512:], torch.full((tokens, heads, 64), 4.0))
+    torch.testing.assert_close(
+        flash.adapter.attention.call_args.kwargs["q_descale"],
+        torch.arange(1, 7, dtype=torch.float32).view(tokens, heads),
+    )
+    torch.testing.assert_close(history[0, 1, 0].float(), torch.cat((torch.full((512,), 2.0), torch.full((64,), 4.0))))
+    torch.testing.assert_close(history[1, 0, 0].float(), torch.cat((torch.full((512,), 4.0), torch.full((64,), 5.0))))
+    torch.testing.assert_close(history[0, 0, 0].float(), torch.full((576,), -8.0))

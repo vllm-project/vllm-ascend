@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import get_pcp_profile_num_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def make_runner(tokens=16384, pcp=16, requests=64, query=4, method="mtp", dcp=1):
@@ -180,6 +180,7 @@ def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
         (8, 500, 1, [15] * 500, [True] * 500),
         (16, 500, 1, [31] * 500, [True] * 500),
         (8, 2, 1, [225, 16159], [True, True]),
+        (8, 64, 4, [23] * 63 + [14935], [True] * 64),
         (16, 2, 1, [961, 15423], [True, True]),
         (8, 2, 256, [256, 16128], [False, True]),
         (16, 2, 8, [8, 16352], [False, True]),
@@ -188,7 +189,7 @@ def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
 @pytest.mark.parametrize("dcp,shard_decode", [(1, False), (1, True), (8, False)])
 def test_budget_covers_actual_pcp_partitions(pcp, requests, query, lens, prefills, shard_decode, dcp):
     runner = make_runner(pcp=pcp, requests=requests, query=query, dcp=dcp)
-    manager = PCPManager.__new__(PCPManager)
+    manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = pcp
     manager.dcp_world_size = dcp
     manager.shard_decode_requests = shard_decode
