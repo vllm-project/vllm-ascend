@@ -193,7 +193,18 @@ jobs:
               if requested == "latest":
                   listing = git(workspace, "ls-remote", "--heads", "origin", "refs/heads/releases/v*")
                   names = [line.split()[1].removeprefix("refs/heads/") for line in listing.splitlines() if line.strip()]
-                  return helper.resolve_latest_release_branch(os.environ["GITHUB_REPOSITORY"], names, os.environ["GITHUB_TOKEN"])
+                  if not names:
+                      print("No releases/v* branches; skip extra coverage branch", file=sys.stderr)
+                      return ""
+                  try:
+                      return helper.resolve_latest_release_branch(
+                          os.environ["GITHUB_REPOSITORY"],
+                          names,
+                          os.environ["GITHUB_TOKEN"],
+                      )
+                  except ValueError as exc:
+                      print(f"Skip extra coverage branch: {exc}", file=sys.stderr)
+                      return ""
               if release_branch.fullmatch(requested):
                   return requested
               raise SystemExit(f"::error::COVERAGE_BRANCH must be latest, none, or a releases/v* branch: {requested}")
