@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ctypes
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -153,12 +154,64 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     transfer_engine.register_buffer.assert_called_once()
 
 
+@pytest.mark.parametrize("layout", ["HND", "LBHNC", "BLHNC"])
+@pytest.mark.parametrize("heads", [1, 4, 16])
+@pytest.mark.parametrize("spec_factory", [make_full_spec, make_sliding_spec])
+def test_register_head_major_layers_preserves_block_stride(monkeypatch, layout, heads, spec_factory) -> None:
+    spec = replace(spec_factory(), num_kv_heads=heads)
+    num_blocks, num_layers = 4, 3
+    shape = (num_blocks, num_layers, heads, 16, 8) if layout == "BLHNC" else (num_layers, num_blocks, heads, 16, 8)
+    # K and V share one allocation, with either BLHNC or LBHNC physical planes.
+    raw = torch.empty((2, *shape), dtype=torch.float16)
+    names = [f"layer.{i}" for i in range(num_layers)]
+    caches = {name: [plane[:, i] if layout == "BLHNC" else plane[i] for plane in raw] for i, name in enumerate(names)}
+    block_len = heads * 16 * 8 * raw.element_size()
+    block_stride = block_len * num_layers if layout == "BLHNC" else block_len
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_layout=layout,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=block_len if layout == "BLHNC" else num_blocks * block_len,
+                block_stride=block_stride,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+    )
+    worker.engine_id, worker.te_rpc_port = "engine-d", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 16, "127.0.0.1", 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+
+    # Dict order must not determine the physical layer offsets.
+    worker.register_kv_caches(dict(reversed(list(caches.items()))))
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata.layer_names == names
+    assert metadata.kv_caches_base_addr == [[cache.data_ptr() for cache in caches[name]] for name in names]
+    assert metadata.block_shapes == [[(heads, 16, 8)] * 2 for _ in names]
+    assert metadata.block_lens == [[block_len] * 2 for _ in names]
+    assert metadata.block_strides == [[block_stride] * 2 for _ in names]
+    assert metadata.block_size_scales == [[1, 1] for _ in names]
+    transfer_engine.register_buffer.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+    if layout == "BLHNC":
+        assert not caches[names[0]][0].is_contiguous()
+        assert caches[names[0]][0][0].is_contiguous()
+
+
 @pytest.mark.parametrize(
     ("heads", "shape", "step", "error"),
     [
         (2, (2, 16, 2, 8), 1, "exactly one KV head"),
         (16, (2, 16, 16, 8), 1, "cannot distinguish HND from NHD"),
         (1, (2, 16, 1, 16), 2, "contiguous bytes"),
+        (4, (2, 4, 16, 16), 2, "contiguous bytes"),
     ],
 )
 def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, error) -> None:
@@ -194,6 +247,20 @@ def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(shape, step,
     cache = torch.empty(shape, dtype=torch.uint8)[..., ::step]
     with pytest.raises(ValueError, match=error):
         MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache)
+
+
+@pytest.mark.parametrize("layout", [None, "NHD", "LBNHC"])
+def test_equal_head_token_dimensions_require_head_major_layout(layout) -> None:
+    cache = torch.empty((2, 16, 16, 8), dtype=torch.float16)
+    with pytest.raises(ValueError, match="cannot distinguish HND from NHD"):
+        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=16), cache, layout)
+
+
+@pytest.mark.parametrize("layout", ["HND", "LBHNC", "BLHNC"])
+def test_transfer_block_shape_rejects_token_interleaved_kv(layout) -> None:
+    cache = torch.empty((2, 4, 16, 2, 8), dtype=torch.float16)[:, :, :, 0, :]
+    with pytest.raises(ValueError, match="contiguous bytes"):
+        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=4), cache, layout)
 
 
 @pytest.mark.parametrize("spare", [0, 64, 256])
