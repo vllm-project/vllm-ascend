@@ -28,9 +28,13 @@ def rdma():
     assert package_spec is not None and package_spec.origin is not None
     package = Path(package_spec.origin).parent
     source = Path(os.getenv("ENGRAM_TEST_SOURCE", package / "models/deepseek_v41/engram/shared_rdma.py"))
-    spec = importlib.util.spec_from_file_location("engram_shared_rdma_test", source)
+    holder = ModuleType("_engram_rdma_ut")
+    holder.__path__ = [str(source.parent)]
+    sys.modules[holder.__name__] = holder
+    spec = importlib.util.spec_from_file_location(f"{holder.__name__}.shared_rdma", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

@@ -31,23 +31,20 @@ def load_tables(owner, model, stop):
         raise ValueError("Shared Engram currently supports width256/group32 INT8 tables")
     shapes = list(zip(config["engram_layer_ids"], config["engram_num_embeddings"], strict=True))
     # Reject incompatible checkpoint layouts before the first physical allocation.
+    specs: list[tuple[str, int, int, torch.dtype]] = []
     for layer, rows in shapes:
-        for suffix, columns, allowed in [("weight", width, {"I8", "INT8"}), ("scale", width // 32, {"F32", "F8_E8M0"})]:
+        for suffix, columns, allowed, target in [
+            ("weight", width, {"I8", "INT8"}, torch.int8),
+            ("scale", width // 32, {"F32", "F8_E8M0"}, torch.float32),
+        ]:
             key = f"layers.{layer}.engram.embed.{suffix}"
             with safe_open(root / index[key], framework="pt", device="cpu") as file:
                 source = file.get_slice(key)
                 if source.get_shape() != [rows, columns] or source.get_dtype() not in allowed:
                     raise ValueError(f"Unsupported shared Engram checkpoint layout: {key}")
+            specs.append((key, rows, columns, target))
     packed = None
     if owner.shard_count > 1:
-        specs: list[tuple[str, int, int, torch.dtype]] = []
-        for layer, rows in shapes:
-            specs.extend(
-                (
-                    (f"layers.{layer}.engram.embed.weight", rows, width, torch.int8),
-                    (f"layers.{layer}.engram.embed.scale", rows, width // 32, torch.float32),
-                )
-            )
         packed = owner.add_packed(specs)
     for layer, rows in shapes:
         weight_key = f"layers.{layer}.engram.embed.weight"

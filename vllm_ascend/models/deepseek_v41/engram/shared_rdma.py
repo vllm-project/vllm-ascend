@@ -24,6 +24,8 @@ import numpy as np
 import torch
 from safetensors import safe_open
 
+from .partition import partition_units
+
 MIN_ROWS = 65536
 MAX_ROWS = 262144
 MAX_CONTROL_BYTES = 65536
@@ -634,9 +636,7 @@ def _pack_lookup_rows(engine, stage, tables, plan, ids):
 
 
 def shard_range(rows, index, count):
-    if type(index) is not int or type(count) is not int or count < 1 or not 0 <= index < count or rows < count:
-        raise ValueError("invalid Engram shard layout")
-    return rows * index // count, rows * (index + 1) // count
+    return partition_units(rows, index, count)
 
 
 class SharedOwner(socketserver.ThreadingTCPServer):

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 
+from .partition import partition_units
 from .shared_host import CHUNK_ROWS, GIB, MappedHostBuffer, MappingCleanupError, MemfabricRuntime
 
 SCHEMA = 2
@@ -113,9 +114,8 @@ def _align_gib(size):
 
 def shard_range(rows, index, count):
     chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
-    if type(index) is not int or type(count) is not int or count < 1 or not 0 <= index < count or chunks < count:
-        raise ValueError("invalid shared Engram shard layout")
-    return chunks * index // count * CHUNK_ROWS, min(chunks * (index + 1) // count * CHUNK_ROWS, rows)
+    first, last = partition_units(chunks, index, count)
+    return first * CHUNK_ROWS, min(last * CHUNK_ROWS, rows)
 
 
 def packed_layout(specs, shard_index, shard_count):
