@@ -74,6 +74,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
+| `hisparse_prefill_config`          | bool \| dict | `None` | Opt-in on-demand and heterogeneous prefill pipeline for C8 `HiSparseConnector`. Pass `true` or a configuration dictionary (for example `{"enabled": true}`) to enable; omit or set `false` to retain default full-history staging. See <a href="#hisparse_prefill_config">hisparse_prefill_config</a>. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
@@ -291,6 +292,35 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+<span id="hisparse_prefill_config"></span>**hisparse_prefill_config**
+
+`hisparse_prefill_config` enables the persistent `staging_pool`, 3-tier request classification, dual-channel Host-to-Device transfer (coalesced SDMA for full-page requests and 32-AIV deduplicated Top-K row gather for long-context sparse prefill requests), and cross-layer post-SFA prefetching on C8 `HiSparseConnector`. Passing `"hisparse_prefill_config": true` is shorthand for `{"enabled": true}`.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` (`True` when a dict is provided without `enabled`) | Master switch for the HiSparse heterogeneous prefill pipeline. |
+| `min_history_tokens` | int | `32768` | Minimum Host-miss history length `H_host` required before classifying a request into Tier-1 (on-demand) or Tier-2 (elastic). |
+| `tier1_max_ratio` | float | `0.01` | Maximum `Q / H_host` ratio for Tier-1 hard on-demand gather (`0 <= tier1_max_ratio <= tier2_max_ratio <= 1`). |
+| `tier2_max_ratio` | float | `0.05` | Maximum `Q / H_host` ratio for Tier-2 elastic requests, which use coalesced SDMA when `staging_pool` fits and downgrade smallest-ratio-first to on-demand gather under staging pressure. |
+| `staging_rows` | int | `2 * max(max_model_len, 1048576)` | Optional persistent `staging_pool` row capacity; must be at least `2 * max(max_model_len, 1048576)` (`1,312 MiB` at `656` B/row) and mutually exclusive with `staging_bytes`. |
+| `staging_bytes` | int | `None` | Optional persistent `staging_pool` byte capacity; must be at least `2 * max(max_model_len, 1048576) * 656` and mutually exclusive with `staging_rows`. |
+
+**Constraints:**
+
+- Requires `attention_config.hisparse_config`, Model Runner V2, packed C8 KV cache (`--kv-cache-dtype int8` or `fp8`, `block_size=128`, `index_topk=2048`), and `PP = PCP = DCP = 1`.
+
+**Example (online):**
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve "$MODEL_PATH" \
+    --enforce-eager \
+    --block-size 128 \
+    --kv-cache-dtype int8 \
+    --attention-config '{"indexer_kv_dtype": "int8", "hisparse_config": {"eager_host_mirror": true}}' \
+    --kv-transfer-config '{"kv_connector": "HiSparseConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"host_pool_gib": 54}}' \
+    --additional-config '{"hisparse_prefill_config": {"enabled": true}}'
+```
 
 ### Example
 
