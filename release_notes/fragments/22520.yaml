@@ -1,0 +1,4 @@
+pr: 22520
+entries:
+  - category: feature
+    text: Added XPress speculative decoding support on Ascend for compatible Qwen3 draft checkpoints, including eager and full-graph draft execution through the existing DFlash configuration.
