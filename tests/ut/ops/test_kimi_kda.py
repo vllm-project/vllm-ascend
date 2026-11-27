@@ -171,12 +171,16 @@ def test_prepare_beta_does_not_repeat_auxiliary_sigmoid():
 
 
 @pytest.mark.parametrize("f_b_is_local", [False, True])
-def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
+@pytest.mark.parametrize("head_parallel", [False, True])
+def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool, head_parallel: bool):
+    tp_rank = 1 if head_parallel else 2
+    tp_size = 2 if head_parallel else 4
     with (
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
+        patch("vllm_ascend.ops.kimi_kda.get_head_parallel_rank", return_value=2),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=tp_size),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp_size),
     ):
         linear = _KDAFusedBFGLinear(
             hidden_size=6,
@@ -185,6 +189,7 @@ def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
             tp_size=4,
             quant_config=None,
             prefix="model.layers.0.self_attn.in_proj_gfab",
+            head_parallel=head_parallel,
         )
 
     linear.weight.data.zero_()
@@ -195,12 +200,14 @@ def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
     g_weight = torch.arange(24 * 6, dtype=linear.weight.dtype).reshape(24, 6) + 200
 
     linear.weight.weight_loader(linear.weight, b_weight, 0)
+    linear.weight.weight_loader(linear.weight, g_weight, 2)
     linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
+    assert linear.loaded_shard_ids == {"weight": {0, 2}}
     linear.f_b_weight.weight_loader(
         linear.f_b_weight,
         local_f_b_weight if f_b_is_local else global_f_b_weight,
     )
-    linear.weight.weight_loader(linear.weight, g_weight, 2)
+    assert linear.pop_missing_shards() == []
 
     expected_f = (local_f_b_weight.float() @ f_a_weight.float()).to(linear.weight.dtype)
     assert tuple(linear.weight.shape) == (14, 6)

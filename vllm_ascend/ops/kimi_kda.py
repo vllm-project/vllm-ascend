@@ -14,8 +14,8 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
+    StackedColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -97,11 +97,12 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
     ) -> None:
         projection_size = num_heads * head_dim
         if head_parallel:
-            # This path bypasses MergedColumnParallelLinear.__init__, whose
-            # #66784 weight loaders now require the padding state.
+            # Use the PCP head-parallel rank and keep the merged loader's
+            # shard metadata and load tracking.
             self.padding_size = 0
             self.output_sizes = [num_heads, projection_size, projection_size]
-            ColumnParallelLinear.__init__(
+            self.shard_ids = tuple(range(len(self.output_sizes)))
+            StackedColumnParallelLinear.__init__(
                 self,
                 hidden_size,
                 sum(self.output_sizes),
@@ -197,6 +198,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 f"expected {tuple(param_shard.shape)}, got {tuple(fused_weight.shape)}"
             )
         param_shard.copy_(fused_weight)
+        self.validate_shard_id(_F_PROJ_SHARD_ID, self.weight)
 
 
 def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor:
