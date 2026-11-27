@@ -28,6 +28,15 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_flash_hisparse.py and the Flash HiSparse layer/worker adapters:
+#   Targets: Core cache budget, layer binding, row mirror and terminal spill.
+#   Why: The verified pin lacks compact layout bounds and resident-copy hooks.
+#   How: Use the compact budget and bound Flash attention views while keeping
+#        the arena backing. Defer only current rows of eligible Q6 steps.
+#        Keep terminal spill refs through all-rank ACK and Host publication.
+#   Related PR: https://github.com/vllm-project/vllm/pull/69247
+#   Future plan: Remove the adapters after the verified Core pin has all four changes.
+# --------------------------------
 # * platform/patch_dp_supervisor.py:
 #   Target: vllm.entrypoints.launchers.dp_supervisor._build_device_ids.
 #   Why: Multi-port external load balancing assigns too few devices to each

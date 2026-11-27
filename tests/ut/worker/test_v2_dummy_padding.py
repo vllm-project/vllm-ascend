@@ -47,6 +47,7 @@ def runner(buffers):
 
 def _make_graph_manager(buffers, mode, uniform, capture_size):
     manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager.force_eager_target = False
     manager.vllm_config = SimpleNamespace(
         speculative_config=None,
         cache_config=SimpleNamespace(use_kda_recoverssm=False),

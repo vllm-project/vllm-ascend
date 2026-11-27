@@ -12,7 +12,9 @@ no longer needs a monkey patch for these decisions.
 from collections import defaultdict
 from dataclasses import fields, replace
 
+import torch
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
@@ -22,9 +24,11 @@ from vllm.v1.core.kv_cache_planning import (
 )
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups as _upstream_get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -35,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import is_pooled_hisparse_indexer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -43,6 +48,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
+)
+from vllm_ascend.hisparse import require_hybrid_hisparse_core, supports_pooled_hisparse, uses_pooled_hisparse
+from vllm_ascend.hisparse.layout import (
+    get_hybrid_sfa_hisparse_groups,
+    has_hybrid_sfa_hisparse_groups,
+    has_hybrid_sfa_hisparse_specs,
+    regroup_pooled_hisparse_kda,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -63,6 +75,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
+    uses_paired_sfa_cache,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
@@ -80,6 +93,66 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cac
 from vllm_ascend.utils import vllm_version_is
 
 
+def _compact_hisparse_kpool_pages(groups: list[KVCacheGroupSpec]) -> dict[str, int]:
+    """Return the unpadded FP8 KPool bytes per layer and global block ID."""
+    return {
+        name: spec.real_page_size_bytes
+        for group in groups
+        if group.role == KVCacheGroupRole.HISPARSE_INDEXER and isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        if is_pooled_hisparse_indexer(spec)
+        and spec.dtype == torch.float8_e4m3fn
+        and spec.scale_dim == 1
+        and spec.scale_dtype == torch.float32
+    }
+
+
+def _place_compact_hisparse_kpool(config: KVCacheConfig, pages: dict[str, int]) -> None:
+    if not pages:
+        return
+    (shared_size,) = {tensor.size for tensor in config.kv_cache_tensors if not tensor.host_resident}
+    count = config.num_blocks
+    total_size = shared_size + count * sum(pages.values())
+    tensors = []
+    for tensor in config.kv_cache_tensors:
+        if tensor.host_resident:
+            tensors.append(tensor)
+        elif tensor.layers[0] not in pages:
+            tensors.append(replace(tensor, size=total_size))
+
+    (page_size,) = set(pages.values())
+    # CANN PoolKeyIndexer forms 32-bit byte offsets from each layer's
+    # tensor base. Use block-outer bundles in Core's single backing and
+    # keep every bundle within that addressable span.
+    layers_per_bundle = (1 << 32) // (max(1, count) * page_size)
+    if not layers_per_bundle:
+        raise ValueError("A HiSparse KPool layer exceeds the 4 GiB indexer address range.")
+    offset = shared_size
+    layers = list(pages)
+    for start in range(0, len(layers), layers_per_bundle):
+        bundle = layers[start : start + layers_per_bundle]
+        block_stride = page_size * len(bundle)
+        tensors.append(
+            KVCacheTensor(
+                size=total_size,
+                layers=bundle,
+                layer_stride=page_size,
+                block_stride=block_stride,
+                offset=offset,
+            )
+        )
+        offset += count * block_stride
+    config.kv_cache_tensors = tensors
+    logger.info_once(
+        "HiSparse block-outer KPool: %d layers, %d blocks; shared %.2f GiB, KPool %.2f GiB",
+        len(pages),
+        count,
+        shared_size / 2**30,
+        (total_size - shared_size) / 2**30,
+        scope="process",
+    )
+
+
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     """Build Ascend cache layouts with vLLM's cross-worker planning flow."""
 
@@ -94,17 +167,76 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        pooled_hisparse = uses_pooled_hisparse(vllm_config)
+        transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            transfer_config is not None
+            and getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+            and transfer_config.has_connector("AscendStoreConnector")
+            and (pooled_hisparse or has_hybrid_sfa_hisparse_specs(kv_cache_spec.values()))
+        ):
+            raise ValueError("AscendStore does not support pooled or recurrent HiSparse cache layouts.")
+        if pooled_hisparse:
+            require_hybrid_hisparse_core()
+            if not supports_pooled_hisparse(vllm_config):
+                raise ValueError(
+                    "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
+                    "pool size 4 and DP, PP, PCP and DCP set to 1."
+                )
+            if not any(is_pooled_hisparse_indexer(spec) for spec in kv_cache_spec.values()):
+                raise ValueError("Pooled HiSparse requires a declared pooled indexer cache spec.")
+            if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+                raise ValueError("Pooled HiSparse requires the hybrid KV cache manager.")
+            # Core separates the host-backed MLA sources from the device-only
+            # pooled keys, tail rings and KDA state groups.
+            groups = _upstream_get_kv_cache_groups(vllm_config, kv_cache_spec)
+            if compact_pages := _compact_hisparse_kpool_pages(groups):
+                indexer_layers = {
+                    name
+                    for group in groups
+                    if group.role == KVCacheGroupRole.HISPARSE_INDEXER
+                    for name in group.layer_names
+                }
+                if indexer_layers != compact_pages.keys():
+                    raise ValueError("Compact KPool HiSparse requires the same packed indexer format in all layers.")
+                # The compact KPool no longer needs to fill the shared slab
+                # page. Recover native alignment from the verified Mamba page:
+                # resolving HiSparse specs has already reduced block_size.
+                from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+
+                config = vllm_config.model_config.hf_text_config
+                row_bytes = get_sfa_qsfa_packed_head_dim(config.kv_lora_rank, config.qk_rope_head_dim)
+                padded_page_bytes = vllm_config.cache_config.mamba_page_size_padded
+                if padded_page_bytes is None or padded_page_bytes < row_bytes or padded_page_bytes % row_bytes:
+                    raise ValueError("Compact KPool HiSparse requires a recurrent page of whole packed KV rows.")
+                native_size = padded_page_bytes // row_bytes
+                for group in groups:
+                    if group.role == KVCacheGroupRole.HISPARSE_INDEXER:
+                        native = UniformTypeKVCacheSpecs.from_specs(
+                            {
+                                name: kv_cache_spec[name].copy_with_new_block_size(native_size)
+                                for name in group.layer_names
+                            }
+                        )
+                        assert native is not None
+                        group.kv_cache_spec = native
+                return regroup_pooled_hisparse_kda(kv_cache_spec, groups)
+            return groups
+        native_hisparse_groups = get_hybrid_sfa_hisparse_groups(vllm_config, kv_cache_spec)
+        if native_hisparse_groups is not None:
+            return native_hisparse_groups
+        if uses_paired_sfa_cache(vllm_config):
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if step5_groups is not None:
             return step5_groups
+        is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values())
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
             unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-        if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
+        if is_glm5_next:
             return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
 
         qwen4_exp_groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
@@ -127,7 +259,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.attention_config.hisparse_config is None:
             return groups
-        transfer_config = vllm_config.kv_transfer_config
         if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
             return groups
 
@@ -159,6 +290,21 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         pool cost so the model planners materialize exactly the requested block
         count before layerwise reuse is planned.
         """
+        if vllm_config.attention_config.hisparse_config is not None and (
+            pages := _compact_hisparse_kpool_pages(kv_cache_groups)
+        ):
+            if vllm_config.cache_config.enable_extensible_kv_cache:
+                # These layer offsets depend on block count. The extensible
+                # cache shrinks storage after capture without moving views.
+                raise ValueError("FP8 HiSparse compact KPool requires a fixed-size KV allocation.")
+            config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+            _place_compact_hisparse_kpool(config, pages)
+            return _attach_transfer_and_speculation_metadata(vllm_config, config)
+        if has_hybrid_sfa_hisparse_groups(kv_cache_groups):
+            return _attach_transfer_and_speculation_metadata(
+                vllm_config,
+                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+            )
         bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
@@ -177,6 +323,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the device memory cost per global block ID."""
+        if vllm_config.attention_config.hisparse_config is not None:
+            pages = _compact_hisparse_kpool_pages(kv_cache_groups)
+            if not pages:
+                return None
+            return _upstream_pool_bytes_per_block(vllm_config, kv_cache_groups) + sum(pages.values())
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
         if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
             probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
@@ -191,7 +342,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if uses_paired_sfa_cache(vllm_config):
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
@@ -525,7 +676,9 @@ def get_ascend_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if has_hybrid_sfa_hisparse_groups(kv_cache_groups):
+        kv_cache_config = _upstream_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    elif uses_paired_sfa_cache(vllm_config):
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
         kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
