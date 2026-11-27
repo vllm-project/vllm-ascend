@@ -684,6 +684,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             )
             owner = SimpleNamespace(
                 host_pool=host_pool,
+                device=source.device,
                 max_num_reqs=max_num_reqs,
                 resident_source_index=group,
                 request_state_indices=states,
