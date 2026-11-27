@@ -2168,6 +2168,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             use_exp2=use_exp2,
             use_qk_l2norm_in_kernel=True,
             use_beta_sigmoid_in_kernel=use_chunk32,
+            # Inference consumes only output and final_state. Avoid exporting
+            # beta_eff, which otherwise adds a BHT -> BTH transpose per layer.
+            output_beta_eff=False,
             allow_neg_eigval=False,
             disable_recompute=disable_recompute,
             state_v_first=True,
