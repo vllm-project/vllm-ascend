@@ -1034,6 +1034,12 @@ For DP>1, the launcher executes the role script without filtering.
       communicator, a window and step interval of 300, and zero redundant
       experts. The Prefill configuration sets `enable_fused_mc2` to `2`
       and `enable_shared_expert_dp` to `true`.
+    - The shorter EPLB window and interval give faster feedback in short
+      benchmark or accuracy runs. A smaller window uses fewer load samples,
+      and a shorter interval can increase how often experts are rearranged
+      and reduce stability. For production, use the defaults of
+      `window_size=1000` and `step_interval=3000`. See
+      [Asynchronous EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#asynchronous-eplb).
     - Prefill uses `--max-num-seqs 64` and
       `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
     - Decode uses `FULL_DECODE_ONLY` with default capture sizes and NPUGraph Ex.
@@ -2148,12 +2154,6 @@ Use the role-specific values in the 950DT products example when deploying on tha
   role. The reference uses 64 sequences and 16384 batched tokens on Prefill,
   and 40 sequences and 240 batched tokens on Decode. Measure time to first
   token, time per output token, and throughput before changing these limits.
-- Prefill uses EPLB `window_size=300` and `step_interval=300` for faster
-  feedback in short benchmark or accuracy runs. A smaller window uses
-  fewer load samples, and a shorter interval can increase how often
-  experts are rearranged and reduce stability. For production, use the
-  defaults of `window_size=1000` and `step_interval=3000`. See
-  [Asynchronous EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#asynchronous-eplb).
 - For workloads with stable shapes, consider setting
   `ascend_compilation_config.enable_static_kernel` to `true` on Decode.
   Enable it with caution because static kernel compilation can
