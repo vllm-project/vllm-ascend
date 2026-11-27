@@ -17,19 +17,20 @@ from this checkout's operators instead of two checkouts:
   ordering cannot bias the medians.
 * Before timing, each case settles the card with sustained full steps for
   ``--settle`` seconds, so the frequency governor reaches steady state
-  instead of being measured on its boost ramp; the garbage collector is
-  then disabled while the executions are enqueued, because a collector
-  pause lets the device drain its queue and the event windows start
-  measuring host stalls instead of kernel time.
+  instead of being measured on its boost ramp.
+* Durations are the pure device execution times of the kernels, read from
+  the ``kernel_details.csv`` that ``torch_npu.profiler`` (Level0) exports
+  for the run — the same number ``msprof`` shows. Host dispatch and
+  launch-queue gaps cannot enter the timing. Traces land under
+  ``npu_profile_trace``.
 * Verify is the median of the per-execution mean over the L layer calls,
   commit runs once across the layers, and the total is the median of each
   execution's sum of L verify calls plus one commit.
-* Timing excludes the commit plan, the conv compaction, host dispatch and
-  the state reset: the plan and conv kernels are no-op'd after warmup, and
-  the deferred path restores the warmup replay plan from a snapshot instead
+* Timing excludes the commit plan, the conv compaction and the state
+  reset: the plan and conv kernels are no-op'd after warmup, and the
+  deferred path restores the warmup replay plan from a snapshot instead
   of rebuilding it (the defer kernel zeroes the plan it consumes), so both
-  paths replay/commit the same counts every execution. All launches of a
-  case are queued before the device starts on them.
+  paths replay/commit the same counts every execution.
 * ``full`` accepts Q tokens everywhere, ``mixed ramp`` cycles lengths 0..Q,
   and the alternating/clustered cases split the batch evenly between zero-
   and full-acceptance requests. K=V=128 throughout.
@@ -42,7 +43,9 @@ Run under ``ASCEND_RT_VISIBLE_DEVICES`` to pick the card (device npu:0).
 
 import argparse
 import contextlib
+import csv
 import gc
+import os
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -51,6 +54,11 @@ from typing import Any
 
 import torch
 import torch_npu  # noqa: F401
+from torch_npu.profiler import (
+    ProfilerActivity,
+    profile,
+    tensorboard_trace_handler,
+)
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 
@@ -74,6 +82,27 @@ LOWER_BOUND = -5.0
 # Recorded serving page strides for the H32/H64 checkpoint pools.
 SERVING_PAGE_STRIDE = {32: 625152, 64: 1250304}
 PLAN_KERNELS = ("_prepare_commit_plan_kernel", "_compact_conv_state_kernel")
+TRACE_ROOT = "npu_profile_trace"
+TRACE_CSVS = ("kernel_details.csv", "op_summary.csv")
+# Name fragments identifying the measured kernels in the trace CSVs.
+VERIFY_MARK = "recoverssm_verify"
+COMMIT_MARK = "commit_kda_state"
+DEFER_MARK = "defer_commit"
+
+
+def _profiler_options() -> dict:
+    """Level0 (kernel durations only) where this torch_npu has it."""
+    try:
+        from torch_npu.profiler import AiCMetrics, ProfilerLevel, _ExperimentalConfig
+
+        return {
+            "experimental_config": _ExperimentalConfig(
+                profiler_level=ProfilerLevel.Level0,
+                aic_metrics=AiCMetrics.AiCoreNone,
+            )
+        }
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return {}
 
 
 def acceptance_counts(pattern: str, batch: int, spec_query_len: int) -> list[int]:
@@ -288,11 +317,121 @@ def skipped_kernels(module, names):
                 setattr(module, name, original)
 
 
+def _trace_csvs(root: str) -> set[str]:
+    """Every kernel-duration CSV under the trace root, any nesting."""
+    found = set()
+    for dirpath, _, names in os.walk(root):
+        for name in names:
+            if name in TRACE_CSVS:
+                found.add(os.path.join(dirpath, name))
+    return found
+
+
+def _new_kernel_rows(root: str, known: set[str]) -> list[tuple[str, float, float]]:
+    """(name, duration us, start us) rows from the trace this case wrote."""
+    fresh: dict[str, list[str]] = {}
+    for path in _trace_csvs(root) - known:
+        fresh.setdefault(os.path.dirname(path), []).append(path)
+    picked = []
+    for _, paths in sorted(fresh.items()):
+        for preferred in TRACE_CSVS:
+            match = [p for p in paths if os.path.basename(p) == preferred]
+            if match:
+                picked.append(match[0])
+                break
+    if not picked:
+        raise RuntimeError(
+            f"torch_npu.profiler wrote no trace CSV under {root!r};"
+            " check that profiling (MSPTI) is available on this system"
+        )
+    rows = []
+    for path in picked:
+        rows.extend(_read_kernel_rows(path))
+    rows.sort(key=lambda row: row[2])
+    return rows
+
+
+def _read_kernel_rows(path: str) -> list[tuple[str, float, float]]:
+    with open(path, newline="", encoding="utf-8") as handle:
+        records = list(csv.reader(handle))
+    if len(records) < 2:
+        return []
+    header = [column.strip().lower() for column in records[0]]
+    marks = (VERIFY_MARK, COMMIT_MARK, DEFER_MARK)
+    # Header spellings differ across CANN versions, so find the kernel
+    # name column by the data it carries.
+    name_col = None
+    for col in range(len(records[0])):
+        if any(
+            len(record) > col and any(mark in record[col] for mark in marks)
+            for record in records[1:]
+        ):
+            name_col = col
+            break
+    duration_col = start_col = None
+    for col, column in enumerate(header):
+        if duration_col is None and "duration" in column:
+            duration_col = col
+        elif start_col is None and "start" in column:
+            start_col = col
+    if name_col is None or duration_col is None:
+        raise RuntimeError(f"unrecognized trace CSV {path!r}: header {header[:8]}")
+    rows = []
+    for position, record in enumerate(records[1:]):
+        if len(record) <= max(name_col, duration_col):
+            continue
+        name = record[name_col]
+        if not any(mark in name for mark in marks):
+            continue
+        start = (
+            float(record[start_col])
+            if start_col is not None and len(record) > start_col
+            else float(position)
+        )
+        rows.append((name, float(record[duration_col]), start))
+    return rows
+
+
+def _assign_rows(
+    rows: list[tuple[str, float, float]],
+    sequence: list[str],
+    num_layers: int,
+) -> dict[str, list]:
+    """Walk the trace in execution order: L verify kernels, then the
+    path's single commit/defer kernel, per execution."""
+    records = {label: [] for label in ("immediate", "deferred")}
+    position = 0
+    for label in sequence:
+        verify = []
+        for _ in range(num_layers):
+            name, duration, _ = rows[position]
+            if VERIFY_MARK not in name:
+                raise RuntimeError(
+                    f"expected a verify kernel at trace row {position},"
+                    f" got {name!r}"
+                )
+            verify.append(duration)
+            position += 1
+        name, duration, _ = rows[position]
+        expected = DEFER_MARK if label == "deferred" else COMMIT_MARK
+        if expected not in name:
+            raise RuntimeError(
+                f"expected a {expected} kernel at trace row {position},"
+                f" got {name!r}"
+            )
+        records[label].append((verify, duration))
+        position += 1
+    if position != len(rows):
+        raise RuntimeError(
+            f"the trace holds {len(rows)} measured kernels but the run"
+            f" sequence accounts for {position}"
+        )
+    return records
+
+
 def _medians(records: list) -> tuple:
     verify_means, commit_times, totals = [], [], []
-    for layer_events, commit_start, commit_end in records:
-        verify_us = [start.elapsed_time(end) * 1000 for start, end in layer_events]
-        commit_us = commit_start.elapsed_time(commit_end) * 1000
+    for verify_us, commit_us in records:
         verify_means.append(statistics.mean(verify_us))
         commit_times.append(commit_us)
         totals.append(sum(verify_us) + commit_us)
@@ -326,43 +465,37 @@ def measure_case(args: argparse.Namespace, shape: tuple, pattern: str) -> dict:
             raise RuntimeError(
                 f"non-finite verify output for {shape} {pattern} ({case.label})"
             )
-    executions = {case.label: [] for case in cases}
 
     def queue_execution(case: Case) -> None:
         case.reset_state()
         if case.label == "deferred":
             case.arm_replay()
-        layer_events = []
-        for layer in case.layers:
-            start = torch.npu.Event(enable_timing=True)
-            end = torch.npu.Event(enable_timing=True)
-            start.record()
-            case.launch_verify_layer(layer)
-            end.record()
-            layer_events.append((start, end))
-        commit_start = torch.npu.Event(enable_timing=True)
-        commit_end = torch.npu.Event(enable_timing=True)
-        commit_start.record()
+        case.launch_verify()
         case.commit()
-        commit_end.record()
-        executions[case.label].append((layer_events, commit_start, commit_end))
 
-    gc.collect()
-    gc.disable()
-    try:
+    # ABBA: each path runs once first and once second per pair, so ordering
+    # cannot bias the medians. The kernels land in the trace in exactly
+    # this order, which is how rows are attributed to a path.
+    sequence = []
+    for _ in range(args.pairs):
+        sequence += ["immediate", "deferred", "deferred", "immediate"]
+    by_label = {case.label: case for case in cases}
+    known = _trace_csvs(TRACE_ROOT)
+    with profile(
+        activities=[ProfilerActivity.NPU],
+        on_trace_ready=tensorboard_trace_handler(TRACE_ROOT),
+        **_profiler_options(),
+    ):
         with skipped_kernels(recoverssm_module, PLAN_KERNELS):
-            for _ in range(args.pairs):
-                for case in cases:
-                    queue_execution(case)
-                for case in cases[::-1]:
-                    queue_execution(case)
+            for label in sequence:
+                queue_execution(by_label[label])
         torch.npu.synchronize()
-    finally:
-        gc.enable()
+    rows = _new_kernel_rows(TRACE_ROOT, known)
+    records = _assign_rows(rows, sequence, num_layers=len(by_label["immediate"].layers))
     del cases
     gc.collect()
     torch.npu.empty_cache()
-    return {label: _medians(records) for label, records in executions.items()}
+    return {label: _medians(entries) for label, entries in records.items()}
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,6 +525,7 @@ def main() -> None:
     print(f"operators: {recoverssm_module.__file__}")
     print("immediate: plain verify + per-step state commit")
     print("deferred : fused-replay verify + one-warp defer commit")
+    print(f"timing: torch_npu.profiler kernel durations (traces in {TRACE_ROOT}/)")
     print(
         f"{args.pairs} ABBA pairs ({2 * args.pairs} executions per path),"
         f" {args.settle:.1f}s settle per case"
