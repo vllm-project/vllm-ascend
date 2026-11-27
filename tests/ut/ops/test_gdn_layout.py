@@ -6,6 +6,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
+try:
+    from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
+except ImportError:  # vLLM before the fla package moved to vllm/third_party
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm
+
 from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -98,7 +103,7 @@ def test_head_first_external_l2norm_accepts_multiple_heads(backend, sliced):
             torch.testing.assert_close(kwargs["initial_state"], state.transpose(-1, -2).contiguous())
             return output, kwargs["initial_state"]
 
-        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm):
+        with patch(f"{_l2norm.__name__}.l2norm_fwd", side_effect=norm):
             actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 

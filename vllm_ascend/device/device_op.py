@@ -1091,11 +1091,13 @@ class BaseDeviceAdaptor:
             disable_recompute=False,
             state_v_first=False,
         )
-        final_state = final_state.transpose(-1, -2).contiguous()
+        final_state = final_state.transpose(-1, -2)
         if keep_meta is not None:
             full_final_state = initial_state.clone()
             full_final_state[keep_meta] = final_state
             final_state = full_final_state
+        else:
+            final_state = final_state.contiguous()
         return output, final_state
 
     @staticmethod

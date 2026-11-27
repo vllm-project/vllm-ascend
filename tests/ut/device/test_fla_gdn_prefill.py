@@ -39,6 +39,11 @@ from unittest.mock import patch
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
+try:
+    from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
+except ImportError:  # vLLM before the fla package moved to vllm/third_party
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm
+
 import vllm_ascend.ops  # noqa: F401 - Break the device_op import cycle.
 
 # Typical A2/A3 GDN prefill shape.
@@ -90,7 +95,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         # The Triton L2-norm kernel does not produce meaningful values on CPU,
         # so every adaptor call runs against a reference implementation.
         self.l2norm_patch = patch(
-            "vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd",
+            f"{_l2norm.__name__}.l2norm_fwd",
             side_effect=ref_l2norm,
         )
         self.l2norm = self.l2norm_patch.start()

@@ -24,6 +24,11 @@ import pytest
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
+try:
+    from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
+except ImportError:  # vLLM before the fla package moved to vllm/third_party
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm
+
 from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -76,7 +81,7 @@ def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
         patch("vllm_ascend.attention.gdn_attn_builder.get_current_hardware_profile", return_value=profile),
         patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
         patch(
-            "vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd",
+            f"{_l2norm.__name__}.l2norm_fwd",
             side_effect=lambda x: torch.nn.functional.normalize(x.float(), dim=-1).to(x.dtype),
         ) as l2norm,
     ):
