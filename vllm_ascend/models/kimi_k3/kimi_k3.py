@@ -14,6 +14,7 @@ from copy import copy
 from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import vllm.envs as envs
 from torch import nn
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -21,7 +22,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.parallel_state import model_parallel_is_initialized
+from vllm.distributed.parallel_state import GroupCoordinator, model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -91,7 +92,10 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.distributed.parallel_state import get_gproj_tp_group
+from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
+from vllm_ascend.ops.head_parallel import HeadParallelColumnLinear, HeadParallelRowLinear, get_head_sharded_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -101,12 +105,7 @@ from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimCon
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
-from vllm_ascend.worker.v2.pp_transport import (
-    PPTransportDataType,
-    add_pp_transport_tensors,
-    get_pp_transport_tensors,
-)
+from vllm_ascend.utils import get_rotation_path, is_950, npu_stream_switch, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
@@ -633,6 +632,53 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         return self.mla_attn(positions, hidden_states)
 
 
+_DSA_GATE_COMM_STREAMS: dict[torch.device, torch.npu.Stream] = {}
+
+
+def _make_dsa_gate_projection(g_proj: nn.Module, group: GroupCoordinator, num_heads: int, head_dim: int):
+    layout = KDAInputProjectionTPLayout(group, num_heads, head_dim)
+
+    def begin_gate(hidden: torch.Tensor) -> Callable[[], Callable[[], torch.Tensor]]:
+        device = hidden.device
+        comm_stream = _DSA_GATE_COMM_STREAMS.get(device)
+        if comm_stream is None:
+            # Each layer consumes its gate before the next layer starts.
+            comm_stream = torch.npu.Stream(device=device)
+            _DSA_GATE_COMM_STREAMS[device] = comm_stream
+        owner, capacity = layout.prepare_input(hidden)
+        owner = owner.contiguous()
+        comm_stream.wait_stream(torch.npu.current_stream())
+        owner.record_stream(comm_stream)
+        with npu_stream_switch(comm_stream):
+            gathered, gather_work = all_gather_async(owner, group)
+
+        def project_gate() -> Callable[[], torch.Tensor]:
+            gather_work.wait()
+            consumer = torch.npu.current_stream()
+            # Keep the contiguous send alive through the wait on the consuming stream.
+            owner.record_stream(consumer)
+            gathered.record_stream(consumer)
+            gate = g_proj(gathered)[0].contiguous()
+            comm_stream.wait_stream(consumer)
+            gate.record_stream(comm_stream)
+            with npu_stream_switch(comm_stream):
+                received = torch.empty_like(gate)
+                exchange = dist.all_to_all_single(received, gate, group=group.device_group, async_op=True)
+
+            def finish_gate() -> torch.Tensor:
+                exchange.wait()
+                consumer = torch.npu.current_stream()
+                gate.record_stream(consumer)
+                received.record_stream(consumer)
+                return layout.restore_gate(received, capacity)
+
+            return finish_gate
+
+        return project_gate
+
+    return begin_gate
+
+
 class AscendKimiDSAAttention(AscendKimiMLAAttention):
     """Kimi projections and output gate on the shared GLM/DeepSeek SFA stack."""
 
@@ -657,13 +703,33 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             topk_indices_buffer=topk_indices_buffer,
         )
         if config.mla_use_output_gate:
-            self.g_proj = ColumnParallelLinear(
-                config.hidden_size,
-                config.num_attention_heads * config.v_head_dim,
-                bias=False,
-                quant_config=vllm_config.quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
+            gate_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
+            if gate_size > 1:
+                if config.num_attention_heads % gate_size:
+                    raise ValueError(
+                        f"gproj_tensor_parallel_size must divide the DSA head count ({config.num_attention_heads})."
+                    )
+                group = get_gproj_tp_group()
+                self.g_proj = HeadParallelColumnLinear(
+                    config.hidden_size,
+                    config.num_attention_heads * config.v_head_dim,
+                    tp_group=group,
+                    bias=False,
+                    gather_output=False,
+                    quant_config=None,
+                    prefix=f"{prefix}.g_proj",
+                )
+                self.impl.begin_gate = _make_dsa_gate_projection(
+                    self.g_proj, group, config.num_attention_heads, config.v_head_dim
+                )
+            else:
+                self.g_proj = ColumnParallelLinear(
+                    config.hidden_size,
+                    config.num_attention_heads * config.v_head_dim,
+                    bias=False,
+                    quant_config=vllm_config.quant_config,
+                    prefix=f"{prefix}.g_proj",
+                )
             self.impl.g_proj = self.g_proj
 
 
@@ -801,7 +867,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             return False
         o_proj = self.self_attn.o_proj
         # PCP KDA owns combined TP/PCP head shards and its own reductions.
-        if isinstance(o_proj, KDARowParallelLinear):
+        if isinstance(o_proj, HeadParallelRowLinear):
             return False
         if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
             return False
@@ -951,6 +1017,26 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
     dspark_aux_capture_materialized = False
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        # v0.34.0's mixin appends the live tensor when the additive residual
+        # is None; vLLM main clones it (#66177) because the first layer
+        # updates that buffer in place. Mirror the snapshot on the release
+        # lane, keeping upstream's attn-res bank reset so the capture stays
+        # the raw prefix sum.
+        if vllm_version_is("0.34.0") and layer_idx in self.aux_hidden_state_layers:
+            if self.config.attn_res_block_size is not None:
+                residual = None
+            if residual is None:
+                aux_hidden_states.append(hidden_states.clone())
+                return aux_hidden_states
+        return super()._maybe_add_hidden_state(aux_hidden_states, layer_idx, hidden_states, residual)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
@@ -973,11 +1059,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self.n_redundant_experts = (
             parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
         )
-        self.use_sequence_parallel = (
-            (parallel_config.pipeline_parallel_size == 1 or vllm_config.use_v2_model_runner)
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-        )
+        self.use_sequence_parallel = parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1050,23 +1132,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             # A materialized state at start_layer belongs to this stage,
             # unlike the raw state emitted by the preceding stage.
             self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
-        if vllm_version_is("0.33.0") and pp.is_last_rank:
-            self._aux_upstream_total_cached = self._aux_slot_base_cached
+            # v0.34.0 caches the receive count inside the mixin, before the
+            # boundary above moves into this stage; sync it for collection.
+            if vllm_version_is("0.34.0") and pp.is_last_rank:
+                self._aux_upstream_total_cached = self._aux_slot_base_cached
 
-    if not vllm_version_is("0.33.0"):
-
-        def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-            if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
-                return super().aux_hidden_state_slot_keys()
-            pp = get_pp_group()
-            if pp.world_size < 2:
-                return (), ()
-            # Materialized DSpark captures before layer L. A cut at L belongs
-            # to the receiving stage, unlike raw post-layer capture.
-            base = self._aux_slot_base_cached
-            end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
-            key = self.AUX_HIDDEN_STATE_KEY
-            return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
+            return super().aux_hidden_state_slot_keys()
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        # Materialized DSpark captures before layer L. A cut at L belongs
+        # to the receiving stage, unlike raw post-layer capture.
+        base = self._aux_slot_base_cached
+        end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
+        key = self.AUX_HIDDEN_STATE_KEY
+        return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
 
     def make_empty_intermediate_tensors(
         self,
@@ -1103,12 +1185,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
-                # DSA retains an independent G projection. Newer upstream
-                # loaders otherwise map it to shard 2 of the two-shard Q/KV
-                # projection. Match registered parameters, including scales
-                # and offsets, and preserve their own TP/quantization loaders.
-                # Missing PP layers and fused MLA/KDA gates stay upstream.
-                if ".g_proj." in name and name in params_dict:
+                # Load standalone G, B and F_a before upstream can map them into packed projections.
+                # Upstream loads standalone F_b by name. Only fused F_b needs the mapping below.
+                if name in params_dict and any(token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.")):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     kwargs = args[2] if len(args) > 2 else {}
@@ -1164,13 +1243,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             residual = intermediate_tensors["residual"]
 
         materialized_aux = self.dspark_aux_capture_materialized
-        # Main's runner relays upstream slots and merges them once on the last
-        # stage. The release model still carries the cumulative payload.
-        aux_hidden_states = (
-            get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
-            if vllm_version_is("0.33.0")
-            else []
+        # v0.34.0 relays earlier stages' aux slots through the PP tensors;
+        # vLLM main merges them in the runner, so this yields [] there.
+        # Only this stage's own captures are packed into the outgoing payload:
+        # re-packing the relayed slots would duplicate them and shift the
+        # local slot keys.
+        remote_aux_hidden_states: list[torch.Tensor] = (
+            [] if get_pp_group().is_first_rank else self.collect_remote_aux_hidden_states(intermediate_tensors)
         )
+        aux_hidden_states: list[torch.Tensor] = []
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -1186,7 +1267,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = sp_shard(hidden_states)
             if residual is not None:
                 residual = sp_shard(residual)
-            aux_hidden_states = [sp_shard(aux) for aux in aux_hidden_states]
+            remote_aux_hidden_states = [sp_shard(aux) for aux in remote_aux_hidden_states]
         if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
                 aux_hidden_states,
@@ -1254,13 +1335,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 residual = sp_all_gather(residual)[:full_num_tokens]
                 aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
             output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-            if not vllm_version_is("0.33.0"):
-                return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
-            return add_pp_transport_tensors(
-                output,
-                PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
-            )
+            return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
 
         # The loop above already captured aux for every ``(layer_idx + 1)``
         # in ``aux_hidden_state_layers``, including ``end_layer``; upstream
@@ -1276,6 +1351,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states)
+        # Order the states by global layer position: everything relayed by the
+        # upstream stages comes before this stage's own captures.
+        aux_hidden_states = remote_aux_hidden_states + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1349,7 +1427,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1401,11 +1479,9 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         vLLM main lets the AMD Kimi class provide its own model state; that
         state builds upstream attention metadata, which is invalid on NPU.
         """
-        from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
-            AscendMambaHybridModelState,
-        )
+        from vllm_ascend.models.kimi_k3.model_state import AscendKimiModelState
 
-        return AscendMambaHybridModelState
+        return AscendKimiModelState
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
@@ -1459,7 +1535,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

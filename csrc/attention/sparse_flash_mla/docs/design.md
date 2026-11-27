@@ -30,7 +30,7 @@ LSE=\log Z.
 
 算子不负责生成压缩 KV，也不负责从全量 KV 计算 TopK 排名；调用方提供压缩结果及稀疏索引。融合的核心是按小块完成 `QKᵀ → mask/softmax → PV → 累加`，避免存储完整注意力矩阵。
 
-公式与精度参考：[Golden](../tests/pytest/sparse_flash_mla_golden.py) 的 `calculate_by_bnsd`、`sinks_softmax`；输出 shape 参考 [InferShape](../op_host/sparse_flash_mla_infershape.cpp)。
+公式与精度参考：[Golden](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/pytest/sparse_flash_mla_golden.py) 的 `calculate_by_bnsd`、`sinks_softmax`；输出 shape 参考 [InferShape](../op_host/sparse_flash_mla_infershape.cpp)。
 
 ### 1.2 场景与模板路由
 
@@ -346,7 +346,7 @@ arch35 主循环完成后，AIV 经同步再按 FD metadata 执行 `ProcessFlash
 | 阅读顺序 | 文件/符号 | 需要回答的问题 |
 | --- | --- | --- |
 | 1 | [README](../README.md)、[InferShape](../op_host/sparse_flash_mla_infershape.cpp) | 支持哪些输入，输出如何排列？ |
-| 2 | [Golden](../tests/pytest/sparse_flash_mla_golden.py) | 选择、mask、sink、LSE 的数学语义是什么？ |
+| 2 | [Golden](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/pytest/sparse_flash_mla_golden.py) | 选择、mask、sink、LSE 的数学语义是什么？ |
 | 3 | [Host tiling](../op_host/sparse_flash_mla_tiling.cpp)、[tiling 结构](../op_host/sparse_flash_mla_tiling.h) | 哪个分支，哪些字段和 workspace？ |
 | 4 | [Metadata](../../sparse_flash_mla_metadata/op_kernel_aicpu/sparse_flash_mla_metadata_aicpu.cpp) | 任务游标、负载和 FD 如何生成？ |
 | 5 | [Kernel 入口](../op_kernel/sparse_flash_mla.cpp) | 实际实例化哪个模板？ |
@@ -371,7 +371,7 @@ arch35 主循环完成后，AIV 经同步再按 FD metadata 执行 `ProcessFlash
 | 调度 | 行内 S2 跨核、split-G、空闲核、流水排空 |
 | 一致性 | 单样本与拼 batch/重排 batch；普通模式与 batch consistency；aclgraph |
 
-已有 [Host UT](../tests/ut/op_host/test_sparse_flash_mla_tiling.cpp)、[arch35 UT](../tests/ut/op_host/arch35/test_sparse_flash_mla_tiling.cpp)、[单跑测试](../tests/pytest/test_sparse_flash_mla_single.py)、[batch consistency 测试](../tests/pytest/test_sparse_flash_mla_batch_consistency.py) 可作为起点。Golden 比较应同时检查输出与 LSE，并沿用仓库比较方法，避免随意放宽阈值掩盖边界错误。
+已有 [Host UT](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/ut/op_host/test_sparse_flash_mla_tiling.cpp)、[arch35 UT](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/ut/op_host/arch35/test_sparse_flash_mla_tiling.cpp)、[单跑测试](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/pytest/test_sparse_flash_mla_single.py)、[batch consistency 测试](https://gitcode.com/cann/ops-transformer/blob/master/csrc/attention/sparse_flash_mla/tests/pytest/test_sparse_flash_mla_batch_consistency.py) 可作为起点。Golden 比较应同时检查输出与 LSE，并沿用仓库比较方法，避免随意放宽阈值掩盖边界错误。
 
 在安装了匹配 CANN、torch_npu 和本仓库扩展的 Ascend 环境中，可从测试目录使用已有脚本：
 

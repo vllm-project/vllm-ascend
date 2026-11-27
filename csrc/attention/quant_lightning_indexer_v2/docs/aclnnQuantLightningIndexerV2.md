@@ -43,7 +43,7 @@ $$
 
 ## 函数原型
 
-每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnQuantLightningIndexerV2"接口执行计算。
+每个算子分为[两段式接口](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnQuantLightningIndexerV2"接口执行计算。
 
 ```Cpp
 aclnnStatus aclnnQuantLightningIndexerV2GetWorkspaceSize(
@@ -493,11 +493,10 @@ aclnnStatus aclnnQuantLightningIndexerV2(
       <td>公式中的Indices输出对应的value值。</td>
       <td>
           <ul>
-                <li>returnValue为1时输出有效值，无效部分按输出 dtype 填负无穷；returnValue为0时输出shape为(0,)的空tensor。</li>
-                <li>910B/910_93（arch22）在 returnValue为1时直接输出 FP32（跨 rank 归并不掉精度）；950（arch35）为 BF16。</li>
+                <li>returnValue为1时输出有效值，无效部分填bf16负无穷；returnValue为0时输出shape为(0,)的空tensor。</li>
           </ul>
       </td>
-      <td>BFLOAT16（arch22 且 returnValue=1 时为 FLOAT32）</td>
+      <td>BFLOAT16</td>
       <td>ND</td>
       <td>returnValue为1时shape与sparseIndicesOut保持一致；returnValue为0时shape为(0,)。</td>
       <td>x</td>
@@ -553,7 +552,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 - **返回值：**
 
-  aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+  aclnnStatus：返回状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
   第一段接口会完成入参校验，出现以下场景时报错：
 
@@ -622,7 +621,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 - **返回值：**
 
-  aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+  aclnnStatus：返回状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
 ## 约束说明
 
@@ -635,7 +634,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 ## 调用示例
 
-示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
+示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/compile_and_run_sample.md)。
 
 ```Cpp
 /**

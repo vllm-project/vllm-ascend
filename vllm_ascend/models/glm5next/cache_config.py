@@ -34,7 +34,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 
 
@@ -121,7 +120,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )
     scale_alignments = tuple(
-        get_storage_block_size(spec) * get_dtype_size(spec.scale_dtype)
+        spec.num_states * get_dtype_size(spec.scale_dtype)
         for spec in indexer_specs
         if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
     )
@@ -476,23 +475,3 @@ def get_glm5_next_kv_cache_config(
         kv_cache_groups=groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
-
-
-def get_glm5_next_max_memory_usage(
-    vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-) -> int:
-    """Return capacity for GLM-Next's shared global block-id pool."""
-
-    layout = _get_glm5_next_cache_layout(groups)
-    if layout is None:
-        raise ValueError("Expected GLM-Next cache groups.")
-    # Scheduler groups allocate disjoint IDs from the shared global BlockPool.
-    # One request therefore needs enough IDs for every group even though one
-    # physical tensor slot can be reused by layers from different groups.
-    blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(vllm_config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
-    return blocks * get_glm5_next_pool_bytes_per_block(groups)

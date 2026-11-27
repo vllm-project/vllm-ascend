@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     MmcDirect,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -140,8 +141,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._recv_buffer_reuse_event = None
             self._recv_buffer_registered = False
             self._backend.register_buffer(
-                [self._recv_buffer.data_ptr()],
-                [self._recv_buffer.nbytes],
+                [BufferDescriptor(address=self._recv_buffer.data_ptr(), size_bytes=self._recv_buffer.nbytes)]
             )
             self._recv_buffer_registered = True
             logger.info(
@@ -176,6 +176,10 @@ class ECMemcacheConnector(ECConnectorBase):
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
         seen_mm_hashes_in_current_request: list[str] = []
         for feature in request.mm_features:
+            position = feature.mm_position
+            # Inputs before num_computed_tokens are already in the KV cache.
+            if position.offset + position.length <= num_computed_tokens:
+                continue
             current_image_mm_hash = feature.identifier
             if (
                 current_image_mm_hash in self._mm_hash_hits
@@ -532,7 +536,9 @@ class ECMemcacheConnector(ECConnectorBase):
             # recv_buffer_tokens limits persistent NPU memory only. Oversized
             # values share this per-call staging buffer, which is registered
             # once and released after all second-pass batches finish.
-            self._backend.register_buffer([temporary_buffer_ptr], [temporary_buffer.nbytes])
+            self._backend.register_buffer(
+                [BufferDescriptor(address=temporary_buffer_ptr, size_bytes=temporary_buffer.nbytes)]
+            )
             registered = True
             for batch in self._build_capacity_batches(request_params, temporary_buffer_bytes):
                 self._load_batch_into_buffer(

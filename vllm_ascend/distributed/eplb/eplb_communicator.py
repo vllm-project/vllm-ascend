@@ -501,7 +501,7 @@ class _HixlSession:
             for remote_engine in self._remote_engines.values():
                 try:
                     assert self._engine is not None
-                    status = self._engine.disconnect(remote_engine)
+                    status = self._engine.disconnect(remote_engine, 2000)
                     if status != getattr(self._hixl, "NOT_CONNECTED", None):
                         self._check_status(status, "disconnect")
                 except Exception as error:

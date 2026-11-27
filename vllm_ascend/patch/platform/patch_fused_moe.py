@@ -36,10 +36,8 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
@@ -74,6 +72,9 @@ def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    # Preserve BaseRouter's selection flow when TopK already returned physical IDs.
+    if getattr(self, "_use_gating_top_k_with_map", False):
+        return topk_ids
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids
@@ -141,7 +142,7 @@ def _ascend_FusedMoE(
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.
     scaling_kwargs: dict[str, Any]
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         scaling_kwargs = {"apply_routed_scale_to_output": apply_routed_scale_to_output}
     else:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
@@ -156,20 +157,6 @@ def _ascend_FusedMoE(
             )
         apply_routed_scale_to_output = routed_scale_mode.scales_output
         scaling_kwargs = {"routed_scale_mode": routed_scale_mode}
-    # RoutedExperts allocates its parameters before AscendMoERunner is
-    # constructed. Propagate Ascend EPLB capacity into the upstream factory so
-    # redundant expert slots are present when weights are created and loaded.
-    eplb_config = get_ascend_config().eplb_config
-    if eplb_config.dynamic_eplb or eplb_config.expert_map_path is not None:
-        configured_redundancy = eplb_config.num_redundant_experts
-        upstream_redundancy = num_redundant_experts
-        if configured_redundancy and upstream_redundancy not in (0, configured_redundancy):
-            raise ValueError(
-                f"Conflicting EPLB redundant expert counts: vLLM={upstream_redundancy}, Ascend={configured_redundancy}."
-            )
-        enable_eplb = True
-        num_redundant_experts = configured_redundancy or upstream_redundancy
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -186,7 +173,7 @@ def _ascend_FusedMoE(
             hash_indices_table=hash_indices_table,
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
-            eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
+            eplb_state=AscendEplbLayerState() if enable_eplb else None,
         )
     routed_experts_cls = _adapt_routed_experts_cls(routed_experts_cls)
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
@@ -215,7 +202,12 @@ def _ascend_FusedMoE(
         routed_experts_args=routed_experts_args,
         **kwargs,
     )
-    _adapt_eplb_router(runner.router, enable_router_eplb)
+    _adapt_eplb_router(runner.router, enable_eplb)
+    if enable_eplb:
+        from vllm_ascend.ops.triton.eplb import _EPLB_MAP_KERNEL
+
+        # The model runner holds its JIT registry window during construction.
+        _EPLB_MAP_KERNEL.register_warmup(num_experts, top_k)
     return runner
 
 

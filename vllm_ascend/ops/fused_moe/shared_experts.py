@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodB
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.parallel_state import get_shared_expert_tp_group
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
 from vllm_ascend.ops.fused_moe import moe_utils
@@ -45,9 +46,15 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     RoutedMoEMilestones,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.linear_op import SharedExpertColumnParallelOp, SharedExpertRowParallelOp
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    npu_stream_switch,
+    shared_expert_tp_enable,
+    shared_experts_calculation_stream,
+)
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -64,6 +71,7 @@ class SharedExpertParallelMode(Enum):
     SHARED_EXPERT_DATA_PARALLEL_ONLY = auto()  # Full activations, replicated weights (DP only).
     SEQUENCE_PARALLEL_ONLY = auto()  # Sharded activations, TP-sharded weights (SP only).
     SEQUENCE_PARALLEL_SEDP = auto()  # Sharded activations, replicated weights (SP + DP).
+    FINE_GRAINED_TENSOR_PARALLEL = auto()  # DP-local tokens, DP-axis weight shards.
 
 
 class SharedExpertMLPPath(Enum):
@@ -142,6 +150,17 @@ class AscendSharedExperts:
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
+        self.finegrained_tp_group = None
+        if shared_expert_tp_enable():
+            if not isinstance(
+                getattr(layer.gate_up_proj, "custom_op", None), SharedExpertColumnParallelOp
+            ) or not isinstance(getattr(layer.down_proj, "custom_op", None), SharedExpertRowParallelOp):
+                raise ValueError("Shared-expert fine-grained TP requires sharded gate_up_proj and down_proj linears.")
+            if layer.gate_up_proj.gather_output or not layer.down_proj.input_is_parallel:
+                raise ValueError(
+                    "Shared-expert fine-grained TP requires local gate/up output and partitioned down input."
+                )
+            self.finegrained_tp_group = get_shared_expert_tp_group()
 
         # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
         # setup below proves the configuration is supported, then armed once
@@ -172,7 +191,7 @@ class AscendSharedExperts:
         self._setup_megamoe_shared_fusion()
 
     def _setup_megamoe_shared_fusion(self) -> None:
-        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+        """Fuse the shared expert into the MegaMoe operator when supported.
 
         When active, each shared linear's ``process_weights_after_loading`` is
         wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
@@ -183,33 +202,47 @@ class AscendSharedExperts:
         dispatches to MegaMoe. Any unsupported configuration keeps the
         standalone shared-expert execution unchanged.
         """
+        # MegaMoe's fused shared ABI does not own the DP-axis AG/RS.
+        if getattr(self, "finegrained_tp_group", None) is not None:
+            return
         if not use_cann_megamoe(get_current_vllm_config()):
             return
         # Only enable_fused_mc2=3 opts into fusing the shared expert into the
         # MegaMoe operator; =2 keeps the separate shared-expert forward.
         if not get_ascend_config().megamoe_shared_expert_fusion:
             return
-        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
             return
-        # Checks the ROUTED experts' quant type: the shared fusion stacks on
-        # top of the routed MegaMoe path, which must support the scenario
-        # first. The operator's A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP
-        # (its A2/A3 ones are A16W16 / A8W8-INT / A8W4-INT), so all three MXFP
-        # types pass. The shared expert's own quant type is resolved
-        # per-linear in _collect_megamoe_shared_weight and may differ from
-        # this one (mixed quantization).
-        if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):
-            # Only MXFP8 and MXFP4 are implemented. Their shared weights
-            # rebuild cheaply from the post-processed linear buffers: MXFP8
-            # needs an (out, in) transpose, packed MXFP4 additionally needs the
-            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
-            # routed experts.
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not implemented for quant type %s; "
-                "keeping the separate shared-expert forward.",
-                self.quant_type,
+        # The payload family follows the machine's routed MegaMoe contract rather
+        # than a separate capability: A5 keeps the MXFP layouts, A3 (arch22) the
+        # INT8 A8W8 one.
+        supports_mxfp_fusion = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        if supports_mxfp_fusion:
+            self._megamoe_shared_fusion_platform = "A5/MXFP"
+        else:
+            # A3 (arch22) INT8 shared fusion, enabled by enable_fused_mc2=3. The
+            # arch22 kernel consumes shared_l1/l2 when the INT8 payload uses the
+            # routed (in, out) FRACTAL_NZ layout: a per-expert list of 2-D int8
+            # weights plus a 1-D per-output-channel uint64 scale, matching the
+            # routed-expert INT8 descriptor contract.
+            self._megamoe_shared_fusion_platform = "A3/INT8"
+        # On A3 the routed experts can be W8A8 or W4A8, while the shared
+        # linears must supply W8A8 weights.
+        supported_quant_types = (
+            (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+            if supports_mxfp_fusion
+            else (QuantType.W8A8, QuantType.W4A8)
+        )
+        if self.quant_type not in supported_quant_types:
+            self._disable_megamoe_shared_fusion(
+                f"quant type {self.quant_type} is not supported on {self._megamoe_shared_fusion_platform}"
             )
-            self._megamoe_shared_fusion_disabled = True
+            return
+        if self.quant_type == QuantType.W4A8 and not moe_utils.supports_cann_mega_moe_mixed_int_shared():
+            self._disable_megamoe_shared_fusion(
+                "the CANN MegaMoe interface cannot describe W4A8 routed and W8A8 shared experts independently"
+            )
             return
         # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
         # operator and cannot be fused.
@@ -266,6 +299,12 @@ class AscendSharedExperts:
             )
             return
 
+        logger.info_once(
+            "MegaMoe shared-expert fusion gate passed (%s): routed quant type %s, "
+            "fusing the shared expert into the MegaMoe operator (enable_fused_mc2=3).",
+            self._megamoe_shared_fusion_platform,
+            self.quant_type,
+        )
         for linear, slot in (
             (self.layer.gate_up_proj, "w1"),
             (self.layer.down_proj, "w2"),
@@ -383,34 +422,76 @@ class AscendSharedExperts:
         """
         if self._megamoe_shared_fusion_disabled:
             return
-        padding = getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))
-        if any(padding):
+        weight_dtype = linear.weight.data.dtype
+        is_int8 = weight_dtype == torch.int8
+        self._megamoe_shared_weight_dtype = weight_dtype
+        # The routed layer already fixed this machine's MegaMoe payload family:
+        # A5 accepts the MXFP layouts only, arch22 (A3) accepts the INT8 one. A
+        # checkpoint that quantizes the shared expert into the other family
+        # cannot be expressed by the operator, and publishing it would also
+        # skip the standalone forward, so fall back before rebuilding anything.
+        platform = getattr(self, "_megamoe_shared_fusion_platform", "A5/MXFP")
+        is_mxfp_platform = platform != "A3/INT8"
+        if weight_dtype in (torch.uint8, torch.float8_e4m3fn) and not is_mxfp_platform:
             self._disable_megamoe_shared_fusion(
-                f"padded shared-expert weights {padding} do not match the routed "
-                "intermediate size required by the MegaMoe layout"
+                f"shared-expert weight dtype {weight_dtype} is an MXFP payload, but the "
+                f"routed MegaMoe layer on {platform} consumes the arch22 INT8 family",
             )
             return
-        weight_dtype = linear.weight.data.dtype
+        if is_int8 and is_mxfp_platform:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight dtype {weight_dtype} is an arch22 INT8 payload, but "
+                f"the routed MegaMoe layer on {platform} consumes the MXFP family",
+            )
+            return
+        # The MXFP padding attributes describe block_128/block_32 shard
+        # padding. INT8 weights keep the plain (in, out) shape, so skip the
+        # block_128-based inference there; a stale hint would otherwise
+        # spuriously disable the INT8 fusion.
+        if not is_int8:
+            padding = getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))
+            if any(padding):
+                self._disable_megamoe_shared_fusion(
+                    f"padded shared-expert weights {padding} do not match the routed "
+                    "intermediate size required by the MegaMoe layout"
+                )
+                return
         if weight_dtype == torch.uint8:
             # Packed MXFP4 shared expert: two logical K values per byte.
             packed_fp4 = True
         elif weight_dtype == torch.float8_e4m3fn:
             packed_fp4 = False
+        elif weight_dtype == torch.int8:
+            # A3 INT8 (A8W8 / A8W4) shared expert: one int8 per element.
+            packed_fp4 = False
         else:
             self._disable_megamoe_shared_fusion(
                 f"shared-expert weight dtype {weight_dtype} is not "
-                "supported by MegaMoe fusion (expected MXFP8 fp8_e4m3fn or packed "
-                "MXFP4 uint8); keeping the separate shared-expert forward."
+                "supported by MegaMoe fusion (expected MXFP8 fp8_e4m3fn, packed "
+                "MXFP4 uint8, or INT8 int8); keeping the separate shared-expert forward."
             )
             return
         # Resolve the shared expert's own quant type. The packed weight bytes
         # alone cannot tell an A4 from an A8 shared activation, so prefer the
-        # type declared by the shared linear's quant method (this is what
-        # mixed-quantization checkpoints rely on: W4A8MXFP shared under
-        # W8A8MXFP routed runs the shared GMM in A8W4-FP mode). Fall back to
-        # the weight-dtype heuristic when the method declares nothing.
+        # type declared by the shared linear's quant method (mixed-quantization
+        # checkpoints rely on it: W4A8MXFP shared under W8A8MXFP routed runs the
+        # shared GMM in A8W4-FP mode). Fall back to the weight-dtype heuristic
+        # when the method declares nothing.
         shared_quant_type = getattr(getattr(linear, "quant_method", None), "quant_type", QuantType.NONE)
-        if shared_quant_type in (QuantType.W4A4MXFP, QuantType.W4A8MXFP):
+        if is_int8:
+            # The A3 INT8 shared payload is validated for W8A8 only. A W4A8
+            # shared linear materializes int32 packed weights and is rejected by
+            # the dtype check above, so W4A8 declared on an int8 buffer does not
+            # match: keep the separate shared forward.
+            if shared_quant_type == QuantType.W4A8:
+                self._disable_megamoe_shared_fusion(
+                    "shared quant type W4A8 is not supported by the A3 INT8 shared payload (W8A8 only)"
+                )
+                return
+            if shared_quant_type != QuantType.W8A8:
+                # Undeclared: an int8 buffer with no quant type is the W8A8 path.
+                shared_quant_type = QuantType.W8A8
+        elif shared_quant_type in (QuantType.W4A4MXFP, QuantType.W4A8MXFP):
             if not packed_fp4:
                 self._disable_megamoe_shared_fusion(
                     f"shared quant type {shared_quant_type} expects packed MXFP4 "
@@ -439,6 +520,21 @@ class AscendSharedExperts:
                     self.moe_config.intermediate_size_per_partition // 2,
                 )
             )
+        elif is_int8:
+            # A3 INT8: the processed W8A8 own-linear weight already stores the
+            # logical (in, out) orientation the MegaMoe INT8 GMM expects
+            # (w1 (H, 2I), w2 (I, H)); never transpose it.
+            expected_weight_shape = (
+                (
+                    self.moe_config.hidden_dim,
+                    2 * self.moe_config.intermediate_size_per_partition,
+                )
+                if slot == "w1"
+                else (
+                    self.moe_config.intermediate_size_per_partition,
+                    self.moe_config.hidden_dim,
+                )
+            )
         else:
             expected_weight_shape = (
                 (
@@ -456,8 +552,18 @@ class AscendSharedExperts:
             # internal format, so force the ND view before the transpose +
             # contiguous materialization (2 == ACL_FORMAT_ND).
             weight = torch_npu.npu_format_cast(linear.weight.data, 2)
-            weight = weight.transpose(0, 1).contiguous()
-            scale = linear.weight_scale.data.transpose(0, 1).contiguous()
+            if not is_int8:
+                # A5 MXFP descriptors are (out, in); flip them to (in, out). A3
+                # INT8 weights are already (in, out) and must never be transposed
+                # (the operator requires shared_weight2 = (I, H)).
+                weight = weight.transpose(0, 1).contiguous()
+                # MXFP scales follow the transposed weight; the INT8 scale is
+                # rebuilt from the flattened per-channel buffer further down.
+                raw_scale = linear.weight_scale.data
+                if raw_scale.dim() == 1:
+                    scale = raw_scale.reshape(-1, 1).contiguous()
+                else:
+                    scale = raw_scale.transpose(0, 1).contiguous()
         finally:
             torch.npu.config.allow_internal_format = True
         if tuple(weight.shape) != expected_weight_shape:
@@ -482,7 +588,40 @@ class AscendSharedExperts:
         # Checkpoint E8M0 scales are stored as bytes; the MegaMoe A5 input
         # check requires their semantic dtype for routed and shared experts
         # alike (the storage is unchanged, only the dtype is reinterpreted).
-        scale = scale.view(torch.float8_e8m0fnu)
+        if is_int8:
+            # A3 INT8 shared GMM: feed exactly the routed-expert contract -- a
+            # per-expert list of 2-D int8 weights in the (in, out) FRACTAL_NZ
+            # layout plus a 1-D per-output-channel scale whose fp32 bits are
+            # packed in an int64 (mega_moe_arch22.h: ScaleType =
+            # GemmType<uint64_t, VectorLayout>). ``weight`` already holds the
+            # processed (in, out) buffer, so only the NZ cast is needed; the
+            # int64 container matches the routed fused scale lists
+            # (scale_from_float_to_int64), because a bf16/fp32 scale would be
+            # silently misread.
+            weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+            base_scale = linear.weight_scale.data
+            scale = base_scale.reshape(-1).to(torch.float32).contiguous().view(torch.int32).to(torch.int64)
+            # The arch22 epilogue reads one scale per output channel. A
+            # per-group W8A8 checkpoint would flatten to out * groups values and
+            # be silently misread, so reject anything but the exact length.
+            expected_scale_len = (
+                2 * self.moe_config.intermediate_size_per_partition if slot == "w1" else self.moe_config.hidden_dim
+            )
+            if scale.numel() != expected_scale_len:
+                self._disable_megamoe_shared_fusion(
+                    f"shared-expert scale length {scale.numel()} does not match the "
+                    f"per-output-channel contract {expected_scale_len}"
+                )
+                return
+            logger.info_once(
+                "A3 MegaMoe INT8 shared payload: orientation=(in,out) "
+                "weight=%s dtype=%s format=FRACTAL_NZ scale=%s dtype=uint64",
+                tuple(weight.shape),
+                weight.dtype,
+                tuple(scale.shape),
+            )
+        else:
+            scale = scale.view(torch.float8_e8m0fnu)
         self._megamoe_shared_parts[slot] = weight
         self._megamoe_shared_parts[slot + "_scale"] = scale
         self._publish_megamoe_shared_fusion()
@@ -531,7 +670,13 @@ class AscendSharedExperts:
         fusion.weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
             self.megamoe_shared_weights_ready = True
-            logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
+            logger.info_once(
+                "Fused the shared expert into the %s MegaMoe operator "
+                "(enable_fused_mc2=3, shared quant type %s, shared weight dtype %s).",
+                getattr(self, "_megamoe_shared_fusion_platform", "A5/MXFP"),
+                self._megamoe_shared_quant_type,
+                getattr(self, "_megamoe_shared_weight_dtype", "unknown"),
+            )
 
     def _disable_megamoe_shared_fusion(self, reason: str) -> None:
         if not self._megamoe_shared_fusion_disabled:
@@ -615,6 +760,8 @@ class AscendSharedExperts:
 
     def parallel_mode(self) -> SharedExpertParallelMode:
         """Resolve the effective activation/weight layout for this forward."""
+        if getattr(self, "finegrained_tp_group", None) is not None:
+            return SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
         # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
         # expert is local. Shared-expert linears still span the physical TP
         # group, so their layout must be derived from that group instead.
@@ -672,6 +819,10 @@ class AscendSharedExperts:
         TP-sharded shared-expert weights need the full activations, so
         all-gather the shards back to [T_padded, H] and drop the padding rows.
         """
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
+            # These are different DP requests, not SP slices of num_tokens.
+            return finegrained_tp_group.all_gather(hidden_states, dim=0)
         gathered = tensor_model_parallel_all_gather(hidden_states, dim=0)
         return gathered[: _EXTRA_CTX.num_tokens]
 
@@ -684,6 +835,9 @@ class AscendSharedExperts:
         (down_proj is built with reduce_results=False), replacing the usual
         TP all-reduce.
         """
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
+            return finegrained_tp_group.reduce_scatter(shared_out, dim=0)
         tp_size = self.moe_config.tp_group.world_size
         original_num_tokens = shared_out.shape[0]
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
@@ -701,7 +855,11 @@ class AscendSharedExperts:
         collectives.  This method is intended to overlap the gather only with
         a routed input transform such as Kimi-K3's latent projection.
         """
-        if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
+        if not (
+            self.multistream_overlap
+            and self.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+        ):
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         input_ready = torch.npu.current_stream().record_event()
@@ -709,7 +867,10 @@ class AscendSharedExperts:
             torch.npu.current_stream().wait_event(input_ready)
             # Keep TP padding across the custom-op boundary; the shared MLP
             # trims it before computation.
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+            if self.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL:
+                hidden_states = self._gather_sp_input(hidden_states)
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
             all_gather_done = torch.npu.current_stream().record_event()
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
@@ -728,13 +889,21 @@ class AscendSharedExperts:
         on the default stream can deadlock HCCL when ranks make different
         progress across the two process groups.
         """
-        if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
+        if not (
+            self.multistream_overlap
+            and self.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+        ):
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         # Keep TP padding across the custom-op boundary; the shared MLP trims
         # it before computation. The caller records shared_input_ready after
         # this returns, handing the gathered tensor to the auxiliary stream.
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        hidden_states = (
+            self._gather_sp_input(hidden_states)
+            if self.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
+            else tensor_model_parallel_all_gather(hidden_states, dim=0)
+        )
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
             is_gathered=True,
@@ -784,7 +953,11 @@ class AscendSharedExperts:
             # Full activations + replicated weights: shard tokens locally,
             # run the MLP, then gather its complete output.
             hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not prepared_input.is_gathered:
+        elif (
+            mode
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+            and not prepared_input.is_gathered
+        ):
             # TP-sharded weights require full activations. Multistream starts
             # this gather before the routed path; the serial path does it here.
             hidden_states = self._gather_sp_input(hidden_states)
@@ -1157,7 +1330,10 @@ class AscendSharedExperts:
         local_dp_metadata = submitted_gate_up.local_dp_metadata
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
-            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            if self.multistream_overlap and mode in (
+                SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+                SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL,
+            ):
                 self._wait_for_milestone(
                     milestones.routed_finalize_done,
                     "routed_finalize_done",
@@ -1165,13 +1341,22 @@ class AscendSharedExperts:
                 shared_out = self._pad_and_reduce_scatter(shared_out)
 
         if self.multistream_overlap and (
-            mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY or not defer_output_wait
+            mode
+            not in (
+                SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+                SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL,
+            )
+            or not defer_output_wait
         ):
             self.wait_for_output()
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
             shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not self.multistream_overlap:
+        elif (
+            mode
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+            and not self.multistream_overlap
+        ):
             shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out

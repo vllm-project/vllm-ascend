@@ -315,6 +315,14 @@ class MooncakeTransferAddressMixin:
 class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
     """Worker implementation shared by Mooncake transfer modes."""
 
+    @staticmethod
+    def _get_transfer_max_workers(vllm_config: VllmConfig) -> int:
+        assert vllm_config.kv_transfer_config is not None
+        max_workers = vllm_config.kv_transfer_config.get_from_extra_config("transfer_max_workers", 32)
+        if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
+            raise ValueError(f"Mooncake transfer_max_workers must be a positive integer, got {max_workers!r}")
+        return max_workers
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -364,15 +372,19 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.handshake_port = self.side_channel_port + device_index
 
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host,
-            device_name=device_name,
-        )
+        self.engine = self._get_transfer_engine(device_name)
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None
         self.xfer_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake worker %s", engine_id)
+
+    def _get_transfer_engine(self, device_name: str | None):
+        return global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
+
+    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
+        """Register the memory ranges collected for KV transfer."""
+        global_te.register_buffer(ptrs, lengths)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
@@ -512,6 +524,54 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
         return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
 
+    def _validate_kv_sharing_layers(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+    ) -> None:
+        """Accept unconfigured layers only when they borrow a configured cache."""
+        configured_layers = {
+            layer_name
+            for tensor_config in self.kv_cache_config.kv_cache_tensors
+            for layer_name in get_kv_cache_tensor_layers(tensor_config)
+        }
+        extra_layers = kv_caches.keys() - configured_layers
+        if not extra_layers:
+            return
+
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        sharing_targets = {
+            name: getattr(forward_context.get(name), "kv_sharing_target_layer_name", None) for name in extra_layers
+        }
+        undeclared_layers = sorted(name for name, target in sharing_targets.items() if not target)
+        if undeclared_layers:
+            raise ValueError(f"KV caches contain layers absent from kv_cache_tensors: {undeclared_layers}.")
+        if self.ascend_config.kvpp_config.size > 1:
+            raise ValueError("MooncakeConnectorV2 does not support KV sharing with KV parallelism.")
+
+        for layer_name, target_name in sorted(sharing_targets.items()):
+            if target_name not in configured_layers:
+                raise ValueError(
+                    f"KV sharing layer {layer_name!r} must target a configured owner, got {target_name!r}."
+                )
+            target_cache = kv_caches.get(target_name)
+            if target_cache is None:
+                raise ValueError(f"No KV cache was registered for configured layer {target_name!r}.")
+            caches = as_kv_cache_tensors(kv_caches[layer_name])
+            target_caches = as_kv_cache_tensors(target_cache)
+            if (
+                not caches
+                or len(caches) != len(target_caches)
+                or any(
+                    cache.device != target.device
+                    or cache.data_ptr() != target.data_ptr()
+                    or cache.dtype != target.dtype
+                    or cache.shape != target.shape
+                    or cache.stride() != target.stride()
+                    for cache, target in zip(caches, target_caches)
+                )
+            ):
+                raise ValueError(f"KV sharing layer {layer_name!r} must bind to the same cache as {target_name!r}.")
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -521,6 +581,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
+        # Like NIXL, only independently allocated caches enter transfer metadata.
+        # Validate the runner's extra shared bindings before registering memory.
+        self._validate_kv_sharing_layers(kv_caches)
         self.kvpp_layer_owners = (
             map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             if self.ascend_config.kvpp_config.size > 1
@@ -620,13 +683,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
                 )
 
-        unexpected_layers = kv_caches.keys() - configured_layer_names
-        if unexpected_layers:
-            raise ValueError(f"KV caches contain layers absent from kv_cache_tensors: {sorted(unexpected_layers)}.")
-
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._register_transfer_buffers(register_regions.ptrs, register_regions.lengths)
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,

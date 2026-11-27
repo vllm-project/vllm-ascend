@@ -4,29 +4,22 @@
 import importlib
 import inspect
 import sys
-from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from types import MethodType, ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
-
-from vllm_ascend.utils import vllm_version_is
 
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "sleep_mode_backend",
-    "_get_sleep_parameters",
     "discard",
     "checkpoint_prepare",
     "checkpoint_restore",
     "_scoped_allocator_max_split",
-    "_init_workspace_and_model_runner",
-    "_make_model_runner",
     "handle_ft_command",
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
     "_get_cudagraph_capture_context",
-    "get_draft_model",
     "_set_draft_weight_update_target",
     "get_compilation_match_table",
     "get_encoder_timing_stats",
@@ -34,9 +27,7 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "randomize_dummy_inputs",
     "save_sharded_state",
     "save_tensorized_model",
-    "shutdown_weight_transfer_engine",
     "start_draft_weight_update",
-    "_start_weight_update",
     "elastic_ep_execute",
 )
 
@@ -62,18 +53,101 @@ def test_unverified_interface_rejects_calls_without_worker_state(name):
         method(*args, **kwargs)
 
 
-@pytest.mark.parametrize("reset", [None, "absent", "callable"])
-def test_reset_mm_cache_preserves_optional_runner_method(reset):
+def test_weight_update_hook_rejects_draft_without_worker_state():
     from vllm_ascend.worker.worker import NPUWorker
 
     worker = object.__new__(NPUWorker)
-    reset_fn = Mock() if reset == "callable" else reset
-    runner = SimpleNamespace() if reset == "absent" else SimpleNamespace(reset_mm_cache=reset_fn)
+    with pytest.raises(NotImplementedError, match="Draft weight updates"):
+        worker._start_weight_update(is_draft=True)
+
+
+def test_shutdown_weight_transfer_engine_is_inherited():
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Releasing the trainer connection needs no NPU state, so it is inherited.
+    assert NPUWorker.shutdown_weight_transfer_engine is GPUWorker.shutdown_weight_transfer_engine
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("reset_mm_cache", "compute_weight_checksums", "reset_weights"),
+)
+def test_model_accessors_are_inherited(name):
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Every supported runner exposes get_model()/reset_mm_cache(), so these
+    # worker RPCs need no Ascend override.
+    assert getattr(NPUWorker, name) is getattr(GPUWorker, name)
+
+
+@pytest.mark.parametrize("drafter", ["absent", "draft-model", "other-speculator"])
+def test_get_draft_model_reports_the_runner_drafter(drafter):
+    """This RPC used to raise on Ascend; it now reports the runner's drafter.
+
+    Bind the real upstream runner implementation so both branches of its
+    isinstance() gate run: a configured DraftModelSpeculator yields its draft
+    module, while no drafter (or a non-draft speculator) yields None.
+    """
+    import torch
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    draft_model = torch.nn.Linear(2, 2) if drafter == "draft-model" else None
+    # The runner only reads isinstance()/attribute state from this slot, so the
+    # parameterization mixes a mock with plain objects on purpose. Annotate the
+    # union up front so mypy does not pin it to the first MagicMock branch.
+    speculator: object | None
+    if drafter == "draft-model":
+        mock_speculator = MagicMock(spec=DraftModelSpeculator)
+        mock_speculator.model = draft_model
+        speculator = mock_speculator
+    elif drafter == "other-speculator":
+        speculator = object()  # e.g. a speculator that carries no draft model
+    else:
+        speculator = None
+
+    runner = SimpleNamespace(speculator=speculator)
+    runner.get_draft_model = MethodType(GPUModelRunner.get_draft_model, runner)
+
+    worker = object.__new__(NPUWorker)
     worker.model_runner = runner
-    worker.reset_mm_cache()
-    if reset == "callable":
-        reset_fn.assert_called_once_with()
-    assert worker.model_runner is runner
+
+    assert worker.get_draft_model() is draft_model
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_shutdown_weight_transfer_engine_releases_trainer_connection(configured):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Keep the engine in a local so the optional type narrows for mypy.
+    engine = Mock() if configured else None
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = False
+    worker.weight_transfer_engine = engine
+
+    worker.shutdown_weight_transfer_engine()
+
+    if engine is not None:
+        engine.shutdown.assert_called_once_with()
+
+
+def test_shutdown_weight_transfer_engine_rejects_active_update():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = True
+    worker.weight_transfer_engine = Mock()
+
+    with pytest.raises(RuntimeError, match="during a weight update"):
+        worker.shutdown_weight_transfer_engine()
+
+    worker.weight_transfer_engine.shutdown.assert_not_called()
 
 
 @pytest.fixture
@@ -84,8 +158,8 @@ def worker_constructor(monkeypatch):
     from vllm.v1.worker import gpu_worker
 
     import vllm_ascend
-    from vllm_ascend import ascend_forward_context, mrv2_utils, utils
     from vllm_ascend import logger as ascend_logger
+    from vllm_ascend import mrv2_utils, utils
     from vllm_ascend.worker import worker as worker_module
 
     events = []
@@ -94,7 +168,6 @@ def worker_constructor(monkeypatch):
         return Mock(side_effect=lambda *args, **kwargs: events.append(name))
 
     monkeypatch.setattr(mrv2_utils, "apply_v2_model_runner_config_patch", record("runner_config"))
-    monkeypatch.setattr(ascend_forward_context, "sync_v2_extra_kwargs", record("sync"))
     monkeypatch.setattr(utils, "adapt_patch", record("patches"))
     kda = ModuleType("vllm_ascend.patch.worker.patch_kda_recoverssm")
     kda.patch_kda_recoverssm = record("kda")  # type: ignore[attr-defined]
@@ -104,13 +177,27 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(
         worker_module, "get_current_hardware_profile", Mock(return_value=Mock(supports=lambda _: False))
     )
-    for name in ("register_ascend_customop", "init_ascend_config", "check_ascend_device_type"):
+    for name in ("register_ascend_customop", "check_ascend_device_type"):
         monkeypatch.setattr(worker_module, name, record(name))
-    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", record("logging"))
+    ascend_config = SimpleNamespace(ascend_log_path="/test/ascend/log")
+
+    def init_config(config):
+        events.append("init_ascend_config")
+        return ascend_config
+
+    monkeypatch.setattr(worker_module, "init_ascend_config", Mock(side_effect=init_config))
+    file_logging = record("logging")
+    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", file_logging)
     monkeypatch.setattr(
         worker_module,
         "get_ascend_config",
-        Mock(return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=False))),
+        Mock(
+            return_value=SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_npugraph_ex=False, enable_static_kernel=False, enable_super_kernel=False
+                )
+            )
+        ),
     )
     sleep_manager = SimpleNamespace()
 
@@ -141,6 +228,8 @@ def worker_constructor(monkeypatch):
         module=worker_module,
         parent_calls=parent_calls,
         events=events,
+        ascend_config=ascend_config,
+        file_logging=file_logging,
         sleep_manager=sleep_manager,
         executor_factory=executor_module.ElasticEPScalingExecutor,
     )
@@ -180,6 +269,7 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
         is_driver_worker=True,
     )
     setup.executor_factory.assert_called_once_with(worker)
+    setup.file_logging.assert_called_once_with(setup.ascend_config.ascend_log_path)
     assert worker.vllm_config is config
     assert worker.model_config is config.model_config
     assert worker.parallel_config is config.parallel_config
@@ -187,10 +277,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.local_rank == 2
     assert worker.distributed_init_method == "env://"
     assert worker.is_driver_worker is True
-    assert worker._sleep_saved_buffers == {}
-    assert worker._sleep_saved_parameters == {}
-    if vllm_version_is("0.33.0"):
-        assert worker._sleep_saved_draft_buffers == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False
@@ -209,7 +295,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.use_v2_model_runner is True
     assert setup.events == [
         "runner_config",
-        "sync",
         "patches",
         "kda",
         "ops",
@@ -309,22 +394,49 @@ def xlite_worker_module(monkeypatch):
                     package.xlite_worker = previous_attribute
 
 
-def test_xlite_constructor_and_device_runner(worker_constructor, monkeypatch, xlite_worker_module):
+@pytest.mark.parametrize("xlite", [False, True], ids=["default", "xlite"])
+def test_init_device_selects_runner_and_orders_registration(
+    worker_constructor, monkeypatch, xlite_worker_module, xlite
+):
     xlite_worker = xlite_worker_module
-
-    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker)
-    assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
     device, runner = object(), object()
+    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker if xlite else None)
+    worker.vllm_config.is_mm_encoder_only = False
+    if xlite:
+        assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
+        # Runner selection is the hook's job; the init_device skeleton stays inherited.
+        assert "init_device" not in vars(xlite_worker.XliteWorker)
+        assert "_make_model_runner" in vars(xlite_worker.XliteWorker)
+        factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
+        monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
+    else:
+        factory = Mock(return_value=runner, __name__="NPUModelRunner")
+        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
+        runner_module.NPUModelRunner = factory  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, runner_module.__name__, runner_module)
     init_device = Mock(return_value=device)
+    fla, workspace, usage = Mock(), Mock(), Mock()
+    ordered = Mock()
+    for name, mock in (
+        ("init_device", init_device),
+        ("register_fla", fla),
+        ("init_workspace", workspace),
+        ("make_runner", factory),
+        ("report_usage", usage),
+    ):
+        ordered.attach_mock(mock, name)
     monkeypatch.setattr(worker, "_init_device", init_device)
-    factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
-    monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
-    workspace, usage = Mock(), Mock()
-    monkeypatch.setattr(xlite_worker, "init_workspace_manager", workspace)
-    monkeypatch.setattr(xlite_worker, "report_usage_stats", usage)
+    monkeypatch.setattr(worker_constructor.module, "register_ascend_fla_customop", fla)
+    monkeypatch.setattr(worker_constructor.module, "init_workspace_manager", workspace)
+    monkeypatch.setattr(worker_constructor.module, "report_usage_stats", usage)
     worker.init_device()
-    init_device.assert_called_once_with()
-    workspace.assert_called_once_with(device, 1)
-    factory.assert_called_once_with(worker.vllm_config, device)
-    assert worker.model_runner is worker.xlite_runner is runner
-    usage.assert_called_once_with(worker.vllm_config)
+    assert ordered.mock_calls == [
+        call.init_device(),
+        call.register_fla(),
+        call.init_workspace(device, 1),
+        call.make_runner(worker.vllm_config, device),
+        call.report_usage(worker.vllm_config),
+    ]
+    assert worker.model_runner is runner
+    if xlite:
+        assert worker.xlite_runner is runner

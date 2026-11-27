@@ -1,0 +1,4 @@
+pr: 21295
+entries:
+  - category: performance
+    text: Reduced Qwen3.8-Flash-Next target QSA scratch memory by sharing compatible top-k buffers across sequential layers when prefill context parallelism and microbatching are disabled. MTP buffers remain independent.

@@ -75,7 +75,7 @@ The MemFabric data path is selected at launch through
 `kv_connector_extra_config["memfabric_transfer_protocol"]` instead of hardware
 detection: `sdma` (default) and `device_rdma` target A3 series nodes, while
 `device_urma` is the connector protocol for 950PR&950DT Products nodes. Connector
-protocol availability does not imply sparse Decode offload support: sparse
+protocol availability does not imply Sparse Decode Offload support: sparse
 Decode offload rejects 950PR&950DT Products. Prefill and Decode must use the same
 protocol.
 
@@ -204,13 +204,13 @@ these operators in the installed `_C_ascend` extension:
 
 The repository includes the native kernels, PyTorch bindings, and Python
 integration for fused LIM and Copy-SFA. The installed build must include these
-operators to run sparse Decode offload; the presence of Python source alone
+operators to run Sparse Decode Offload; the presence of Python source alone
 is not sufficient.
 
 LIM C8 uses `npu_fused_quant_lightning_indexer_manage`, which is included on
 this branch. Enable it with `--attention_config.indexer_kv_dtype int8`. The
 indexer then Hadamard-rotates and int8-quantizes query and key, and
-`_lim_select` forwards that int8 query and the fp16 dequant scales to the C8
+`_lim_select` forwards that int8 query and the FP16 dequant scales to the C8
 LIM. The 19-parameter management ABI matches BF16 LIM, so Copy-SFA and miss H2D
 stay unchanged. The C8 kernel is int8-only; `indexer_kv_dtype fp8` is not a
 LIM C8 serving path.
@@ -304,7 +304,7 @@ sender thread remains alive, Prefill may continue waiting.
   keep-device-cache and overlap paths. Config validation checks the installed
   build's device metadata before offload allocation; it does not require NPU
   initialization or a runtime SoC query.
-- Layerwise shared-buffer offload requires the Memcache backend and eager mode.
+- Layerwise Prefill Offload requires the Memcache backend and eager mode.
 - Sparse Decode Offload supports an SFA/MLA
   sparse-attention model. The main KV cache must use BF16; packed main caches
   (C8 or TQ4) are rejected. LIC8 quantization is supported separately for the

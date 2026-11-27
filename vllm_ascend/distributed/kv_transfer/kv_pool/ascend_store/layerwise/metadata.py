@@ -4,8 +4,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
+import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
@@ -168,7 +169,9 @@ class LayerTransferTask:
 
 @dataclass
 class LayerLoadTask:
-    wait_for_save_layer: int | None
+    # Non-consuming waits; the step fence clears save completion after all readers.
+    wait_for_save_layers: tuple[int, ...]
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
-    attention_start_gate: AttentionComputeStartGate | None = None
+    load_gate: AttentionLoadGate | None = None
+    compute_boundary: torch.npu.Event | None = None

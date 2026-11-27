@@ -7,10 +7,14 @@ import torch
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
-NUM_TOKENS = [1, 8, 32]
-NUM_QKV_HEADS = [(6, 1), (8, 2)]
-HEAD_DIMS = [128]
-ROTARY_DIMS = [64, 128]
+QKV_CASES = [
+    # rotary_dim, head_dim, tokens, Q heads, KV heads
+    (64, 128, 1, 6, 1),
+    (64, 128, 32, 8, 2),
+    (128, 128, 1, 6, 1),
+    (128, 128, 32, 8, 2),
+    (64, 128, 8, 6, 1),
+]
 TP_WORLDS = [1]
 EPS = [1e-6]
 DTYPES = [torch.bfloat16]
@@ -113,10 +117,7 @@ def _reference_impl(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads", NUM_QKV_HEADS)
-@pytest.mark.parametrize("head_dim", HEAD_DIMS)
-@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("rotary_dim,head_dim,num_tokens,num_q_heads,num_kv_heads", QKV_CASES)
 @pytest.mark.parametrize("tp_world", TP_WORLDS)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)

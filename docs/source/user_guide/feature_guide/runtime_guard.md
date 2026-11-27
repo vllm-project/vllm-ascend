@@ -57,7 +57,7 @@ Configure through `--additional-config` (or `LLM(..., additional_config=...)`):
 
 **Bootstrap overwrite:** At process start the effective config is built from **built-in defaults + `additional_config.runtime_config` overlay** (and dump-dir seed). Any pre-existing file at `runtime_config_path` is **ignored for that first load** and then **rewritten** when the worker leader persists (`(overwrote)` in the startup log). Put detectors / dump quotas you need at boot into the `runtime_config` overlay (or edit the JSON **after** start with hot-reload). Pre-seeding only the on-disk JSON without an overlay will look like “my file was wiped” — that is expected.
 
-See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config reference](../configuration/runtime_config.md).
+See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config.md](../configuration/runtime_config.md).
 
 ## Architecture (summary)
 
@@ -88,7 +88,7 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 | Type | Stage | Typical use |
 |------|-------|-------------|
 | `token_repeat` | after sample | Stutter / repetition |
-| `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
+| `logits_finite` | before sample | NaN/Inf logits (`isfinite` + gate; default **async** `.item()` wait at after-sample — logits may be mutated by grammar before wait; set `item_sync: true` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
 All detectors default to **disabled**. Enable individually under `detector.<name>.enabled`.
@@ -155,6 +155,6 @@ Residual risks (PD cross-machine, DCP full-sequence stitch, offload-backed dump)
 
 ## Related docs
 
-- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
-- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)  
+- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference
+- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`

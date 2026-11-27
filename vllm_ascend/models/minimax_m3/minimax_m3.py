@@ -116,18 +116,18 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
-from vllm_ascend.worker.v2.pp_transport import (
-    PPTransportDataType,
-    add_pp_transport_tensors,
-    get_pp_transport_tensors,
-)
+from vllm_ascend.ops.mmrs import SequenceParallelMMReduceScatterOp
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
 _FP8_E4M3_MAX = 448.0
 _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
+# Prefill batches fuse the O-projection MM + ReduceScatter only inside this
+# token-count range; other batches stay on the plain MM + ReduceScatter path.
+_MMRS_MIN_TOKENS = 256
+_MMRS_MAX_TOKENS = 16384
 
 
 def _resolve_layer_kv_cache_dtype(
@@ -1038,6 +1038,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
         else:
             self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
+        # With sequence parallelism, transfer the post-attention ReduceScatter
+        # to the O-projection: fused MMRS when possible, plain MM +
+        # ReduceScatter otherwise; both paths return the SP token shard, so
+        # no external ReduceScatter is needed here. Without SP the
+        # O-projection keeps its plain GEMM forward.
+        if self.use_sequence_parallel:
+            self.self_attn.o_proj.custom_op = SequenceParallelMMReduceScatterOp(
+                self.self_attn.o_proj,
+                attention_layer_name=f"{prefix}.self_attn.attn",
+                min_tokens=_MMRS_MIN_TOKENS,
+                max_tokens=_MMRS_MAX_TOKENS,
+            )
+
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
@@ -1105,7 +1118,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Fully Connected
         if self.use_sequence_parallel:
-            hidden_states = sp_reduce_scatter(hidden_states)
+            # `sp_reduce_scatter` has been included in `SequenceParallelMMReduceScatterOp`
             if not input_is_sequence_parallel:
                 residual = sp_shard(residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -1190,17 +1203,21 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            remote_aux_hidden_states: list[torch.Tensor] = []
             aux_hidden_states: list[torch.Tensor] = []
             self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            aux_hidden_states = (
-                get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
-                if vllm_version_is("0.33.0")
-                else []
-            )
+            # v0.34.0 relays earlier stages' aux slots through the PP tensors;
+            # vLLM main instead merges them in the runner, so this returns [].
+            # Only this stage's own captures are packed into the outgoing
+            # payload: re-packing the relayed slots would duplicate them and
+            # shift the local slot keys.
+            remote_aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            # Annotated in the first-rank branch above; mypy flags a redefinition.
+            aux_hidden_states = []
 
         hidden_states_are_sp = False
         sp_forward_context = None
@@ -1247,19 +1264,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
                 residual = sp_all_gather(residual)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-            if not vllm_version_is("0.33.0"):
-                return IntermediateTensors(
-                    {**intermediate_tensors.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)}
-                )
-            return add_pp_transport_tensors(
-                intermediate_tensors,
-                PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
+            return IntermediateTensors(
+                {**intermediate_tensors.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         if hidden_states_are_sp:
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
+        # Order the states by global layer position: everything relayed by the
+        # upstream stages comes before this stage's own captures.
+        aux_hidden_states = remote_aux_hidden_states + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
 

@@ -10,7 +10,6 @@ test_cases:
       OMP_PROC_BIND: "false"
       VLLM_WORKER_MULTIPROC_METHOD: spawn
       ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
-      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - --port
       - "$SERVER_PORT"
@@ -19,7 +18,7 @@ test_cases:
       - --kv-cache-dtype
       - auto
       - --max-model-len
-      - "81920"
+      - "102400"
       - --block-size
       - "128"
       - --max-num-batched-tokens
