@@ -9,17 +9,20 @@ in an independent clean container; model quality and throughput were not evaluat
 
 ## Configuration
 
-The only new Decode optimization boolean is `hy4flash_dfly_dp_graph` in
+The local TP1/DP Draft graph option is `hy4flash_dfly_dp_graph` in
 `--additional-config`. It defaults to false. Set it to true for local TP1/DP
 Draft graphs with FULL_DECODE_ONLY and DFly speculation. Unsupported distributed
 layouts retain eager Draft. Supported input preparation uses fused kernels outside the Draft graph;
 only the Draft model body is captured. Explicit eager mode takes precedence.
 
-The former Decode optimization booleans, environment variables and HY4_* aliases
-are removed. Remove them from launch scripts. Removed additional-config names
-are rejected instead of silently accepted. Old environment exports have no
-consumer. Generic vLLM/Ascend options and Engram storage configuration remain.
-The Prefill controls already supplied by commits 821c4a1a4 and bbec613749 remain.
+Three optional CANN Decode controls are now supported again:
+`hy4flash_cann_indexer_decode`, `hy4flash_cann_c8_decode`, and
+`hy4flash_cann_c8_swa_decode`. They default to false; the Decode deployment
+examples explicitly enable the validated combination. See
+[the C8 Decode guide](hy4_decode_c8.md) for layouts, cache lifetime, guards,
+configuration and validation. The other former Decode booleans and HY4_*
+environment aliases remain removed. Generic vLLM/Ascend options and Engram
+storage configuration remain unchanged.
 
 Decode fusion, hash preparation, embedding preparation and row staging select
 supported paths automatically. Helpers retain shape/device/layout fallbacks.

@@ -1987,6 +1987,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_flashcomm1",
         # Consumed by the HYV4 Flash model and its attention metadata builder.
         "hy4flash_dfly_dp_graph",
+        "hy4flash_cann_c8_decode",
+        "hy4flash_cann_c8_swa_decode",
+        "hy4flash_cann_indexer_decode",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",

@@ -5,3 +5,7 @@ entries:
     highlight: true
     model: hy4-flash
     hardware: [950DT]
+  - category: performance
+    text: Added opt-in paged IndexPool selection and compact C8 sparse/sliding-window attention for HY4 Flash PD Decode on Ascend 950DT with CANN 9.3 and DFly 5. Enable hy4flash_cann_indexer_decode, hy4flash_cann_c8_decode and hy4flash_cann_c8_swa_decode in additional-config to reduce explicit score-matrix and FP32 KV intermediates; all three default to false.
+    model: hy4-flash
+    hardware: [950DT]

@@ -36,4 +36,4 @@ exec vllm serve /home/s00971618/weight/Hy4-flash-FP8-testing \
   --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32,64,128],"max_decode_cudagraph_capture_tokens":512}' \
   --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
   --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"engine_id":"prefix-dfly-d-1795082110","kv_connector_extra_config":{"ascend_local_comm_res_path":"/home/s00971618/hy4-flash-0day/UB8_1P1D/ub_endpoints","prefill":{"tp_size":4,"dp_size":1},"decode":{"tp_size":1,"dp_size":4}}}' \
-  --additional-config '{"enable_mlapo":false,"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":false},"hy4flash_dfly_dp_graph":true}'
+  --additional-config '{"enable_mlapo":false,"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":false},"hy4flash_dfly_dp_graph":true,"hy4flash_cann_c8_decode":true,"hy4flash_cann_c8_swa_decode":true,"hy4flash_cann_indexer_decode":true}'

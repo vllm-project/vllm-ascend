@@ -4,5 +4,8 @@
   "multistream_overlap_shared_expert": true,
   "ascend_compilation_config": {
     "enable_npugraph_ex": false
-  }
+  },
+  "hy4flash_cann_c8_decode": true,
+  "hy4flash_cann_c8_swa_decode": true,
+  "hy4flash_cann_indexer_decode": true
 }

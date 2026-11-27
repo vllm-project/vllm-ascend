@@ -14,7 +14,6 @@ from vllm import envs
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -49,6 +48,7 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows, pack_c8_components
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.hy_v4_flash.cache_layout import PACKED_CACHE_FORMAT
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
@@ -74,7 +74,7 @@ from .mla_prolog import CANNBotBf16MlaProlog
 from .pd_role import uses_prefill_ops
 from .prefill_metadata import logical_positions, reuse_prefill_metadata
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 ACL_FORMAT_ND = 2
 C8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
@@ -495,6 +495,15 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.native_decode_attention = not reuse_target and uses_decode_fusions(vllm_config)
         self.decode_data_fusions = self.native_decode_attention and HAS_TRITON
         self.bulk_c8_decode_reads = True
+        self.cann_c8_decode = vllm_config.additional_config.get("hy4flash_cann_c8_decode", False)
+        self.cann_c8_swa_decode = vllm_config.additional_config.get("hy4flash_cann_c8_swa_decode", False)
+        self.cann_indexer_decode = vllm_config.additional_config.get("hy4flash_cann_indexer_decode", False)
+        if not all(
+            isinstance(value, bool)
+            for value in (self.cann_c8_decode, self.cann_c8_swa_decode, self.cann_indexer_decode)
+        ):
+            raise ValueError("HY4 experimental CANN Decode options must be boolean")
+        self.decode_index_pages = None
         self.ops = triton_ops
         if self.use_cann_prefill:
             from . import li_prefill_p0, prefill_ops
@@ -1067,12 +1076,35 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             full_graph=full_graph,
         )
         query, wv = self._absorb_query(q_nope[:num_tokens], q_pe[:num_tokens], absorbed=absorbed)
+        if (
+            self.cann_indexer_decode
+            and self.use_pd_decode
+            and self.use_fp8_cache
+            and self.indexer is not None
+            and self.incremental_index_pool
+            and self.fuse_indexpool_select
+            and block_size == 64
+            and (self.indexer.num_heads, self.indexer.ratio, self.indexer.budget) == (16, 4, 511)
+            and cache.device.type == "npu"
+            and self.decode_index_pages is None
+        ):
+            self.decode_index_pages = torch.zeros(
+                (cache.shape[0] // block_size, block_size // self.indexer.ratio, 1, INDEX_DIM),
+                dtype=torch.bfloat16,
+                device=cache.device,
+            )
         if full_graph:
             self._forward_decode_graph(meta, cache, block_size, hidden, q_c, positions, query, wv, out)
             return out
 
         if keys is not None and self.incremental_index_pool:
             self._update_index_pool(cache, block_size, meta, keys, positions)
+        if self.decode_index_pages is not None:
+            from .index_pool_decode import refresh_pages
+
+            for request, length in enumerate(meta.seq_lens):
+                if meta.query_start_loc[request + 1] > meta.query_start_loc[request]:
+                    refresh_pages(cache, self.decode_index_pages, meta.block_table[request], block_size, length)
         return self._attend_eager(
             meta,
             cache,
@@ -1742,6 +1774,39 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
 
         batch_size = seq_lens.shape[0]
         if (
+            self.cann_c8_swa_decode
+            and self.use_pd_decode
+            and self.use_fp8_cache
+            and self.indexer is None
+            and num_queries == BATCH_VERIFY_MAX_QUERIES
+            and window == 512
+            and self.local_heads == 64
+            and query.dtype == torch.bfloat16
+            and query.device.type == "npu"
+        ):
+            from .c8_decode import attend_compact_c8
+
+            lane = torch.arange(window, device=query.device)
+            lengths = (logical + 1).clamp(0, window)
+            selected = (logical + 1 - window).clamp_min(0)[..., None] + lane
+            selected.masked_fill_(lane >= lengths[..., None], -1)
+            packed_rows = [
+                self._gather(
+                    cache, meta.block_table[request], block_size, selected[request].clamp_min(0), slice(C8_ROW_BYTES)
+                )
+                for request in range(batch_size)
+            ]
+            selected = selected.flatten(0, 1)
+            packed = torch.cat(packed_rows, dim=0)
+            context = attend_compact_c8(query, packed, selected, self.learnable_sink_param, self.scale)
+            value = _head_bmm(context, wv)
+            out[:num_tokens].copy_(value.reshape_as(out[:num_tokens]))
+            out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
+            if snapshot is not None:
+                snapshot[:num_tokens, :window].copy_(selected)
+            logger.info_once("HYV4 Flash uses compact CANN C8 attention for sliding-window Decode.")
+            return
+        if (
             shared_positions is not None
             and self.use_pd_decode
             and self.use_fp8_cache
@@ -1854,27 +1919,45 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             ratio = self.indexer.ratio
             budget = self.indexer.budget
             max_groups = self.max_model_len // ratio
-            scores = torch.empty((batch_size, num_queries, max_groups), dtype=torch.float32, device=query.device)
+            scores = (
+                None
+                if self.decode_index_pages is not None
+                else torch.empty((batch_size, num_queries, max_groups), dtype=torch.float32, device=query.device)
+            )
             for request in range(batch_size):
                 start = request * num_queries
                 stop = start + num_queries
                 table = meta.block_table[request]
                 self._update_decode_pool(cache, table, block_size, seq_lens[request], num_queries, positions.ndim)
-                write_pool_scores(
-                    index_query[start:stop],
-                    index_weight[start:stop],
-                    cache,
-                    table,
-                    logical[request],
-                    block_size,
+                if scores is not None:
+                    write_pool_scores(
+                        index_query[start:stop],
+                        index_weight[start:stop],
+                        cache,
+                        table,
+                        logical[request],
+                        block_size,
+                        max_groups,
+                        ratio,
+                        budget,
+                        scores[request],
+                    )
+            if self.decode_index_pages is not None:
+                from .index_pool_decode import select_pages
+
+                batched_selected = select_pages(
+                    index_query,
+                    index_weight,
+                    self.decode_index_pages,
+                    meta.block_table[:batch_size],
+                    logical,
                     max_groups,
-                    ratio,
-                    budget,
-                    scores[request],
                 )
-            batched_selected = select_pool_candidates(
-                scores.flatten(0, 1), logical.flatten(), max_groups, ratio, budget
-            ).view(batch_size, num_queries, -1)
+                logger.info_once("HYV4 Flash uses paged CANN LightningIndexerV2 for Decode verification.")
+            else:
+                batched_selected = select_pool_candidates(
+                    scores.flatten(0, 1), logical.flatten(), max_groups, ratio, budget
+                ).view(batch_size, num_queries, -1)
         for request in range(seq_lens.shape[0]):
             start = request * num_queries
             stop = start + num_queries
@@ -1951,6 +2034,25 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             if batch_sparse:
                 sparse_selected.append(selected)
                 continue
+            if (
+                self.cann_c8_decode
+                and self.use_pd_decode
+                and self.use_fp8_cache
+                and self.indexer is not None
+                and query.dtype == torch.bfloat16
+                and query.device.type == "npu"
+                and self.local_heads == 32
+                and num_queries == BATCH_VERIFY_MAX_QUERIES
+                and selected.shape[-1] == 2048
+            ):
+                from .c8_decode import attend_compact_c8
+
+                packed = self._gather(cache, table, block_size, selected.clamp_min(0), slice(C8_ROW_BYTES))
+                context = attend_compact_c8(query[start:stop], packed, selected, self.learnable_sink_param, self.scale)
+                value = _head_bmm(context, wv)
+                out[start:stop].copy_(value.reshape_as(out[start:stop]))
+                logger.info_once("HYV4 Flash uses compact CANN C8 attention for sparse Decode verification.")
+                continue
             q = query[start:stop]
             if self._can_gather_decode_fia_rows(cache, q.dtype):
                 from .c8_read import gather_compact_c8_fia_rows as gather_c8_fia_rows
@@ -1980,6 +2082,21 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             logger.info_once("HYV4 Flash gathers sparse Decode C8 cache rows for the whole rank with CANN.")
             selected = torch.stack(sparse_selected)
             selected = selected.flatten(0, 1)
+            if self.cann_c8_decode:
+                from .c8_decode import attend_compact_c8
+
+                packed = self._gather(
+                    cache,
+                    meta.block_table[:batch_size],
+                    block_size,
+                    selected.view(batch_size, -1).clamp_min(0),
+                    slice(C8_ROW_BYTES),
+                ).view(num_tokens, selected.shape[-1], C8_ROW_BYTES)
+                context = attend_compact_c8(query, packed, selected, self.learnable_sink_param, self.scale)
+                value = _head_bmm(context, wv)
+                out[:num_tokens].copy_(value.reshape_as(out[:num_tokens]))
+                logger.info_once("HYV4 Flash uses batched compact CANN C8 attention for sparse Decode verification.")
+                return
             if self._can_gather_decode_fia_rows(cache, query.dtype):
                 from .c8_read import (
                     empty_compact_c8_fia_rows as empty_c8_fia_rows,
@@ -2031,6 +2148,10 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         raw, key_pos = self._read_index_rows(cache, table, block_size, history, position_ndim)
         keys = self.indexer.encode_keys(raw, key_pos, full_graph=True)
         self.ops.copy_pool_keys(cache, table, keys, first, block_size, ratio, write=True, end_group=end)
+        if self.decode_index_pages is not None:
+            from .index_pool_decode import write_pages
+
+            write_pages(keys, self.decode_index_pages, table, first, end, block_size)
 
     def _read_decode_pool(self, cache, table, block_size, seq_len, position_ndim):
         ratio = self.indexer.ratio
