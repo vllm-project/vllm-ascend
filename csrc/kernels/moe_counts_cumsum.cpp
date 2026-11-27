@@ -4,14 +4,16 @@
 
 extern "C" __global__ __aicore__ void moe_counts_cumsum_kernel(GM_ADDR input, GM_ADDR output, uint32_t count) {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    AscendC::InitSocState();
+    AscendC::TPipe pipe;
     AscendC::GlobalTensor<int64_t> x, y;
     x.SetGlobalBuffer((__gm__ int64_t*)input,count);
     // The host adapter limits count to 4096, requiring at most 32 KiB of UB.
     // Align the UB extent to 32 bytes for DataCopyPad.
     const uint32_t aligned_count = (count + 3) / 4 * 4;
     y.SetGlobalBuffer((__gm__ int64_t*)output,aligned_count);
-    AscendC::LocalTensor<int64_t> values(AscendC::TPosition::VECCALC, 0, aligned_count);
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> buf;
+    pipe.InitBuffer(buf, aligned_count * sizeof(int64_t));
+    AscendC::LocalTensor<int64_t> values = buf.Get<int64_t>();
     AscendC::DataCopyExtParams copy{1,count*8,0,0,0};
     const uint8_t right_padding = static_cast<uint8_t>(aligned_count - count);
     AscendC::DataCopyPadExtParams<int64_t> padding{true,0,right_padding,0};

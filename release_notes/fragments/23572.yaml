@@ -1,0 +1,9 @@
+pr: 23572
+entries:
+  - category: performance
+    text: >-
+      Accelerated small INT64 MoE expert-count prefix-sum conversions on Ascend A2/A3
+      by replacing the per-layer AICPU cumsum with a single-core AIV scalar kernel,
+      reducing DeepSeek-V4 decode P50 TPOT by 1.00-1.25 ms (2.8%-4.1%) on 8x Ascend A3
+      in TP8 and EP8 AllGather serving workloads.
+    hardware: [A2, A3]
