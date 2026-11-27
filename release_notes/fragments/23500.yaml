@@ -1,0 +1,7 @@
+pr: 23500
+entries:
+  - category: performance
+    text: >-
+      Eligible DeepSeek V4.1 DSpark decode batches with PCP now generate drafts
+      once per request. Draft context preparation can overlap target sampling
+      while the owner groups use FULL ACL Graph replay.
