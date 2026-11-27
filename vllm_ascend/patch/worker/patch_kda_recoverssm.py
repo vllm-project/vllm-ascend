@@ -1,13 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Install the Ascend RecoverSSM commit backends and the deferred machinery.
+
+The stock commit context is swapped for the Ascend Triton one, and GLM
+RecoverSSM model states are upgraded to the deferred variant: accepted-token
+commits are delayed to the next verify step, which replays the pending
+records in-kernel (see ``recoverssm_deferred``).
+"""
 
 from __future__ import annotations
-from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 
-# Set True once the deferred machinery is installed.
+from typing import TYPE_CHECKING, Any
+
+from vllm_ascend.models.glm5next.recoverssm_config import is_glm_recoverssm_model, use_glm_recoverssm
+
+if TYPE_CHECKING:
+    import torch
+    import torch.nn as nn
+    from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+
+# Set once the deferred machinery is installed.
 _deferred_installed = False
 
-def patch_kda_recoverssm(vllm_config):
+
+def patch_kda_recoverssm(vllm_config: VllmConfig) -> None:
+    """Swap the RecoverSSM commit context for the Ascend one and hook the
+    model-state init that installs the deferred machinery. Idempotent."""
     if not use_glm_recoverssm(vllm_config):
         return
 
@@ -15,8 +34,8 @@ def patch_kda_recoverssm(vllm_config):
     if _deferred_installed:
         return
 
-    # Immediate path: swap the stock commit context for the Ascend one.
     import vllm.models.kimi_k3.nvidia.ops.recoverssm as recoverssm
+
     from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
     recoverssm.KDARecoverSSMCommitContext = KDARecoverSSMCommitContext
@@ -24,44 +43,32 @@ def patch_kda_recoverssm(vllm_config):
     _hook_model_state_init()
     _deferred_installed = True
 
-def _hook_model_state_init() -> None:
 
-    import vllm_ascend.worker.v2.model_states as model_states_mod
-    from vllm_ascend.models.glm5next.recoverssm_config import is_glm_recoverssm_model
+def _hook_model_state_init() -> None:
+    """Wrap ``model_runner.init_model_state`` to upgrade GLM RecoverSSM
+    states to the deferred variant after construction.
+
+    ``patch_model_state`` binds the Ascend init onto the runner by value
+    during ``adapt_patch``, which runs before this hook installs, so
+    rebinding the ``model_states`` module attribute would never reach the
+    runner. Wrap the runner binding instead.
+    """
+    import vllm.v1.worker.gpu.model_runner as model_runner
+
     from vllm_ascend.models.glm5next.recoverssm_deferred import install_model_state
 
-    base_init = model_states_mod.init_asecnd_model_state
+    base_init = model_runner.init_model_state
 
-    def init_asecnd_model_state(vllm_config, model, encoder_cache, device):
+    def init_model_state(
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> Any:
         state = base_init(vllm_config, model, encoder_cache, device)
-
-        if not is_glm_recoverssm_model(vllm_config):
-            return state
-        if not use_glm_recoverssm(vllm_config):
-            return state
-        if getattr(state, "recoverssm", None) is None:
-            return state
-
-        install_model_state(state)
-
-        language_model = model
-        if hasattr(model, "get_language_model"):
-            language_model = model.get_language_model()
-        layers = getattr(language_model, "layers", None)
-        start = getattr(language_model, "start_layer", 0)
-        end = getattr(language_model, "end_layer", None)
-        if layers is not None:
-            decoder_layers = layers[start:end] if end is not None else layers
-            for decoder in decoder_layers:
-                attn = getattr(decoder, "self_attn", None)
-                if attn is None:
-                    continue
-                if not getattr(attn, "use_recoverssm", False):
-                    continue
-                if getattr(attn, "recoverssm_backend", "triton") != "fp32_deferred":
-                    continue
-                attn.deferred_recoverssm = True
-
+        # install_model_state itself skips states without a recoverssm slot.
+        if is_glm_recoverssm_model(vllm_config):
+            install_model_state(state)
         return state
 
-    model_states_mod.init_asecnd_model_state = init_asecnd_model_state
+    model_runner.init_model_state = init_model_state
