@@ -28,6 +28,14 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_dp_supervisor.py:
+#   Target: vllm.entrypoints.launchers.dp_supervisor._build_device_ids.
+#   Why: Multi-port external load balancing assigns too few devices to each
+#        local DP rank when prefill context parallelism is enabled.
+#   How: Size each child's device slice using TP * PP * PCP.
+#   Related PR: https://github.com/vllm-project/vllm/pull/69664
+#   Future plan: Remove once both the release and verified-main pins include the fix.
+# --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
@@ -241,7 +249,9 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -398,26 +408,6 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 15. File: platform/patch_mla_prefill_backend.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   REMOVED: upstream vLLM v0.32.0 exposes the official
-#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
-#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
-#   from `vllm_ascend/attention/mla_prefill.py`.
-#
-# ** 16. File: platform/patch_multiproc_executor.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
-#    Why:
-#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
-#       a new process which is not allowed by daemon=True.
-#    How：
-#       Set daemon=False in MultiprocExecutor.
-#    Related PR (if no, explain why):
-#       Find a way to support daemon=False in vLLM
-#    Future Plan:
-#       Remove this patch when vLLM fix the issue.
-#
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
@@ -482,26 +472,6 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
-#
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -560,7 +530,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 21b. File: platform/patch_torch_utils.py**
+# ** 22. File: platform/patch_torch_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
 #    Why:
@@ -586,22 +556,6 @@
 #    Future Plan:
 #       Remove this override when upstream vLLM can select NPU weight
 #       offloading based on a working device mapping.
-#
-# ** 22. File: platform/patch_tool_choice_none_content.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
-#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
-#    Why:
-#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
-#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
-#       expect those empty fields to be omitted so clients see `tool_calls=None`.
-#    How：
-#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
-#       empty `tool_calls` lists from `message` / `delta` objects.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/44105
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 23. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -726,27 +680,6 @@
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
 #
-# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
-#      `forward`, `make_empty_intermediate_tensors`
-#    Why:
-#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
-#       hidden states are collected from specific target model layers (e.g.,
-#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
-#       PP rank (where the drafter runs) only sees a subset of aux states, causing
-#       `combine_hidden_states` to fail with a k-axis shape mismatch.
-#    How：
-#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
-#       transparently pass aux hidden states through IntermediateTensors across PP
-#       stages. Each PP stage carries forward all aux states from previous stages,
-#       and the last PP rank merges them into a single list for the drafter.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
-#    Future Plan:
-#       Remove this patch once upstream Eagle3 supports collecting aux hidden
-#       states that span PP stages without cross-stage propagation.
-#
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -851,10 +784,6 @@
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend dispatch path for this
 #       fused attention preparation.
-#
-#
-# ** 11. File: worker/patch_mm_input_norm.py (removed) **
-# vLLM #62767 keeps the processor-derived normalization buffers nonpersistent.
 #
 # ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1538,32 +1467,6 @@
 #       No upstream PR yet; vLLM #52162 still passes the global request count.
 #    Future Plan:
 #       Remove once upstream dispatches sharded PCP decode with local counts.
-#
-# ** 33. File: platform/patch_vision.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
-#    Why:
-#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
-#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
-#       which does not distinguish scenarios and requires eps > 0 in all cases.
-#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
-#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
-#       positive".
-#    How：
-#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
-#       The patch is guarded with contextlib.suppress(ImportError) so it does
-#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
-#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
-#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
-#       removing running_mean/running_var. That commit is included in the target
-#       16cfe728; on those versions FusedInputNorm.forward is used as-is
-#       (multiply-add).
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/50411
-#       https://github.com/vllm-project/vllm/pull/51734
-#    Future Plan:
-#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
-#       (which, like upstream, allows eps >= 0 for inference).
 #
 # ** 34. File: worker/patch_worker_profiler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -2,18 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """arch22 native HiSparse contracts against the A5 foundation's CPU oracle."""
 
+import ctypes
 from contextlib import contextmanager
+from functools import partial
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
-from vllm_ascend.hisparse.host_pool import allocate_mapped_host
+from vllm_ascend.hisparse.host_pool import _ACL_HAC_AIV, allocate_mapped_host
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+_ACL_ERROR_RT_FEATURE_NOT_SUPPORT = 207000
 
-@pytest.fixture(autouse=True)
+
+@pytest.fixture(scope="module", autouse=True)
 def _require_arch22():
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
@@ -22,6 +26,25 @@ def _require_arch22():
     if not hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"):
         import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found, import-untyped]  # noqa: F401
     assert hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"), "rebuild the arch22 extension"
+
+
+@pytest.fixture(scope="module")
+def mapped_host_allocator(_require_arch22):
+    """Prefer native mapping; require working MemFabric when it is unsupported."""
+    device = torch.npu.current_device()
+    acl = ctypes.CDLL("libascendcl.so")
+    query = acl.aclrtHostMemMapCapabilities
+    query.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    query.restype = ctypes.c_int
+    capability = ctypes.c_int()
+    status = query(device, _ACL_HAC_AIV, ctypes.byref(capability))
+    if status == _ACL_ERROR_RT_FEATURE_NOT_SUPPORT or (status == 0 and capability.value == 0):
+        # Select the existing backend explicitly for these tests. Allocation
+        # failures must propagate, including a missing/unusable MemFabric SDK.
+        return partial(allocate_mapped_host, memfabric=True)
+    if status != 0:
+        raise RuntimeError(f"AIV Host mapping capability query failed unexpectedly: status={status}")
+    return allocate_mapped_host
 
 
 def _reference_hisparse_resolve_residency(topk, requests, states, source, resident, hot_table, dgi, lru, block):
@@ -83,10 +106,10 @@ def _reference_hisparse_resolve_residency(topk, requests, states, source, reside
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("compact", [False, True])
-def test_random_request_unions(capture, compact):
+def test_random_request_unions(capture, compact, mapped_host_allocator):
     """Vary query counts, request order, stable state, duplicates and residency."""
     rows, topk, hot_size, block, width, requests_count = 40, 8, 16, 4, 16, 8
-    host = allocate_mapped_host((132, width), torch.float32)
+    host = mapped_host_allocator((132, width), torch.float32)
     mapping = host._hisparse_registration
     host.copy_(torch.arange(host.numel(), dtype=torch.float32).view_as(host))
     # 1..32 are hot pages and 33..64 are resident pages; layer 0 is a sentinel.
@@ -244,10 +267,12 @@ def test_random_request_unions(capture, compact):
 
 @pytest.mark.parametrize("rows,topk,row_bytes", [(1, 17, 656), (4, 2048, 656), (16, 2048, 1152)])
 @pytest.mark.parametrize("capture", [False, True])
-def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk, row_bytes, capture):
+def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(
+    rows, topk, row_bytes, capture, mapped_host_allocator
+):
     block = 128
     blocks = (rows * topk + block - 1) // block + 1
-    host = allocate_mapped_host((blocks * block, row_bytes), torch.uint8)
+    host = mapped_host_allocator((blocks * block, row_bytes), torch.uint8)
     mapping = host._hisparse_registration
     host.copy_((torch.arange(host.shape[0], dtype=torch.int32) % 251).to(torch.uint8)[:, None].expand_as(host))
     backing = torch.full((blocks, 2, block, row_bytes), 203, dtype=torch.uint8, device="npu")
@@ -309,14 +334,14 @@ def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk,
 @pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240), (3, 4096)])
 @pytest.mark.parametrize("cross_stream", [False, True])
 @pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.int8, 656)])
-def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, dtype, width):
+def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, dtype, width, mapped_host_allocator):
     topk, block = 2048, 128
     positions = query_rows * topk
     union = min(positions, hot_size)
     # The 3 x 2048 case has more positions than the 4096-row mask/scan
     # capacity. Its duplicates cross tiles of the iterative miss scan.
     blocks = hot_size // block + 1
-    host = allocate_mapped_host((hot_size + block, width), dtype)
+    host = mapped_host_allocator((hot_size + block, width), dtype)
     mapping = host._hisparse_registration
     host.copy_((torch.arange(host.size(0)) % 97).to(dtype)[:, None].expand_as(host))
     hot = torch.zeros((blocks, block, width), dtype=dtype, device="npu")
@@ -431,8 +456,8 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
     mapping.close()
 
 
-def test_plan_gather_respects_request_state_padding():
-    host = allocate_mapped_host((32, 16), torch.float32)
+def test_plan_gather_respects_request_state_padding(mapped_host_allocator):
+    host = mapped_host_allocator((32, 16), torch.float32)
     mapping = host._hisparse_registration
     host.copy_(torch.arange(host.numel(), dtype=torch.float32).view_as(host))
     hot = torch.full((8, 4, 16), -17.0, device="npu")
@@ -988,11 +1013,11 @@ def test_resident_parallel_rows_preserve_output_neighbors(valid_count):
 
 
 @pytest.mark.parametrize("count", [1, 2047])
-def test_batch_dma_to_mapped_host(count):
+def test_batch_dma_to_mapped_host(count, mapped_host_allocator):
     """The existing D2H ABI writes the same allocation that AIV reads."""
     if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
         import vllm_ascend.vllm_ascend_C  # noqa: F401
-    host = allocate_mapped_host((count, 576), torch.bfloat16)
+    host = mapped_host_allocator((count, 576), torch.bfloat16)
     source = (torch.arange(count, device="npu") % 97).to(torch.bfloat16)[:, None].expand(count, 576).contiguous()
     row_bytes = 576 * source.element_size()
     src = torch.arange(count, dtype=torch.int64) * row_bytes + source.data_ptr()

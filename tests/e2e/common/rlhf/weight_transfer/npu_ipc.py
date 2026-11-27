@@ -98,7 +98,9 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
         dist.destroy_process_group()
 
 
-def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+def run_npu_ipc_weight_transfer_transaction(
+    case: WeightUpdateModelCase, packed: bool, *, reload_mode: str | None = None
+):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
         pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
 
@@ -110,6 +112,8 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
+    if reload_mode is not None:
+        env_dict.update(VLLM_RELOAD_MODE=reload_mode, VLLM_USE_V2_MODEL_RUNNER="1")
 
     with weight_transfer_servers(
         source,
@@ -162,8 +166,8 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 # KV cache outright; `/sleep` reads its level from the query string,
                 # a JSON body is ignored.
                 post_control(server, "sleep", params={"level": 2})
-                # Level 2 unmapped the weights pool and `send_weights`' layerwise
-                # reload copies the payload back into exactly those buffers, so the
+                # Level 2 unmapped the weights pool and `send_weights`
+                # reloads the payload into those buffers, so the
                 # weights allocation has to be mapped again before the transaction.
                 # The KV cache stays asleep until the update is finished.
                 post_control(server, "wake_up", params={"tags": ["weights"]})

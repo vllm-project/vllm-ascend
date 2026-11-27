@@ -68,6 +68,22 @@ def _format_log_call(call):
     return args[0] % args[1:]
 
 
+class _FakeTextFile:
+    """Minimal context-managed iterable standing in for ``open()`` output."""
+
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
 # =========================================================================
 # Backend ABC
 # =========================================================================
@@ -506,6 +522,24 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         ):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
+
+    def test_independent_store_preference_uses_registered_segment(self):
+        for hostname, expected in (("10.0.0.7:50053", "10.0.0.7:50053"), ("", "10.0.0.7"), (None, "10.0.0.7")):
+            with self.subTest(hostname=hostname):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(preferred_segment=True), use_fabric_mem=False
+                )
+                backend._use_store_independent_te = True
+                store = MagicMock()
+                store.setup.return_value = 0
+                if hostname is None:
+                    del store.get_hostname
+                else:
+                    store.get_hostname.return_value = hostname
+
+                self._setup_store(backend, store)
+
+                self.assertEqual(backend.local_seg, expected)
 
     def test_dp_clients_use_distinct_ssd_paths_and_log_actual_directories(self):
         for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
@@ -1040,6 +1074,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             master_server_address="127.0.0.1:50088",
             enable_ssd_offload=False,
             tenant_id="default",
+            preferred_segment=False,
         )
         with (
             patch.object(sys.modules["mooncake.store"], "MooncakeDistributedStore", create=True) as mock_store_cls,
@@ -1761,6 +1796,59 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         set_device.assert_not_called()
         store.init.assert_called_once_with(3, init_bm=False)
+
+    def test_setup_store_raises_on_nonzero_init_result(self):
+        b = self._make_backend()
+        b.device_id = 3
+        b._init_bm = True
+        store = MagicMock()
+        store.init.return_value = -1
+        module_path = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend"
+
+        with (
+            patch.object(
+                sys.modules["memcache_hybrid"],
+                "DistributedObjectStore",
+                return_value=store,
+                create=True,
+            ),
+            patch(f"{module_path}.torch.npu.set_device"),
+            patch(f"{module_path}.time.sleep"),
+            patch(f"{module_path}._read_driver_innerversion", return_value=None),
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"return code -1.*missing/empty driver version file",
+            ),
+        ):
+            b._setup_store()
+
+    def test_read_driver_innerversion_missing_file(self):
+        with patch.object(memcache_module.os.path, "isfile", return_value=False):
+            self.assertIsNone(memcache_module._read_driver_innerversion())
+
+    def test_read_driver_innerversion_prefers_innerversion_field(self):
+        lines = ["Version=V100R001C21B035\n", "Innerversion=V100R001C23SPC008B220\n"]
+        fake_file = _FakeTextFile(lines)
+        with (
+            patch.object(memcache_module.os.path, "isfile", return_value=True),
+            patch("builtins.open", return_value=fake_file),
+        ):
+            self.assertEqual(
+                memcache_module._read_driver_innerversion(),
+                "V100R001C23SPC008B220",
+            )
+
+    def test_read_driver_innerversion_falls_back_to_version_field(self):
+        lines = ["Version=V100R001C21B035\n", "Innerversion=\n"]
+        fake_file = _FakeTextFile(lines)
+        with (
+            patch.object(memcache_module.os.path, "isfile", return_value=True),
+            patch("builtins.open", return_value=fake_file),
+        ):
+            self.assertEqual(
+                memcache_module._read_driver_innerversion(),
+                "V100R001C21B035",
+            )
 
     def test_register_buffer(self):
         b = self._make_backend()

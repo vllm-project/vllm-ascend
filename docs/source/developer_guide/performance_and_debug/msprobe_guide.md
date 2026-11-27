@@ -302,7 +302,7 @@ Use `msprobe graph_visualize` to build or compare graphs, then open the generate
 
 An L0 `dump.json` contains forward I/O for modules together with parameters. Using PyTorch's `Conv2d` as an example, the network code looks like:
 
-`output = self.conv2(input) # self.conv2 = torch.nn.Conv2d(64, 128, 5, padding=2, bias=True)`
+`output = self.conv2(input) # self.conv2 = torch.nn.Conv2d(16, 32, 5, bias=True)`
 
 `dump.json` contains the following entries:
 

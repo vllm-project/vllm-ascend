@@ -542,30 +542,39 @@ def test_memcache_splits_host_and_device_batches_without_reordering(memcache_bac
     assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
 
 
-def test_memcache_bounds_each_hisparse_host_get_lease(memcache_backend) -> None:
+@pytest.mark.parametrize(
+    ("memory_location", "direction"),
+    [(MemoryLocation.HOST, MmcDirect.COPY_G2H), (MemoryLocation.DEVICE, MmcDirect.COPY_G2L)],
+)
+def test_memcache_bounds_each_hisparse_get_lease(memcache_backend, memory_location, direction) -> None:
     backend = memcache_backend
-    backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
-    key_size = 130 * 1024 * 1024
+    backend.store.batch_get_into_layers.side_effect = [[0, 0], [-3106], [0]]
+    mib = 1024 * 1024
+    keys = ["one", "two", "three", "four"]
+    addresses = [[1, 2], [3], [4], [5]]
+    sizes = [[127 * mib, mib], [128 * mib], [130 * mib], [130 * mib]]
 
     assert get_bulk_by_memory_location(
-        backend, ["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, memory_locations=[MemoryLocation.HOST] * 3
+        backend, keys, addresses, sizes, memory_locations=[memory_location] * len(keys)
     ) == [
+        0,
         0,
         -3106,
         0,
     ]
     assert backend.store.batch_get_into_layers.call_args_list == [
-        call([key], [[index]], [[key_size]], MmcDirect.COPY_G2H.value)
-        for index, key in enumerate(("one", "two", "three"), 1)
+        call(keys[:2], addresses[:2], sizes[:2], direction.value),
+        call(keys[2:3], addresses[2:3], sizes[2:3], direction.value),
+        call(keys[3:], addresses[3:], sizes[3:], direction.value),
     ]
 
 
-def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_backend) -> None:
+def test_memcache_hisparse_get_sends_an_oversized_key_alone(memcache_backend) -> None:
     backend = memcache_backend
     mib = 1024 * 1024
     device_size = 130 * mib
     host_size = 257 * mib
-    backend.store.batch_get_into_layers.side_effect = [[0, 0], [0], [0], [0]]
+    backend.store.batch_get_into_layers.return_value = [0]
 
     results = get_bulk_by_memory_location(
         backend,
@@ -582,7 +591,8 @@ def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_bac
     )
     assert results == [0] * 5
     assert backend.store.batch_get_into_layers.call_args_list == [
-        call(["device1", "device2"], [[1], [5]], [[device_size], [device_size]], MmcDirect.COPY_G2L.value),
+        call(["device1"], [[1]], [[device_size]], MmcDirect.COPY_G2L.value),
+        call(["device2"], [[5]], [[device_size]], MmcDirect.COPY_G2L.value),
         call(["host1"], [[2]], [[mib]], MmcDirect.COPY_G2H.value),
         call(["host-large"], [[3, 4]], [[host_size - mib, mib]], MmcDirect.COPY_G2H.value),
         call(["host2"], [[6]], [[mib]], MmcDirect.COPY_G2H.value),

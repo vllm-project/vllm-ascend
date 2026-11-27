@@ -1,0 +1,5 @@
+pr: 21605
+entries:
+  - category: performance
+    text: Speed up packed DCP LSE combine by about 1.5x on A3 and 1.7x on A5 for the target shapes.
+    hardware: [A3, A5]

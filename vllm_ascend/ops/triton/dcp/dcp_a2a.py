@@ -10,10 +10,11 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type, is_950
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    MAX_UNROLLED_COMBINE_ELEMENTS,
+    _decode_lse_significand,
     _encode_lse_fields,
-    _fused_dcp_lse_combine_batched_kernel,
+    _fused_dcp_lse_combine_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
@@ -70,7 +71,7 @@ def _rank_tiled_mode() -> str:
     A5 vectorizes a runtime rank-row stride, so it can use the dynamic kernel
     for any token count. A3 lowers the same stride to scalar-rate transfers
     (measured 10-15x slower than its scalar kernel), so it only uses the static
-    twin for warmed decode buckets. Other backends keep the scalar paths.
+    twin for warmed decode buckets. Other backends use the fallback paths.
     """
     if is_950():
         return "dynamic"
@@ -230,7 +231,7 @@ def _fused_dcp_lse_combine_kernel(
                 sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
                 exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
                 safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                significand = _decode_lse_significand(significand_hi, significand_mid, significand_lo)
                 lse = sign * significand * tl.exp2(safe_exponent - 23.0)
                 valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             lse_max = tl.maximum(lse_max, tl.where(valid_lse, lse, -float("inf")))
@@ -258,7 +259,7 @@ def _fused_dcp_lse_combine_kernel(
                 sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
                 exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
                 safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                significand = _decode_lse_significand(significand_hi, significand_mid, significand_lo)
                 lse = sign * significand * tl.exp2(safe_exponent - 23.0)
                 valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             weight = tl.where(valid_lse, tl.exp(lse - safe_lse_max), 0.0)
@@ -512,9 +513,8 @@ def _launch_fused_dcp_lse_combine(
     grid_size = total_rows if total_rows < vector_cores else vector_cores
     # Wide rank tile: one program folds all ranks for a 512-wide feature tile.
     # A 16x512 BF16 tile holds the FP32 temporaries in 32 KiB; measured 2-4x
-    # faster than narrower tiles and than the scalar/batched paths at DCP8/16
-    # with head dims 512 and 1024. It runs before the batched path because
-    # those rows still won at T64/T256.
+    # faster than narrower tiles at DCP8/16 with head dims 512 and 1024.
+    # Preserve the rank-tiled dispatch before the row-weighted fallback.
     rank_tile = triton.next_power_of_2(dcp_size)
     feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
@@ -551,11 +551,11 @@ def _launch_fused_dcp_lse_combine(
             if not static_selected and static_shape not in _UNWARMED_LOGGED:
                 _UNWARMED_LOGGED.add(static_shape)
                 # Decode buckets are bounded by the DCP decode budget; larger
-                # counts are prefill and are expected to take the scalar path.
+                # counts are prefill and are expected to take a fallback path.
                 log = logger.warning if num_tokens <= A3_DECODE_TOKEN_BUCKETS[-1] else logger.debug
                 log(
                     "DCP rank-tiled static kernel has no warmed variant for shape=%s "
-                    "strides=%s; using the scalar/batched path.",
+                    "strides=%s; using the row-weighted or scalar path.",
                     static_shape,
                     static_strides,
                 )
@@ -597,33 +597,17 @@ def _launch_fused_dcp_lse_combine(
             BLOCK_D=feature_tile,
         )
         return
-    # Stream ranks so the live output accumulator is independent of DCP size.
-    # Four rows per core amortize the wider row tile; small workloads keep the
-    # scalar path. No chip model, token/head list or DCP whitelist is required.
-    batched = (
+    # TODO: Merge the packed DCP combine kernels into one generic kernel.
+    vector_compatible = (
         recv.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 512
-        and total_rows >= 4 * vector_cores
-        # Feature-strided code exceeds 192 KiB UB on the measured A3;
-        # one-row coalesced loads produce invalid CANN 9.2 VEC parameters.
         and (local_output is None or local_output.stride(-1) == 1)
         and not return_lse
     )
-    if batched:
-        block_rows = 8
-        block_d = triton.next_power_of_2(head_dim)
-        # Unrolling amortizes loop overhead when cores process multiple tiles.
-        # Bound its live output tiles; larger worlds use the same streaming math.
-        rank_unroll = (
-            dcp_size
-            if total_rows >= 2 * block_rows * vector_cores
-            and dcp_size * block_rows * block_d <= MAX_UNROLLED_COMBINE_ELEMENTS
-            else 1
-        )
-        grid_size = min(vector_cores, triton.cdiv(total_rows, block_rows))
+    if vector_compatible:
         launch(
-            _fused_dcp_lse_combine_batched_kernel,
+            _fused_dcp_lse_combine_head_scatter_kernel,
             (grid_size,),
             recv,
             output,
@@ -636,11 +620,10 @@ def _launch_fused_dcp_lse_combine(
             head_dim,
             num_heads,
             total_rows,
+            MODE=get_current_hardware_profile().dcp_head_scatter_mode,
             DCP_SIZE=dcp_size,
             HAS_LOCAL=local_output is not None,
-            RANK_UNROLL=rank_unroll,
-            BLOCK_D=block_d,
-            BLOCK_ROWS=block_rows,
+            BLOCK_D=triton.next_power_of_2(head_dim),
             multibuffer=False,
         )
         return
@@ -665,7 +648,6 @@ def _launch_fused_dcp_lse_combine(
         RETURN_LSE=return_lse,
         HAS_LOCAL=local_output is not None,
     )
-    return
 
 
 def _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):

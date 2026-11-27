@@ -586,13 +586,16 @@ class BaseKVPoolScheduler(ABC):
         # A consumer skips Prefill writes, including KV received over PD.
         # Its first Decode save may restore missing Prefill ancestors in the pool.
         skip_save = force_skip_save and not (is_decoding and self.save_decode_cache)
-        return self._build_req_meta(
+        meta = self._build_req_meta(
             request_tracker,
             request.block_hashes,
             load_spec,
             request.prompt_token_ids,
             skip_save,
         )
+        if meta is not None:
+            meta.computed_prefix_tokens = num_current_tokens
+        return meta
 
     def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
         """Use the current request table rather than retained SWA block IDs."""

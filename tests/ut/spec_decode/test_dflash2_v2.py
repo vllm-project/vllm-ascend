@@ -23,6 +23,7 @@ from dataclasses import make_dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -62,6 +63,24 @@ else:
     HAS_LILICORR = True
 
 REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not supported by the paired vLLM version")
+
+
+@pytest.mark.parametrize(
+    ("a3_sinks", "expected"),
+    [([True], (False, True)), ([False], (True, False)), ([True, False], (False, False))],
+)
+def test_mla_provider_requires_uniform_draft_groups(monkeypatch, a3_sinks, expected):
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    monkeypatch.setattr(AscendMLABackend, "get_impl_cls", staticmethod(lambda: object))
+    groups = [
+        SimpleNamespace(
+            backend=AscendMLABackend,
+            get_metadata_builder=MagicMock(return_value=SimpleNamespace(flashmla_state=object(), use_a3_mla_sink=sink)),
+        )
+        for sink in a3_sinks
+    ]
+    assert dflash_module.detect_draft_attn_architecture([groups]) == ("MLA", *expected)
 
 
 @pytest.mark.parametrize("causal", [False, True])
@@ -188,6 +207,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
+    speculator.attn_architecture, speculator.use_flashmla, _ = dflash_module.detect_draft_attn_architecture([[group]])
     # vLLM main exposes max_model_len as a read-only view of vllm_config.
     speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
     speculator.draft_max_seq_len = 1024
@@ -517,9 +537,12 @@ def test_greedy_walk_contract_reference():
 @pytest.mark.parametrize("num_reqs_padded", [2, 4])
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.1")}
     speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
+    speculator.arange_np = np.arange(2 * 3 + 1, dtype=np.int32)
     speculator._group_causal = {0: False}
     seq_lens = torch.tensor([10, 20])
     metadata = {
@@ -532,12 +555,13 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
         )
         for name in ("draft.0", "draft.1")
     }
-    speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", build)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
     assert speculator.build_draft_attn_metadatas(num_reqs_padded, seq_lens) == [metadata]
 
-    kwargs = speculator._build_uniform_attn_metadata.call_args.kwargs
+    kwargs = build.call_args.kwargs
     assert kwargs["num_reqs"] == 2
     assert kwargs["seq_lens_cpu_upper_bound"] is seq_lens
     assert kwargs["causal"] is speculator._group_causal
@@ -560,6 +584,8 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.attn_backends = {"draft": AscendAttentionBackend}
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.input_batch = SimpleNamespace(num_reqs=8)
     speculator.num_query_per_req = 8
     speculator._group_causal = {0: False}
@@ -654,6 +680,8 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     speculator.max_num_tokens = 8
     speculator.draft_kv_cache_group_ids = [0, 1]
     speculator.draft_attn_layer_names = active_layers
+    speculator.attn_groups = [[SimpleNamespace(backend=AscendAttentionBackend, layer_names=["draft.0", "draft.1"])]]
+    speculator.model = SimpleNamespace()
     speculator.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     backends = {name: object() for name in ("draft.0", "draft.1")}
     layers = {name: SimpleNamespace(get_attn_backend=lambda name=name: backends[name]) for name in backends}
