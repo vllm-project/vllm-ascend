@@ -54,6 +54,25 @@ def test_fused_bfg_head_parallel_keeps_unpadded_checkpoint_layout():
         linear._zero_output_padding(linear.weight)
         torch.testing.assert_close(linear.weight, torch.full_like(linear.weight, 3))
 
+        b_weight = torch.ones((4, 6), dtype=linear.weight.dtype)
+        f_a_weight = torch.full((2, 6), 2, dtype=linear.weight.dtype)
+        f_b_weight = torch.ones((8, 2), dtype=linear.weight.dtype)
+        g_weight = torch.full((8, 6), 3, dtype=linear.weight.dtype)
+
+        linear.weight.weight_loader(linear.weight, b_weight, 0)
+        linear.f_a_weight.weight_loader(linear.f_a_weight, f_a_weight)
+        linear.f_b_weight.weight_loader(linear.f_b_weight, f_b_weight)
+        linear.weight.weight_loader(linear.weight, g_weight, 2)
+
+        assert linear.pop_missing_shards() == []
+        torch.testing.assert_close(linear.weight[:2], b_weight[:2])
+        torch.testing.assert_close(linear.weight[2:6], torch.full_like(linear.weight[2:6], 4))
+        torch.testing.assert_close(linear.weight[6:], g_weight[:4])
+
+        linear.weight.weight_loader(linear.weight, b_weight, 0)
+        linear.weight.weight_loader(linear.weight, g_weight, 2)
+        assert linear.pop_missing_shards() == ["weight.1"]
+
 
 class _RecordingLinear(nn.Module):
     def __init__(self, output: torch.Tensor) -> None:
