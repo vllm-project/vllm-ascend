@@ -17,11 +17,59 @@ from vllm_ascend.models import register_model
 from vllm_ascend.models.quarot_utils import process_weight
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.worker.v2.spec_decode import lmhead_tp_utils
+from vllm_ascend.worker.v2.spec_decode.dspark.aux_states import ProjectedDraftAuxStates
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
 
 _HIDDEN = 8
+
+
+@pytest.mark.parametrize("target_quantized", [False, True])
+@pytest.mark.parametrize("projection_supported", [False, True])
+def test_pcp_aux_projection_configuration_uses_model_capability(target_quantized, projection_supported):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.vllm_config = SimpleNamespace(quant_config=object() if target_quantized else None)
+    spec.model = SimpleNamespace(supports_pcp_local_aux_projection=projection_supported)
+    staging = torch.empty(4, 6)
+    spec._aux_staging = staging
+
+    assert spec.configure_pcp_aux_projection() is projection_supported
+    if projection_supported:
+        assert spec._pcp_aux_projection_enabled
+        assert spec._aux_staging is None
+    else:
+        assert not getattr(spec, "_pcp_aux_projection_enabled", False)
+        assert spec._aux_staging is staging
+
+
+def test_pcp_aux_projection_graph_forward_reads_current_projected_states():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.vllm_config = SimpleNamespace(quant_config=object())
+    spec.model = SimpleNamespace(
+        supports_pcp_local_aux_projection=True,
+        combine_hidden_states=MagicMock(side_effect=AssertionError("projected features must not be combined twice")),
+    )
+    spec.hidden_states = torch.full((4, 2), float("nan"))
+    spec._aux_staging = torch.empty(4, 6)
+    spec._num_rejected = None
+    spec._num_graph_context_tokens = lambda _: 4
+    spec.target_input_buffers = SimpleNamespace(query_start_loc=torch.tensor([0, 3]))
+    spec.prepare_context_anchor = MagicMock()
+    stored = []
+    spec._precompute_context_kv = lambda start, end: stored.append(spec.hidden_states[start:end].clone())
+    assert spec.configure_pcp_aux_projection()
+
+    # Exercise the real graph-forward preparation twice with different inputs.
+    # This checks the captured branch contract, not device graph capture itself.
+    for value in (1.0, 2.0):
+        context = torch.full((3, 2), value)
+        spec._store_hidden_states(3, torch.empty_like(context), ProjectedDraftAuxStates(context), 4)
+        spec._prepare_graph_forward(1, None)
+        torch.testing.assert_close(stored[-1][:3], context)
+        torch.testing.assert_close(stored[-1][3:], torch.zeros(1, 2))
+    spec.model.combine_hidden_states.assert_not_called()
+    assert spec.prepare_context_anchor.call_count == 2
 
 
 def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:

@@ -22,6 +22,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -395,8 +396,23 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 @support_torch_compile
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
     draft_id_to_target_id = None
-    # This projection preserves token rows and gathers complete TP features.
-    supports_pcp_local_aux_projection = True
+
+    @property
+    def supports_pcp_local_aux_projection(self) -> bool:
+        """Check the loaded projection, independently of target quantization.
+
+        ModelSlim W4A8 checkpoints can keep ``mtp.0.main_proj`` in BF16.
+        AscendUnquantizedLinearMethod inherits UnquantizedLinearMethod, so
+        the type check covers both implementations without class-name matching.
+        Truly quantized or unknown projection methods retain the raw-aux path.
+        """
+        main_proj = getattr(getattr(self, "model", None), "main_proj", None)
+        weight = getattr(main_proj, "weight", None)
+        return (
+            isinstance(getattr(main_proj, "quant_method", None), UnquantizedLinearMethod)
+            and isinstance(weight, torch.Tensor)
+            and weight.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        )
 
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 

@@ -95,13 +95,11 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
     def configure_pcp_aux_projection(self) -> bool:
         """Called after model loading/set_attn and before any draft capture.
-
-        Opt in only for a model declaring token-local projection. Start with
-        unquantized models: dynamic quantization can couple token rows.
+        The model checks its loaded projection method and weights. A quantized
+        target can still use an unquantized auxiliary projection; the global
+        quant_config does not describe the quantization of this particular layer.
         """
         if not getattr(self.model, "supports_pcp_local_aux_projection", False):
-            return False
-        if self.vllm_config.quant_config is not None:
             return False
         self._pcp_aux_projection_enabled = True
         # Newer upstream FULL graphs read raw aux from this buffer and combine

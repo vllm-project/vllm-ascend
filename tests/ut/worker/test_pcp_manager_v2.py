@@ -1469,8 +1469,14 @@ def test_sampling_restore_exposes_unpadded_global_view(is_draft_prefill_sharded:
 @pytest.mark.parametrize("compact_global_batch", [False, True], ids=["padded", "compact"])
 @pytest.mark.parametrize("num_graph_tokens", [0, 6], ids=["eager", "graph-staging"])
 @pytest.mark.parametrize("base_input_batch", [False, True], ids=["ascend-batch", "base-batch"])
+@pytest.mark.parametrize("target_quantized", [False, True], ids=["float-target", "quantized-target"])
 def test_dspark_pcp_aux_projection_matches_global_projection(
-    monkeypatch, rank: int, compact_global_batch: bool, num_graph_tokens: int, base_input_batch: bool
+    monkeypatch,
+    rank: int,
+    compact_global_batch: bool,
+    num_graph_tokens: int,
+    base_input_batch: bool,
+    target_quantized: bool,
 ) -> None:
     # Reuse the sampling fixture, but keep the real parent restoration methods:
     # only the collective is mocked so row permutations and padding are tested.
@@ -1511,7 +1517,8 @@ def test_dspark_pcp_aux_projection_matches_global_projection(
 
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.vllm_config = SimpleNamespace(
-        quant_config=None, parallel_config=SimpleNamespace(prefill_context_parallel_size=1)
+        quant_config=object() if target_quantized else None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
     )
     speculator.draft_attn_layer_names = set()
     speculator.model = SimpleNamespace(
