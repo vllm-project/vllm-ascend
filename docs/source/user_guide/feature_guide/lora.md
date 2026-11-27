@@ -41,8 +41,9 @@ dispatch on every participating rank, including ranks with only base-model
 requests. W8A8 dynamic quantization occurs before the local expert matmuls.
 When the whole group has no active adapter, expert dispatch and computation
 skip LoRA metadata and delta operations. Resident adapters alone do not keep
-that work active. Graph selection also uses the group's active adapter count,
-so an idle or base-only worker can still process a peer's expert LoRA tokens.
+that work active. An idle or base-only worker still selects a graph with LoRA
+operations when a peer needs expert adapters. Other graph-key semantics follow
+vLLM, including its mixed base-model/adapter buckets and dummy capture keys.
 This adds CPU control collectives once per forward; device performance and
 supported topology evidence must be reported for the deployed revision.
 
