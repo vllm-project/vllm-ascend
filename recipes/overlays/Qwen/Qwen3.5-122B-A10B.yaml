@@ -70,6 +70,7 @@ presets:
   ascend_910b_measured:
     label: "Measured (BF16, TP8, MTP)"
     hardware: ascend_910b
+    strategy: single_node_tp
     variants: [default]
     default: true
     image: quay.io/ascend/vllm-ascend:v0.32.0rc1
