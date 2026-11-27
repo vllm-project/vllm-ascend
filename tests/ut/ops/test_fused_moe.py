@@ -138,6 +138,10 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.model_config.max_model_len = 2048
 
     mocker.patch("vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config", return_value=mock_vllm_config)
+    mocker.patch(
+        "vllm_ascend.ops.fused_moe.catccos_adapter.get_ascend_config",
+        return_value=SimpleNamespace(enable_fused_mc2=0, fused_mc2_backend="auto"),
+    )
 
 
 @pytest.fixture
@@ -854,6 +858,7 @@ class TestAscendFusedMoE:
             SimpleNamespace(
                 in_profile_run=True,
                 moe_comm_method=moe_comm_method,
+                moe_comm_type=MoECommType.ALLGATHER,
                 flash_comm_v1_enabled=True,
                 eplb_heat_collection_status=True,
             ),
@@ -929,6 +934,7 @@ class TestAscendFusedMoE:
             "_EXTRA_CTX",
             SimpleNamespace(
                 in_profile_run=False,
+                moe_comm_type=MoECommType.ALLGATHER,
                 moe_comm_method=moe_comm_method,
                 flash_comm_v1_enabled=False,
                 eplb_heat_collection_status=True,

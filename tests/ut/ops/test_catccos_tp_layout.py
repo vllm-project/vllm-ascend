@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import torch
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithMC2
 
 
@@ -17,11 +18,16 @@ def test_tp4_nonmultiple_token_count_restores_original_order():
     context = SimpleNamespace(
         mc2_mask=torch.tensor([True] * global_tokens + [False]),
         padded_num_tokens=8,
+        moe_comm_type=MoECommType.FUSED_MC2,
     )
     moe_config = SimpleNamespace(tp_group=SimpleNamespace(device_group=object()))
 
     with (
         patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config") as get_config,
+        patch(
+            "vllm_ascend.ops.fused_moe.catccos_adapter.get_ascend_config",
+            return_value=SimpleNamespace(enable_fused_mc2=1, fused_mc2_backend="catccos"),
+        ),
         patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=tp_size),
         patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=2),
         patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", context),
