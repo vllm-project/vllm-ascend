@@ -566,7 +566,6 @@ def test_replay_context_preserves_moe_cursor_and_restores_mc2(state, monkeypatch
         attn_metadata={"original": object()},
         slot_mapping={"original": torch.arange(4)},
         is_padding=original_padding[:2] if sequence_parallel else original_padding,
-        additional_kwargs={"eplb_heat_collection_status": True},
         moe_layer_index=21,
     )
     state.num_tokens = 4
@@ -602,7 +601,6 @@ def test_replay_context_preserves_moe_cursor_and_restores_mc2(state, monkeypatch
             assert mask.tolist() == (
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
-            assert inner.additional_kwargs["eplb_heat_collection_status"] is True
             assert inner.moe_layer_index == 21
             inner.moe_layer_index += 19
             if fail:

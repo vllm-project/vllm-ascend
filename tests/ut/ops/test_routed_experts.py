@@ -290,12 +290,10 @@ def test_get_expert_weights_rejects_non_contiguous_view():
         list(_routed_experts([torch.randn(2, 3, 4).transpose(1, 2)]).get_expert_weights())
 
 
-def test_ascend_expert_map_uses_upstream_map():
+def test_ascend_expert_map_uses_upstream_placement():
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     upstream_map = torch.tensor([0, 1], dtype=torch.int32)
-    # Both v0.28.0 and main read quant_method in RoutedExperts.expert_map.
     routed_experts.quant_method = SimpleNamespace(moe_kernel=None)
     object.__setattr__(routed_experts, "_expert_map", upstream_map)
-    object.__setattr__(routed_experts, "rocm_aiter_fmoe_enabled", False)
 
     assert routed_experts.ascend_expert_map is upstream_map
