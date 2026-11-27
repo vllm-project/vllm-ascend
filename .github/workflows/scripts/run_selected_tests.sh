@@ -231,9 +231,16 @@ run_pytest_batch() {
   shift
   local batch_targets=("$@")
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+  local log_name="${target}"
+  log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
+  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
 
-  echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+  echo "::group::${target}"
+  echo -e "\033[1;34m=== Running packed batch: ${target} ===\033[0m"
+  echo -e "  \033[33mBatch size:\033[0m ${#batch_targets[@]}"
+  for batch_target in "${batch_targets[@]}"; do
+    echo -e "    \033[32m-\033[0m ${batch_target}"
+  done
   local start_time=0
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
@@ -261,8 +268,11 @@ run_pytest_batch() {
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
+  echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
+  elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
+    test_results+=("${target}|SKIPPED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
@@ -297,26 +307,35 @@ print_timing_json() {
 print_test_info
 setup_vllm_cache_root
 
+# select_tests.py already packs targets into one matrix group per runner
+# partition. CPU always runs that group as one pytest. NPU recommended /
+# main2main jobs do the same after isolating the Triton-incompatible
+# aclgraph replay test. Coverage maps and estimated-time updates still need
+# one pytest per file, so those modes keep the per-target loop.
+aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
+packed_targets=()
+run_aclgraph_capture_replay=0
+for target in "${targets[@]}"; do
+  if [ "${mode}" = "with-device" ] && [ "${target}" = "${aclgraph_capture_replay}" ]; then
+    run_aclgraph_capture_replay=1
+    continue
+  fi
+  packed_targets+=("${target}")
+done
+
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
-elif [ "${mode}" = "with-device" ]; then
-  aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
-  run_aclgraph_capture_replay=0
-  for target in "${targets[@]}"; do
-    if [ "${target}" = "${aclgraph_capture_replay}" ]; then
-      run_aclgraph_capture_replay=1
-      continue
-    fi
+elif [ "${enable_coverage}" = "true" ] || [ "${record_timing}" = "true" ]; then
+  for target in "${packed_targets[@]}"; do
     run_pytest_target "${target}"
   done
-  if [ "${run_aclgraph_capture_replay}" = "1" ]; then
-    pip uninstall -y triton-ascend triton
-    run_pytest_target "${aclgraph_capture_replay}"
-  fi
-else
-  for target in "${targets[@]}"; do
-    run_pytest_target "${target}"
-  done
+elif [ "${#packed_targets[@]}" -gt 0 ]; then
+  run_pytest_batch "${npu_type}-${num_npus}card (${#packed_targets[@]} targets)" "${packed_targets[@]}"
+fi
+
+if [ "${run_aclgraph_capture_replay}" = "1" ]; then
+  pip uninstall -y triton-ascend triton
+  run_pytest_target "${aclgraph_capture_replay}"
 fi
 
 print_timing_json
