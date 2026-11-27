@@ -194,13 +194,12 @@ class NPUWorker(GPUWorker):
             )
 
         # Worker processes receive a pickled VllmConfig, so the platform config
-        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
-        # Ascend V2 model runner overrides so the worker resolves the same
-        # runner version as the engine. Idempotent.
-        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+        # hook (NPUPlatform.check_and_update_config) never runs here. Reject a
+        # stale explicit request for the removed Model Runner V1. Idempotent.
+        from vllm_ascend.mrv2_utils import validate_v2_model_runner_env
         from vllm_ascend.utils import adapt_patch
 
-        apply_v2_model_runner_config_patch()
+        validate_v2_model_runner_env()
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
@@ -254,7 +253,6 @@ class NPUWorker(GPUWorker):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
-        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 

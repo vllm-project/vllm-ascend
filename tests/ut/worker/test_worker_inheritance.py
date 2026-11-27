@@ -160,7 +160,7 @@ def worker_constructor(monkeypatch):
 
     import vllm_ascend
     from vllm_ascend import logger as ascend_logger
-    from vllm_ascend import mrv2_utils, utils
+    from vllm_ascend import utils
     from vllm_ascend.worker import worker as worker_module
 
     events = []
@@ -168,7 +168,6 @@ def worker_constructor(monkeypatch):
     def record(name):
         return Mock(side_effect=lambda *args, **kwargs: events.append(name))
 
-    monkeypatch.setattr(mrv2_utils, "apply_v2_model_runner_config_patch", record("runner_config"))
     monkeypatch.setattr(utils, "adapt_patch", record("patches"))
     kda = ModuleType("vllm_ascend.patch.worker.patch_kda_recoverssm")
     kda.patch_kda_recoverssm = record("kda")  # type: ignore[attr-defined]
@@ -295,9 +294,7 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert setup.sleep_manager.get_runner() is None
     assert worker.npugraph_memory_bytes == 0
     assert worker._kvpp_cache_allocation_plan is None
-    assert worker.use_v2_model_runner is True
     assert setup.events == [
-        "runner_config",
         "patches",
         "kda",
         "ops",

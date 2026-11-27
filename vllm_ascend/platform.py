@@ -47,7 +47,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+from vllm_ascend.mrv2_utils import validate_v2_model_runner_env
 
 # isort: off
 from vllm_ascend.utils import (
@@ -750,14 +750,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default. Feature validation is
-        # left to upstream.
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default runner selection.
-        apply_v2_model_runner_config_patch()
+        # Model Runner V1 has been removed; reject a stale explicit request
+        # for it before the engine starts.
+        validate_v2_model_runner_env()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization

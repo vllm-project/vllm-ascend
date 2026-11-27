@@ -15,41 +15,17 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 import pytest
 
 import vllm_ascend.mrv2_utils as mrv2_utils
-from vllm_ascend.mrv2_utils import use_v2_model_runner
-
-_CONFIGS = [SimpleNamespace(), MagicMock()]
-_CONFIG_IDS = ["empty-config", "magicmock-config"]
 
 
-@pytest.mark.parametrize("config", _CONFIGS, ids=_CONFIG_IDS)
-def test_v2_is_the_only_runner(config):
-    assert use_v2_model_runner(config) is True
-
-
-def test_validate_v2_model_runner_keeps_the_upstream_feature_list():
-    config = SimpleNamespace(_get_v2_model_runner_unsupported_features=lambda: ["suffix"])
-
-    with pytest.raises(ValueError, match="suffix"):
-        mrv2_utils._validate_v2_model_runner(config)
-
-
-def test_validate_v2_model_runner_accepts_a_supported_config():
-    config = SimpleNamespace(_get_v2_model_runner_unsupported_features=lambda: [])
-
-    mrv2_utils._validate_v2_model_runner(config)
-
-
-def test_explicit_v1_request_is_rejected(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+@pytest.mark.parametrize("value", ["0", "00", " 0 "])
+def test_explicit_v1_request_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", value)
 
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
-        mrv2_utils.apply_v2_model_runner_config_patch()
+        mrv2_utils.validate_v2_model_runner_env()
 
 
 def test_v1_request_is_rejected_after_upstream_drops_the_entry(monkeypatch):
@@ -60,27 +36,14 @@ def test_v1_request_is_rejected_after_upstream_drops_the_entry(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
-        mrv2_utils.apply_v2_model_runner_config_patch()
+        mrv2_utils.validate_v2_model_runner_env()
 
 
-def test_apply_config_patch_is_wired(monkeypatch):
-    from vllm.config.vllm import VllmConfig
+@pytest.mark.parametrize("value", [None, "1", "true", "yes"])
+def test_v2_or_unset_request_is_allowed(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", value)
 
-    original_property = VllmConfig.use_v2_model_runner
-    original_validate = getattr(VllmConfig, "_validate_v2_model_runner", None)
-
-    mrv2_utils.apply_v2_model_runner_config_patch()
-    assert isinstance(VllmConfig.use_v2_model_runner, property)
-    assert VllmConfig.use_v2_model_runner.fget is mrv2_utils.use_v2_model_runner
-    if original_validate is not None:
-        # Ascend owns this hook so the GPU-only Triton precondition does not
-        # reject configs built in environments without Triton.
-        assert VllmConfig._validate_v2_model_runner is mrv2_utils._validate_v2_model_runner
-
-    # Re-applying is harmless.
-    mrv2_utils.apply_v2_model_runner_config_patch()
-
-    # Restore the upstream class state so later tests are unaffected.
-    monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
-    if original_validate is not None:
-        monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+    mrv2_utils.validate_v2_model_runner_env()
