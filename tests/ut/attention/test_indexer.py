@@ -76,6 +76,9 @@ def test_bf16_li_v2_causal_tnd_padding(monkeypatch, starts, kv_lengths, storage_
 
 
 def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch):
+    from tests.ut.ops.test_bf16_sharded_indexer import install_li_v2_cpu_kernels
+
+    install_li_v2_cpu_kernels(monkeypatch)
     context = SimpleNamespace()
     monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
     metadata_op = Mock(side_effect=lambda cu_q, lengths, heads, k, metadata_size: lengths.clone())
@@ -97,29 +100,27 @@ def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch)
     get_plan = AscendSFAIndexerBackend._get_bf16_li_v2_plan
     plan = get_plan(first, meta, key_cache)
     assert get_plan(next_layer, meta, key_cache) is plan
-    assert metadata_op.call_count == 2
-    torch.testing.assert_close(plan.cu_query, torch.arange(5, dtype=torch.int32))
-    assert [call.args[-2:] for call in metadata_op.call_args_list] == [(32, 8192), (32, 256)]
-    assert all(call.kwargs == {"metadata_size": 1024} for call in metadata_op.call_args_list)
-    for window, start, stop in zip(plan.windows, (0, 64), (64, 66)):
-        pages = table[owners.long(), start:stop]
-        expected_valid = (pages >= 2) & (pages < 130)
-        torch.testing.assert_close(window.valid_pages, expected_valid)
-        torch.testing.assert_close(window.block_table, torch.where(expected_valid, pages, 0))
-        assert window.block_table.is_contiguous()
-        expected_lengths = (lengths.flatten() - start * 128).clamp(0, (stop - start) * 128)
-        torch.testing.assert_close(window.visible_lengths, expected_lengths)
-        torch.testing.assert_close(window.metadata, expected_lengths)
+    assert (plan.windows, plan.capacity) == (2, 66 * 128)
+    width = 33 * 128
+    torch.testing.assert_close(plan.cu_query, torch.arange(9, dtype=torch.int32))
+    metadata_op.assert_called_once_with(plan.cu_query, plan.visible_lengths, 32, width, metadata_size=1024)
+    pages = torch.cat(table[owners.long()].split(33, dim=1))
+    expected_valid = (pages >= 2) & (pages < 130)
+    torch.testing.assert_close(plan.valid_pages, expected_valid)
+    torch.testing.assert_close(plan.block_table, torch.where(expected_valid, pages, 0))
+    assert plan.block_table.is_contiguous()
+    expected_lengths = torch.cat((lengths.flatten().clamp(0, width), (lengths.flatten() - width).clamp(0, width)))
+    torch.testing.assert_close(plan.visible_lengths, expected_lengths)
+    torch.testing.assert_close(plan.metadata, expected_lengths)
     # Warmup and capture can use the same Python context and stable input storage.
     table.fill_(3)
     lengths.zero_()
     new_plan = get_plan(first, meta, key_cache)
     assert get_plan(next_layer, meta, key_cache) is new_plan
     assert new_plan is not plan
-    assert metadata_op.call_count == 4
-    for window in new_plan.windows:
-        assert (window.block_table == 3).all()
-        assert (window.visible_lengths == 0).all()
+    assert metadata_op.call_count == 2
+    assert (new_plan.block_table == 3).all()
+    assert (new_plan.visible_lengths == 0).all()
 
 
 def _make_builder(
@@ -128,8 +129,10 @@ def _make_builder(
     dsa_cp: bool = False,
     num_speculative_tokens: int | None = None,
     physical_block_size: int = 128,
+    indexer_spec: AscendSFAIndexerCacheSpec | None = None,
+    index_rope_dim: int | None = None,
 ) -> AscendSFAIndexerMetadataBuilder:
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = indexer_spec or FullAttentionSpec(
         block_size=physical_block_size,
         num_kv_heads=1,
         head_size=160,
@@ -138,7 +141,7 @@ def _make_builder(
     layer_names = ["model.layers.0.self_attn.indexer.k_cache"]
     vllm_config = MagicMock()
     vllm_config.model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(index_topk=2048),
+        hf_text_config=SimpleNamespace(index_topk=2048, index_rope_dim=index_rope_dim),
         hf_config=SimpleNamespace(),
         # DCP fixtures below provide two 128-token columns per rank.
         max_model_len=512,
@@ -290,6 +293,34 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     # tables instead of introducing another asynchronously copied buffer.
     assert metadata.cos.data_ptr() == cos.data_ptr()
     assert metadata.sin.data_ptr() == sin.data_ptr()
+
+
+@pytest.mark.parametrize("scale_dim", [0, 1])
+def test_nope_indexer_metadata_uses_dense_slots_and_persistent_tables(monkeypatch, scale_dim):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8 if scale_dim else torch.bfloat16,
+        scale_dim=scale_dim,
+    )
+    builder = _make_builder(num_speculative_tokens=3, indexer_spec=spec, index_rope_dim=0)
+    cos, sin = (torch.empty(16, 1, 1, 64) for _ in range(2))
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._cos_mla", cos)
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._sin_mla", sin)
+    common = _make_common_metadata()
+    common.positions = common.positions.int()
+    for metadata in (builder.build_for_cudagraph_capture(common), builder.build_for_drafting(common, 1)):
+        assert metadata.cos.data_ptr() == cos.data_ptr()
+        assert metadata.sin.data_ptr() == sin.data_ptr()
+        assert metadata.cos.shape[0] == common.num_input_tokens
+        assert not builder._rope_buffers
+        if scale_dim:
+            torch.testing.assert_close(metadata.cache_scatter_indices[:, 1], common.slot_mapping[:4])
+        else:
+            assert metadata.cache_scatter_indices is None
+            assert not builder._cache_scatter_indices_buffers
+            torch.testing.assert_close(metadata.slot_mapping, common.slot_mapping[:4])
 
 
 def _make_decode_pcp_context() -> SimpleNamespace:

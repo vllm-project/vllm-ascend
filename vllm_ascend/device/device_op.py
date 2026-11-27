@@ -708,9 +708,11 @@ class BaseDeviceAdaptor:
                 ql_nope = F.pad(ql_nope.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
                 if q_pe is not None:
                     q_pe = F.pad(q_pe.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
-            if getattr(sfa_impl, "is_kimi_k31", False) is True and not getattr(sfa_impl, "_logged_kimi_sfa", False):
+            log_sfa = getattr(sfa_impl, "is_kimi_k31", False) is True and not getattr(
+                sfa_impl, "_logged_kimi_sfa", False
+            )
+            if log_sfa:
                 logger.info_once("Kimi K3.1 DSA first entering _C_ascend.npu_sparse_flash_attention", scope="process")
-                sfa_impl._logged_kimi_sfa = True
             result = torch.ops._C_ascend.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
@@ -729,6 +731,12 @@ class BaseDeviceAdaptor:
                 attention_mode=2,
                 return_softmax_lse=return_lse,
             )
+            if log_sfa:
+                logger.info_once(
+                    "Kimi K3.1 DSA stage=dispatched attention=_C_ascend.npu_sparse_flash_attention",
+                    scope="process",
+                )
+                sfa_impl._logged_kimi_sfa = True
             if pad_query_groups:
                 output, softmax_max, softmax_sum = result
                 output = output.unflatten(1, (num_kv_heads, _SFA_PADDED_QUERY_GROUP_SIZE))

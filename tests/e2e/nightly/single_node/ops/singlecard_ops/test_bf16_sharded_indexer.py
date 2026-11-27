@@ -109,12 +109,12 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadat
     # Integer-valued inputs produce exact FP32 scores even with different
     # reduction orders. Negative weights exercise signed candidate scores.
     query = torch.randint(-1, 2, (rows, heads, dim), generator=generator).bfloat16()
-    query[1].zero_()  # More than K identical scores across two windows.
+    query[1].zero_()  # More than K identical scores across three windows.
     weights = torch.randint(-2, 3, (rows, heads), generator=generator).float()
-    keys = torch.randint(-2, 3, (70, page_size, 1, dim), generator=generator).bfloat16()
+    keys = torch.randint(-2, 3, (135, page_size, 1, dim), generator=generator).bfloat16()
     keys[:first_valid_page].fill_(1000)
-    # One high-scoring token lives in the second window, past the cutoff.
-    keys[66, 123].fill_(64)  # Logical ID 8315 on rank 0.
+    # Put a winner in the last real page of the 133-page DCP8 table.
+    keys[-1, 123].fill_(64)
     query[0].fill_(1)
     weights[0].fill_(1)
     table = torch.arange(2, len(keys), dtype=torch.int32).repeat(2, 1)
@@ -138,6 +138,7 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadat
             heads,
             metadata_size=native_indexer_metadata_size,
         )
+        assert plan.windows == 3 and plan.block_table.shape == (3 * rows, 45)
         return lightning_indexer_v2_candidates(device_q, device_w, device_k, plan, topk)
 
     stripe = 768
@@ -145,8 +146,8 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadat
 
     def visible_lengths(rank):
         global_lengths = [
-            11 * cycle + 128,
-            11 * cycle,
+            22 * cycle + 128,
+            22 * cycle,
             (16 + rank) * stripe + 513,
             rank * stripe + 127,
             rank * stripe + 129,

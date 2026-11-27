@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -14,14 +19,139 @@ class _RestoreLanguage(TorchLanguage):
     def program_id(self, axis):
         return torch.tensor(self.index[axis], dtype=torch.int32)
 
+    @staticmethod
+    def minimum(left, right):
+        return torch.minimum(torch.as_tensor(left), torch.as_tensor(right))
+
+    @staticmethod
+    def maximum(left, right):
+        return torch.maximum(torch.as_tensor(left), torch.as_tensor(right))
+
     def load(self, pointer, mask=None, other=0):
         if mask is None:
             mask = torch.ones_like(torch.as_tensor(pointer.offset), dtype=torch.bool)
-        return super().load(pointer, mask, other)
+        result = super().load(pointer, mask, other)
+        return result.to(torch.uint8) if result.dtype == torch.bool else result
 
-    def store(self, pointer, value, mask):
+    def store(self, pointer, value, mask=None):
+        if mask is None:
+            mask = torch.ones_like(torch.as_tensor(pointer.offset), dtype=torch.bool)
         assert mask.dtype == torch.bool, "Mask must have boolean scalar type"
-        super().store(pointer, value, mask)
+        super().store(pointer, torch.as_tensor(value), mask)
+
+
+def install_li_v2_cpu_kernels(monkeypatch):
+    """Execute the production LI V2 launchers and kernels against CPU tensors."""
+    language = _RestoreLanguage(programs=1)
+    triton = SimpleNamespace(cdiv=lambda x, y: (x + y - 1) // y, next_power_of_2=lambda x: 1 << (x - 1).bit_length())
+    module = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+
+    class Kernel:
+        def __init__(self, name):
+            self.function = load_function("../sharded_indexer.py", name, {"tl": language})
+
+        def __getitem__(self, grid):
+            def launch(*args):
+                args = [Pointer(x) if isinstance(x, torch.Tensor) else x for x in args]
+                for index in itertools.product(*(range(dim) for dim in grid)):
+                    language.index = index
+                    self.function(*args)
+
+            return launch
+
+    for name in ("build_li_v2_batched_inputs", "pack_li_v2_window_queries", "restore_li_v2_scores"):
+        scope = {"torch": torch, "triton": triton, "_" + name: Kernel("_" + name)}
+        setattr(module, name, load_function("../sharded_indexer.py", name, scope))
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
+@pytest.mark.parametrize("cols,windows,pages_per_window", [(1, 1, 1), (133, 3, 45)])
+@pytest.mark.parametrize("for_dcp_merge,weight_dtype", [(False, torch.bfloat16), (True, torch.float32)])
+def test_batched_li_v2_calls_native_once_and_selects_earliest_tied_ids(
+    monkeypatch, cols, windows, pages_per_window, for_dcp_merge, weight_dtype
+):
+    from vllm_ascend.ops import lightning_indexer_v2 as li
+
+    install_li_v2_cpu_kernels(monkeypatch)
+    rows, page_size, topk = 5, 128, 2048
+    width = pages_per_window * page_size
+    capacity = cols * page_size
+    table = torch.empty((2, 2 * cols), dtype=torch.int32)[:, ::2]
+    table[0] = torch.arange(cols) % 5 + 2
+    table[1] = 3
+    if cols > 1:
+        table[0, [0, 44, 89, 130]] = torch.tensor([0, -1, 1, 8], dtype=torch.int32)
+    owners = torch.tensor([0, 1, 1, 1, -1], dtype=torch.int32)
+    lengths = torch.tensor([capacity + 7, capacity - 5, 3, 0, capacity], dtype=torch.int32)
+    query = torch.arange(rows * 4, dtype=torch.bfloat16).view(rows, 2, 2)[:, :, 1:]
+    weights = torch.ones(rows, 4, dtype=weight_dtype)[:, ::2]
+    weights[1].zero_()
+    key = torch.arange(8, dtype=torch.bfloat16).view(8, 1, 1, 1).expand(-1, page_size, -1, -1)
+    key[0, 0] = 100  # A hole redirected to page zero would otherwise win.
+    metadata = Mock(return_value=torch.zeros(1024, dtype=torch.int32))
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", metadata, raising=False)
+    plan = li.build_lightning_indexer_v2_plan(table, owners, lengths, 8, page_size, 2, 2, metadata_size=1024)
+    assert (plan.windows, plan.capacity) == (windows, capacity)
+    metadata.assert_called_once_with(plan.cu_query, plan.visible_lengths, 2, width, metadata_size=1024)
+    torch.testing.assert_close(plan.cu_query, torch.arange(rows * windows + 1, dtype=torch.int32))
+    if cols == 133:
+        assert not plan.valid_pages[-rows:, -2:].any()
+        assert plan.visible_lengths[-rows].item() == 43 * page_size
+
+    def native(q, k, w, cu, visible, pages, tiling, native_topk):
+        assert cu is plan.cu_query and pages is plan.block_table and visible is plan.visible_lengths
+        assert k is key and tiling is metadata.return_value and native_topk == width
+        torch.testing.assert_close(q, query.repeat(windows, 1, 1))
+        torch.testing.assert_close(w, weights.float().repeat(windows, 1))
+        assert q.is_contiguous() and w.is_contiguous()
+        # The native order is arbitrary, including ties. Poison its padding.
+        ids = torch.arange(width - 1, -1, -1, dtype=torch.int32).expand(rows * windows, width)
+        scores = key[pages.gather(1, ids.long() // page_size).long(), 0, 0, 0].float()
+        scores *= (q[:, :, 0].float() * w).sum(dim=1, keepdim=True)
+        invalid = ids >= visible[:, None]
+        return ids.masked_fill(invalid, -1).unsqueeze(1), scores.masked_fill(invalid, torch.inf).unsqueeze(1)
+
+    scorer = Mock(side_effect=native)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2", scorer, raising=False)
+    ids, scores = li.lightning_indexer_v2_candidates(query, weights, key, plan, topk, for_dcp_merge=for_dcp_merge)
+    scorer.assert_called_once()
+    assert ids.dtype == (torch.int64 if for_dcp_merge else torch.int32)
+    assert scores.dtype == torch.float32
+    for row in range(rows):
+        candidates = []
+        if 0 <= owners[row] < table.shape[0]:
+            # The reference walks logical IDs directly, without splitting windows.
+            scale = (query[row, :, 0].float() * weights[row].float()).sum().item()
+            page_ids = table[owners[row]].tolist()
+            for token in range(min(lengths[row].item(), capacity)):
+                page = page_ids[token // page_size]
+                if 2 <= page < key.shape[0]:
+                    candidates.append((scale * page, token))
+        expected = sorted(candidates, key=lambda pair: (-pair[0], pair[1]))[:topk]
+        count = len(expected)
+        assert ids[row, 0, :count].tolist() == [token for _, token in expected]
+        assert scores[row, 0, :count].tolist() == [score for score, _ in expected]
+        assert torch.isneginf(scores[row, 0, count:]).all()
+        if not for_dcp_merge:
+            assert (ids[row, 0, count:] == -1).all()
+
+
+@pytest.mark.parametrize("rows,cols", [(0, 133), (3, 0)])
+def test_empty_li_v2_plan_skips_native_metadata_and_scorer(monkeypatch, rows, cols):
+    from vllm_ascend.ops import lightning_indexer_v2 as li
+
+    install_li_v2_cpu_kernels(monkeypatch)
+    forbidden = Mock(side_effect=AssertionError("empty plan launched native op"))
+    for name in ("npu_lightning_indexer_v2", "npu_lightning_indexer_v2_metadata"):
+        monkeypatch.setattr(torch.ops._C_ascend, name, forbidden, raising=False)
+    owners = torch.zeros(rows, dtype=torch.int32)
+    table = torch.empty(1, cols, dtype=torch.int32)
+    plan = li.build_lightning_indexer_v2_plan(table, owners, owners, 1, 128, 1, 2)
+    q = torch.empty(rows, 2, 1, dtype=torch.bfloat16)
+    ids, scores = li.lightning_indexer_v2_candidates(q, q[..., 0], q.new_empty(1, 128, 1, 1), plan, 2048)
+    assert ids.shape == scores.shape == (rows, 1, 2048)
+    assert (ids == -1).all() and torch.isneginf(scores).all()
+    forbidden.assert_not_called()
 
 
 @pytest.mark.parametrize("width", [128, 384, 8192])

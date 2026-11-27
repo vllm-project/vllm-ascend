@@ -18,6 +18,148 @@ MIN_FUSED_SORT_ROW_PERCENT = 75
 
 
 @triton.jit
+def _build_li_v2_batched_inputs(
+    table,
+    request_rows,
+    lengths,
+    cu_query,
+    visible,
+    pages,
+    valid_pages,
+    table_row_stride,
+    table_col_stride,
+    owner_stride,
+    length_stride,
+    num_cache_pages,
+    first_valid_page,
+    ROWS: tl.constexpr,
+    REQUESTS: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    PAGES_PER_WINDOW: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch = tl.program_id(0)
+    window = batch // ROWS
+    row = batch % ROWS
+    owner = tl.load(request_rows + row * owner_stride).to(tl.int64)
+    owner_valid = (owner >= 0) & (owner < REQUESTS)
+    start = window * PAGES_PER_WINDOW
+    lane = tl.arange(0, BLOCK)
+    source_col = start + lane
+    in_table = (lane < PAGES_PER_WINDOW) & (source_col < TABLE_COLS) & owner_valid
+    page = tl.load(table + owner * table_row_stride + source_col * table_col_stride, mask=in_table, other=0)
+    valid = in_table & (page >= first_valid_page) & (page < num_cache_pages)
+    destination = batch.to(tl.int64) * PAGES_PER_WINDOW + lane
+    tl.store(pages + destination, tl.where(valid, page, 0), mask=lane < PAGES_PER_WINDOW)
+    tl.store(valid_pages + destination, valid, mask=lane < PAGES_PER_WINDOW)
+
+    length = tl.load(lengths + row * length_stride)
+    window_tokens = tl.maximum(0, tl.minimum(TABLE_COLS - start, PAGES_PER_WINDOW)) * PAGE_SIZE
+    local_visible = tl.minimum(tl.maximum(length - start * PAGE_SIZE, 0), window_tokens)
+    tl.store(visible + batch, tl.where(owner_valid, local_visible, 0))
+    tl.store(cu_query + batch + 1, batch + 1)
+    tl.store(cu_query, 0, mask=batch == 0)
+
+
+def build_li_v2_batched_inputs(
+    table, request_rows, lengths, num_cache_pages, page_size, first_valid_page, pages_per_window, windows
+):
+    """Build one paged, single-query CANN request for each (window, query row)."""
+    rows = request_rows.numel()
+    batches = windows * rows
+    cu_query = torch.empty(batches + 1, dtype=torch.int32, device=table.device)
+    visible = torch.empty((batches,), dtype=torch.int32, device=table.device)
+    pages = torch.empty((batches, pages_per_window), dtype=torch.int32, device=table.device)
+    valid_pages = torch.empty_like(pages, dtype=torch.bool)
+    if batches:
+        _build_li_v2_batched_inputs[(batches,)](
+            table,
+            request_rows,
+            lengths,
+            cu_query,
+            visible,
+            pages,
+            valid_pages,
+            table.stride(0),
+            table.stride(1),
+            request_rows.stride(0),
+            lengths.stride(0),
+            num_cache_pages,
+            first_valid_page,
+            rows,
+            table.shape[0],
+            table.shape[1],
+            page_size,
+            pages_per_window,
+            triton.next_power_of_2(pages_per_window),
+        )
+    else:
+        cu_query.zero_()
+    return cu_query, visible, pages, valid_pages
+
+
+@triton.jit
+def _pack_li_v2_window_queries(
+    query,
+    weights,
+    packed_query,
+    packed_weights,
+    q_row_stride,
+    q_head_stride,
+    q_dim_stride,
+    w_row_stride,
+    w_head_stride,
+    ROWS: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    DIM_BLOCK: tl.constexpr,
+):
+    batch = tl.program_id(0).to(tl.int64)
+    row = batch % ROWS
+    head = tl.arange(0, HEAD_BLOCK)
+    dim = tl.arange(0, DIM_BLOCK)
+    q = tl.load(
+        query + row * q_row_stride + head[:, None] * q_head_stride + dim[None, :] * q_dim_stride,
+        mask=(head[:, None] < HEADS) & (dim[None, :] < DIM),
+        other=0,
+    )
+    w = tl.load(weights + row * w_row_stride + head * w_head_stride, mask=head < HEADS, other=0)
+    tl.store(
+        packed_query + batch * HEADS * DIM + head[:, None] * DIM + dim[None, :],
+        q,
+        mask=(head[:, None] < HEADS) & (dim[None, :] < DIM),
+    )
+    tl.store(packed_weights + batch * HEADS + head, w.to(tl.float32), mask=head < HEADS)
+
+
+def pack_li_v2_window_queries(query, weights, windows):
+    """Pack strided BF16 queries and FP32 scoring weights in CANN request order."""
+    if windows == 1:
+        return query.contiguous(), weights.float().contiguous()
+    rows, heads, dim = query.shape
+    batches = windows * rows
+    packed_query = torch.empty((batches, heads, dim), device=query.device, dtype=query.dtype)
+    packed_weights = torch.empty((batches, heads), device=weights.device, dtype=torch.float32)
+    if batches:
+        _pack_li_v2_window_queries[(batches,)](
+            query,
+            weights,
+            packed_query,
+            packed_weights,
+            *query.stride(),
+            *weights.stride(),
+            rows,
+            heads,
+            dim,
+            triton.next_power_of_2(heads),
+            triton.next_power_of_2(dim),
+        )
+    return packed_query, packed_weights
+
+
+@triton.jit
 def _restore_li_v2_scores(
     ids,
     scores,
@@ -30,6 +172,8 @@ def _restore_li_v2_scores(
     WIDTH: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
+    ROWS_PER_WINDOW: tl.constexpr = None,
+    DENSE_WIDTH: tl.constexpr = None,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -42,11 +186,24 @@ def _restore_li_v2_scores(
     valid_page = tl.load(pages + row * page_stride + safe_idx // PAGE_SIZE) != 0
     # Native IDs within a window are unique. Masked slots keep their -inf
     # initializer, including holes that used physical page zero for safety.
-    tl.store(dense + row * dense_stride + offset + safe_idx, score, valid & valid_page)
+    output_row = row
+    output_col = offset + safe_idx
+    if ROWS_PER_WINDOW is not None:
+        output_row = row % ROWS_PER_WINDOW
+        output_col = output_col + (row // ROWS_PER_WINDOW) * WIDTH
+        # The final equal-width CANN window can extend beyond the dense score row.
+        valid = valid & (output_col < DENSE_WIDTH)
+    tl.store(dense + output_row * dense_stride + output_col, score, valid & valid_page)
 
 
-def restore_li_v2_scores(ids, scores, valid_pages, lengths, dense, offset, page_size):
+def restore_li_v2_scores(ids, scores, valid_pages, lengths, dense, offset, page_size, rows_per_window=None):
     rows, _, width = ids.shape
+    if not rows:
+        return
+    if rows_per_window is not None and (
+        rows_per_window <= 0 or rows_per_window != dense.shape[0] or rows % rows_per_window
+    ):
+        raise ValueError("batched LightningIndexerV2 scores must contain a whole number of dense row groups")
     _restore_li_v2_scores[(rows, triton.cdiv(width, 256))](
         ids,
         scores,
@@ -59,6 +216,8 @@ def restore_li_v2_scores(ids, scores, valid_pages, lengths, dense, offset, page_
         width,
         page_size,
         256,
+        rows_per_window,
+        dense.shape[1],
     )
 
 

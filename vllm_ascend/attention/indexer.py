@@ -45,6 +45,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -415,6 +416,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         key: torch.Tensor | None = None,
         *,
         windows: int = 0,
+        scorer_calls: int = 0,
         sort_elements: int = 0,
     ) -> None:
         if not self._is_kimi_k31:
@@ -428,7 +430,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         logger.info(
             "Kimi K3.1 LightningIndexerV2 stage=forward route=%s reason=%s layer=%s capture_metadata=%s "
             "query_rows=%s actual_tokens=%s query_dtype=%s kv_dtype=%s kv_shape=%s kv_stride=%s "
-            "table_shape=%s windows=%s sort_elements=%s sort_limit=%s",
+            "table_shape=%s windows=%s scorer_calls=%s sort_elements=%s sort_limit=%s",
             route,
             reason,
             self.k_cache.prefix,
@@ -441,6 +443,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             key.stride() if key is not None else None,
             tuple(metadata.block_table.shape),
             windows,
+            scorer_calls,
             sort_elements,
             _BF16_LI_V2_MAX_SORT_ELEMENTS,
         )
@@ -1112,14 +1115,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 if reason is None:
                     self._log_li_v2_route("enter_dcp_windows", None, indexer_metadata, q_li, key_cache)
                     plan = self._get_bf16_li_v2_plan(indexer_metadata, key_cache)
-                    indices, scores = lightning_indexer_v2_candidates(q_li, weights, key_cache, plan, self.topk_tokens)
+                    indices, scores = lightning_indexer_v2_candidates(
+                        q_li, weights, key_cache, plan, self.topk_tokens, for_dcp_merge=True
+                    )
                     self._log_li_v2_route(
                         "dispatched_dcp_windows",
                         None,
                         indexer_metadata,
                         q_li,
                         key_cache,
-                        windows=len(plan.windows),
+                        windows=plan.windows,
+                        scorer_calls=1,
                         sort_elements=sort_elements,
                     )
                 else:
@@ -1236,7 +1242,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 return_values=False,
                 **({"seqused_q": used_query} if padded else {}),
             )
-            self._log_li_v2_route("dispatched_" + route, None, indexer_metadata, q_li, key_cache)
+            self._log_li_v2_route("dispatched_" + route, None, indexer_metadata, q_li, key_cache, scorer_calls=1)
             return indices
         self._log_li_v2_route("device_postprocess", reason, indexer_metadata, q_li, key_cache)
         return DeviceOperator.indexer_select_post_process(
@@ -1281,6 +1287,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFAIndexerBackend])
         self.use_rope = getattr(vllm_config.model_config.hf_text_config, "index_rope_dim", None) != 0
+        # The runner reshapes a scale-free indexer allocation directly into
+        # dense K pages. _write_cache_tensor addresses them with flat slots.
+        self._needs_scatter_indices = not (
+            isinstance(kv_cache_spec, AscendSFAIndexerCacheSpec) and kv_cache_spec.scale_dim == 0
+        )
         scheduler_config = vllm_config.scheduler_config
         self.decode_threshold = 1
         self.speculative_config = vllm_config.speculative_config
@@ -1290,6 +1301,13 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.use_dsa_cp = enable_dsa_cp()
+        if _uses_kimi_k31_bf16_indexer(vllm_config):
+            logger.info_once(
+                "Kimi K3.1 BF16 indexer metadata cache_write_indices=%s indexer_rope=%s",
+                "block_token" if self._needs_scatter_indices else "flat_slots",
+                "enabled" if self.use_rope else "disabled",
+                scope="process",
+            )
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._group_metadata_buffers: dict[
             object,
@@ -1843,7 +1861,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         num_decode_tokens: int,
         is_pcp_sharded: bool,
         buffer_key: object,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
+        if not self._needs_scatter_indices:
+            return None
         slots = slot_mapping
         if self.use_pcp:
             # Match _gather_cache_inputs / _gather_prefill_cache_inputs without
@@ -1913,7 +1933,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 buffer_key,
             )
         self._mask_lim_slot_mapping(common_attn_metadata, slot_mapping, buffer_key)
-        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+        input_positions = common_attn_metadata.positions[:num_input_tokens]
+        if self.use_rope:
+            input_positions = input_positions.long()
         block_size = self.kernel_block_size
 
         cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope, use_rope=self.use_rope)
@@ -2000,7 +2022,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 sin,
                 buffer_key,
             )
-        elif copy_rope or (self.use_sharded_bf16 and full_graph_mode):
+        elif self.use_rope and (copy_rope or (self.use_sharded_bf16 and full_graph_mode)):
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
                 sin,

@@ -434,6 +434,8 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", MagicMock(), raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2", selectors["causal"], raising=False)
     monkeypatch.setattr(module, "lightning_indexer_v2_candidates", selectors["window"])
+    plan = SimpleNamespace(windows=3)
+    monkeypatch.setattr(backend, "_get_bf16_li_v2_plan", MagicMock(return_value=plan))
     monkeypatch.setattr(module, "bf16_paged_indexer_candidates", selectors["paged"])
     monkeypatch.setattr(module.DeviceOperator, "indexer_select_post_process", selectors["postprocess"])
     merge = MagicMock(return_value=ids)
@@ -462,6 +464,10 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
         assert decisions == [("enter_" + suffix, None), ("dispatched_" + suffix, None)]
         if expected == "causal":
             assert ("seqused_q" in selectors["causal"].call_args.kwargs) == padded
+        else:
+            selectors["window"].assert_called_with(query, weights, key, plan, 2048, for_dcp_merge=True)
+            dispatched = forward_log.call_args
+            assert "windows=3 scorer_calls=1" in dispatched.args[0] % dispatched.args[1:]
     else:
         route = {
             "custom": "custom_selector",

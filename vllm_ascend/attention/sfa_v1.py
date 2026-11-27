@@ -2109,17 +2109,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         # prefill); only MLAPO carries a per-call token-count limit.
         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
             fused_type = PreprocessType.NATIVE
-        if (
+        log_preprocess = (
             getattr(self, "is_kimi_k31", False) is True
             and getattr(self, "_last_kimi_preprocess", None) != fused_type
             and num_input_tokens > 0
-        ):
+        )
+        if log_preprocess:
             logger.info_once(
                 "Kimi K3.1 DSA first entering preprocess=%s",
                 self._preprocess_op_name(fused_type),
                 scope="process",
             )
-            self._last_kimi_preprocess = fused_type
+            if fused_type == PreprocessType.NATIVE:
+                self._last_kimi_preprocess = fused_type
 
         # IMPORTANT!
         # NOTE: With PIECEWISE ACL graphs, this method is executed in
@@ -2173,6 +2175,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                     num_input_tokens=num_input_tokens,
                     attn_metadata=attn_metadata,
                 )
+            if log_preprocess:
+                logger.info_once(
+                    "Kimi K3.1 DSA stage=dispatched preprocess=%s",
+                    self._preprocess_op_name(fused_type),
+                    scope="process",
+                )
+                self._last_kimi_preprocess = fused_type
             self._record_query_gather_context(ql_nope, q_pe, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
         # native

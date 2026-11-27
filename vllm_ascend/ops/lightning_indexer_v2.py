@@ -13,16 +13,14 @@ from vllm.logger import logger
 _ASCEND_950_MAX_TOPK = 8192
 
 
-class LightningIndexerV2Window(NamedTuple):
-    block_table: torch.Tensor
-    valid_pages: torch.Tensor
-    visible_lengths: torch.Tensor
-    metadata: torch.Tensor
-
-
 class LightningIndexerV2Plan(NamedTuple):
     cu_query: torch.Tensor
-    windows: tuple[LightningIndexerV2Window, ...]
+    visible_lengths: torch.Tensor
+    block_table: torch.Tensor
+    valid_pages: torch.Tensor
+    metadata: torch.Tensor
+    windows: int
+    capacity: int
 
 
 @cache
@@ -57,31 +55,33 @@ def build_lightning_indexer_v2_plan(
     num_heads_q: int,
     metadata_size: int = 2048,
 ) -> LightningIndexerV2Plan:
-    """Represent each query row as one request with its own rank-local causal prefix."""
-    rows = request_rows.numel()
-    cu_query = torch.arange(rows + 1, dtype=torch.int32, device=block_table.device)
-    pages = block_table.index_select(0, request_rows)
-    valid_pages = (pages >= first_valid_page) & (pages < num_cache_pages)
-    # The kernel may load any page inside the visible prefix. Redirect holes
-    # to allocated storage and keep their logical positions for score masking.
-    pages = torch.where(valid_pages, pages, 0).to(torch.int32)
-    lengths = local_visible_lengths.reshape(rows)
-    windows = []
-    # Request every score within each window so invalid pages and arbitrary
-    # native tie order cannot displace a valid candidate at the local cutoff.
-    # Ascend 950 supports score-returning Top-K up to 8192, including partial windows.
-    window_pages = _ASCEND_950_MAX_TOPK // page_size
-    for start in range(0, pages.shape[1], window_pages):
-        stop = min(start + window_pages, pages.shape[1])
-        width = (stop - start) * page_size
-        visible = (lengths - start * page_size).clamp(0, width)
-        metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
-            cu_query, visible, num_heads_q, width, metadata_size=metadata_size
+    """Batch equal-width windows as independent single-query TND requests."""
+    from vllm_ascend.ops.triton.sharded_indexer import build_li_v2_batched_inputs
+
+    cols = block_table.shape[1]
+    max_pages = _ASCEND_950_MAX_TOPK // page_size
+    windows = (cols + max_pages - 1) // max_pages
+    # Balance windows to pad at most one page per window. Return all scores so
+    # holes and arbitrary native tie order cannot displace a valid local ID.
+    pages_per_window = (cols + windows - 1) // windows if windows else 0
+    cu_query, visible, pages, valid_pages = build_li_v2_batched_inputs(
+        block_table,
+        request_rows,
+        local_visible_lengths.reshape(-1),
+        num_cache_pages,
+        page_size,
+        first_valid_page,
+        pages_per_window,
+        windows,
+    )
+    metadata = (
+        torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+            cu_query, visible, num_heads_q, pages_per_window * page_size, metadata_size=metadata_size
         )
-        windows.append(
-            LightningIndexerV2Window(pages[:, start:stop].contiguous(), valid_pages[:, start:stop], visible, metadata)
-        )
-    return LightningIndexerV2Plan(cu_query, tuple(windows))
+        if visible.numel()
+        else visible
+    )
+    return LightningIndexerV2Plan(cu_query, visible, pages, valid_pages, metadata, windows, cols * page_size)
 
 
 @lru_cache(maxsize=2)
@@ -148,29 +148,29 @@ def lightning_indexer_v2_candidates(
     key_cache: torch.Tensor,
     plan: LightningIndexerV2Plan,
     topk: int,
+    *,
+    for_dcp_merge: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Score every visible rank-local token with BF16 CANN LightningIndexerV2."""
-    from vllm_ascend.ops.triton.sharded_indexer import restore_li_v2_scores
+    from vllm_ascend.ops.triton.sharded_indexer import pack_li_v2_window_queries, restore_li_v2_scores
 
     rows = query.shape[0]
     page_size = key_cache.shape[1]
-    capacity = sum(window.block_table.shape[1] * page_size for window in plan.windows)
     # Start in logical token order, including holes. A stable sort then selects
     # the earliest local ID on ties, independent of CANN's native Top-K order.
-    dense = torch.full((rows, max(topk, capacity)), -torch.inf, device=query.device, dtype=torch.float32)
-    q = query.contiguous()
-    w = weights.float().contiguous()
-    offset = 0
-    for window in plan.windows:
-        width = window.block_table.shape[1] * page_size
+    dense = torch.full((rows, max(topk, plan.capacity)), -torch.inf, device=query.device, dtype=torch.float32)
+    if rows and plan.windows:
+        q, w = pack_li_v2_window_queries(query, weights, plan.windows)
+        width = plan.block_table.shape[1] * page_size
         indices, scores = torch.ops._C_ascend.npu_lightning_indexer_v2(
-            q, key_cache, w, plan.cu_query, window.visible_lengths, window.block_table, window.metadata, width
+            q, key_cache, w, plan.cu_query, plan.visible_lengths, plan.block_table, plan.metadata, width
         )
-        restore_li_v2_scores(indices, scores, window.valid_pages, window.visible_lengths, dense, offset, page_size)
-        # Release these outputs before allocating the next pair or the final sort buffers.
-        del indices, scores
-        offset += width
+        restore_li_v2_scores(indices, scores, plan.valid_pages, plan.visible_lengths, dense, 0, page_size, rows)
+        del indices, scores, q, w
     best_scores, order = torch.sort(dense, dim=-1, descending=True, stable=True)
     best_scores = best_scores[:, :topk]
-    best_ids = order[:, :topk].to(torch.int32).masked_fill_(best_scores == -torch.inf, -1)
+    best_ids = order[:, :topk]
+    # The DCP pack kernel already validates scores and writes INT32 IDs.
+    if not for_dcp_merge:
+        best_ids = best_ids.to(torch.int32).masked_fill_(best_scores == -torch.inf, -1)
     return best_ids.unsqueeze(1), best_scores.unsqueeze(1)

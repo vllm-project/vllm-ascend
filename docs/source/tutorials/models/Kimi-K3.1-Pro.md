@@ -2176,8 +2176,11 @@ a CANN installation that provides `LightningIndexerV2` and
 `LightningIndexerV2Metadata`. The BF16 K3.1 indexer detects these operators
 automatically. DCP1 uses causal retrieval. FULL graphs and padded TND
 batches pass the valid query length of each request to both native operators.
-TP8/DCP8 scores each query's visible local KV in windows of up to 8192 tokens,
-selects 2048 candidates per rank and merges them across ranks.
+TP8/DCP8 batches the local KV windows as independent TND requests in one
+`_C_ascend::npu_lightning_indexer_v2` call per eligible indexer layer and rank.
+For a 133-page table with 128 tokens per page, three 45-page windows cover the
+table. The final window masks its two padding pages. A shared metadata call
+describes all windows. Each rank selects 2048 candidates and merges them across ranks.
 
 Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>`.
 
@@ -2186,10 +2189,11 @@ Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>
 | `stage=probe` | The worker loaded the reported extension and resolved both CANN operators. |
 | `stage=init status=eligible` or `disabled` | An eligible worker reports `metadata_elements`, the INT32 output length accepted by its CANN metadata operator before graph capture. A disabled worker reports the first blocking reason. The log also identifies issues specific to the padding ABI. |
 | `route=enter_causal`, `enter_causal_padded` or `enter_dcp_windows` | A forward entered the selected V2 path, before native metadata and scoring. |
-| `route=dispatched_causal`, `dispatched_causal_padded` or `dispatched_dcp_windows` | The host call returned. The DCP record includes the number of score windows submitted. |
+| `route=dispatched_causal`, `dispatched_causal_padded` or `dispatched_dcp_windows` | The host call returned. `scorer_calls` counts native scoring calls for this layer on this rank. In the DCP path, `windows` counts the windows batched into the call. |
 | `route=bf16_paged_fallback` or `device_postprocess` | The worker used the alternative scorer. The same line includes its reason, query and cache dtypes, cache shape/strides and sort budget. |
 | `route=skip_topk` or `custom_selector` | This layer skipped retrieval or delegated selection to the attention implementation. |
 | `DSA selected preprocess` and `DSA first entering` | The first record names the preprocessing implementation selected after loading weights. The forward records name the preprocessing and sparse attention operators reached by the worker. |
+| `DSA stage=dispatched preprocess=...` and `DSA stage=dispatched attention=_C_ascend.npu_sparse_flash_attention` | The fused preprocessing or BF16 sparse attention host call returned. Each worker logs the first occurrence. |
 
 Indexer forward records show the first occurrence per layer, route, reason and capture
 metadata mode. FULL graph replay runs the recorded device operations without
@@ -2202,8 +2206,8 @@ can also use `cann_ops_transformer.mla_prolog` for projections, normalization
 and the main KV cache write. The startup record reports `preprocess=native`
 when the selected implementation uses the individual preprocessing operations.
 
-To compare rank-local BF16 scoring on the same inputs, run
-`python benchmarks/bf16_sharded_indexer.py --requests 16 --local-tokens 16384`
+To compare rank-local BF16 scoring on a 128-query, 133-page input, run
+`python benchmarks/bf16_sharded_indexer.py --requests 32 --tokens-per-request 4 --local-tokens 17024`
 from the repository root. The timings cover graph replay through local Top-K.
 Shared metadata preparation and the DCP collective are outside the timed region.
 
