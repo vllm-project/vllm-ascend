@@ -332,8 +332,8 @@ class AscendDSABackend(AttentionBackend):
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Return the final component view shapes in NHD order and their storage dtypes."""
         prefix = (num_blocks, spec.num_states, spec.num_kv_heads)
-        shapes = ((*prefix, spec.head_size),)
-        dtypes = (spec.dtype,)
+        shapes: tuple[tuple[int, ...], ...] = ((*prefix, spec.head_size),)
+        dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
         if getattr(spec, "scale_dim", 0):
             shapes += ((*prefix, spec.scale_dim),)
             dtypes += (spec.scale_dtype,)

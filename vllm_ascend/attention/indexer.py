@@ -404,7 +404,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if not spec.scale_dim:
             return (key_shape,), (spec.dtype,)
 
-        scale_shape = (*prefix, spec.scale_dim)
+        scale_shape: tuple[int, ...] = (*prefix, spec.scale_dim)
         if spec.cache_sparse_li_c4:
             scale_shape = (*scale_shape[:-1], spec.scale_dim // 2, 2)
         return (key_shape, scale_shape), (spec.dtype, spec.scale_dtype)

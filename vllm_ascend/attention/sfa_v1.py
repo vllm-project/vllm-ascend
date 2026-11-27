@@ -459,7 +459,7 @@ class AscendSFABackend(AttentionBackend):
             raise ValueError("SFA kernel block size must divide the manager block size.")
         runtime_blocks = num_blocks * (spec.block_size // block_size)
         if spec.uses_packed_sfa_main_cache:
-            widths = (spec.head_size,)
+            widths: tuple[int, ...] = (spec.head_size,)
         else:
             if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
                 raise ValueError("SFA runtime views require component dimensions in the cache spec.")

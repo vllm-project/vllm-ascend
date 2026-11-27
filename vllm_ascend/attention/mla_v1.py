@@ -155,8 +155,8 @@ class AscendMLABackend(AttentionBackend):
             raise ValueError("MLA kernel block size must divide the manager block size.")
         kernel_blocks_per_manager = spec.block_size // block_size
         prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
-        widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
-        dtypes = (spec.dtype, spec.rope_dtype if spec.rope_dtype is not None else spec.dtype)
+        widths: tuple[int, ...] = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        dtypes: tuple[torch.dtype, ...] = (spec.dtype, spec.rope_dtype if spec.rope_dtype is not None else spec.dtype)
         # Legacy MLA specs encode page bytes through head_size/dtype. Preserve
         # split FIA components (which can have mixed dtypes) and fused FlashMLA
         # storage until a follow-up unifies the storage metadata.
