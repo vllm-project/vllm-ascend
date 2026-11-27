@@ -923,16 +923,14 @@
 #    Future Plan:
 #       Remove when upstream forwards `embed_input_ids` from ModelWithContext.
 #
-#   5. `vllm_ascend.worker.v2.spec_decode.init_speculator`
-#      (+ the by-name rebind in `vllm_ascend.worker.v2.model_runner`)
+#   5. The plain MTP entry in the MRv2 speculator map
 #    Why:
-#       310P needs its own MTP speculator (`AscendMTPSpeculator310`).
-#    How：
-#       Replace `init_speculator` with a 310P router that returns
-#       `AscendMTPSpeculator310` for plain MTP and delegates to the original
-#       otherwise; rebind the model_runner by-name reference as well.
+#       Plain MTP on 310P needs host slot mappings and the 310P draft loop.
+#    How:
+#       Register AscendMTPSpeculator310 for the plain MTP config when the
+#       worker installs its 310P patches. The shared factory constructs it.
 #    Future Plan:
-#       Remove once the MTP speculator is selected through a device dispatch.
+#       Remove the override when the shared MTP implementation supports 310P.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
