@@ -96,6 +96,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     # _is_layerwise_save_owner gates the save path; attention groups never use
     # align state, and a bare producer owns every save.
     worker.kv_role = "kv_producer"
+    worker.can_put = True
     worker.save_decode_cache = False
     worker.group_uses_align_state = [False] * num_groups
     worker.sharded_mamba_group_ids = set()

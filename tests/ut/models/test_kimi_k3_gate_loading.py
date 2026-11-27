@@ -155,3 +155,60 @@ def test_fused_mla_gate_keeps_upstream_shard_two_loading():
     assert torch.all(fused[:6] == -1)
     assert torch.all(fused[6:] == 5)
     assert loaded == {"layers.0.self_attn.fused_qkv_a_proj.weight"}
+
+
+def make_dsa_model():
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        is_moe=False,
+        dsa_config=SimpleNamespace(dsa_layers=[1], index_topk=8),
+        is_linear_attn=False,
+        linear_attn_config=None,
+        num_hidden_layers=1,
+        num_nextn_predict_layers=0,
+    )
+    model.n_redundant_experts = 0
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    indexer = nn.Module()
+    merged = make_linear(MergedColumnParallelLinear, [2, 3])
+    add_parameter(merged, "weight", (5, 4), torch.bfloat16)
+    indexer.wk_weights_proj = merged
+    plain_loader = lambda param, value, **kwargs: param.data.copy_(value)
+    wq_b = nn.Module()
+    wq_b.weight_loader = plain_loader
+    add_parameter(wq_b, "weight", (4, 4), torch.bfloat16)
+    indexer.wq_b = wq_b
+    k_norm = nn.Module()
+    k_norm.weight_loader = plain_loader
+    add_parameter(k_norm, "weight", (4,), torch.float32)
+    add_parameter(k_norm, "bias", (4,), torch.float32)
+    indexer.k_norm = k_norm
+    layer.self_attn.indexer = indexer
+    model.layers = nn.ModuleList([layer])
+    return model
+
+
+def test_dsa_indexer_weights_load_into_ascend_indexer_params():
+    # The inherited upstream loader renames every .self_attn.indexer.*
+    # weight to its native .dsa_indexer.* layout whenever dsa_config is
+    # set, but the Ascend DSA stack registers GLM/DeepSeek-style
+    # self_attn.indexer.* parameters. The Ascend loader must consume
+    # them (fused wk/weights_proj included) before delegating upstream.
+    model = make_dsa_model()
+    indexer = model.layers[0].self_attn.indexer
+    weights = [
+        ("layers.0.self_attn.indexer.wk.weight", torch.full((2, 4), 1.0, dtype=torch.bfloat16)),
+        ("layers.0.self_attn.indexer.weights_proj.weight", torch.full((3, 4), 2.0, dtype=torch.bfloat16)),
+        ("layers.0.self_attn.indexer.wq_b.weight", torch.full((4, 4), 3.0, dtype=torch.bfloat16)),
+        ("layers.0.self_attn.indexer.k_norm.weight", torch.full((4,), 4.0)),
+        ("layers.0.self_attn.indexer.k_norm.bias", torch.full((4,), 5.0)),
+    ]
+    loaded = model.load_weights(iter(weights))
+    assert loaded == {name for name, _ in model.named_parameters()}
+    torch.testing.assert_close(indexer.wk_weights_proj.weight[:2].float(), torch.full((2, 4), 1.0))
+    torch.testing.assert_close(indexer.wk_weights_proj.weight[2:].float(), torch.full((3, 4), 2.0))
+    torch.testing.assert_close(indexer.wq_b.weight.float(), torch.full((4, 4), 3.0))
+    torch.testing.assert_close(indexer.k_norm.weight, torch.full((4,), 4.0))
+    torch.testing.assert_close(indexer.k_norm.bias, torch.full((4,), 5.0))

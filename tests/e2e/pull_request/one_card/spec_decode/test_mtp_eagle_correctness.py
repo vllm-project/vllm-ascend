@@ -27,7 +27,6 @@ from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -45,13 +44,11 @@ MAX_NUM_SEQS = 256
 )
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY"])
-@pytest.mark.parametrize("disable_padded_drafter_batch", [False])
 def test_deepseek_mtp(
     model_name: str,
     dynamic_num_speculative_tokens: int | None,
     num_speculative_tokens: int,
     cudagraph_mode: str,
-    disable_padded_drafter_batch: bool,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -66,7 +63,6 @@ def test_deepseek_mtp(
     speculative_config = {
         "method": "mtp",
         "num_speculative_tokens": num_speculative_tokens,
-        **({"disable_padded_drafter_batch": disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}),
     }
     if dynamic_num_speculative_tokens is not None:
         speculative_config["num_speculative_tokens_per_batch_size"] = [

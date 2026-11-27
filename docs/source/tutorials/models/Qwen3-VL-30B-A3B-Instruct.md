@@ -31,6 +31,8 @@ It is recommended to download the model weight to a shared directory across mult
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT Products"
@@ -42,29 +44,15 @@ Select an image based on your machine type and start the Docker image on your no
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
       -v /etc/hixlep/:/etc/hixlep/ \
       -v /root/.cache:/root/.cache \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
       -v /usr/lib64:/usr/lib64 \
       -itd $IMAGE bash
@@ -78,35 +66,11 @@ Select an image based on your machine type and start the Docker image on your no
 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -120,27 +84,11 @@ Select an image based on your machine type and start the Docker image on your no
 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -254,7 +202,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-30b \
@@ -282,7 +230,7 @@ Key Parameter Descriptions:
 
 - `--tensor-parallel-size 2` maps the model to two NPUs. Increase TP only after validating memory, communication, and throughput on your hardware.
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
-- `--max-model-len` is the maximum input plus output length for a single request. By default, the model can support long context, but `128000` is a practical validation value for many image/video workloads.
+- `--max-model-len` is the maximum input plus output length for a single request. The deployment examples set it to `32768`; `128000` is a practical validation value for long-context image/video workloads and can be used after confirming KV cache capacity.
 - `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. Video requests consume more memory, so the video example uses a smaller value.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. Increase it only after confirming the service is stable.
@@ -374,7 +322,7 @@ vllm bench serve \
   --model Qwen/Qwen3-VL-30B-A3B-Instruct \
   --served-model-name qwen3-vl-30b \
   --dataset-name random \
-  --random-input 200 \
+  --random-input-len 200 \
   --num-prompts 200 \
   --request-rate 1 \
   --save-result \

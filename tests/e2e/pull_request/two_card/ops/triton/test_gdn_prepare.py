@@ -12,8 +12,8 @@ import torch_npu  # noqa: F401
 from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
-from vllm_ascend.ops import gdn_attn_builder as builder_module
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
+from vllm_ascend.attention import gdn_attn_builder as builder_module
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.triton.mamba.gdn_prepare import _prepare_gdn_kernel
 
 
@@ -26,6 +26,16 @@ def _assert_metadata_equal(actual, expected):
             _assert_metadata_equal(getattr(actual, name), value)
     else:
         assert actual == expected
+
+
+def _build_generic_metadata(builder, common, accepted, drafts, num_actual_reqs):
+    # Share the graph buffers for address checks, but keep the reference build
+    # from warming the layout cache and bypassing the fused kernel under test.
+    with (
+        patch.object(builder, "_get_decode_layout_key", return_value=None),
+        patch.object(builder, "_build_fused_metadata", return_value=None),
+    ):
+        return builder.build(0, common, accepted, drafts, num_actual_reqs=num_actual_reqs)
 
 
 @pytest.mark.parametrize("mixed", [False, True])
@@ -50,8 +60,7 @@ def test_adaptive_device_boundaries_match_generic_metadata(mixed, graph_mode):
     common.block_table_tensor = torch.arange(len(host_queries) * 16, dtype=torch.int32, device=device).view(-1, 16) + 1
     accepted = torch.tensor([4, 3, 1] if mixed else [4, 3], dtype=torch.int32, device=device)
     drafts = torch.tensor([3, 3, -1] if mixed else [3, 3], dtype=torch.int32)
-    with patch.object(builder, "_build_fused_metadata", return_value=None):
-        expected = deepcopy(builder.build(0, common, accepted, drafts, num_actual_reqs=len(host_queries)))
+    expected = deepcopy(_build_generic_metadata(builder, common, accepted, drafts, len(host_queries)))
     with patch.object(builder_module, "prepare_gdn", wraps=builder_module.prepare_gdn) as prepare:
         actual = builder.build(0, common, accepted, drafts, num_actual_reqs=len(host_queries))
     _assert_metadata_equal(actual, expected)
@@ -131,8 +140,7 @@ def test_fused_decode_matches_generic_metadata(query_len, num_spec, projection_s
         if not any(d > 0 for d in draft_counts[:count]):
             accepted = None
         # The generic implementation is the oracle for every metadata field.
-        with patch.object(builder, "_build_fused_metadata", return_value=None):
-            generic = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
+        generic = _build_generic_metadata(builder, common, accepted, drafts, count)
         expected = deepcopy(generic)
         for name in (
             "spec_state_indices_tensor",
@@ -214,8 +222,7 @@ def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
         common.block_table_tensor = torch.arange(rows * 32, dtype=torch.int32, device=device).view(rows, 32)
         drafts = torch.tensor([3 if q == 4 else -1 for q in queries], dtype=torch.int32) if num_spec else None
         accepted = torch.ones(rows, dtype=torch.int32, device=device) if num_spec else None
-        with patch.object(builder, "_build_fused_metadata", return_value=None):
-            expected = deepcopy(builder.build(0, common, accepted, drafts, num_actual_reqs=count))
+        expected = deepcopy(_build_generic_metadata(builder, common, accepted, drafts, count))
         with patch.object(_prepare_gdn_kernel, "run", side_effect=record_kernel):
             actual = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
         _assert_metadata_equal(actual, expected)

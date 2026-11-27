@@ -1914,6 +1914,14 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/kernels/fla/test_fused_sigmoid_gating_delta_rule.py
     estimated_time: 20
+  - name: tests/v1/core/test_kv_cache_planning.py
+    estimated_time: 20
+  - name: tests/config/test_kv_cache_dtype.py
+    estimated_time: 20
+  - name: tests/v1/structured_output/test_structured_output_manager.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_hisparse_connector.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20

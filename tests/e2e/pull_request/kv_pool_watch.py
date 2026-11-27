@@ -434,7 +434,6 @@ def _prefix_cache_hits(source: Any) -> float:
 def _env_fingerprint() -> dict[str, str]:
     return {
         "ascend_rt_visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", ""),
-        "vllm_use_v2_model_runner": os.environ.get("VLLM_USE_V2_MODEL_RUNNER", ""),
         "kv_pool_ab_mode": os.environ.get("KV_POOL_AB_MODE", "record"),
     }
 

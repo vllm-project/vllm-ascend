@@ -1,0 +1,4 @@
+pr: 21373
+entries:
+  - category: feature
+    text: On Model Runner V2 with Breakable ACLGraph, set `enable_static_kernel` to `true` to compile static kernels during graph warmup. Breakable disables `enable_npugraph_ex`, and SuperKernel follows `enable_static_kernel` unless you set `enable_super_kernel` explicitly. This path requires PP=1, matching target and draft TP sizes when the draft uses graphs, and CANN 9.1 or later with torch_npu support for isolated static kernel installation.

@@ -27,6 +27,11 @@ and native C8 (E4M3FN values with FP32 scales), with independent Main and
 Indexer KV dtype selection. The A2/A3 extension does not add a BF16 HiSparse
 serving path or change the existing non-HiSparse BF16 path.
 
+On a single Ascend 950 node with colocated Prefill and Decode, you can
+[combine HiSparse with AscendStore](#combining-hisparse-with-ascendstore)
+to offload historical KV to local DDR and reuse full KV blocks from MemCache
+across requests.
+
 ### Constraints and Limitations
 
 | Category | Constraint |
@@ -84,6 +89,52 @@ For a `MultiConnector` configuration, put `transfer_backend` in the
 `HiSparseConnector` child's extra configuration. This setting selects
 the private Host allocator. Omitting it uses native ACL Host-memory registration.
 
+### Combining HiSparse with AscendStore
+
+AscendStore saves and restores Host Source and NPU Indexer pages. HiSparse
+manages the Host Source, Resident, and Hot buffers.
+
+Use the vLLM Core revision pinned by the matching vLLM Ascend build with
+Ascend HiSparse support. Keep the attention options above and pass the following
+JSON to `--kv-transfer-config`.
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 4}
+      },
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"backend": "memcache", "load_async": true}
+      }
+    ]
+  }
+}
+```
+
+See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup and
+[AscendStore settings](#ascendstore-settings) for the required options.
+See [Monitoring AscendStore prefix reuse](#monitoring-ascendstore-prefix-reuse)
+for the metrics to check after startup.
+Mooncake support is deferred pending a fix for
+[PUT timeout data corruption](https://github.com/kvcache-ai/Mooncake/issues/4491).
+
+AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
+This version identifies the external pool key format. The keys include the
+target and draft checkpoint identities, resolved revisions, dummy-weight mode,
+filename patterns for `sharded_state` and `runai_streamer_sharded`, effective
+model configurations (including RoPE settings), and page layout. If the Hub revision
+resolver is unavailable, pin the checkpoint commit when sharing a persistent
+pool. Use a versioned directory when replacing local weights in a persistent
+pool. Files overwritten in place keep the same model path.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss
@@ -93,12 +144,33 @@ counter. The counter can stay at zero when selected rows are already on the NPU.
 curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:hisparse_cache_misses_total'
 ```
 
+#### Monitoring AscendStore prefix reuse
+
+Check the server's `/metrics` endpoint for
+`vllm:external_prefix_cache_hits_total` to track prefix hits in MemCache and
+`vllm:ascend_store_load_get_keys_total` to track keys read by AscendStore.
+A request served from the local prefix cache may leave both counters unchanged.
+
 ## Configuration Parameters
 
-| Parameter | Meaning |
+| Parameter | Description |
 | --- | --- |
 | `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
 | `eager_host_mirror` | Keep `true` for this foundation; Core maintains the Host KV mirror. |
 | `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it for the planned context lengths and concurrency; the example reserves 4 GiB per rank. |
 | `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold the deduplicated union of rows selected during speculative verification and fit the resolver's on-chip UB budget. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |
+
+### AscendStore settings
+
+| Parameter | Description |
+| --- | --- |
+| `kv_connector` / `kv_role` | In `--kv-transfer-config`, use `MultiConnector` with one `HiSparseConnector` and one `AscendStoreConnector`. Set `kv_role=kv_both` on the parent and both children. |
+| `backend` / `load_async` | In the AscendStore child's `kv_connector_extra_config`, set `backend=memcache` and `load_async=true`. |
+| `use_layerwise` / `discard_partial_chunks` | In the AscendStore child's `kv_connector_extra_config`, keep `use_layerwise=false` and `discard_partial_chunks=true` for whole-block transfers. |
+| `protocol` | Set to `host_tcp` in the MemCache local configuration. |
+| `hisparse_config.eager_host_mirror` | Set to `true` in `--attention-config`, including for Prefill-only saves. |
+| `prefill_context_parallel_size` | Keep at `1`. |
+
+To fall back to local computation after an external load fails, set
+`kv_load_failure_policy=recompute` in `--kv-transfer-config`.

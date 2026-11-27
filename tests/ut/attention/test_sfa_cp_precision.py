@@ -213,7 +213,16 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
         actual = kernels.dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
     assert actual is expected
     combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False, softmax_sum=None
+        output,
+        lse,
+        1,
+        1,
+        scatter_group=None,
+        pcp_group=None,
+        return_lse=True,
+        defer_combine=False,
+        softmax_sum=None,
+        output_mask=None,
     )
 
 

@@ -78,6 +78,11 @@ def register_connector():
         "MultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
     )
 
+    if "HiSparseConnector" in KVConnectorFactory._registry:
+        _register_with_class_name_alias(
+            "HiSparseConnector", "vllm_ascend.hisparse.connector", "HiSparseConnector", override=True
+        )
+
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
     )

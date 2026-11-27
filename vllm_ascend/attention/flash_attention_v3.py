@@ -44,9 +44,9 @@ def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
     if config is None:
         config = get_current_vllm_config_or_none()
     if config is not None and getattr(config.cache_config, "kv_cache_layout", None) is not None:
-        return config.cache_config.get_resolved_kv_cache_layout().name == "LBHNC"
+        return config.cache_config.get_resolved_kv_cache_layout().name in ("LBHNC", "HND", "BLHNC")
     # Legacy runners and standalone callers may not have a resolved config.
-    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND")
+    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND", "BLHNC")
 
 
 class AscendFlashAttentionBackend(AttentionBackend):
@@ -55,6 +55,7 @@ class AscendFlashAttentionBackend(AttentionBackend):
     # FA3 writes K/V inside forward, before reading the paged cache.
     forward_includes_kv_cache_update = True
     supported_dtypes = [torch.float16, torch.bfloat16]
+    # FA3 reads FP16/BF16 KV caches on both target and draft models. C8 is unsupported.
     supported_kv_cache_dtypes = ["auto", "float16", "bfloat16"]
 
     @staticmethod

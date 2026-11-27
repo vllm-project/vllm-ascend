@@ -47,7 +47,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.models.deepseek_v4.cache_reuse import get_swa_save_layer_name
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -134,6 +135,9 @@ CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
 CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
 
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
+# Single-group o_proj dispatches batches up to this many tokens to the plain
+# 2D matmul; past it npu_transpose_batchmatmul wins again (compute-bound).
+_WO_A_SMALL_M_LIMIT = 128
 
 
 def get_or_compute_compressor_metadata(
@@ -802,13 +806,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # DSpark target and draft builders must not overwrite module-global RoPE.
         self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
-        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-        self.compressor_ratio = getattr(
-            kv_cache_spec,
-            "compress_ratio",
-            getattr(kv_cache_spec, "tokens_per_state", 0),
-        )
+        self.storage_block_size = kv_cache_spec.num_states
+        self.compressor_ratio = kv_cache_spec.tokens_per_state
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
@@ -2279,6 +2278,27 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
+        if (
+            self.n_local_groups == 1
+            and not _has_weight_scale(self.wo_a)
+            and o_proj_input.shape[0] <= _WO_A_SMALL_M_LIMIT
+        ):
+            # Single local group (TP >= o_groups): the grouped transpose matmul
+            # degenerates to a plain linear, but npu_transpose_batchmatmul pays
+            # a ~2x fixed kernel cost at small batch sizes (M << N), where its
+            # kernel selection dominates. Run the plain 2D matmul on the same
+            # 3D ND weight — it is [1, K, N] contiguous, so view(K, N) is free.
+            # Batches above _WO_A_SMALL_M_LIMIT keep the original kernel: in
+            # the compute-bound regime the transpose kernel wins again
+            # (measured ~10% at prefill-sized M).
+            # The weight_scale check keeps quantized wo_a (layout owned by the
+            # quantization path) on the original transpose path when fp8
+            # attention is not applicable.
+            num_tokens, group_hidden = o_proj_input.shape[0], o_proj_input.shape[2]
+            return torch.matmul(
+                o_proj_input.view(num_tokens, group_hidden),
+                self.wo_a.weight.view(group_hidden, -1),
+            ).unsqueeze(1)
         return torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,
@@ -2387,15 +2407,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Prepare cache updates and report whether local writes can be skipped."""
-        return False
+    def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare caches and optionally return invocation-local Q intermediates."""
+        return False, None
 
     def _get_o_proj_input_shape(
         self,
@@ -2440,18 +2454,24 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return output
         layer_metadata = self._get_layer_metadata(layer_name, attn_metadata)
         common_attn_metadata = layer_metadata.attention
+        save_layer_name = layer_name
         if common_attn_metadata is None:
             common_attn_metadata = layer_metadata.swa
+            if self.swa_cache_layer is not None:
+                # Push needs the registered SWA cache name to submit the write
+                # before a rotating slot is reused.
+                save_layer_name = get_swa_save_layer_name(layer_name, self.swa_cache_layer.prefix)
         actual_tokens = common_attn_metadata.num_actual_tokens
 
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
+        cache_is_prepared, prepared_query = self._prepare_caches_and_query(
             layer_name,
             hidden_states,
             kv_cache,
             attn_metadata,
+            layer_metadata,
         )
         if actual_tokens == 0:
             output.zero_()
@@ -2463,7 +2483,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             notify_kv_cache_written(layer_name)
             with attention_transfer_window():
                 pass
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
             return output
 
         req_metadata = _require_req_metadata(common_attn_metadata)
@@ -2473,6 +2493,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv_cache,
             layer_metadata,
             cache_is_prepared,
+            prepared_query=prepared_query,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -2490,7 +2511,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         # o
         self._forward_o_proj(o_proj_input, output)
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
 
         return output_padded
 
@@ -2809,6 +2830,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
@@ -2854,7 +2876,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        if prepared_query is not None:
+            assert cache_is_prepared
+            q, qr, qr_pertoken_scale = prepared_query
+            compressor_overlap_output = None
+        elif self.multistream_dsv4_dsa_overlap:
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,
