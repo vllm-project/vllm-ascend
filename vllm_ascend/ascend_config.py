@@ -360,6 +360,100 @@ class RlConfig:
 
 
 @config(config=ConfigDict(frozen=True))
+class PcpConfig:
+    """Configuration Object for ``additional_config["pcp_config"]``.
+
+    Typed selector for the DeepSeek V4.1 prefill-context-parallel (PCP) KV
+    placement. All switches are off by default, so ``pcp_config`` absent keeps
+    the replicated cache path. ``kv_sharing="owner"`` maps the complete
+    logical KV range on every PCP rank but only owns ``1 / pcp_size`` of its
+    physical pages; the remaining switches refine the owner path and are
+    ignored by the replicated path.
+
+    Example:
+
+        {
+            "pcp_config": {
+                "kv_sharing": "owner",
+                "owner_placement": "contiguous",
+                "owner_capacity": true,
+                "local_index": true,
+                "local_kv_write": true,
+                "local_kv_write_source": false,
+                "owner_stage": true,
+                "owner_stage_bytes": 1073741824,
+                "owner_stage_swa_chunk": true,
+                "owner_stage_swa_chunk_bytes": 268435456,
+                "enable_timing": false
+            }
+        }
+    """
+
+    # "replicated" keeps one physical copy on every PCP rank. "owner" backs
+    # the V4.1 cache with a VMM slab whose physical 2 MiB chunks are split
+    # 1/pcp_size per rank while every rank maps the full logical range.
+    kv_sharing: Literal["replicated", "owner"] = "replicated"
+    # Owner slab placement: "contiguous" gives each rank one contiguous span,
+    # "modulo" interleaves 2 MiB chunks round-robin.
+    owner_placement: Literal["contiguous", "modulo"] = "contiguous"
+    # Turn the HBM freed by owner sharing into extra KV blocks. A mapped slab
+    # is mandatory: if it fails, allocation raises instead of falling back to
+    # a replicated cache that no longer fits.
+    owner_capacity: bool = False
+    # Keep the indexer K plane out of the owner-sharded long-KV tuple; that
+    # tuple gets its own replicated tensor and stays fully local.
+    local_index: bool = False
+    # Write KV from rank-local hidden states instead of the gathered view.
+    # Applied only when the target tensor is backed by a mapped owner slab.
+    local_kv_write: bool = False
+    # Also write the compressed source planes from local tokens. Requires
+    # ``local_kv_write``; inactive while ``local_index`` keeps the index plane
+    # replicated because that copy needs the complete global rows.
+    local_kv_write_source: bool = False
+    # Stage a pure-prefill batch's long-KV blocks into local scratch.
+    owner_stage: bool = False
+    owner_stage_bytes: int = 1 << 30
+    # Stage only each local chunk's visible SWA window.
+    owner_stage_swa_chunk: bool = False
+    owner_stage_swa_chunk_bytes: int = 256 << 20
+    # Log per-region device time for the V4.1 attention forward.
+    enable_timing: bool = False
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.owner_capacity and self.kv_sharing != "owner":
+            raise ValueError('pcp_config.owner_capacity requires pcp_config.kv_sharing="owner"')
+        if self.local_kv_write_source and not self.local_kv_write:
+            raise ValueError("pcp_config.local_kv_write_source requires pcp_config.local_kv_write")
+        for name in ("owner_stage_bytes", "owner_stage_swa_chunk_bytes"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"pcp_config.{name} must be positive; got {value}")
+        return self
+
+
+def pcp_config_from_vllm_config(vllm_config: VllmConfig | None) -> PcpConfig:
+    """Resolve ``additional_config["pcp_config"]`` into a :class:`PcpConfig`.
+
+    This is the single entry point for the PCP read sites: pass the returned
+    immutable object into helpers instead of reading environment variables or
+    raw ``additional_config`` keys. ``None`` (and an absent key) yields the
+    replicated defaults.
+    """
+    if vllm_config is None:
+        return PcpConfig()
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    raw = additional_config.get("pcp_config")
+    if raw is None:
+        return PcpConfig()
+    if isinstance(raw, PcpConfig):
+        return raw
+    if not isinstance(raw, dict):
+        raise ValueError(f"additional_config.pcp_config must be a dict, got {type(raw).__name__}.")
+    return PcpConfig(**raw)
+
+
+@config(config=ConfigDict(frozen=True))
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
@@ -438,6 +532,17 @@ class QuantizedAllReduceConfig:
                 raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
 
 
+def _shared_engram_max_rows() -> int:
+    """One receive-buffer bound for config, readers, and the owner.
+
+    Imported lazily: ``ascend_config`` is loaded on CPU control paths and must
+    not pull the NPU model stack at import time.
+    """
+    from vllm_ascend.models.deepseek_v41.engram.shared_rdma import MAX_ROWS
+
+    return MAX_ROWS
+
+
 @config
 class SharedEngramConfig:
     """Shared Engram owner and per-rank receive capacity."""
@@ -466,8 +571,9 @@ class SharedEngramConfig:
         host, separator, port = self.endpoint.rpartition(":")
         if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
             raise ValueError("shared Engram endpoint must be host:port")
-        if not 0 < self.capacity <= 262144:
-            raise ValueError("shared Engram capacity must be in [1, 262144]")
+        max_rows = _shared_engram_max_rows()
+        if not 0 < self.capacity <= max_rows:
+            raise ValueError(f"shared Engram capacity must be in [1, {max_rows}]")
         if self.listen_port is not None and not 0 < self.listen_port < 65536:
             raise ValueError("shared Engram listen_port must be in [1, 65535]")
         if self.listen_port is not None and self.local_comm_res:
@@ -568,6 +674,19 @@ class AscendConfig:
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
+            },
+            "pcp_config": {
+                "kv_sharing": "replicated",
+                "owner_placement": "contiguous",
+                "owner_capacity": false,
+                "local_index": false,
+                "local_kv_write": false,
+                "local_kv_write_source": false,
+                "owner_stage": false,
+                "owner_stage_bytes": 1073741824,
+                "owner_stage_swa_chunk": false,
+                "owner_stage_swa_chunk_bytes": 268435456,
+                "enable_timing": false
             },
             "rl_config": {
                 "enabled": false,
@@ -718,6 +837,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    pcp_config: PcpConfig = dataclasses.field(default_factory=PcpConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----

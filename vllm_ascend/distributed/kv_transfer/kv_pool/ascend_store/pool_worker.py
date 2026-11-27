@@ -81,6 +81,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    kvpd_timing_enabled,
+    log_kvpd_timing,
+    sum_transfer_bytes,
+)
+from vllm_ascend.distributed.kv_transfer.utils.owner_transfer import (
+    OwnerTransferStager,
+    owner_backed_tensor,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -123,6 +132,9 @@ class BaseKVPoolWorker(ABC):
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
         self._previous_save_batch: KVCacheStoreBatch | None = None
+        # Non-None when this rank's KV cache is owner-sharded. The transport
+        # engine stages complete logical blocks through this registered buffer.
+        self.owner_transfer_stager: OwnerTransferStager | None = None
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self.kv_send_thread: KVTransferThread | None = None
@@ -130,6 +142,7 @@ class BaseKVPoolWorker(ABC):
         self._transfer_threads_started = False
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
+        self._kvpd_timing = kvpd_timing_enabled(vllm_config)
 
     @abstractmethod
     def _start_kv_transfer_threads(self) -> None:
@@ -808,6 +821,32 @@ class BaseKVPoolWorker(ABC):
 
         registered_regions: dict[int, tuple[int, int]] = {}
         registration_caches = {**kv_caches, **auxiliary_caches} if auxiliary_caches else kv_caches
+        owner_tensor = owner_backed_tensor(registration_caches)
+        owner_staging = owner_tensor is not None and getattr(self.m_store, "requires_owner_transport_staging", True)
+        if owner_staging:
+            from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+                owner_slab_for_tensor,
+            )
+
+            self.owner_transfer_stager = OwnerTransferStager(owner_tensor.device)
+            logger.info_once(
+                "Owner-sharded PCP KV detected: staging complete blocks through a "
+                "%.1f MiB transport-registered buffer.",
+                self.owner_transfer_stager.capacity / (1 << 20),
+            )
+
+            def _owner_backed(cache: torch.Tensor) -> bool:
+                return owner_slab_for_tensor(cache) is not None
+        else:
+            if owner_tensor is not None:
+                logger.info_once(
+                    "Owner-sharded PCP KV detected: the transport engine addresses the "
+                    "logical VMM range directly; no staging buffer is used."
+                )
+
+            def _owner_backed(cache: torch.Tensor) -> bool:
+                return False
+
         for layer_name, cache_or_caches in registration_caches.items():
             num_blocks = self._get_host_num_blocks(layer_name)
             for cache in self._as_cache_tuple(cache_or_caches):
@@ -816,6 +855,11 @@ class BaseKVPoolWorker(ABC):
                 if not isinstance(region_len, int):
                     region_len = 0
                 self.kv_caches_base_addr.append(base_addr)
+                if _owner_backed(cache):
+                    # The VMM range contains peer-mapped pages and cannot be
+                    # registered with HIXL/Mooncake. Complete blocks are staged
+                    # through owner_transfer_stager instead.
+                    continue
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
                 end = base_addr + region_len
@@ -883,12 +927,34 @@ class BaseKVPoolWorker(ABC):
             if self._transfer_layout is not None
             else [BufferDescriptor(address=start, size_bytes=end - start) for start, end in registered_regions.values()]
         )
+        if self.owner_transfer_stager is not None:
+            # Register only the staging buffer (plus any replicated auxiliary
+            # cache); the owner VMM range must never reach the engine.
+            buffers.append(
+                BufferDescriptor(
+                    address=self.owner_transfer_stager.ptr,
+                    size_bytes=self.owner_transfer_stager.capacity,
+                )
+            )
         self.m_store.register_buffer(buffers)
         self._start_kv_transfer_threads()
 
-    def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
+    def _record_kv_connector_operation(
+        self,
+        operation: str,
+        duration_seconds: float,
+        num_keys: int,
+        num_bytes: int = 0,
+        queue_wait_seconds: float | None = None,
+    ) -> None:
         with self._kv_stats_lock:
-            self._kv_stats.record_operation(operation, duration_seconds, num_keys)
+            self._kv_stats.record_operation(
+                operation,
+                duration_seconds,
+                num_keys,
+                num_bytes=num_bytes,
+                queue_wait_seconds=queue_wait_seconds,
+            )
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         with self._kv_stats_lock:
@@ -896,7 +962,11 @@ class BaseKVPoolWorker(ABC):
                 return None
             stats = self._kv_stats
             self._kv_stats = AscendStoreKVConnectorStats()
-            return stats
+        if self._kvpd_timing:
+            logger.info("[KVPD_STATS] %s", stats.reduce())
+        else:
+            logger.debug("AscendStore connector stats: %s", stats.reduce())
+        return stats
 
     def _record_invalid_blocks_ids(self, block_ids: list[int]) -> None:
         if not block_ids:
@@ -1262,7 +1332,41 @@ class BaseKVPoolWorker(ABC):
                 chunk_hashes.append(chunk_hash)
                 variant_counts.append(len(variants))
 
-            present = [chunk_hashes[index] for index in self._iter_present_lookup_candidates(keys, variant_counts)]
+            present: list[BlockHash | str] = []
+            if keys:
+                res = self.m_store.exists(keys)  # type: ignore[assignment]
+                if res is None or len(res) != len(keys):
+                    raise ValueError("Incomplete Store existence response")
+                if self._kvpd_timing:
+                    log_kvpd_timing(
+                        True,
+                        "d_lookup_keys",
+                        group=group_id,
+                        token_len=token_len,
+                        hbm_hit_tokens=hbm_hit_tokens,
+                        variants=len(keys) // max(len(chunk_hashes), 1),
+                        keys=len(keys),
+                        exists=sum(1 for value in res if value == 1),  # type: ignore[union-attr]
+                        sample_keys=keys[:1],
+                        sample_res=list(res[:1]),  # type: ignore[index]
+                    )
+                offset = 0
+                for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
+                    values = res[offset : offset + count]  # type: ignore[index]
+                    if count and all(value == 1 for value in values):
+                        present.append(chunk_hash)
+                    offset += count
+            elif self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_lookup_keys",
+                    group=group_id,
+                    token_len=token_len,
+                    hbm_hit_tokens=hbm_hit_tokens,
+                    chunk_mask=None if lookup_mask is None else len(lookup_mask),
+                    keys=0,
+                    exists=0,
+                )
 
             logger.debug(
                 "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
@@ -1313,15 +1417,50 @@ class BaseKVPoolWorker(ABC):
             )
             if coordinator_hit is not None:
                 return coordinator_hit
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_lookup_path",
+                    token_len=token_len,
+                    hbm_hit_tokens=hbm_hit_tokens,
+                    groups=kv_cache_group_ids,
+                    use_layerwise=use_layerwise,
+                    coordinator=coordinator_hit,
+                    num_groups=self.num_kv_cache_groups,
+                )
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 
                 if not keys:
+                    if self._kvpd_timing:
+                        log_kvpd_timing(
+                            True,
+                            "d_lookup_keys",
+                            group=group_id,
+                            token_len=token_len,
+                            hbm_hit_tokens=hbm_hit_tokens,
+                            keys=0,
+                            path="contiguous",
+                        )
                     return StoreLookupResult(0)
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+                if self._kvpd_timing:
+                    log_kvpd_timing(
+                        True,
+                        "d_lookup_keys",
+                        group=group_id,
+                        token_len=token_len,
+                        hbm_hit_tokens=hbm_hit_tokens,
+                        variants=num_ranks,
+                        keys=len(keys),
+                        exists=sum(1 for value in res if value == 1),  # type: ignore[union-attr]
+                        sample_keys=multi_tp_keys[:1],
+                        sample_res=list(res[:1]),  # type: ignore[index]
+                        path="contiguous",
+                    )
                 num_block = len(keys)
                 if use_layerwise:
                     res = self.check_all_layers_exists(
@@ -1514,6 +1653,9 @@ class KVPoolWorker(BaseKVPoolWorker):
                 enable_kv_event=self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
+                owner_stager=self.owner_transfer_stager,
+                record_operation=self._record_kv_connector_operation,
+                enable_timing=self._kvpd_timing,
                 host_memory_group_ids=host_memory_group_ids,
             )
         if self.load_async:
@@ -1528,6 +1670,8 @@ class KVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
+                owner_stager=self.owner_transfer_stager,
+                enable_timing=self._kvpd_timing,
                 host_memory_group_ids=host_memory_group_ids,
             )
         try:
@@ -1576,6 +1720,16 @@ class KVPoolWorker(BaseKVPoolWorker):
                 requested_group_ids,
                 self.load_async,
             )
+            if self._kvpd_timing:
+                request.load_enqueue_perf = time.perf_counter()
+                log_kvpd_timing(
+                    True,
+                    "d_load_enqueue",
+                    request.req_id,
+                    token_len=token_len,
+                    groups=requested_group_ids,
+                    load_async=self.load_async,
+                )
             if self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
@@ -1655,13 +1809,44 @@ class KVPoolWorker(BaseKVPoolWorker):
                 len(key_list_c),
                 key_list_c[:3],
             )
+            load_bytes = sum_transfer_bytes(size_list_c)
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_start",
+                    request.req_id,
+                    token_len=token_len,
+                    groups=load_group_ids,
+                    keys=len(key_list_c),
+                    bytes=load_bytes,
+                )
             load_get_start = time.perf_counter()
             self._wait_for_block_zeroing_before_get()
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if self.owner_transfer_stager is not None:
+                ret = self.owner_transfer_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
+            else:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            load_get_duration = time.perf_counter() - load_get_start
+            queue_wait = (
+                load_get_start - getattr(request, "load_enqueue_perf", load_get_start) if self._kvpd_timing else None
+            )
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_done",
+                    request.req_id,
+                    duration_ms=round(load_get_duration * 1e3, 3),
+                    queue_wait_ms=round(queue_wait * 1e3, 3),
+                    keys=len(key_list_c),
+                    bytes=load_bytes,
+                    success=not (ret is None or (isinstance(ret, list) and any(r != 0 for r in ret))),
+                )
             self._record_kv_connector_operation(
                 "load_get",
-                time.perf_counter() - load_get_start,
+                load_get_duration,
                 len(key_list_c),
+                num_bytes=load_bytes,
+                queue_wait_seconds=queue_wait,
             )
             if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
@@ -1713,7 +1898,21 @@ class KVPoolWorker(BaseKVPoolWorker):
             raise TypeError(
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
-        requests = [request for request in connector_metadata.requests if request.can_save]
+        requests: list[ReqMeta] = []
+        for request in connector_metadata.requests:
+            can_save = request.can_save
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "p_prefill_done",
+                    request.req_id,
+                    token_len=request.token_len_chunk,
+                    can_save=can_save,
+                    is_last_chunk=request.is_last_chunk,
+                )
+            if can_save is None or not can_save:
+                continue
+            requests.append(request)
         if requests:
             current_event = torch.npu.Event()
             current_event.record()
@@ -1830,13 +2029,19 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(keys_c),
             keys_c[:3],
         )
+        load_bytes = sum_transfer_bytes(sizes_c)
         load_get_start = time.perf_counter()
         self._wait_for_block_zeroing_before_get()
-        ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        if self.owner_transfer_stager is not None:
+            ret = self.owner_transfer_stager.get(self.m_store, keys_c, addrs_c, sizes_c)
+        else:
+            ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        load_get_duration = time.perf_counter() - load_get_start
         self._record_kv_connector_operation(
             "load_get",
-            time.perf_counter() - load_get_start,
+            load_get_duration,
             len(keys_c),
+            num_bytes=load_bytes,
         )
         if self.backend_name == "memcache" and (ret is None or len(ret) != len(keys_c) or any(r != 0 for r in ret)):
             return False
@@ -1917,7 +2122,10 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(missing_keys),
             missing_keys[:3],
         )
-        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
+        if self.owner_transfer_stager is not None:
+            put_result = self.owner_transfer_stager.put(self.m_store, missing_keys, missing_addrs, missing_sizes)
+        else:
+            put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
         if isinstance(put_result, list):
             if len(put_result) != len(missing_keys):
                 logger.error(

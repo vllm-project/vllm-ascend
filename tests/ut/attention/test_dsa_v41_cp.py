@@ -1727,3 +1727,160 @@ def test_a5_async_plans_reject_unsupported_visibility_contract(
     with pytest.raises(ValueError, match=error):
         dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
     builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()
+
+
+class TestOwnerLocalKvWrites:
+    """Local prefill KV writes are opt-in and require an owner slab."""
+
+    @staticmethod
+    def _pcp_metadata():
+        metadata = object.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
+        metadata.global_metadata = object()
+        return metadata
+
+    @staticmethod
+    def _attn():
+        layer = SimpleNamespace(kv_cache=torch.zeros(1))
+        return SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=layer), long_kv_cache=layer)
+
+    def test_local_write_requires_mapped_owner_slab(self, monkeypatch):
+        from vllm_ascend.ascend_config import PcpConfig
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
+        config = PcpConfig(local_kv_write=True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: False)
+        assert dsa_v41_cp._local_cache_writes_enabled(config) is False
+        # The default config keeps the switch off regardless of the slab.
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: True)
+        assert dsa_v41_cp._local_cache_writes_enabled(PcpConfig()) is False
+        assert dsa_v41_cp._local_cache_writes_enabled(config) is True
+
+    def test_local_source_write_is_off_with_a_replicated_index_copy(self, monkeypatch):
+        from vllm_ascend.ascend_config import PcpConfig
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+        from vllm_ascend.models.deepseek_v41 import cache_config
+
+        config = PcpConfig(local_kv_write=True, local_kv_write_source=True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: True)
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda *_: True)
+        # Owners of the replicated index plane need the complete global rows.
+        assert dsa_v41_cp._local_source_writes_enabled(config) is False
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda *_: False)
+        assert dsa_v41_cp._local_source_writes_enabled(config) is True
+        # Requires local_kv_write as well.
+        assert dsa_v41_cp._local_source_writes_enabled(PcpConfig()) is False
+
+    def test_swa_write_skips_gather_for_local_rows(self, monkeypatch):
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
+        calls = []
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: object())
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl,
+            "_gather_cache_rows",
+            staticmethod(lambda *args, **kwargs: pytest.fail("local writes must not gather")),
+        )
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: calls.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        value = torch.arange(6, dtype=torch.float32).view(3, 2)
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            self._attn(), metadata, value, dsa_v41_cp.PcpConfig(local_kv_write=True)
+        )
+        assert calls == [(metadata, value)]
+
+    def test_swa_write_gathers_when_the_backing_is_replicated(self, monkeypatch):
+        """An owner runtime does not make a replicated plane safe to write locally."""
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
+        gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
+        writes = []
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: None)
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl,
+            "_gather_cache_rows",
+            staticmethod(lambda value, metadata: gathered),
+        )
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: writes.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            self._attn(), metadata, torch.arange(6, dtype=torch.float32).view(3, 2)
+        )
+        assert writes == [(metadata.global_metadata, gathered)]
+
+    def test_swa_write_gathers_global_rows_by_default(self, monkeypatch):
+        gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
+        writes = []
+
+        def gather(value, metadata):
+            assert value.shape[0] == 3
+            return gathered
+
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: False)
+        monkeypatch.setattr(dsa_v41_cp.AscendDSAV41PCPImpl, "_gather_cache_rows", staticmethod(gather))
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: writes.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            object(), metadata, torch.arange(6, dtype=torch.float32).view(3, 2)
+        )
+        assert len(writes) == 1
+        assert writes[0][0] is metadata.global_metadata
+        assert writes[0][1] is gathered
+
+    def test_multistream_swa_write_forwards_the_typed_config(self, runtime):
+        """Every rank must reach the same local-vs-gathered decision.
+
+        ``_preprocess`` hands its typed config to the empty/non-multistream
+        write. The overlapped QKV path must do the same: a peer that takes the
+        local branch while this rank defaults to ``pcp_config=None`` would
+        gather alone and hang the PCP cache collectives.
+        """
+        from vllm_ascend.ascend_config import PcpConfig
+
+        state = runtime(overlap=True)
+        impl = state.impl
+        config = PcpConfig(local_kv_write=True)
+        impl._pcp_config = config
+        writes = []
+        impl._write_swa_cache = lambda attn, metadata, value, pcp_config=None: writes.append(pcp_config)
+        swa_metadata = SimpleNamespace(global_metadata=object())
+        hidden_states = torch.arange(8, dtype=torch.float32).view(2, 4)
+        zeros = torch.zeros(2, 1, 1, 2)
+        impl._multistream_qkv(state.attn, hidden_states, zeros, zeros, swa_metadata)
+        assert writes == [config]
+
+    def test_local_write_builds_rank_local_swa_slots(self, builders, monkeypatch):
+        """Local SWA writes need the local slot slice, not the global view.
+
+        Prefill normally skips the local cache-slot build because every write
+        goes through the gathered metadata. Enabling the rank-local write must
+        build the local SWA plane, otherwise the write scatters through stale
+        rows and corrupts attention.
+        """
+        owners = builders(2, rank=1, specialized=True)
+        swa_builder = owners["swa"]
+        config = swa_builder.vllm_config
+        built = []
+        monkeypatch.setattr(swa_builder, "_build_swa_cache", lambda *args, **kwargs: built.append(1))
+        batch = _batch(2, 1, "prefill")
+
+        config.additional_config = {}
+        _build_planes(owners, batch)
+        assert built == []
+
+        config.additional_config = {"pcp_config": {"local_kv_write": True}}
+        _build_planes(owners, batch)
+        assert built

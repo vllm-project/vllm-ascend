@@ -24,6 +24,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    log_kvpd_timing,
+    sum_transfer_bytes,
+)
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
 
@@ -527,6 +531,9 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
+        owner_stager: Any = None,
+        record_operation: Callable[..., None] | None = None,
+        enable_timing: bool = False,
         host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
@@ -539,6 +546,9 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
             ready_event,
             name="KVCacheSendingThread",
         )
+        self.owner_stager = owner_stager
+        self._record_operation_cb = record_operation
+        self.enable_timing = enable_timing
         self.host_memory_group_ids = host_memory_group_ids
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
@@ -636,6 +646,15 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
             for request in requests:
                 self.add_stored_request(request)
             for request in requests:
+                if self.enable_timing:
+                    request.save_enqueue_perf = time.perf_counter()
+                    request.save_enqueue_ts_ns = time.time_ns()
+                    log_kvpd_timing(
+                        True,
+                        "p_save_enqueue",
+                        request.req_id,
+                        token_len=request.token_len_chunk,
+                    )
                 self.request_queue.put(request)
             self.request_queue.put(save_batch)
         return save_batch
@@ -1139,16 +1158,58 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
                 # This request's readiness event covers all subsequent group PUTs.
                 current_event = None
             put_result: bool | list[bool] | None
+            put_start = time.perf_counter()
+            put_bytes = sum_transfer_bytes(sizes)
+            queue_wait = put_start - getattr(req_meta, "save_enqueue_perf", put_start) if self.enable_timing else None
+            if self.enable_timing:
+                log_kvpd_timing(
+                    True,
+                    "p_put_start",
+                    req_id,
+                    group=group_id,
+                    keys=len(keys),
+                    bytes=put_bytes,
+                    queue_wait_ms=round(queue_wait * 1e3, 3),
+                    sample_keys=keys[:1],
+                )
             if self.host_memory_group_ids:
                 memory_location = (
                     MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
                 )
-                put_result = self.m_store.put(keys, addrs, sizes, memory_location=memory_location)
+                # Owner staging buffers are device memory; host (DDR) groups
+                # have no owner-mapped pages and go straight to the backend.
+                if self.owner_stager is not None and memory_location is MemoryLocation.DEVICE:
+                    put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)
+                else:
+                    put_result = self.m_store.put(keys, addrs, sizes, memory_location=memory_location)
                 if put_result is None:
                     logger.error("KV store returned no bulk PUT status for request %s", req_id)
                     return False
+            elif self.owner_stager is not None:
+                put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)
             else:
                 put_result = self.m_store.put(keys, addrs, sizes)
+            put_duration = time.perf_counter() - put_start
+            put_succeeded = put_result is not False and not (isinstance(put_result, list) and not all(put_result))
+            if self.enable_timing:
+                log_kvpd_timing(
+                    True,
+                    "p_put_done",
+                    req_id,
+                    group=group_id,
+                    keys=len(keys),
+                    bytes=put_bytes,
+                    duration_ms=round(put_duration * 1e3, 3),
+                    success=put_succeeded,
+                )
+            if self._record_operation_cb is not None:
+                self._record_operation_cb(
+                    "save_put",
+                    put_duration,
+                    len(keys),
+                    num_bytes=put_bytes,
+                    queue_wait_seconds=queue_wait,
+                )
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
@@ -1185,7 +1246,9 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
-        record_operation: Callable[[str, float, int], None] | None = None,
+        record_operation: Callable[..., None] | None = None,
+        owner_stager: Any = None,
+        enable_timing: bool = False,
         host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
@@ -1198,11 +1261,13 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
         )
+        self.owner_stager = owner_stager
         self.host_memory_group_ids = host_memory_group_ids
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self.enable_timing = enable_timing
 
     def _handle_request_exception(self, request_data: ReqMeta) -> None:
         # run() holds the submission lock, and _handle_request already
@@ -1332,9 +1397,29 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                 len(key_list),
                 key_list[:3],
             )
-            load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
+            load_bytes = sum_transfer_bytes(size_list)
+            load_get_start = time.perf_counter() if self._record_operation_cb is not None or self.enable_timing else 0.0
+            queue_wait = (
+                load_get_start - getattr(req_meta, "load_enqueue_perf", load_get_start) if self.enable_timing else None
+            )
+            if self.enable_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_start",
+                    req_id,
+                    token_len=token_len,
+                    groups=req_meta.kv_cache_group_ids or [0],
+                    keys=len(key_list),
+                    bytes=load_bytes,
+                    queue_wait_ms=round(queue_wait * 1e3, 3),
+                )
             if memory_locations is None:
-                ret = self.m_store.get(key_list, addr_list, size_list)
+                # Owner-sharded VMM pages cannot be read directly; stage them
+                # through the registered transport buffer.
+                if self.owner_stager is not None:
+                    ret = self.owner_stager.get(self.m_store, key_list, addr_list, size_list)
+                else:
+                    ret = self.m_store.get(key_list, addr_list, size_list)
             else:
                 ret = get_bulk_by_memory_location(
                     self.m_store,
@@ -1344,11 +1429,25 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                     tp_rank=self.tp_rank,
                     memory_locations=memory_locations,
                 )
+            load_get_duration = time.perf_counter() - load_get_start
+            if self.enable_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_done",
+                    req_id,
+                    duration_ms=round(load_get_duration * 1e3, 3),
+                    queue_wait_ms=round(queue_wait * 1e3, 3),
+                    keys=len(key_list),
+                    bytes=load_bytes,
+                    success=not (ret is None or (isinstance(ret, list) and any(r != 0 for r in ret))),
+                )
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
                     "load_get",
-                    time.perf_counter() - load_get_start,
+                    load_get_duration,
                     len(key_list),
+                    num_bytes=load_bytes,
+                    queue_wait_seconds=queue_wait,
                 )
             # A hybrid request must acknowledge a failed import as a unit.
             if (

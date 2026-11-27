@@ -60,15 +60,24 @@ def test_a3_config_round_trips_after_serialization():
     assert SharedEngramConfig(**asdict(config)) == config
 
 
-@pytest.mark.parametrize("capacity", [65536, 72000, 262144])
+@pytest.mark.parametrize("capacity", [65536, 72000, 262144, 294912, 393216, 589824])
 def test_remote_engram_accepts_supported_capacity(capacity):
     assert SharedEngramConfig(backend="a2", endpoint="host:29500", capacity=capacity).capacity == capacity
 
 
-@pytest.mark.parametrize("capacity", [0, 262145])
-def test_remote_engram_rejects_unsupported_capacity(capacity):
-    with pytest.raises(ValueError, match="capacity"):
-        SharedEngramConfig(backend="a2", endpoint="host:29500", capacity=capacity)
+def test_remote_engram_accepts_the_reader_receive_budget():
+    from vllm_ascend.models.deepseek_v41.engram.shared_rdma import MAX_ROWS
+
+    config = SharedEngramConfig(backend="a2", endpoint="host:29500", capacity=MAX_ROWS)
+    assert config.capacity == MAX_ROWS
+
+
+def test_remote_engram_rejects_unsupported_capacity():
+    from vllm_ascend.models.deepseek_v41.engram.shared_rdma import MAX_ROWS
+
+    for capacity in (0, MAX_ROWS + 1):
+        with pytest.raises(ValueError, match="capacity"):
+            SharedEngramConfig(backend="a2", endpoint="host:29500", capacity=capacity)
 
 
 @pytest.mark.parametrize("port", [0, 65536])

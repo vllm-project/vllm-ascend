@@ -25,8 +25,37 @@ import torch
 from safetensors import safe_open
 
 MIN_ROWS = 65536
-MAX_ROWS = 262144
 MAX_CONTROL_BYTES = 65536
+
+# Receive-buffer policy. A reader allocates one contiguous uint8 buffer of
+# ``capacity * row_bytes`` on its NPU for the whole model lifetime, and the
+# owner mirrors it as pinned host staging for every attached rank. Bound that
+# allocation by a slice of the NPU HBM budget instead of an arbitrary row
+# count: A2/A3 nodes expose 64 GiB per NPU and this path claims at most 1/64
+# of it. The explicit byte ceiling stops a larger future device from growing
+# the buffer without review. 1 GiB is ~1.6% of a 64 GiB NPU and holds ~3.7M
+# rows, which leaves ample room for MBT 12288/16384 (294,912/393,216 rows)
+# while still failing fast on an absurd max_num_batched_tokens.
+ROW_BYTES = 264  # 256 INT8/FP8 code bytes + 8-byte E8M0 scale.
+MAX_ROW_BYTES = 288  # Code bytes plus eight FP32 scales (32 B).
+HBM_BUDGET_BYTES = 64 << 30
+RECEIVE_BUFFER_HBM_DIVISOR = 64
+MAX_RECEIVE_BYTES = 1 << 30
+
+
+def receive_buffer_budget_bytes():
+    """Largest per-rank receive buffer, in bytes, allowed by policy."""
+    return min(MAX_RECEIVE_BYTES, HBM_BUDGET_BYTES // RECEIVE_BUFFER_HBM_DIVISOR)
+
+
+def max_receive_rows(row_bytes=MAX_ROW_BYTES):
+    """Row budget for the widest supported row size (owner and reader agree)."""
+    return max(MIN_ROWS, receive_buffer_budget_bytes() // row_bytes)
+
+
+# Single shared limit for the reader, the owner attach check, and the
+# configured capacity in ``ascend_config.py``.
+MAX_ROWS = max_receive_rows()
 
 # A failed transfer may still access its registered receive buffer.
 _held_readers = set()
@@ -47,7 +76,11 @@ def capacity_for_batch(configured, max_tokens, layer_head_counts, tp_size):
     required = max((max_tokens * (heads // tp_size) for heads in layer_head_counts), default=0)
     capacity = max(MIN_ROWS, configured, required)
     if capacity > MAX_ROWS:
-        raise ValueError(f"shared Engram lookup needs {capacity} rows, exceeding the supported limit {MAX_ROWS}")
+        raise EngramCapacityError(
+            f"shared Engram lookup needs {capacity} rows at up to {MAX_ROW_BYTES} B/row, "
+            f"exceeding the {MAX_ROWS}-row receive budget ({receive_buffer_budget_bytes()} B, "
+            f"1/{RECEIVE_BUFFER_HBM_DIVISOR} of the {HBM_BUDGET_BYTES} B HBM budget)"
+        )
     return capacity
 
 
@@ -155,7 +188,7 @@ def checkpoint_metadata(model):
                         sample.update(tensor[row : row + 1].contiguous().view(torch.uint8).numpy().tobytes())
         tables[str(layer)] = dict(
             rows=rows,
-            row_bytes=264 if scale_dtype == "F8_E8M0" else 288,
+            row_bytes=ROW_BYTES if scale_dtype == "F8_E8M0" else MAX_ROW_BYTES,
             scale_dtype=scale_dtype,
             code_dtype=code_dtype,
             samples=sample.hexdigest(),
@@ -232,7 +265,7 @@ class RemoteReader:
 
     def __init__(self, model, endpoint, *, capacity, library_path=None, listen_port=None, local_comm_res=None):
         if not 0 < capacity <= MAX_ROWS:
-            raise ValueError("invalid remote Engram row capacity")
+            raise ValueError(f"invalid remote Engram row capacity: 1..{MAX_ROWS} rows fit the receive budget")
         self.closed = False
         self.failed = False
         self._operation_lock = threading.Lock()
@@ -602,7 +635,7 @@ class _OwnerConnection(socketserver.BaseRequestHandler):
             attach = _receive(wire)
             capacity = attach.get("capacity", 0)
             if attach.get("op") != "attach" or attach.get("metadata") != owner.metadata or not 0 < capacity <= MAX_ROWS:
-                raise ValueError("incompatible remote Engram attach")
+                raise ValueError(f"incompatible remote Engram attach: capacity must be in [1, {MAX_ROWS}]")
             physical_device = attach.get("physical_device")
             if type(physical_device) is not int or physical_device < 0:
                 raise ValueError("remote Engram attach requires a physical device ID")

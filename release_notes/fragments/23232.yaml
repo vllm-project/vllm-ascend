@@ -1,0 +1,40 @@
+pr: 23232
+entries:
+  - category: feature
+    text: >-
+      Owner-sharded PCP prefill now accepts the MooncakeHybridConnector leaf
+      of a MultiConnector KV transfer config. The prefill engine stages
+      complete logical KV blocks into a registered buffer so the decode engine
+      pulls from registered HBM instead of peer-mapped owner pages.
+      MooncakeConnectorV1 is not accepted: its hybrid-cache decode registration
+      requires a 2 MiB aligned KV tensor base that the model allocation does
+      not provide. Layerwise transfer and other connectors still fall back to
+      the replicated cache. Owner sharing remains opt-in through
+      `additional_config.pcp_config`.
+    model: deepseek-v4.1
+    hardware: [A2]
+  - category: config
+    text: >-
+      The shared Engram reader now derives its receive capacity from an HBM
+      byte budget (1/64 of the per-NPU HBM, capped at 1 GiB) instead of the
+      fixed 262144-row limit. This allows prefill max_num_batched_tokens 12288
+      and 16384 with 24 Engram heads at TP=1 while still rejecting an absurd
+      batch size.
+    model: deepseek-v4.1
+    hardware: [A2]
+  - category: bugfix
+    text: >-
+      Fixed the owner-sharded PCP prefix-cache regression on DeepSeek V4.1
+      Flash: bounded-replay SWA windows are staged into local HBM again instead
+      of reading three quarters of their rows from peer pages. On 250 20-40k
+      prompts TTFT P50 improved from 22.6 s to 15.0 s.
+    model: deepseek-v4.1
+    hardware: [A2]
+  - category: bugfix
+    text: >-
+      Fixed an IndexError in MooncakeHybridConnector when prefill and decode
+      materialize different numbers of KV cache groups. The consumer now
+      transfers the overlapping groups and leaves the unavailable ones to
+      recompute, and fails explicitly when there is no overlap.
+    model: deepseek-v4.1
+    hardware: [A2]

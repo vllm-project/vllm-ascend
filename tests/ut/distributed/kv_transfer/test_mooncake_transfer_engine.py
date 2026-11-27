@@ -168,6 +168,47 @@ class TestGlobalTE(unittest.TestCase):
             global_te.register_buffer([100], [64])
         engine.register_memory.assert_called_once_with(100, 64)
 
+    def test_add_buffer_publishes_new_regions_without_dropping_earlier_ones(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.return_value = 0
+
+        global_te.register_buffer([0x1000], [128])
+        global_te.add_buffer([0x2000, 0x3000], [256, 512])
+        global_te.add_buffer([0x2000], [256])
+
+        global_te.transfer_engine.assert_has_calls(
+            [
+                call.register_memory(0x1000, 128),
+                call.register_memory(0x2000, 256),
+                call.register_memory(0x3000, 512),
+            ]
+        )
+        self.assertEqual(global_te.transfer_engine.register_memory.call_count, 3)
+        self.assertEqual(
+            global_te.registered_buffers,
+            [(0x1000, 128), (0x2000, 256), (0x3000, 512)],
+        )
+
+    def test_register_buffer_after_add_buffer_registers_its_own_regions(self):
+        # A MultiConnector child may publish its staging buffer before another
+        # child registers its replicated ranges.
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.return_value = 0
+
+        global_te.add_buffer([0x2000], [256])
+        global_te.register_buffer([0x1000], [128])
+        global_te.register_buffer([0x1000], [128])
+
+        global_te.transfer_engine.assert_has_calls(
+            [
+                call.register_memory(0x2000, 256),
+                call.register_memory(0x1000, 128),
+            ]
+        )
+        self.assertEqual(global_te.transfer_engine.register_memory.call_count, 2)
+
     def test_unregister_and_reregister_registered_buffers(self):
         global_te = self.global_te_cls()
         global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
