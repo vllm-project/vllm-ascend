@@ -17,6 +17,8 @@ stack.
 | flash_attn_npu | 0.5.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
 | mooncake-transfer-engine-npu | 0.3.14.post1 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
 | cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | Image build —<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi>, aarch64 only |
+| TileLang (A5) | 0.1.15 | `Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>`.github/workflows/_selected_tests.yaml`<br>`docs/source/developer_guide/contribution/tilelang_operators.md` | PyPI wheels for aarch64 and x86_64, with bundled TVM; installed in both A5 images and all A5 selected-test jobs |
+| apache-tvm-ffi (A5 TileLang) | 0.1.12 | `Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>`.github/workflows/_selected_tests.yaml`<br>`docs/source/developer_guide/contribution/tilelang_operators.md` | PyPI wheels for aarch64 and x86_64; installed alongside TileLang |
 | CANN | 9.2.1 | Image build — `FROM` tag of:<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.310p`<br>`Dockerfile.310p.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`mkdocs.yml` | `quay.io/ascend/cann` |
 
 By default, update all files listed for a component.
