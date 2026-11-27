@@ -188,7 +188,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
+Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#dspark), which generates draft tokens and verifies them with the target model.
 
 The examples enable graph execution for the target model on both platforms. A3 also enables DSpark draft graphs; 950DT products keep the draft eager. See [DSpark and KV Cache Configuration](#921-dspark-and-kv-cache-configuration) for the platform-specific settings.
 
@@ -3431,7 +3431,7 @@ The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT produ
 
 #### 9.2.2 Workload-Specific Tuning
 
-Change one parameter at a time and retain the command and benchmark result for each run. For general methods, refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md). For feature descriptions and configuration constraints, refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) and [Speculative Decoding Guide](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark).
+Change one parameter at a time and retain the command and benchmark result for each run. For general methods, refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md). For feature descriptions and configuration constraints, refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) and [Speculative Decoding Guide](../../user_guide/feature_guide/speculative_decoding.md#dspark).
 
 #### 9.2.3 Tool-Assisted Tuning with msmodeling
 
