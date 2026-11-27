@@ -41,10 +41,10 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
+    get_sparse_flash_mla_plan_buffer_size,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
-    round_up,
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
@@ -98,27 +98,8 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# SparseFlashMla metadata has one entry per AIC/AIV scheduling field.
-SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC = 9
-SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV = 8
-SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 1024
-SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE = 2048
 SAS_METADATA_BUFFER_SIZE = 1024
 QLI_METADATA_BUFFER_SIZE = 1024
-
-
-def _sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
-    if device.type != "npu":
-        return SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE
-    properties = torch.npu.get_device_properties(device)
-    entries = (
-        SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num
-        + SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV * properties.vector_core_num
-    )
-    return max(
-        SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE,
-        round_up(entries, SPARSE_FLASH_MLA_PLAN_ALIGNMENT),
-    )
 
 
 def _copy_sas_metadata(buffer: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
@@ -834,7 +815,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
-            _sparse_flash_mla_plan_buffer_size(self.device)
+            get_sparse_flash_mla_plan_buffer_size(self.device)
             if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
                 sparse_flash_mla_metadata,
