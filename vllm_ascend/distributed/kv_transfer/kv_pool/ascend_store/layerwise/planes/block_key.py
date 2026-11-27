@@ -19,7 +19,9 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
+from vllm.v1.kv_cache_interface import FullAttentionSpec, RSWASpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_interface import supports_bounded_replay
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.base import (
     LayerwiseDataPlane,
 )
@@ -44,6 +46,33 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
     def __init__(self, worker: LayerwiseKVPoolWorker):
         self._worker = worker
+        self._retain_running_prefix = self._can_retain_running_prefix(worker)
+        if self._retain_running_prefix:
+            logger.info("Mooncake layerwise keeps the full-attention prefix resident across prefill chunks")
+
+    @staticmethod
+    def _can_retain_running_prefix(worker: LayerwiseKVPoolWorker) -> bool:
+        # Running DSv4.1 requests retain their full-attention source pages,
+        # including blocks adopted from local prefix-cache hits. Private
+        # SWA/state groups are outside this plane.
+        if not (
+            worker.block_key_hybrid
+            and worker.kv_role == "kv_producer"
+            and worker.backend_name == "mooncake"
+            and worker.kv_cache_config is not None
+            and worker.cacheable_group_ids
+            and supports_bounded_replay(worker.vllm_config.model_config)
+        ):
+            return False
+        for group_id in worker.cacheable_group_ids:
+            spec = worker.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+            if not all(
+                isinstance(layer_spec, FullAttentionSpec) and not isinstance(layer_spec, RSWASpec)
+                for layer_spec in specs
+            ):
+                return False
+        return True
 
     # --- step entry points -----------------------------------------------------
 
@@ -232,7 +261,12 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 cached_tokens = request.load_spec.kvpool_cached_tokens
                 if not worker.use_eagle and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups:
                     cached_tokens = request.load_spec.pool_hit_tokens
-            load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
+            resident_prefix = (
+                self._retain_running_prefix
+                and request.load_spec is None
+                and 0 < cached_tokens <= request.computed_prefix_tokens
+            )
+            load_masks = None if resident_prefix else worker._compute_reachable_load_masks(request, cached_tokens)
             for group in worker.cacheable_group_ids:
                 # Skip private rings before deriving token hashes: their physical
                 # capacity need not even be divisible by the hash block size.
@@ -246,6 +280,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 view.save_last_block_key = view.load_last_block_key = None
                 view.partial_block_index = None
                 result[group].append(view)
+                view.load_key_block_offset = 0
                 ids = request.block_ids_by_group[group]
                 hashes = get_block_hashes(request.block_hashes, block_size, worker.hash_block_size)
                 load_mask = load_masks[group] if load_masks is not None else None
@@ -254,27 +289,28 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 def key(index, group=group, hashes=hashes):
                     return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
 
-                start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0
-                entries = (
-                    [
-                        (key(index), index)
-                        for index in range(start, min(cached_tokens // block_size, len(hashes), len(ids)))
-                        if selected(load_mask, index)
+                if not resident_prefix:
+                    start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0
+                    load_end = min(len(ids), cached_tokens // block_size)
+                    entries = (
+                        [
+                            (key(index), index)
+                            for index in range(start, min(load_end, len(hashes)))
+                            if selected(load_mask, index)
+                        ]
+                        if request.load_spec is not None and request.load_spec.can_load
+                        else []
+                    )
+                    entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
+                    entries = [
+                        (name, index)
+                        for name, index in entries
+                        if start <= index < load_end and selected(load_mask, index)
                     ]
-                    if request.load_spec is not None and request.load_spec.can_load
-                    else []
-                )
-                entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
-                entries = [
-                    (name, index)
-                    for name, index in entries
-                    if start <= index < min(len(ids), cached_tokens // block_size) and selected(load_mask, index)
-                ]
-                view.load_key_block_offset = 0
-                view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
-                for name, index in entries:
-                    view.load_block_keys[index] = name
-                    get_slots.append((view, name, ids[index], index))
+                    view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
+                    for name, index in entries:
+                        view.load_block_keys[index] = name
+                        get_slots.append((view, name, ids[index], index))
 
                 start = request.save_start_token // block_size
                 end = min(request.save_end_token // block_size, len(hashes), len(ids))

@@ -43,7 +43,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
     observed_states = []
 
     def record_ready_state(layer_name, kv_cache_layer, attn_metadata):
-        assert layer_name == ""
+        assert layer_name == model.prefix
         assert kv_cache_layer == []
         assert attn_metadata is forward_context.attn_metadata
         observed_states.append(tuple(state.clone() for state in model.kv_cache))

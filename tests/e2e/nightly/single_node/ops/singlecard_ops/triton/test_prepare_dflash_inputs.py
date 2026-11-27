@@ -640,7 +640,7 @@ def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_fr
         case["num_speculative_steps"] = case["num_query_per_req"]
     data = _build_inputs(case, "npu")
     args = _impl_args(data, case)
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         # vLLM main takes block_stride after block_size. These cache pages are contiguous.
         args.insert(18, case["block_size"])
     prepare_dflash_inputs(*args)
@@ -654,7 +654,7 @@ def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_fr
 )
 def test_worker_entry_point_uses_ascend_launcher(monkeypatch):
     case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_manager384_rank5").copy()
-    has_block_stride = not vllm_version_is("0.33.0")
+    has_block_stride = not vllm_version_is("0.34.0")
     if has_block_stride:
         case["block_stride"] = 768
     data = _build_inputs(case, "npu")

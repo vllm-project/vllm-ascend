@@ -128,7 +128,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -155,7 +155,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -264,7 +264,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -311,7 +311,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
@@ -402,7 +402,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 2 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -560,7 +560,7 @@ vllm serve /models/GLM-5.1-w4a8 \
     --tensor-parallel-size $tp_size \
     --enable-expert-parallel \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 202752 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
@@ -680,7 +680,7 @@ vllm serve /models/GLM-5.1-w4a8 \
     --tensor-parallel-size $tp_size \
     --enable-expert-parallel \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 202752 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
