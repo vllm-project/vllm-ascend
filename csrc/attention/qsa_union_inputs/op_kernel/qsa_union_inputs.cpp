@@ -805,12 +805,13 @@ private:
             GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
         SetFlag<HardEvent::S_MTE3>(ready);
         WaitFlag<HardEvent::S_MTE3>(ready);
-        const uint32_t union_copy = AlignUp(count, 8);
-        const uint32_t mask_copy = AlignUp(count * BLOCK_Y, 8);
-        DataCopy(union_idx_gm_[group * output_width_ + base], union_tile,
-                 union_copy);
-        DataCopy(exact_mask_gm_[group * output_width_ * BLOCK_Y + base * BLOCK_Y],
-                 mask_tile, mask_copy);
+        DataCopyPad(union_idx_gm_[group * output_width_ + base], union_tile,
+                    DataCopyExtParams(1, count * sizeof(int32_t), 0, 0, 0));
+        DataCopyPad(
+            exact_mask_gm_[group * output_width_ * BLOCK_Y + base * BLOCK_Y],
+            mask_tile,
+            DataCopyExtParams(
+                1, count * BLOCK_Y * sizeof(int32_t), 0, 0, 0));
         event_t complete = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_S));
         SetFlag<HardEvent::MTE3_S>(complete);
