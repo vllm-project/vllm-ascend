@@ -11,7 +11,12 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
     BASE16_MAX_N_GROUP,
+    WIDE_FP16_BLOCK_N,
+    WIDE_FT_MAX_N_GROUP,
+    WIDE_FT_MIN_N_GROUP,
+    WIDE_FT_VECTOR_CORES,
     DispatchConfigError,
+    WideRmsMode,
     _select_layernorm_launch,
 )
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num
@@ -236,7 +241,42 @@ def layer_norm_fwd_npu(
     if bias is not None:
         assert bias.stride(-1) == 1
         assert bias.shape == (N,)
-    # allocate output
+    activation_id = _activation_id(activation)
+    runtime_p = None
+    ub_bytes = None
+    wide_rms_mode: WideRmsMode | None = None
+    if ngroups == 1 and getattr(getattr(x, "device", None), "type", None) == "npu":
+        runtime_p = get_vectorcore_num()
+        if (
+            runtime_p == WIDE_FT_VECTOR_CORES
+            and WIDE_FT_MIN_N_GROUP <= group_size <= WIDE_FT_MAX_N_GROUP
+            and is_rms_norm
+            and activation_id == _ACTIVATION_SWISH
+            and bias is None
+            and out is None
+            and z is not None
+            and x.stride(0) == z.stride(0) == N
+            and x.dtype == weight.dtype == z.dtype
+        ):
+            if x.dtype == torch.bfloat16 and norm_before_gate:
+                wide_rms_mode = "bf16_post_gate"
+            elif (
+                x.dtype == torch.float16
+                and not norm_before_gate
+                and WIDE_FP16_BLOCK_N // 2 < group_size <= WIDE_FP16_BLOCK_N
+            ):
+                wide_rms_mode = "fp16_pre_gate"
+        if 128 < group_size <= BASE16_MAX_N_GROUP or wide_rms_mode is not None:
+            ub_bytes = get_ub_size_bytes()
+    spec = _select_layernorm_launch(
+        M,
+        group_size,
+        ngroups,
+        runtime_p,
+        ub_bytes=ub_bytes,
+        wide_rms_mode=wide_rms_mode,
+    )
+
     if out is not None:
         assert out.shape == x.shape
     else:
@@ -245,23 +285,7 @@ def layer_norm_fwd_npu(
     mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
-    runtime_p = None
-    ub_bytes = None
-    if ngroups == 1 and getattr(getattr(x, "device", None), "type", None) == "npu":
-        runtime_p = get_vectorcore_num()
-        if 128 < group_size <= BASE16_MAX_N_GROUP:
-            ub_bytes = get_ub_size_bytes()
-    spec = _select_layernorm_launch(
-        M,
-        group_size,
-        ngroups,
-        runtime_p,
-        ub_bytes=ub_bytes,
-    )
-
     # BASE selections reuse the upstream kernel and feature-dimension guard.
-    # Grouped, non-NPU, and unqualified wide-N inputs retain BLOCK_M=64;
-    # qualified single-group NPU inputs may use a smaller row tile.
     if spec.impl == "FT_BASE":
         max_fused_size = 65536 // x.element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
@@ -288,7 +312,7 @@ def layer_norm_fwd_npu(
             BLOCK_N=block_n,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
-            ACTIVATION=_activation_id(activation),
+            ACTIVATION=activation_id,
         )
         return out, mean, rstd
 
@@ -318,7 +342,7 @@ def layer_norm_fwd_npu(
             BLOCK_N=block_n,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
-            ACTIVATION=_activation_id(activation),
+            ACTIVATION=activation_id,
         )
         return out, mean, rstd
 

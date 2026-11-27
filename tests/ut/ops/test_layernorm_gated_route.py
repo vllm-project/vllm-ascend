@@ -284,6 +284,70 @@ def _unload_layernorm_fakes(saved):
 
 
 class WrapperRouteTests(unittest.TestCase):
+    def test_adaptive_wide_public_routes(self):
+        layer, state, launches, saved = _load_layernorm_with_fakes()
+        self.addCleanup(_unload_layernorm_fakes, saved)
+        for rows, width, dtype, norm_before_gate, kernel, block_m, block_n in (
+            (65, 513, "bfloat16", True, "_layer_norm_fwd_1pass_kernel_npu", 4, 1024),
+            (65, 1024, "float16", False, "_layer_norm_fwd_1pass_kernel_npu", 4, 1024),
+            (20441, 512, "bfloat16", True, "_layer_norm_fwd_persistent_hoist_kernel_npu", 8, 512),
+            (20441, 1024, "bfloat16", True, "_layer_norm_fwd_persistent_hoist_kernel_npu", 4, 1024),
+            (65, 2049, "bfloat16", True, "_layer_norm_fwd_1pass_kernel_npu", 2, 4096),
+            (20441, 8192, "bfloat16", True, "_layer_norm_fwd_1pass_kernel_npu", 1, 8192),
+        ):
+            with self.subTest(rows=rows, width=width, dtype=dtype):
+                x = _FakeTensor((rows, width), dtype)
+                weight = _FakeTensor((width,), dtype)
+                z = _FakeTensor(x.shape, dtype)
+                _, mean, rstd = layer.layer_norm_fwd_npu(
+                    x, weight, None, 1e-5, z=z, norm_before_gate=norm_before_gate, is_rms_norm=True, activation="silu"
+                )
+                name, grid, args, kwargs = launches[-1]
+                self.assertEqual(name, kernel)
+                self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"], kwargs["ACTIVATION"]), (block_m, block_n, 0))
+                tiles = (rows + block_m - 1) // block_m
+                self.assertEqual(grid, (min(40, tiles),) if "hoist" in kernel else (tiles, 1))
+                self.assertEqual(args[7:12], (width, width, width, rows, width))
+                self.assertIsNone(mean)
+                self.assertEqual(rstd.shape, (rows,))
+        self.assertEqual(state["ub_getter_calls"], 6)
+        self.assertEqual(state["name_calls"], 0)
+
+    def test_adaptive_wide_public_route_preserves_other_modes(self):
+        layer, state, launches, saved = _load_layernorm_with_fakes()
+        self.addCleanup(_unload_layernorm_fakes, saved)
+        x = _FakeTensor((65, 513), "bfloat16")
+        weight = _FakeTensor((513,), "bfloat16")
+        z = _FakeTensor(x.shape, x.dtype)
+        padded_z = _FakeTensor(x.shape, x.dtype)
+        padded_z.stride = lambda dim: 1 if dim == -1 else 520
+        for case, overrides in (
+            ("sigmoid", {"activation": "sigmoid"}),
+            ("LayerNorm", {"is_rms_norm": False}),
+            ("bias", {"bias": weight}),
+            ("no gate", {"z": None}),
+            ("opposite gate order", {"norm_before_gate": False}),
+            ("caller output", {"out": _FakeTensor(x.shape, x.dtype)}),
+            ("padded gate", {"z": padded_z}),
+            ("mixed dtype", {"weight": _FakeTensor(weight.shape, "float32")}),
+        ):
+            with self.subTest(case=case):
+                options = {"z": z, "weight": weight, "bias": None, "is_rms_norm": True}
+                options.update(overrides)
+                layer.layer_norm_fwd_npu(x, eps=1e-5, **options)
+                name, _, _, kwargs = launches[-1]
+                self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+                self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (64, 1024))
+
+        x = _FakeTensor((65, 1025), "float16")
+        weight = _FakeTensor((1025,), "float16")
+        z = _FakeTensor(x.shape, x.dtype)
+        layer.layer_norm_fwd_npu(x, weight, None, 1e-5, z=z, norm_before_gate=False, is_rms_norm=True)
+        name, _, _, kwargs = launches[-1]
+        self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+        self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (64, 2048))
+        self.assertEqual(state["ub_getter_calls"], 0)
+
     def test_activation_ids_reach_all_launch_routes(self):
         layer, state, launches, saved = _load_layernorm_with_fakes()
         try:

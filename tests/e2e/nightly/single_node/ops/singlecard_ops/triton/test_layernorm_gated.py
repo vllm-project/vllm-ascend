@@ -7,7 +7,7 @@ from tests.accuracy_utils import assert_reference_accuracy
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num, init_device_properties_triton
 
 DEVICE = "npu"
 pytestmark = pytest.mark.skipif(
@@ -290,6 +290,47 @@ def test_layer_norm_fwd_npu_hoist_routes(
         assert expected_mean is None
     else:
         assert_reference_accuracy(actual_mean, expected_mean)
+
+
+@pytest.mark.parametrize(
+    ("rows", "width", "dtype", "post_gate", "block_m", "hoist"),
+    [
+        (65, 513, torch.bfloat16, True, 4, False),
+        (65, 1024, torch.float16, False, 4, False),
+        (65, 1025, torch.bfloat16, True, 4, False),
+        (65, 2049, torch.bfloat16, True, 2, False),
+        (65, 4097, torch.bfloat16, True, 1, False),
+        (20441, 512, torch.bfloat16, True, 8, True),
+        (20441, 1024, torch.bfloat16, True, 4, True),
+    ],
+)
+@torch.inference_mode()
+def test_layer_norm_fwd_npu_adaptive_wide_routes(rows, width, dtype, post_gate, block_m, hoist, monkeypatch):
+    if get_vectorcore_num() != 40 or get_ub_size_bytes() < 192 * 1024:
+        pytest.skip("Wide adaptive routes require 40 vector cores and at least 192 KiB UB")
+
+    base = _KernelLaunchRecorder(layernorm_gated._layer_norm_fwd_1pass_kernel_npu)
+    persistent = _KernelLaunchRecorder(layernorm_gated._layer_norm_fwd_persistent_hoist_kernel_npu)
+    monkeypatch.setattr(layernorm_gated, "_layer_norm_fwd_1pass_kernel_npu", base)
+    monkeypatch.setattr(layernorm_gated, "_layer_norm_fwd_persistent_hoist_kernel_npu", persistent)
+
+    generator = torch.Generator(device="cpu").manual_seed(0x1F3A5C8)
+    x = torch.randn((rows, width), generator=generator, dtype=dtype).to(DEVICE)
+    z = torch.randn((rows, width), generator=generator, dtype=dtype).to(DEVICE)
+    weight = torch.randn((width,), generator=generator, dtype=dtype).to(DEVICE)
+    eps = 1e-6
+    actual, mean, rstd = layer_norm_fwd_npu(x, weight, None, eps, z=z, norm_before_gate=post_gate, is_rms_norm=True)
+    expected, expected_mean, expected_rstd = layer_norm_gated_ref(x, weight, None, eps, z, width, post_gate, True)
+
+    selected, unused = (persistent, base) if hoist else (base, persistent)
+    tiles = (rows + block_m - 1) // block_m
+    assert selected.grids == ([(min(40, tiles),)] if hoist else [(tiles, 1)])
+    assert not unused.grids
+    assert selected.launch_kwargs[0]["BLOCK_M"] == block_m
+    assert selected.launch_kwargs[0]["BLOCK_N"] == 1 << (width - 1).bit_length()
+    assert mean is expected_mean is None
+    assert_reference_accuracy(actual, expected)
+    assert_reference_accuracy(rstd, expected_rstd)
 
 
 @torch.inference_mode()

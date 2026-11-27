@@ -116,6 +116,64 @@ class SelectorTests(unittest.TestCase):
             m.LaunchSpec("FT_BASE", 64),
         )
 
+    def test_adaptive_bf16_tiles_and_wide_hoist_boundary(self):
+        m = self.mod
+        for width, base_bm, hoist_bm in (
+            (257, 16, 8),
+            (512, 16, 8),
+            (513, 4, 4),
+            (1024, 4, 4),
+            (1025, 4, 4),
+            (2048, 4, 4),
+            (2049, 2, 2),
+            (4096, 2, 2),
+            (4097, 1, None),
+            (8192, 1, None),
+        ):
+            for rows, expected in (
+                (65, m.LaunchSpec("FT_BASE", base_bm)),
+                (20440, m.LaunchSpec("FT_BASE", base_bm)),
+                (20441, m.LaunchSpec("FT_PERSIST_HOIST", hoist_bm) if hoist_bm else m.LaunchSpec("FT_BASE", base_bm)),
+            ):
+                with self.subTest(rows=rows, width=width):
+                    self.assertEqual(
+                        m._select_layernorm_launch(rows, width, 1, 40, ub_bytes=196608, wide_rms_mode="bf16_post_gate"),
+                        expected,
+                    )
+
+    def test_adaptive_tiles_require_eligible_resources_and_width(self):
+        m = self.mod
+        for width, groups, cores, ub_bytes, mode in (
+            (513, 2, 40, 196608, "bf16_post_gate"),
+            (513, 1, 48, 196608, "bf16_post_gate"),
+            (513, 1, 40, None, "bf16_post_gate"),
+            (513, 1, 40, 196607, "bf16_post_gate"),
+            (1025, 1, 40, 196608, "fp16_pre_gate"),
+            (8193, 1, 40, 196608, "bf16_post_gate"),
+        ):
+            with self.subTest(width=width, groups=groups, cores=cores, ub_bytes=ub_bytes, mode=mode):
+                self.assertEqual(
+                    m._select_layernorm_launch(20441, width, groups, cores, ub_bytes=ub_bytes, wide_rms_mode=mode),
+                    m.LaunchSpec("FT_BASE", 64),
+                )
+        self.assertEqual(
+            m._select_layernorm_launch(20441, 1024, 1, 40, ub_bytes=196608, wide_rms_mode="fp16_pre_gate"),
+            m.LaunchSpec("FT_BASE", 4),
+        )
+
+    def test_adaptive_offset_bound_includes_masked_tile_lanes(self):
+        m = self.mod
+        for width, last_safe_rows, expected in (
+            (8192, 262144, m.LaunchSpec("FT_BASE", 1)),
+            (1023, 2099200, m.LaunchSpec("FT_PERSIST_HOIST", 4)),
+        ):
+            for rows, spec in ((last_safe_rows, expected), (last_safe_rows + 1, m.LaunchSpec("FT_BASE", 64))):
+                with self.subTest(width=width, rows=rows):
+                    self.assertEqual(
+                        m._select_layernorm_launch(rows, width, 1, 40, ub_bytes=196608, wide_rms_mode="bf16_post_gate"),
+                        spec,
+                    )
+
     def test_invalid_shape_and_resource_inputs_fail_closed(self):
         m = self.mod
         with self.assertRaises(m.DispatchConfigError):

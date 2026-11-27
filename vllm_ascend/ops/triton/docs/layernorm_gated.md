@@ -8,10 +8,10 @@
     - RMSNorm: `rstd = rsqrt(sum(x^2) / N_group + eps)`, `y = x * rstd * weight + bias`; bias is omitted when absent.
     - With `z`, let `gate(z) = z * sigmoid(z)` for `swish`/`silu` (default `swish`), or `gate(z) = sigmoid(z)` for `sigmoid`. Apply `x *= gate(z)` before normalization when `norm_before_gate=False`, or `y *= gate(z)` after the affine transform when true.
 - **Algorithm flow** (rows and groups are independent):
-  1. Validate the two-dimensional input layout, allocate output/statistics, and select a BASE row tile or HOIST32 execution.
-  2. BASE processes BM16 or BM64 row tiles. HOIST32 uses BM32 tiles in a grid-stride loop with the grid capped at the vector-core count; weight and optional bias are loaded before the loop.
+  1. Validate the two-dimensional input layout, select a row tile and execution path, and allocate output/statistics.
+  2. BASE processes one row tile per program. HOIST uses a grid-stride loop with the grid capped at the vector-core count and loads the weight and optional bias before the loop.
   3. Normalize and apply the affine transform and optional gate in fp32, then store masked outputs and group-major statistics.
-- **Supported modes**: Ascend NPU inference with LayerNorm or RMSNorm, optional bias, and pre/post gate. The single-card test uses the Atlas A2/A3 device guard; the runtime selector introduces no product-name or dtype allowlist. Hardware and runtime coverage are reported with the source version in the PR test results.
+- **Supported modes**: Ascend NPU inference with LayerNorm or RMSNorm, optional bias, and pre/post gate. The wider adaptive tiles are specific to the gated RMSNorm modes below. Hardware and runtime coverage are reported with the source version in the PR test results.
 
 ## Parameters
 
@@ -34,21 +34,36 @@
 - `M` and `N_group` must be positive, and `N` divisible by `group_size`. `weight` and optional `bias` have shape `[N]`; optional `z` and `out` match `x`. All require contiguous last dimensions.
 - `G=N/N_group` counts normalization groups within each row. For GDN output normalization, `[T,H_local,D_v]` is flattened to `[M,N]` with `M=T*H_local` and `N=D_v`: each row is one token/value-head pair, and model heads do not become normalization groups. `group_size=None` gives `G=1`.
 - Statistics use group-major indexing `group*M+row`. Caller-provided `out` is reused and overwritten; input `x`, `weight`, `bias`, and `z` are otherwise read only. Allocate a separate `out`; overlapping output/input storage is not qualified. No caller-visible layout or dtype conversion is introduced by this wrapper. Device, dtype compatibility and non-overlapping storage remain caller preconditions inherited from the upstream wrapper.
-- Multi-group inputs retain BASE64. Single-group NPU inputs below width 128 use BASE16; width 128 uses HOIST32 when `4*ceil(M/32)>=P`, otherwise BASE16, where `P` is the initialized vector-core count. Widths 129–512 use BASE16 when the UB getter reports at least 192 KiB; other inputs retain BASE64.
+- Multi-group inputs use BASE with BM64. Single-group NPU inputs below width 128 use BASE with BM16. Width 128 uses HOIST with BM32 when `4 * ceil(M/32) >= P`, otherwise BASE with BM16, where `P` is the initialized vector-core count.
 - Single-group NPU calls require device properties initialized through the existing `init_device_properties_triton()` contract. The UB getter uses the detected device property or its existing compatibility default. Grouped calls do not query these properties.
-- The single-group BASE16 resource envelope ends at `N_group=512` (`BLOCK_N<=512`). Wider groups retain BASE64 and may still overflow UB; this change does not make them resource-safe. The limit applies to per-group width, not total `N`. BASE's existing `65536 / element_size` feature-width guard is separate from the compiler's full-tile UB limit.
+- BASE's existing `65536 / element_size` feature-width guard is separate from the compiler's full-tile UB limit.
 - Forward inference only; positive finite `eps` and finite floating inputs are the intended domain. There is no backward implementation in this module. Graph replay and full-model qualification are not established by the recorded single-operator tests.
+
+## Adaptive row tiles
+
+For single-group NPU inputs, the table applies when `P=40` and the UB getter reports at least 192 KiB. It covers bias-free RMSNorm with SiLU gating (`swish` or `silu`), matching dtypes for `x`, `weight` and `z`, contiguous rows for `x` and `z`, and an output allocated by the wrapper.
+
+| Mode | `N_group` | Rounded column tile `BLOCK_N` | BASE row tile | HOIST row tile |
+| --- | --- | --- | --- | --- |
+| BF16, normalize then gate | 257–512 | 512 | 16 | 8 |
+| BF16, normalize then gate | 513–1024 | 1024 | 4 | 4 |
+| BF16, normalize then gate | 1025–2048 | 2048 | 4 | 4 |
+| BF16, normalize then gate | 2049–4096 | 4096 | 2 | 2 |
+| BF16, normalize then gate | 4097–8192 | 8192 | 1 | — |
+| FP16, gate then normalize | 513–1024 | 1024 | 4 | — |
+
+Where a HOIST tile is listed, the selector uses it when `ceil(M/P) >= 512`. This threshold estimates the row workload per vector core. The selected tile also has to fit signed 32-bit row and column offsets, including padded lanes. Inputs outside the table or its guards follow the existing dispatch. For widths 129–512 this uses BASE with BM16 when the UB getter reports at least 192 KiB. The remaining inputs in that width range and wider inputs outside the table use BASE with BM64 and may overflow UB.
 
 ## Origin and Differences
 
 - **Origin**: The existing vLLM-Ascend gated normalization implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial; see the source-file header.
 - **Differences**:
-    - NPU adaptation for performance: selects smaller BASE row tiles for eligible single-group inputs and uses persistent execution with parameter reuse for suitable N128 workloads.
-    - The public signature, activation validation and BASE kernel are preserved. HOIST implements both activation IDs without changing the default swish arithmetic, normalization, output aliasing or statistics layout. Grouped inputs keep the original BASE64 launch. No adaptive tiling, wider HOIST routes or new resource getters are introduced.
+    - NPU adaptation: selects smaller BASE row tiles for eligible inputs and uses persistent execution with parameter reuse for suitable workloads.
+    - The wider dispatch reuses the existing BASE and HOIST kernels and initialized device-property getters. Both activation IDs, the public signature and statistics layout are preserved.
 
 ## Test Cases
 
-The single-card test compares output and group-major statistics against a CPU fp32 reference. It covers LayerNorm/RMSNorm, optional bias/gate, all activation names, pre/post gating, grouping, caller-provided `out`, BASE16/64, the HOIST32 dispatch boundary, N192/N512 resource-envelope points, and flattened GDN shapes including M20449/N128. Synthetic boundaries supplement model-shape coverage; they do not establish all reachable model configurations.
+The single-card test compares output and group-major statistics against a CPU fp32 reference. It covers LayerNorm/RMSNorm, optional bias/gate, all activation names, pre/post gating, grouping, caller-provided `out`, the width-128 HOIST boundary, N192/N512 resource-envelope points, and flattened GDN shapes including M20449/N128. On devices matching the resource guard it also checks the public wrapper's wide BASE and HOIST launches as well as their numerical results.
 
 For every compared tensor, both finite-value checks and both contribution-guide accuracy conditions must pass: at least 99% of elements satisfy `abs(actual-reference) <= atol + rtol*abs(reference)`, and the maximum absolute error does not exceed the bound below.
 
