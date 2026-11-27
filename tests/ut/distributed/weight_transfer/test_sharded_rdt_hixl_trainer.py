@@ -104,10 +104,11 @@ class _FakeProducerServer:
     def inflight(self):
         return self._inflight_groups
 
-    def begin_sync(self, live_count, live_consumer_ids=None):
+    def begin_sync(self, live_count, live_consumer_ids=None, sync_idx=None):
         self.order.append("begin")
         self.live_count = max(1, int(live_count))
         self.live_ids = live_consumer_ids
+        self.sync_idx = sync_idx
 
     def publish_group(self, group_idx, entries):
         self.order.append("publish")
@@ -437,6 +438,8 @@ def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
     )
     engine.send_weights()
     assert server.live_count == 1  # num_consumers=1 in the harness
+    if hasattr(engine, "_sync_idx"):
+        assert server.sync_idx == engine._sync_idx
     engine.send_weights(live_consumer_ids=[0])
     assert server.live_count == 1
 
@@ -448,9 +451,11 @@ class TestLiveCountPlumbing:
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
-        engine = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
-        engine._init_info = ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers)
-        engine.source = object()  # send_weights asserts a source is present
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            init_info=ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers),
+            client=RecordingClient(),
+            source=_rdt_source_two_layers(),
+        )
         received: list = []
         engine._send_weights_inner = lambda count, ids: received.append((count, ids))
         return engine, received

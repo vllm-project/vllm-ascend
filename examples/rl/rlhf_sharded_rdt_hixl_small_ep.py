@@ -53,11 +53,14 @@ builds it before ``fully_shard`` splits it: the default is ~29 GiB in bf16, so
 existing Ray cluster if there is one and otherwise starts its own.
 Uses ND expert weights (weight_nz_mode=0) for layerwise replay. Set
 RDT_RESULT_PATH to save the output comparisons and shutdown result as JSON.
+Set RDT_CHECKPOINT_VERIFY_DIR to a fresh shared directory to load a BF16
+checkpoint on both sides and verify every local parameter on every DP rank.
 """
 
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -123,9 +126,12 @@ class FSDPTrainWorker:
         # than a blend of independent inits -- the second sync's stability check
         # is only meaningful against coherent weights.
         torch.manual_seed(0)
-        config = AutoConfig.from_pretrained(model_name)
-        with torch.device("npu"):
-            model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+        if os.getenv("RDT_CHECKPOINT_VERIFY_DIR"):
+            model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to("npu")
+        else:
+            config = AutoConfig.from_pretrained(model_name)
+            with torch.device("npu"):
+                model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
@@ -163,6 +169,12 @@ class FSDPTrainWorker:
 
 def main():
     assert torch.npu.device_count() >= 4, "Select four NPUs before starting this example"
+    verify_dir = os.environ.get("RDT_CHECKPOINT_VERIFY_DIR")
+    if verify_dir:
+        Path(verify_dir).mkdir(parents=True, exist_ok=True)
+        verify_dir = tempfile.mkdtemp(prefix="hixl-", dir=Path(verify_dir).resolve())
+        os.environ["RDT_CHECKPOINT_VERIFY_DIR"] = verify_dir
+        print(f"[verify] per-rank checkpoint reports in {verify_dir}", flush=True)
     # Ship a minimal working_dir (this example dir) so Ray actors do NOT inherit
     # a workspace snapshot that shadows the editable vLLM install.
     runtime_env: dict[str, object] = {
@@ -172,6 +184,7 @@ def main():
     forwarded = {
         k: os.environ[k]
         for k in (
+            "RDT_CHECKPOINT_VERIFY_DIR",
             "HCCL_CONNECT_TIMEOUT",
             "HCCL_EXEC_TIMEOUT",
             "LD_PRELOAD",
@@ -229,13 +242,18 @@ def main():
     ray.get([w.get_rank.remote() for w in workers])
     print(f"[init] {FSDP_WORLD_SIZE} FSDP trainer workers ready (seeded weights).")
 
+    additional_config: dict[str, object] = {"weight_nz_mode": 0}
+    if verify_dir:
+        additional_config["hixl_checkpoint_verify_dir"] = verify_dir
     server = launch_vllm_serve(
         MODEL_NAME,
         tensor_parallel_size=INFERENCE_TP_SIZE,
         data_parallel_size=INFERENCE_DP_SIZE,
         enable_expert_parallel=True,
         port=VLLM_PORT,
+        load_format="auto" if verify_dir else "dummy",
         extra_args=[
+            *(["--worker-cls", "rdt_hixl_checkpoint_worker.CheckpointWorker"] if verify_dir else []),
             "--max-model-len",
             "128",
             "--max-num-seqs",
@@ -247,14 +265,14 @@ def main():
             "--all2all-backend",
             "allgather_reducescatter",
             "--additional-config",
-            json.dumps({"weight_nz_mode": 0}),
+            json.dumps(additional_config),
         ],
     )
     try:
         wait_for_server(VLLM_ENDPOINT, server)
 
         before = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
-        print("[generate] BEFORE sync (vLLM's own dummy init):")
+        print("[generate] BEFORE sync:")
         for p, t in zip(PROMPTS, before):
             print(f"  {p!r} -> {t!r}")
 
@@ -274,20 +292,24 @@ def main():
         for p, t in zip(PROMPTS, after):
             print(f"  {p!r} -> {t!r}")
 
-        # Sync again; replay must be stable, so generation must not move.
-        pause_generation(VLLM_ENDPOINT)
-        t0 = time.perf_counter()
-        ray.get([w.sync_weights.remote() for w in workers])
-        print(f"[sync] iter 1 took {time.perf_counter() - t0:.3f}s")
-        resume_generation(VLLM_ENDPOINT)
+        # The byte check also exercises the steady-state pipeline and ring wrap.
+        rounds = 5 if verify_dir else 2
+        for iteration in range(1, rounds):
+            pause_generation(VLLM_ENDPOINT)
+            t0 = time.perf_counter()
+            ray.get([w.sync_weights.remote() for w in workers])
+            print(f"[sync] iter {iteration} took {time.perf_counter() - t0:.3f}s")
+            resume_generation(VLLM_ENDPOINT)
         again = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
 
-        # Greedy decoding, so both comparisons are exact.
-        assert after != before, (
-            f"generation did not change across the weight sync, so the sync moved nothing: {before!r}"
-        )
-        assert again == after, f"a second sync changed generation, so replay is not stable: {after!r} then {again!r}"
-        print("[ok] weights moved on sync 0 and replay was stable on sync 1")
+        if verify_dir:
+            for rank in range(INFERENCE_DP_SIZE):
+                report = json.loads((Path(verify_dir) / f"rank-{rank}.json").read_text())
+                assert report["round"] == rounds and report["parameters"] > 0 and not report["mismatches"], report
+            assert after == before, "checkpoint generation changed after transfer"
+        else:
+            assert after != before, f"generation did not change across the weight sync: {before!r}"
+        assert again == after, f"repeated sync changed generation: {after!r} then {again!r}"
         # Disconnect consumers before deregistering the trainer's source rings.
         HTTPVLLMWeightSyncClient(VLLM_ENDPOINT).shutdown_weight_transfer_engine()
         ray.get([w.close.remote() for w in workers])
@@ -301,6 +323,7 @@ def main():
                         "after": after,
                         "again": again,
                         "changed": after != before,
+                        "verified_rounds": rounds if verify_dir else 0,
                         "stable": again == after,
                         "shutdown": True,
                     },

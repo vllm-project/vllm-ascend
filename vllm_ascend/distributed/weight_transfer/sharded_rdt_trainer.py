@@ -139,63 +139,19 @@ class _HixlProducerServer(_RDTProducerServer):
 
 class ShardedRDTHixlTrainerWeightTransferEngine(ShardedRDTTrainerWeightTransferEngine):
     def _pack_group_for_export(self, held: list, slot_idx: int) -> tuple:
-        """Copy ``held`` into ring slot ``slot_idx``; return ``(storages, views,
-        refs)`` in the same shape the per-storage path returns, but with ONE
-        storage. Views are built exactly as ``publish_group`` rebuilds them, so
-        the two sides cannot disagree about layout.
-
-        Slot safety is not the credit gate alone: that bounds how MANY groups
-        are unfreed, not the order they free in, and barriers do complete out of
-        order. The caller takes ``slot_idx`` from a pool keyed by live group
-        (``_slot_of_group`` / ``_free_slots``); ``_drop_inflight`` returns a slot
-        only once its group is freed everywhere.
-        """
-        offsets: list[int] = []
-        cur = 0
-        for _name, t in held:
-            cur = (cur + 15) & ~15  # 16B keeps every element size we ship aligned
-            offsets.append(cur)
-            cur += t.numel() * t.element_size()
-        need = max(16, (cur + 15) & ~15)
-
+        # Seed upstream's ring with a valid NPU IPC export. The parent
+        # then owns view layout, copy order and reference lifetimes.
+        need = max(16, sum((tensor.numel() * tensor.element_size() + 15) & ~15 for _, tensor in held))
         slot = self._export_ring[slot_idx]
         device = held[0][1].device
         if slot is None or slot.numel() < need or slot.device != device:
-            self._export_ring[slot_idx] = self._export_ring_args[slot_idx] = None
             slot = torch.empty(need, dtype=torch.uint8, device=device)
             self._export_ring[slot_idx] = slot
-
-        ust = slot.untyped_storage()
-        sid = ust.data_ptr()
-        reduce_args = self._export_ring_args[slot_idx]
-        if reduce_args is None:
-            base = torch.empty(0, dtype=torch.uint8, device=device)
-            base.set_(ust, 0, (ust.nbytes(),))
-            _rebuild, reduce_args = _reduce_npu_tensor(base)
-            self._export_ring_args[slot_idx] = reduce_args
-
-        views: dict[str, tuple] = {}
-        refs: dict[str, torch.Tensor] = {}
-        for (name, t), off in zip(held, offsets):
-            shape, esz = tuple(t.shape), t.element_size()
-            stride = self._contig_stride(shape)
-            dst = torch.as_strided(slot.view(t.dtype), shape, stride, off // esz)
-            dst.copy_(t)
-            refs[name] = dst
-            views[name] = (
-                sid,
-                str(t.dtype).split(".")[-1],
-                list(shape),
-                list(stride),
-                off // esz,
-            )
-        # The producer sidecar reads this slot from another process over NPU
-        # IPC, while these copies are merely enqueued on this rank's stream;
-        # nothing orders the two. Without this sync it packs bytes the copy has
-        # not written yet -- silent corruption, and only for ring-packed tensors.
-        if slot.device.type == "npu":
-            torch.accelerator.current_stream(slot.device).synchronize()
-        return {sid: reduce_args}, views, refs
+            self._export_ring_args[slot_idx] = None
+        if self._export_ring_args[slot_idx] is None:
+            _, args = _reduce_npu_tensor(slot)
+            self._export_ring_args[slot_idx] = args
+        return super()._pack_group_for_export(held, slot_idx)
 
     def _publish_async(self, group_idx: int, entries):
         # The sidecar opens NPU IPC storage on a different stream/process.
@@ -262,7 +218,10 @@ class ShardedRDTHixlTrainerWeightTransferEngine(ShardedRDTTrainerWeightTransferE
         # The live IDS ride along with the count: the free barrier needs only
         # the count, but the slot-sharing rendezvous needs to know WHICH
         # consumers are live.
-        self._rpc("begin_sync", live_count, live_ids)
+        if hasattr(self, "_sync_idx"):
+            self._rpc("begin_sync", live_count, live_ids, self._sync_idx)
+        else:  # v0.34 predates tagged free signals.
+            self._rpc("begin_sync", live_count, live_ids)
         # Every owner reaches a group in the same (metadata) order, so their
         # shared gathers line up.
         groups = self._iter_owned_groups()

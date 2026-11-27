@@ -10,20 +10,21 @@ from pathlib import Path
 
 
 def test_sharded_rdt_hixl(tmp_path):
+    import torch
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from tokenizers.pre_tokenizers import Whitespace
-    from transformers import PreTrainedTokenizerFast, Qwen3MoeConfig
+    from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3MoeConfig
     from vllm.utils.network_utils import get_open_port
 
     model_path = tmp_path / "tiny-moe"
     model_path.mkdir()
-    Qwen3MoeConfig(
+    config = Qwen3MoeConfig(
         vocab_size=128,
         hidden_size=1024,
         intermediate_size=256,
         moe_intermediate_size=128,
-        num_hidden_layers=1,
+        num_hidden_layers=3,
         num_attention_heads=8,
         num_key_value_heads=4,
         head_dim=128,
@@ -34,18 +35,27 @@ def test_sharded_rdt_hixl(tmp_path):
         tie_word_embeddings=False,
         bos_token_id=1,
         eos_token_id=2,
-    ).save_pretrained(model_path)
+    )
+    torch.manual_seed(7)
+    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+    model.save_pretrained(model_path)
+    del model
     vocab = {"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "[UNK]": 3}
     vocab.update({f"token{i}": i for i in range(4, 128)})
     tokenizer = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
     tokenizer.pre_tokenizer = Whitespace()
     PreTrainedTokenizerFast(
         tokenizer_object=tokenizer, pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]"
-    ).save_pretrained(model_path)
+    )
+    torch.manual_seed(7)
+    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+    model.save_pretrained(model_path)
+    del model
     example = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_sharded_rdt_hixl_small_ep.py"
     env = dict(
         os.environ,
         RDT_MODEL=str(model_path),
+        RDT_CHECKPOINT_VERIFY_DIR=str(tmp_path / "hashes"),
         RDT_VLLM_PORT=str(get_open_port()),
         RDT_RESULT_PATH=str(tmp_path / "result.json"),
     )
@@ -55,4 +65,4 @@ def test_sharded_rdt_hixl(tmp_path):
         )
     assert result.returncode == 0, (tmp_path / "example.log").read_text()
     evidence = json.loads((tmp_path / "result.json").read_text())
-    assert evidence["changed"] and evidence["stable"] and evidence["shutdown"]
+    assert evidence["verified_rounds"] == 5 and evidence["stable"] and evidence["shutdown"]

@@ -31,6 +31,7 @@ def launch_vllm_serve(
     enable_expert_parallel: bool = False,
     port: int = 8000,
     gpu_memory_utilization: float = 0.7,
+    load_format: str = "dummy",
     extra_args: list[str] | None = None,
 ) -> subprocess.Popen:
     """Start ``vllm serve`` for the RDT inference fleet.
@@ -51,7 +52,7 @@ def launch_vllm_serve(
         str(port),
         "--enforce-eager",
         "--load-format",
-        "dummy",
+        load_format,
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--distributed-executor-backend",
@@ -78,6 +79,8 @@ def launch_vllm_serve(
         os.environ,
         VLLM_SERVER_DEV_MODE="1",
     )
+    if os.getenv("RDT_CHECKPOINT_VERIFY_DIR"):
+        env["PYTHONPATH"] = os.pathsep.join((os.path.dirname(os.path.abspath(__file__)), env.get("PYTHONPATH", "")))
     # Pin the child to THIS Ray cluster. vLLM's ray DP backend reaches Ray
     # through a bare ``ray.init()``, which STARTS a cluster rather than
     # attaching, so wherever we started Ray ourselves (a bare CI runner) the

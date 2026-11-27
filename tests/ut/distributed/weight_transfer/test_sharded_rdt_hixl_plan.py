@@ -1436,3 +1436,81 @@ def test_ep_routing_buffer_is_not_checkpoint_data(monkeypatch):
     assert layer.weight.is_meta
     assert layer.expert_ids_per_ep_rank is routing
     assert not routing.is_meta
+
+
+def test_hixl_init_commits_plan_and_rolls_back_failed_reconnect(monkeypatch):
+    """Run the installed vLLM init path on CPU up to the first replay dispatch."""
+    from unittest.mock import Mock
+
+    import ray
+    from vllm.distributed.weight_transfer import sharded_rdt_engine as upstream
+
+    from vllm_ascend.distributed.weight_transfer import sharded_rdt_engine as ascend
+
+    sessions: list[Mock] = []
+
+    def make_session(device):
+        session = Mock(endpoint=f"consumer-{len(sessions)}")
+        session.allocate.side_effect = lambda size: torch.empty(size, dtype=torch.uint8)
+        sessions.append(session)
+        return session
+
+    first, second = Mock(), Mock()
+    router = Mock(num_producers=2, _actors=[first, second])
+    router.reserve_serve_buffers.return_value = []
+
+    def bind(engine, init_info, *args):
+        state = args[0] if args else engine
+        state._router = router
+
+    base = upstream.ShardedRDTWeightTransferEngine
+    monkeypatch.setattr(ascend, "HixlSession", make_session)
+    monkeypatch.setattr(ray, "get", lambda ref, **kw: ref)
+    monkeypatch.setattr(upstream, "check_ray_rdt_version", lambda *args: None)
+    monkeypatch.setattr(base, "_resolve_producers", bind)
+    monkeypatch.setattr(base, "_bake", lambda *args: None)
+    monkeypatch.setattr(ascend.ShardedRDTHixlWeightTransferEngine, "_ensure_proc_worker", lambda *args: None)
+    cfg = SimpleNamespace(
+        parallel_config=SimpleNamespace(distributed_executor_backend="ray", enable_eplb=False), model_config=None
+    )
+    engine = ascend.ShardedRDTHixlWeightTransferEngine(None, cfg, torch.device("cpu"), torch.nn.Identity())
+    info = SimpleNamespace(
+        names=["w"],
+        group_lens=[1],
+        staging_device="gpu",
+        stages_in_flight=2,
+        num_rdt_buffers=2,
+        buffer_presize_gb=0.0,
+        num_consumers=2,
+    )
+    plan = SimpleNamespace(num_streams=2, chunks=[SimpleNamespace(owner=0, pack_bytes=32, keys=[("w", ())])])
+    monkeypatch.setattr(engine, "_build_call_plan", lambda *args: plan)
+    engine.init_transfer_engine(info)
+    slots = 4 if hasattr(base, "_size_pool") else 2
+    assert sessions[0].allocate.call_count == slots
+    assert all(slot[torch.uint8].numel() >= 32 for slot in engine._dest_buffers)
+    replay = Mock()
+    monkeypatch.setattr(engine, "_run_chunk_pipeline", replay)
+    engine.receive_weights(SimpleNamespace(sync_idx=0))
+    replay.assert_called_once_with(plan)
+
+    # Fail after producer 1 has granted its lease. The previous endpoint's
+    # registration and plan must still be usable.
+    second.hixl_add_consumer.remote.side_effect = RuntimeError("lease failed")
+    with pytest.raises(RuntimeError, match="lease failed"):
+        engine.init_transfer_engine(info)
+    sessions[1].close.assert_called_once()
+    for actor in (first, second):
+        actor.hixl_remove_consumer.remote.assert_called_with("consumer-1")
+    sessions[0].close.assert_not_called()
+    assert engine._cached_plan is plan
+    engine.receive_weights(SimpleNamespace(sync_idx=1))
+    assert replay.call_count == 2
+
+    second.hixl_add_consumer.remote.side_effect = None
+    engine.init_transfer_engine(info)
+    sessions[0].close.assert_called_once()
+    first.hixl_remove_consumer.remote.assert_called_with("consumer-0")
+    assert sessions[2].allocate.call_count == slots
+    engine.shutdown()
+    sessions[2].close.assert_called_once()
