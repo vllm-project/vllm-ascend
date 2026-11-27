@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.utils import supports_bailing_v3_kda
 
 
 class IndexerWrapper(nn.Module):
@@ -195,6 +196,15 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
+        self.output_width = hidden_size
+        passthrough = False
+        if supports_bailing_v3_kda(get_current_vllm_config()):
+            # The model gates rank-local attention heads before its dense projection.
+            from vllm.model_executor.models.bailing_moe_v3 import _IdentityProjection
+
+            passthrough = isinstance(mla_modules.o_proj, _IdentityProjection)
+            if passthrough:
+                self.output_width = num_heads * v_head_dim
         self.output_token_shard_size = 1
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -253,6 +263,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            output_projection_passthrough=passthrough,
             g_proj=mla_modules.g_proj,
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
@@ -294,7 +305,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        hidden_dim = self.hidden_size
+        hidden_dim = self.output_width
         num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
         output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
