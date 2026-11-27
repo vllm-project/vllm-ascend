@@ -117,10 +117,17 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         self._share_qsa_topk_buffers = not use_pcp and not parallel.use_ubatching
         with share_target_topk_buffers(self._share_qsa_topk_buffers):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
+        model_layers = self.layers[self.start_layer : self.end_layer]
+        # The host metadata builder can prepare the first block-table column
+        # once per step.  Opt every Qwen4Exp GDN layer into that shared vector
+        # instead of slicing/copying it again in every CausalConv1d call.
+        for layer in model_layers:
+            if hasattr(layer, "linear_attn"):
+                layer.linear_attn.use_contiguous_conv_indices = True
         if use_pcp:
             from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
 
-            for layer in self.layers[self.start_layer : self.end_layer]:
+            for layer in model_layers:
                 if hasattr(layer, "linear_attn"):
                     shard_gdn_heads_over_pcp(layer.linear_attn, parallel)
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
