@@ -196,6 +196,11 @@ For main branch, vLLM Ascend should work with vLLM main branch and latest 1 or 2
 
 - Both main branch and target vLLM release, such as the vLLM main branch and vLLM 0.8.4, are tested by Ascend E2E CI.
 - To make sure that code changes are compatible with the latest 1 or 2 vLLM releases, vLLM Ascend introduces a version check mechanism inside the code. It checks the version of the installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it may indicate that they have installed a dev or editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
+- The version check compares the installed vLLM's public version for **exact equality** with a release line (local build segments such as `+empty` are stripped first). A development build can therefore have a valid PEP 440 version that still does not select the release-gated code. On the 0.32 release lane, for example, vLLM `0.32.1.dev27+g43d3f1dd7.empty` is valid, but it is not `0.32.0`, so the `0.32.0`-gated imports are skipped and startup may fail with an import error such as `ModuleNotFoundError: No module named 'vllm.v1.core.kv_cache_planning'`. For a dev build that tracks a release branch, set `VLLM_VERSION` to that release line before starting vllm-ascend:
+  ```bash
+  export VLLM_VERSION=0.32.0
+  ```
+  `VLLM_VERSION` only overrides the value used by vllm-ascend's version checks; it does not install or change the vLLM package.
 - Document changes should be compatible with the latest 1 or 2 vLLM releases. Notes should be added if there are any breaking changes.
 
 ## Document branch policy

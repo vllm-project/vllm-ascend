@@ -150,6 +150,8 @@ For each release, we'll publish the performance test and accuracy test report in
 
 The problem is usually caused by the installation of a development or editable version of the vLLM package. In this case, we provide the environment variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the environment variable `VLLM_VERSION` to the version of the vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
 
+A development build can also have a valid PEP 440 version that does not match the release line vllm-ascend tracks. On the 0.32 release lane, for example, `0.32.1.dev27+g43d3f1dd7.empty` is valid, but code gated on `0.32.0` is not selected, and startup may fail with an import error such as `ModuleNotFoundError: No module named 'vllm.v1.core.kv_cache_planning'`. In that case set `VLLM_VERSION` to the release line being tracked (for example, `export VLLM_VERSION=0.32.0`) before starting the service. `VLLM_VERSION` only controls vllm-ascend's version checks; it does not install or change the vLLM package. See the [versioning policy](community/versioning_policy.md#backward-compatibility) for details.
+
 ### 12. How to handle the out-of-memory issue?
 
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
