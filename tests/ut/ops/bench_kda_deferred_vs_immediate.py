@@ -38,6 +38,12 @@ from this checkout's operators instead of two checkouts:
 The deferred path runs in steady state (every verify replays the previous
 step's accepted counts), which is what the engine does between flushes.
 
+The ``Gate`` / ``Gated reduction`` columns run the production acceptance
+gate over each pattern's counts: when its EMA of the fully-accepting row
+share crosses the threshold the engine folds immediately instead of
+deferring, so the gated reduction is the arm the gate picks (gate-on steps
+cost the immediate path plus a one-warp defer kernel).
+
 Run under ``ASCEND_RT_VISIBLE_DEVICES`` to pick the card (device npu:0).
 """
 
@@ -63,6 +69,7 @@ from torch_npu.profiler import (
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 
 import vllm_ascend.ops.triton.kda.recoverssm as recoverssm_module
+from vllm_ascend.models.glm5next.recoverssm_deferred import RecoverSSMAcceptanceGate
 from vllm_ascend.ops.triton.kda.recoverssm import (
     KDARecoverSSMCommitContext,
     kda_recoverssm_verify,
@@ -115,6 +122,23 @@ def acceptance_counts(pattern: str, batch: int, spec_query_len: int) -> list[int
     if pattern == "0/full clustered":
         return [0 if index < batch // 2 else spec_query_len for index in range(batch)]
     raise ValueError(f"unknown acceptance pattern: {pattern}")
+
+
+def gate_arm(shape: tuple, pattern: str) -> str:
+    """The arm the acceptance gate settles on for a pattern's counts.
+
+    Runs the production gate object over the pattern's acceptance counts
+    until its EMA converges, then reports the arm an engine step would take.
+    """
+    batch, _, _, _, _, spec_query_len = shape
+    counts = torch.tensor(
+        acceptance_counts(pattern, batch, spec_query_len), dtype=torch.int32, device="npu"
+    )
+    gate = RecoverSSMAcceptanceGate(batch, "npu")
+    for _ in range(16):
+        gate.update(counts, None, spec_query_len, batch)
+    torch.npu.synchronize()  # land the host mirror before reading the gate
+    return "immediate" if gate.engaged() else "deferred"
 
 
 @dataclass
@@ -525,6 +549,8 @@ def main() -> None:
     print(f"operators: {recoverssm_module.__file__}")
     print("immediate: plain verify + per-step state commit")
     print("deferred : fused-replay verify + one-warp defer commit")
+    print("gated    : the arm the acceptance gate settles on for the pattern;")
+    print("           gate-on steps add the one-warp defer kernel to immediate")
     print(f"timing: torch_npu.profiler kernel durations (traces in {TRACE_ROOT}/)")
     print(
         f"{args.pairs} ABBA pairs ({2 * args.pairs} executions per path),"
@@ -538,26 +564,32 @@ def main() -> None:
                 continue
             stats = measure_case(args, shape, pattern)
             imm, deferred = stats["immediate"], stats["deferred"]
+            picked = gate_arm(shape, pattern)
+            gated = imm if picked == "immediate" else deferred
             reduction = (imm[2] - deferred[2]) / imm[2] * 100
-            rows.append((shape_label(shape), pattern, imm, deferred, reduction))
+            gated_reduction = (imm[2] - gated[2]) / imm[2] * 100
+            rows.append(
+                (shape_label(shape), pattern, imm, deferred, reduction, picked, gated_reduction)
+            )
             print(
                 f"{label}: immediate total {imm[2]:.2f} µs |"
                 f" deferred total {deferred[2]:.2f} µs |"
-                f" reduction {reduction:.2f}%",
+                f" reduction {reduction:.2f}% |"
+                f" gate picks {picked} (gated reduction {gated_reduction:.2f}%)",
                 flush=True,
             )
     print(
         "| B / L / H / Q | Acceptance | immediate verify / layer"
         " | deferred verify / layer | immediate commit | deferred commit"
-        " | immediate total | deferred total | Total reduction |"
+        " | immediate total | deferred total | Total reduction | Gate | Gated reduction |"
     )
-    print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
-    for label, pattern, imm, deferred, reduction in rows:
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|")
+    for label, pattern, imm, deferred, reduction, picked, gated_reduction in rows:
         print(
             f"| {label} | {pattern} | {imm[0]:.2f} | {deferred[0]:.2f}"
             f" | {imm[1]:.2f} | {deferred[1]:.2f}"
             f" | {imm[2]:.2f} | {deferred[2]:.2f}"
-            f" | {reduction:.2f}% |"
+            f" | {reduction:.2f}% | {picked} | {gated_reduction:.2f}% |"
         )
 
 

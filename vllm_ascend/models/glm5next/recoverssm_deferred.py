@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
@@ -24,9 +25,58 @@ if TYPE_CHECKING:
 
 FP32_DEFERRED = "fp32_deferred"
 
+# Deferral saves the fold launch but pays a per-token premium in the fused
+# replay: rows accepting their whole window carry the whole premium and none
+# of the savings. Past this share of such rows, fold immediately instead.
+RECOVERSSM_FULL_ROW_SHARE = 0.25
+# Per-step EMA decay of the share estimate; acceptance is autocorrelated, and
+# every gate flip is a free transition (eager rows zero their pending replay).
+RECOVERSSM_SHARE_DECAY = 0.75
+
 # The fused replay plan handed to ``kda_recoverssm_verify``:
 # (commit_lens, final_state_indices, boundary_state_indices, boundary_recovery_lens).
 ReplayPlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+class RecoverSSMAcceptanceGate:
+    """Tracks the share of spec rows accepting their whole speculative window.
+
+    The share is an EMA kept on the device (updated from the commit's
+    acceptance tensor with the commit plan's row indexing) and mirrored to
+    host memory with an asynchronous copy: the build-side read lags by the
+    enqueue depth, which a slowly moving share tolerates, and never
+    synchronizes the pipeline.
+    """
+
+    def __init__(self, max_rows: int, device: torch.device) -> None:
+        self.share = torch.zeros((), dtype=torch.float32, device=device)
+        self.share_host = torch.zeros((), dtype=torch.float32, pin_memory=is_pin_memory_available())
+        self.eager_ones = torch.ones(max_rows, dtype=torch.int32, device=device)
+
+    def update(
+        self,
+        num_accepted: torch.Tensor,
+        request_indices: torch.Tensor | None,
+        spec_query_len: int,
+        batch: int,
+    ) -> None:
+        """Fold this step's acceptance into the share estimate."""
+        if batch <= 0:
+            return
+        rows = num_accepted[:batch]
+        if request_indices is not None:
+            rows = num_accepted[request_indices[:batch].long()]
+        full = (rows >= spec_query_len).float().mean()
+        self.share.mul_(RECOVERSSM_SHARE_DECAY).add_(full, alpha=1.0 - RECOVERSSM_SHARE_DECAY)
+        self.share_host.copy_(self.share, non_blocking=True)
+
+    def engaged(self) -> bool:
+        """Whether the next commit should fold every row now."""
+        return float(self.share_host) >= RECOVERSSM_FULL_ROW_SHARE
+
+    def eager_mask(self, rows: int) -> torch.Tensor:
+        """The all-eager mask the engaged gate hands the commit."""
+        return self.eager_ones[:rows]
 
 
 @dataclass
@@ -47,6 +97,7 @@ class KDARecoverSSMDeferred:
     context: KDADeferredCommitContext = field(repr=False, compare=False)
     state_indices: torch.Tensor = field(repr=False, compare=False)
     layer_names: list[str] = field(default_factory=list, repr=False, compare=False)
+    gate: RecoverSSMAcceptanceGate | None = field(default=None, repr=False, compare=False)
     started: bool = False
     flushed: bool = False
 
@@ -116,6 +167,7 @@ class DeferredRecoverSSMState(RecoverSSMState):
     def __init__(self, max_num_reqs: int, device: torch.device) -> None:
         super().__init__()
         self.pending = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        self.gate = RecoverSSMAcceptanceGate(max_num_reqs, device)
 
     def add_request(self, req_index: int) -> None:
         # A new or resumed request starts from a committed (prefilled) state.
@@ -137,6 +189,7 @@ class DeferredRecoverSSMState(RecoverSSMState):
                     continue
                 if getattr(builder, "recoverssm_pending", None) is not self.pending:
                     install_builder(builder, self.pending)
+                builder.recoverssm_gate = self.gate
                 builder.recoverssm_request_slots = idx_mapping
 
 
@@ -193,6 +246,14 @@ class _DeferredStepCommit:
 
     def commit(self, *args, **kwargs) -> None:
         deferred = self.deferred
+        gate = deferred.gate
+        if gate is not None and len(args) >= 2:
+            gate.update(
+                args[0],
+                kwargs.get("request_indices"),
+                self.context.spec_query_len,
+                args[1].shape[0],
+            )
         self.context.commit(
             *args,
             **kwargs,
@@ -331,6 +392,11 @@ def _build_deferred(
             near = (low < 0) | (low.clamp(min=0) // block != high // block)
         if bool(near.any()):
             eager = async_tensor_h2d(near.to(torch.int32), device=state_indices.device)
+    gate = getattr(builder, "recoverssm_gate", None)
+    if gate is not None and gate.engaged() and num_spec_decodes > 0:
+        # The gate outranks the boundary mask: every row folds now, and each
+        # row's pending replay is zeroed so the next verify runs plain.
+        eager = gate.eager_mask(num_spec_decodes)
     return KDARecoverSSMDeferred(
         record_rows=rows,
         pending=pending,
@@ -338,4 +404,5 @@ def _build_deferred(
         context=context,
         state_indices=state_indices[:num_spec_decodes],
         layer_names=list(builder.layer_names),
+        gate=gate,
     )
