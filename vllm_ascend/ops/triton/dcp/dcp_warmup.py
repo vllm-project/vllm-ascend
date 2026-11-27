@@ -20,7 +20,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     end_a3_static_warmup,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    _fused_dcp_lse_combine_batched_kernel,
+    _fused_dcp_lse_combine_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
@@ -47,7 +47,7 @@ _DCP_KERNELS = (
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_kernel, ("num_heads", "num_tokens")),
     DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_static_kernel),
-    DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
+    DcpJitKernel(_fused_dcp_lse_combine_head_scatter_kernel),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
     DcpJitKernel(_pack_token_peer_tiled, ("tokens",)),
@@ -64,7 +64,7 @@ class _Tensor(TritonWarmupTensor):
         return len(self.shape)
 
 
-def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores):
+def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores, dcp_size):
     """Sample all scalar-specialization residues within each dispatch interval.
 
     Every varying stride/size is an integer multiple of T. Between dispatch
@@ -72,16 +72,13 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
     pointer-alignment keys. No capture-size list or Cartesian stride product is
     needed. Include integer-width boundaries for large configured capacities.
     """
-    ranks = heads // local_heads
-    rank_min_rows = max(triton.cdiv(2 * vector_cores, ranks), ranks)
+    rank_min_rows = max(triton.cdiv(2 * vector_cores, dcp_size), dcp_size)
     cuts = {
         triton.cdiv(rank_min_rows, local_heads),
         1,
         2,
         128,
         triton.cdiv(8 * vector_cores, heads),
-        triton.cdiv(4 * vector_cores, local_heads),
-        triton.cdiv(16 * vector_cores, local_heads),
         _FULL_PACK_VECTOR_ELEMENTS // local_heads + 1,
         max_tokens + 1,
     }
@@ -224,7 +221,7 @@ def register_dcp_warmup(
         begin_a3_static_warmup(static_shapes)
 
     token_list = sorted(
-        set(_token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores))
+        set(_token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores, dcp_size))
         | {key[1] for key in static_shapes}
     )
     layouts = ("token_major", "head_major_lse", "head_major") if mla else ("token_major",)
