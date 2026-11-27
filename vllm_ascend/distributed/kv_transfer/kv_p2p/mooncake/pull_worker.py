@@ -11,11 +11,13 @@ from contextlib import suppress
 from typing import Any, TypeVar
 
 import msgspec
+import numpy as np
 import torch
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -46,7 +48,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
-    group_concurrent_contiguous,
     worker_rank_to_dcp_rank,
     zmq_ctx,
 )
@@ -905,9 +906,16 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
-            local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+            # P publishes a window-sized suffix. Recover its logical position
+            # before intersecting it with D's unhashed suffix; prefix hits and
+            # different windows in a uniform group need not start together.
+            remote_start_idx = max(0, cdiv(remote_num_prompt_tokens, remote_block_size) - len(remote_group_block_ids))
+            start_idx = max(local_unhashed_start_idx, remote_start_idx)
+            local_kernel_block_ids = self._expand_block_ids(
+                local_group_block_ids[start_idx - local_unhashed_start_idx :], local_block_size_scale
+            )
             remote_kernel_block_ids = self._expand_block_ids(
-                remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
+                remote_group_block_ids[start_idx - remote_start_idx :], remote_block_size_scale
             )
         elif isinstance(spec, FullAttentionSpec):
             if is_dcp_transfer:
@@ -1025,9 +1033,22 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         ]
 
     @staticmethod
+    def _prepare_block_transfer_ranges(
+        local_block_ids: list[int], remote_block_ids: list[int], coalesce: bool
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return local/remote start block IDs and block counts for each transfer range."""
+        local_ids = np.asarray(local_block_ids, dtype=np.uint64)
+        remote_ids = np.asarray(remote_block_ids, dtype=np.uint64)
+        if not coalesce or not local_ids.size:
+            return local_ids, remote_ids, np.ones(local_ids.size, dtype=np.uint64)
+        breaks = np.flatnonzero((np.diff(local_ids) != 1) | (np.diff(remote_ids) != 1)) + 1
+        starts = np.concatenate(([0], breaks))
+        lengths = np.diff(np.concatenate((starts, [local_ids.size]))).astype(np.uint64)
+        return local_ids[starts], remote_ids[starts], lengths
+
+    @staticmethod
     def _append_block_transfer_addresses(
-        local_block_groups: list[list[int]],
-        remote_block_groups: list[list[int]],
+        block_transfer_ranges: tuple[np.ndarray, np.ndarray, np.ndarray],
         local_base_addr: int,
         remote_base_addr: int,
         local_block_stride: int,
@@ -1038,14 +1059,40 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         length_list: list[int],
         local_inner_offset: int = 0,
         remote_inner_offset: int = 0,
+        address_components_cache: dict[tuple[str, tuple[str, bool] | None, int], Any] | None = None,
+        request_cache_key: tuple[str, bool] | None = None,
     ) -> None:
-        """Append addresses from block groups prepared for one request."""
-        if transfer_len <= 0:
+        """Append addresses from block transfer ranges prepared for one request."""
+        local_starts, remote_starts, block_counts = block_transfer_ranges
+        if transfer_len <= 0 or not local_starts.size:
             return
-        for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
-            src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
-            dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
-            length_list.append(transfer_len * len(local_block_group))
+        if local_starts.size == 1:
+            src_list.append(local_base_addr + int(local_starts[0]) * local_block_stride + local_inner_offset)
+            dst_list.append(remote_base_addr + int(remote_starts[0]) * remote_block_stride + remote_inner_offset)
+            length_list.append(transfer_len * int(block_counts[0]))
+            return
+        if address_components_cache is None:
+            address_components_cache = {}
+        # Byte offsets and lengths are shared across layers with matching layouts.
+        # Keep bases and head offsets outside the cache; cached arrays stay read-only.
+        local_key = ("local", request_cache_key, local_block_stride)
+        local_offsets = address_components_cache.get(local_key)
+        if local_offsets is None:
+            local_offsets = local_starts * np.uint64(local_block_stride)
+            address_components_cache[local_key] = local_offsets
+        remote_key = ("remote", request_cache_key, remote_block_stride)
+        remote_offsets = address_components_cache.get(remote_key)
+        if remote_offsets is None:
+            remote_offsets = remote_starts * np.uint64(remote_block_stride)
+            address_components_cache[remote_key] = remote_offsets
+        src_list.extend((local_offsets + np.uint64(local_base_addr + local_inner_offset)).tolist())
+        dst_list.extend((remote_offsets + np.uint64(remote_base_addr + remote_inner_offset)).tolist())
+        length_key = ("lengths", request_cache_key, transfer_len)
+        lengths = address_components_cache.get(length_key)
+        if lengths is None:
+            lengths = (block_counts * np.uint64(transfer_len)).tolist()
+            address_components_cache[length_key] = lengths
+        length_list.extend(lengths)
 
     def _append_spec_transfer_addresses(
         self,
@@ -1094,17 +1141,21 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return None
 
-        single_block_ids_by_request = {
-            request_id: (
-                [[block_id] for block_id in local_block_ids],
-                [[block_id] for block_id in remote_block_ids],
-            )
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
-        contiguous_block_ids_by_request = {
-            request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
+        # Scope all derived arrays/lists to this spec and remote transfer bucket.
+        address_components_cache: dict[tuple[str, tuple[str, bool] | None, int], Any] = {}
+        block_transfer_ranges_by_request: dict[tuple[str, bool], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+        def get_block_transfer_ranges(request_id: str, coalesce: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            # Some layouts only need single blocks (padding or partial heads).
+            # Build each required representation once and reuse it across layers.
+            key = (request_id, coalesce)
+            if key not in block_transfer_ranges_by_request:
+                local_ids, remote_ids = block_ids_by_request[request_id]
+                block_transfer_ranges_by_request[key] = self._prepare_block_transfer_ranges(
+                    local_ids, remote_ids, coalesce
+                )
+            return block_transfer_ranges_by_request[key]
+
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
             spec,
@@ -1141,16 +1192,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
-                    block_ids_to_transfer = (
-                        contiguous_block_ids_by_request
-                        if local_block_stride == remote_block_stride == local_block_len
-                        else single_block_ids_by_request
-                    )
+                    coalesce = local_block_stride == remote_block_stride == local_block_len
                     for request_id, _, _ in transfer_entries:
-                        local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
                         self._append_block_transfer_addresses(
-                            local_block_groups=local_block_groups,
-                            remote_block_groups=remote_block_groups,
+                            block_transfer_ranges=get_block_transfer_ranges(request_id, coalesce),
                             local_base_addr=local_base_addr,
                             remote_base_addr=remote_base_addr,
                             local_block_stride=local_block_stride,
@@ -1159,6 +1204,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                             src_list=src_list,
                             dst_list=dst_list,
                             length_list=length_list,
+                            address_components_cache=address_components_cache,
+                            request_cache_key=(request_id, coalesce),
                         )
             return None
 
@@ -1257,17 +1304,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 transfer_len = num_transfer_heads * local_head_len
                 local_inner_offset = local_head_offset * local_head_len
                 remote_inner_offset = remote_head_offset * remote_head_len
-                block_ids_to_transfer = (
-                    contiguous_block_ids_by_request
-                    if local_block_stride == local_block_len == transfer_len
+                coalesce = (
+                    local_block_stride == local_block_len == transfer_len
                     and remote_block_stride == remote_block_len == transfer_len
-                    else single_block_ids_by_request
                 )
                 for request_id, _, _ in transfer_entries:
-                    local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
                     self._append_block_transfer_addresses(
-                        local_block_groups=local_block_groups,
-                        remote_block_groups=remote_block_groups,
+                        block_transfer_ranges=get_block_transfer_ranges(request_id, coalesce),
                         local_base_addr=local_base_addr,
                         remote_base_addr=remote_base_addr,
                         local_block_stride=local_block_stride,
@@ -1278,6 +1321,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         src_list=src_list,
                         dst_list=dst_list,
                         length_list=length_list,
+                        address_components_cache=address_components_cache,
+                        request_cache_key=(request_id, coalesce),
                     )
 
         return None
