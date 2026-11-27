@@ -223,11 +223,36 @@ def build_compressor_metadata_out(
     )
 
 
+_LIMITED_AUX_STREAM_IDS: set[int] = set()
+
+
+def _ensure_aux_stream_vector_limit(stream: torch.npu.Stream) -> torch.npu.Stream:
+    """Cap the auxiliary overlap stream to 20% of AIV cores (keep all Cube cores).
+
+    Prevents background SWA vector work from saturating all 40 AIV cores on
+    Ascend 910C and causing STARS queue head-of-line blocking or L2/HBM
+    bandwidth contention against the main decode stream.
+    """
+    stream_id = id(stream)
+    if stream_id in _LIMITED_AUX_STREAM_IDS:
+        return stream
+    set_limit = getattr(torch_npu.npu, "set_stream_limit", None)
+    if callable(set_limit):
+        try:
+            from vllm_ascend.ops.triton.dsv41_swa_rope import swa_aux_vector_core_budget
+
+            set_limit(stream, -1, swa_aux_vector_core_budget())
+            _LIMITED_AUX_STREAM_IDS.add(stream_id)
+        except Exception:
+            pass
+    return stream
+
+
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
-    return _DSV4_DSA_OVERLAP_STREAM
+    return _ensure_aux_stream_vector_limit(_DSV4_DSA_OVERLAP_STREAM)
 
 
 def _is_w8a8_dynamic(linear) -> bool:

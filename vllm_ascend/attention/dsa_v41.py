@@ -48,6 +48,10 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.dsv41_swa_rope import (
+    can_store_swa_with_rope,
+    store_swa_with_rope,
+)
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -419,6 +423,33 @@ class AscendDSAV41Impl:
         )
 
     @classmethod
+    def _try_store_swa_with_rope(cls, attn, metadata, kv, cos, sin) -> bool:
+        """Fuse pure-decode SWA partial RoPE + paged scatter in an AIV-budgeted Triton kernel."""
+        if (
+            getattr(attn, "packed_cache_ops", None) is not None
+            or metadata.global_metadata is not None
+            or metadata.num_prefills != 0
+            or metadata.num_decodes != metadata.num_reqs
+        ):
+            return False
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache
+        if isinstance(cache, (list, tuple)):
+            cache = cache[0]
+        slots = metadata.slot_mapping
+        if not can_store_swa_with_rope(kv, cos, sin, cache, slots, attn.head_dim, attn.nope_head_dim):
+            return False
+        store_swa_with_rope(
+            kv,
+            cos,
+            sin,
+            cache,
+            slots,
+            head_dim=attn.head_dim,
+            nope_head_dim=attn.nope_head_dim,
+        )
+        return True
+
+    @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
         kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
         cls._apply_rotary(attn, kv, cos, sin)
@@ -448,8 +479,9 @@ class AscendDSAV41Impl:
             if hidden_states.shape[0]
             else (None, None)
         )
+        swa_aux_done = None
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
-            q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
+            q, qr, swa_aux_done = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
@@ -470,6 +502,10 @@ class AscendDSAV41Impl:
             self._apply_rotary(attn, q, cos, sin)
             # Consume local Query RoPE before compression can reuse source tables.
             prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin)
+        if swa_aux_done is not None:
+            # Join deferred SWA cache write before compression may reuse RoPE tables
+            # and before attention reads the SWA cache.
+            torch.npu.current_stream().wait_event(swa_aux_done)
         self._prepare_compressed_cache(attn, hidden_states, cos, sin, local_metadata, global_metadata, prepared_indexer)
         return q.to(hidden_states.dtype) if q is not None else None, prepared_indexer
 
@@ -587,24 +623,35 @@ class AscendDSAV41Impl:
         qr = attn.q_norm(q_a)
         q_b_quant, q_b_scale = wq_b.quantize(qr)
 
-        # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
+        # Part 3: Q_b matmul (Cube) overlaps KV norm, RoPE, and paged cache write (Vector).
         # A5 prefill/mixed cache publication follows the stream join below.
         write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
+        swa_aux_done = None
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(part3_start)
-            kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            self._apply_rotary(attn, kv, cos, sin)
+            kv = attn.kv_norm(kv)
+            if write_cache_on_main or not self._try_store_swa_with_rope(attn, swa_metadata, kv, cos, sin):
+                kv = kv.view(-1, 1, attn.head_dim)
+                self._apply_rotary(attn, kv, cos, sin)
+                if not write_cache_on_main:
+                    self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
             if not write_cache_on_main:
-                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+                if getattr(kv, "is_npu", False):
+                    kv.record_stream(aux_stream)
+                if getattr(cos, "is_npu", False):
+                    cos.record_stream(aux_stream)
+                if getattr(sin, "is_npu", False):
+                    sin.record_stream(aux_stream)
+                swa_aux_done = aux_stream.record_event()
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
-        main_stream.wait_stream(aux_stream)
         if write_cache_on_main:
+            main_stream.wait_stream(aux_stream)
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         if self.role.is_index_source and attn.indexer.fused_prologue_qw is not None:
             qr = (q_b_quant, q_b_scale)
-        return q, qr
+        return q, qr, swa_aux_done
 
     def _compress_and_write_caches(
         self, attn, hidden_states, cos, sin, local_metadata, global_metadata, *, prepared_indexer=None
