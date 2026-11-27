@@ -863,6 +863,8 @@ def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, 
         afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=fused)
     )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    # This test asserts the per-rank capacity math, not the HCCL window guard.
+    monkeypatch.setattr(afc, "_validate_fused_mc2_hccl_window", lambda _: None)
     config = _make_vllm_config(tensor_parallel_size=2, max_num_batched_tokens=524288)
     config.parallel_config.prefill_context_parallel_size = 8
     config.speculative_config = None
