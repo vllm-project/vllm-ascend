@@ -1296,13 +1296,16 @@ guide_sections:
 
     ### Ascend Atlas 800 A3 single-node DP1×TP8 (W8A8-MTP)
 
-    Verified on Atlas 800 A3 (8 Ascend910 dies) with vLLM Ascend `v0.32.0rc1-a3` and
-    Eco-Tech W8A8-MTP weights (`Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp`). Tutorial-style
-    DP1×TP8 + `FULL_DECODE_ONLY` ACLGraph serve returned HTTP 200; text chat and
-    multimodal OCR PASS; AISBench GSM8K accuracy 96.51.
+    Hand-written lab config (not the builder default for A3, which currently emits
+    FP8 / TP4 / `qwen3_5_mtp` paths). Verified on Atlas 800 A3 (8 Ascend910 dies)
+    with vLLM Ascend `v0.32.0rc1-a3` and ModelScope-only Eco-Tech W8A8-MTP weights
+    (`Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp`). Tutorial-style DP1×TP8 +
+    `FULL_DECODE_ONLY` ACLGraph serve returned HTTP 200; text chat and multimodal
+    OCR PASS; AISBench GSM8K accuracy 96.51.
 
     ```bash
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_USE_MODELSCOPE=True
     export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
     export VLLM_USE_V2_MODEL_RUNNER=1

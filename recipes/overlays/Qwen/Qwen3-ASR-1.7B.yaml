@@ -4,9 +4,21 @@
 # closest public Ascend profile (ascend_910b) for command-builder coverage
 # while guide_sections.ascend keeps the verified 310P serve recipe.
 meta:
-  date_updated: 2026-10-19
+  date_updated: 2026-11-27
   hardware:
     ascend_910b: supported
+
+hardware_notes:
+  ascend_910b:
+    title: Structural proxy for Atlas 300I DUO (310P)
+    body: >-
+      End-to-end validation was on Atlas 300I DUO (310P3). ascend_910b is only a
+      command-builder proxy until a dedicated 310P profile exists; use the
+      guide_sections.ascend recipe for the verified 310P serve flags and image.
+
+strategy_hardware:
+  multi_node_tp:
+    ascend_910b: unsupported
 
 variants:
   ascend_fp16:

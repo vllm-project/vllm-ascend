@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "2B vision-language embedding model. Single-card pooling verified on Atlas A3 (Ascend 910C) and Atlas 300I DUO (310P) with vLLM Ascend 0.23.0."
   date_added: 2026-10-19
-  date_updated: 2026-11-24
+  date_updated: 2026-11-27
   tasks:
     - embedding
   performance_headline: "Atlas A3: LeCaRDv2 0.65931, embeddings bench 153.13 req/s (vLLM Ascend 0.23.0)"
@@ -14,7 +14,7 @@ meta:
 
 model:
   model_id: "Qwen/Qwen3-VL-Embedding-2B"
-  min_vllm_version: "0.19.0"
+  min_vllm_version: "0.23.0"
   architecture: dense
   parameter_count: "2B"
   active_parameters: "2B"
@@ -23,10 +23,7 @@ model:
     - "--runner"
     - "pooling"
     - "--max-model-len"
-    - "1024"
-  base_env: {}
-  docker_image:
-    ascend_910c: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+    - "32768"
 
 variants:
   default:
@@ -39,18 +36,12 @@ variants:
         docker_serve_command: "vllm serve"
         extra_args:
           - "--enforce-eager"
-          - "--served-model-name"
-          - "Qwen/Qwen3-VL-Embedding-2B"
         extra_env:
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     description: "BF16 pooling on one Ascend 910C die; --enforce-eager required on the verified 0.23.0 stack"
 
 compatible_strategies:
   - single_node_tp
-
-hardware_overrides: {}
-strategy_overrides: {}
-dependencies: []
 
 guide: |
   ## Overview
@@ -67,16 +58,16 @@ guide: |
   ### Ascend 910C / Atlas 800 A3 (verified)
 
   On the verified vLLM Ascend 0.23.0 stack, engine init failed during torch.compile
-  unless `--enforce-eager` is set. Default dtype is bfloat16.
+  unless `--enforce-eager` is set. Default dtype is bfloat16. The default command
+  uses `--max-model-len 32768` (model context); lower it for low-memory hosts.
 
   ```bash
   export ASCEND_RT_VISIBLE_DEVICES=0
   export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve Qwen/Qwen3-VL-Embedding-2B \
-    --served-model-name Qwen/Qwen3-VL-Embedding-2B \
     --runner pooling \
-    --max-model-len 1024 \
+    --max-model-len 32768 \
     --enforce-eager \
     --port 8000
   ```
@@ -94,12 +85,13 @@ guide: |
 
   ### Atlas 300I DUO / 310P (verified on hardware; no renderer profile yet)
 
+  Use a low `--max-model-len` on 310P to avoid oversized attention masks / OOM.
+
   ```bash
   export ASCEND_RT_VISIBLE_DEVICES=0
   export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve Qwen/Qwen3-VL-Embedding-2B \
-    --served-model-name Qwen/Qwen3-VL-Embedding-2B \
     --runner pooling \
     --dtype float16 \
     --max-model-len 1024 \
@@ -116,7 +108,6 @@ guide: |
 
   ```bash
   vllm serve Qwen/Qwen3-VL-Embedding-2B \
-    --served-model-name Qwen/Qwen3-VL-Embedding-2B \
     --runner pooling \
     --max-model-len 1024 \
     --port 8000
