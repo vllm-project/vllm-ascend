@@ -49,6 +49,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
     has_requests_to_run_as_prefill,
+    project_pcp_prefill_flags,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
 )
@@ -1829,6 +1830,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     (self.use_dcp or self.use_sharded_dcp)
                     and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
                 ),
+                is_prefilling_override=project_pcp_prefill_flags(pcp_context),
             )
 
         metadata = AscendSFAIndexerMetadata(

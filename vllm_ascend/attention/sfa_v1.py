@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
     has_requests_to_run_as_prefill,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    project_pcp_prefill_flags,
     split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
@@ -793,6 +794,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=not self.use_pcp,
+            is_prefilling_override=project_pcp_prefill_flags(pcp_context),
         )
         if self.nope:
             self._prepare_nope_metadata(metadata, draft_index)

@@ -38,6 +38,7 @@ from vllm_ascend.attention.utils import (
     PreprocessType,
     has_requests_to_run_as_prefill,
     is_dcp_enabled,
+    project_pcp_prefill_flags,
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -354,6 +355,7 @@ class AscendSFADCPMetadataBuilder(
             treat_short_extends_as_decodes=(
                 self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
             ),
+            is_prefilling_override=project_pcp_prefill_flags(getattr(common_attn_metadata, "pcp_context", None)),
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None

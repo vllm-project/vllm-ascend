@@ -898,13 +898,24 @@ def test_partition_batch_keeps_piecewise_request_extent():
     np.testing.assert_array_equal(result.seq_lens_np, np.array([11, 21], dtype=np.int32))
 
 
-@pytest.mark.parametrize("dcp_world_size", [1, 2])
-@pytest.mark.parametrize("is_prefilling", [False, True])
-def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
+@pytest.mark.parametrize(
+    "dcp_world_size,is_prefilling,sfa_model,expected_rows,has_block_counts",
+    [
+        pytest.param(1, True, True, (1, 1, 0), False, id="pcp-only-sfa-prefill"),
+        pytest.param(1, True, False, None, False, id="pcp-only-non-sfa-prefill"),
+        pytest.param(2, True, False, (1, 1, 0), True, id="pcp-dcp-prefill"),
+        pytest.param(2, False, True, None, False, id="pcp-dcp-sfa-no-global-prefill"),
+    ],
+)
+def test_attention_context_collects_global_pcp_data(
+    dcp_world_size, is_prefilling, sfa_model, expected_rows, has_block_counts
+):
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager._kernel_block_table_groups = {}
     manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
+    hf_text_config = SimpleNamespace(index_topk=2048) if sfa_model else SimpleNamespace()
+    manager.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=hf_text_config))
     input_batch = _make_local_pcp_batch()
     input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
     input_batch.idx_mapping = torch.from_numpy(input_batch.idx_mapping_np)
@@ -942,17 +953,16 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
 
     actual = manager.build_attention_context()
 
-    if dcp_world_size > 1 and is_prefilling:
+    if has_block_counts:
         assert actual.global_block_table_num_blocks.device == manager.device
         torch.testing.assert_close(
             actual.global_block_table_num_blocks, torch.tensor([[7, 3], [15, 11]], dtype=torch.int32)
         )
         num_blocks.fill(0)
         assert actual.global_block_table_num_blocks[0, 0] == 7
-        assert actual.local_to_global_req_indices == (1, 1, 0)
     else:
         assert actual.global_block_table_num_blocks is None
-        assert actual.local_to_global_req_indices is None
+    assert actual.local_to_global_req_indices == expected_rows
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
     assert torch.equal(
