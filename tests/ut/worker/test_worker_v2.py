@@ -389,7 +389,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         self.assertEqual(engine.start_weight_update.call_count, 2)
         self.assertEqual(engine.finish_weight_update.call_count, 2)
         self.assertEqual(engine.reset_weight_update_target.call_count, 2)
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             worker.model_runner.reset_lora_state.assert_called_once_with()
             worker.model_runner.on_target_weights_replaced.assert_not_called()
         else:
