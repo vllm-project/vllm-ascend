@@ -273,6 +273,25 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
         return self.backend_cls
 
 
+def get_indexer_runtime_shapes_and_dtypes(
+    backend: type[AttentionBackend], spec: AscendSFAIndexerCacheSpec, num_blocks: int, kernel_block_size: int | None
+) -> KVCacheRuntimeShapesAndDtypes:
+    """Describe indexer keys and optional scales for each kernel block replica."""
+    block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+    if block_size <= 0 or spec.block_size % block_size:
+        raise ValueError("Indexer kernel block size must divide the manager block size.")
+    runtime_blocks = num_blocks * (spec.block_size // block_size) * spec.sfa_dcp_replicated_indexer_size
+    prefix = (runtime_blocks, block_size, spec.num_kv_heads)
+    key_shape = backend.get_kv_cache_shape(*prefix, spec.head_size)
+    if not spec.scale_dim:
+        return (key_shape,), (spec.dtype,)
+
+    scale_shape = backend.get_kv_cache_shape(*prefix, spec.scale_dim)
+    if spec.cache_sparse_li_c4:
+        scale_shape = (*scale_shape[:-1], spec.scale_dim // 2, 2)
+    return (key_shape, scale_shape), (spec.dtype, spec.scale_dtype)
+
+
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     """Backend and impl for split SFA indexer cache layers - one class per
     indexer family, two interfaces:
@@ -394,20 +413,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
-        """Describe indexer keys and optional scales for each kernel block replica."""
-        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
-        if block_size <= 0 or spec.block_size % block_size:
-            raise ValueError("Indexer kernel block size must divide the manager block size.")
-        runtime_blocks = num_blocks * (spec.block_size // block_size) * spec.sfa_dcp_replicated_indexer_size
-        prefix = (runtime_blocks, block_size, spec.num_kv_heads)
-        key_shape = (*prefix, spec.head_size)
-        if not spec.scale_dim:
-            return (key_shape,), (spec.dtype,)
-
-        scale_shape = (*prefix, spec.scale_dim)
-        if spec.cache_sparse_li_c4:
-            scale_shape = (*scale_shape[:-1], spec.scale_dim // 2, 2)
-        return (key_shape, scale_shape), (spec.dtype, spec.scale_dtype)
+        return get_indexer_runtime_shapes_and_dtypes(cls, spec, num_blocks, kernel_block_size)
 
     @staticmethod
     def format_runtime_views(
