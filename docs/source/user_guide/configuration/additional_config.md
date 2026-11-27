@@ -166,7 +166,7 @@ removed. They no longer take effect.
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
-**scheduler_config**
+<span id="scheduler_config"></span>**scheduler_config**
 
 The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
