@@ -506,11 +506,13 @@ def store_mla_draft_context_kv(
     slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None,
 ) -> None:
     """Project draft context during profiling and write the selected layers once KV cache is bound."""
-    per_layer = isinstance(slot_mapping, (list, tuple))
     for layer_idx, layer in enumerate(layers):
-        slots = slot_mapping[layer_idx] if per_layer else slot_mapping
-        if per_layer and slots is None:
-            continue
+        if isinstance(slot_mapping, (list, tuple)):
+            slots = slot_mapping[layer_idx]
+            if slots is None:
+                continue
+        else:
+            slots = slot_mapping
         attn = layer.self_attn
         if slots is not None:
             cache = attn.kv_cache
