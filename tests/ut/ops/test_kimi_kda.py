@@ -114,6 +114,7 @@ class _RecordingStreamSwitch:
 def test_kda_output_norm_uses_checkpoint_epsilon():
     def fake_upstream_init(attention, _config, _vllm_config, _prefix):
         nn.Module.__init__(attention)
+        attention.recoverssm_records = None
         attention.o_norm = SimpleNamespace(eps=1e-5)
         attention.conv_size = 4
         attention.local_projection_size = 2
@@ -1066,6 +1067,7 @@ def test_local_tp_restores_head_order():
 def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads, full_rank, error):
     def init(attention, config, vllm_config, prefix):
         nn.Module.__init__(attention)
+        attention.recoverssm_records = None
         attention.num_heads = heads
 
     config = SimpleNamespace(linear_attn_config={"use_full_rank_gate": full_rank})
