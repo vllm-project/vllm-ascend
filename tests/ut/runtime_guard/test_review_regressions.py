@@ -2040,6 +2040,37 @@ def test_v25c_dump_rank_tag_reads_pcp_manager_rank(monkeypatch):
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) == "not last PP rank"
 
 
+def test_v25d_pcp_manager_without_rank_warns_once(monkeypatch):
+    """Manager present but no pcp_rank must not silently collide without a log."""
+    import vllm_ascend.observability.runtime_guard.rank_gate as rank_gate
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(rank_gate.logger, "warning_once", lambda *a, **_k: calls.append(a))
+    monkeypatch.setattr(
+        rank_gate,
+        "get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=1),
+    )
+    monkeypatch.setattr(
+        rank_gate,
+        "get_pp_group",
+        lambda: SimpleNamespace(rank_in_group=0, is_last_rank=True),
+    )
+
+    # Legitimate PCP rank 0 on the manager — no warning.
+    assert rank_gate.runner_pcp_rank(SimpleNamespace(pcp_manager=SimpleNamespace(pcp_rank=0))) == 0
+    assert calls == []
+
+    # Manager bound but attribute missing → soft-fail 0 + warning_once.
+    assert rank_gate.runner_pcp_rank(SimpleNamespace(pcp_manager=SimpleNamespace())) == 0
+    assert calls and "pcp_manager present but pcp_rank unresolved" in calls[0][0]
+
+    # PCP off (no manager) → 0 without warning.
+    calls.clear()
+    assert rank_gate.runner_pcp_rank(SimpleNamespace()) == 0
+    assert calls == []
+
+
 def test_v25b_manager_skips_when_gated(tmp_path, monkeypatch):
     import vllm_ascend.observability.runtime_config.config as cfg
 

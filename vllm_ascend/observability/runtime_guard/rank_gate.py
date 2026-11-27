@@ -21,6 +21,10 @@ from typing import Any
 
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 
+from vllm_ascend.logger import init_logger_ascend
+
+logger = init_logger_ascend(__name__)
+
 
 def anomaly_check_rank_skip_reason(runner: Any) -> str | None:
     """None if this rank may run detectors; otherwise a short skip reason.
@@ -114,19 +118,34 @@ def runner_pcp_rank(runner: Any) -> int:
     Ascend / upstream runners usually keep ``pcp_rank`` on ``pcp_manager``, not
     on the runner itself. Reading only ``runner.pcp_rank`` collapses every PCP
     row to ``0`` and collides dump dirs (``…_pcp0_…``).
+
+    Soft-fail still returns ``0`` when nothing usable is found, but if a
+    ``pcp_manager`` is bound and still yields no rank we ``warning_once`` so
+    the collision is visible (do not warn on a legitimate PCP rank of 0).
     """
+    manager_present = False
     try:
         pcp_manager = getattr(runner, "pcp_manager", None)
         if pcp_manager is not None:
+            manager_present = True
             val = getattr(pcp_manager, "pcp_rank", None)
             if val is not None:
                 return int(val)
     except Exception:
-        pass
+        manager_present = True
     try:
-        return int(getattr(runner, "pcp_rank", 0) or 0)
+        rank = int(getattr(runner, "pcp_rank", 0) or 0)
     except Exception:
-        return 0
+        rank = 0
+    if manager_present:
+        # Manager was the expected source but did not yield a rank; falling
+        # back to runner.pcp_rank (often 0) recreates the dir collision.
+        logger.warning_once(
+            "[runtime_guard] pcp_manager present but pcp_rank unresolved; "
+            "dump path falling back to pcp_rank=%s (may collide across PCP ranks)",
+            rank,
+        )
+    return rank
 
 
 def runner_dcp_rank(runner: Any) -> int:
