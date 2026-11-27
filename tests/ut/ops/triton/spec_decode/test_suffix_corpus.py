@@ -3,11 +3,12 @@
 
 from types import SimpleNamespace
 
+from tests.ut.ops.triton.spec_decode.conftest import KernelCall
 from vllm_ascend.ops.triton.spec_decode import suffix_corpus as ops
 
 
 def test_ingestion_launcher_uses_tensor_stride_and_document_count(monkeypatch, recording_kernel, suffix_options):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_ingest_kernel", recording_kernel("ingest", calls))
     token_ids = SimpleNamespace(shape=(4, 2048), stride=lambda axis: 2056)
     args = (token_ids, 2048, object(), 2, *[object() for _ in range(8)])

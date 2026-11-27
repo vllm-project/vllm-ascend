@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 from vllm.triton_utils import dispatcher
 
+from tests.ut.ops.triton.spec_decode.conftest import KernelCall
 from vllm_ascend import triton_kernel_overrides as overrides
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.platform import NPUPlatform
@@ -32,7 +33,7 @@ def test_dispatch_reaches_suffix_launchers(monkeypatch, recording_kernel, suffix
     assert tuple(inspect.signature(impl).parameters)[:-1] == names
     assert original.__module__ == target
 
-    calls = []
+    calls: list[KernelCall] = []
     impl_module = importlib.import_module(impl.__module__)
     monkeypatch.setattr(impl_module, name, recording_kernel(operation, calls))
     if operation == "observe":
@@ -41,11 +42,11 @@ def test_dispatch_reaches_suffix_launchers(monkeypatch, recording_kernel, suffix
     monkeypatch.setattr(module, name, original)
     monkeypatch.setattr(dispatcher, "_registry", {})
     alias = ModuleType("_suffix_dispatch_alias")
-    alias.kernel = original
+    vars(alias)["kernel"] = original
     monkeypatch.setitem(sys.modules, alias.__name__, alias)
     dispatcher.register_kernels({key: impl})
     kernel = getattr(module, name)
-    assert alias.kernel is kernel
+    assert vars(alias)["kernel"] is kernel
 
     tensor = SimpleNamespace(shape=(128, 2048), stride=lambda axis: 2056)
     scratch = SimpleNamespace(shape=(128, 8), stride=lambda axis: 12)
@@ -72,8 +73,8 @@ def test_dispatch_reaches_suffix_launchers(monkeypatch, recording_kernel, suffix
         kernel[(999,)](*args.values(), **options, num_warps=1)
     expected_grid = {"local_scan": (7, 8), "finalize": (7,), "ingest": (2, 2), "observe": (18,)}
     assert calls[0][1] == expected_grid[operation]
-    expected_args = args | {"token_ids_stride": 2056, "scratch_stride": 12}
-    expected_args = tuple(expected_args[name] for name in args)
+    expected_values = args | {"token_ids_stride": 2056, "scratch_stride": 12}
+    expected_args = tuple(expected_values[name] for name in args)
     if operation == "observe":
         expected_args += (7,)
         assert [call[0] for call in calls] == ["observe", "clear"]

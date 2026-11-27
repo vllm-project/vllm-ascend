@@ -4,12 +4,51 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from vllm import SamplingParams
+from vllm.outputs import RequestOutput
 
 from tests.e2e.conftest import VllmRunner
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+# Match compare_logprobs()'s default decode tolerance in pull_request/utils.py.
+_DECODE_LOGPROB_ATOL = 2 * 0.0689
+
+
+def _assert_greedy_outputs_close(baseline: list[RequestOutput], speculative: list[RequestOutput]) -> None:
+    """Compare distributions at the first divergence of a shared history."""
+    assert len(baseline) == len(speculative)
+    for prompt_idx, (base_output, spec_output) in enumerate(zip(baseline, speculative, strict=True)):
+        for name, output in (("baseline", base_output), ("suffix", spec_output)):
+            assert output.finished and len(output.outputs) == 1, (prompt_idx, name)
+            completion = output.outputs[0]
+            assert completion.token_ids, (prompt_idx, name, "empty completion")
+            assert completion.logprobs is not None, (prompt_idx, name, "missing logprobs")
+            assert len(completion.token_ids) == len(completion.logprobs), (prompt_idx, name)
+
+        base = base_output.outputs[0]
+        spec = spec_output.outputs[0]
+        assert base.logprobs is not None and spec.logprobs is not None
+        for token_idx, (base_id, spec_id) in enumerate(zip(base.token_ids, spec.token_ids)):
+            if base_id == spec_id:
+                continue
+            base_topk = base.logprobs[token_idx]
+            spec_topk = spec.logprobs[token_idx]
+            detail = (prompt_idx, token_idx, base_id, spec_id, base_topk, spec_topk)
+            # Only the first mismatch conditions on the same token history.
+            assert base_id in spec_topk and spec_id in base_topk, detail
+            for topk in (base_topk, spec_topk):
+                gap = abs(topk[base_id].logprob - topk[spec_id].logprob)
+                assert gap <= _DECODE_LOGPROB_ATOL, detail
+            for token_id in (base_id, spec_id):
+                delta = abs(base_topk[token_id].logprob - spec_topk[token_id].logprob)
+                assert delta <= _DECODE_LOGPROB_ATOL, detail
+            print(f"BF16 near-tie: prompt={prompt_idx}, token={token_idx}, baseline={base_id}, suffix={spec_id}")
+            break
 
 
 def _speculation_counts(runner: VllmRunner) -> tuple[int, int]:
@@ -34,10 +73,10 @@ def _speculation_counts(runner: VllmRunner) -> tuple[int, int]:
     ],
 )
 def test_mrv2_suffix_greedy_accuracy(monkeypatch, enforce_eager: bool, async_scheduling: bool, adaptive: bool) -> None:
-    """Compare greedy outputs with and without suffix decoding."""
+    """Compare greedy distributions with and without suffix decoding."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    sampling_params = SamplingParams(temperature=0, max_tokens=64)
-    common = dict(
+    sampling_params = SamplingParams(temperature=0, max_tokens=64, logprobs=5)
+    common: dict[str, Any] = dict(
         dtype="bfloat16",
         max_model_len=1024,
         max_num_seqs=2,
@@ -76,8 +115,7 @@ def test_mrv2_suffix_greedy_accuracy(monkeypatch, enforce_eager: bool, async_sch
         num_drafts, num_accepted = _speculation_counts(runner)
 
     assert len(speculative) == len(baseline) == len(prompts)
-    assert all(output.outputs[0].token_ids for output in speculative)
-    assert [o.outputs[0].token_ids for o in speculative] == [o.outputs[0].token_ids for o in baseline]
+    _assert_greedy_outputs_close(baseline, speculative)
     assert num_drafts > 0
     assert num_accepted > 0
 
@@ -125,7 +163,10 @@ def test_mrv2_suffix_cross_request_acceptance(monkeypatch) -> None:
                 tokenizer = runner.model.get_tokenizer()
                 prompt_ids = [
                     tokenizer.apply_chat_template(
-                        [{"role": "user", "content": request}], tokenize=True, add_generation_prompt=True
+                        [{"role": "user", "content": request}],
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_dict=False,
                     )
                     for request in requests
                 ]

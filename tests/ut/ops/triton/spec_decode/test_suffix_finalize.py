@@ -3,11 +3,12 @@
 
 from types import SimpleNamespace
 
+from tests.ut.ops.triton.spec_decode.conftest import KernelCall
 from vllm_ascend.ops.triton.spec_decode import suffix_finalize as ops
 
 
 def test_finalize_uses_active_mapping_not_buffer_capacity(monkeypatch, recording_kernel, suffix_options):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_finalize_kernel", recording_kernel("finalize", calls))
     token_ids = SimpleNamespace(shape=(128, 2048), stride=lambda axis: 2048)
     mapping = SimpleNamespace(shape=(7,))

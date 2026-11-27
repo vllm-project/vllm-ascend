@@ -3,11 +3,12 @@
 
 from types import SimpleNamespace
 
+from tests.ut.ops.triton.spec_decode.conftest import KernelCall
 from vllm_ascend.ops.triton.spec_decode import suffix_observe as ops
 
 
 def test_observer_launcher_consumes_previous_drafts_for_active_requests(monkeypatch, recording_kernel, suffix_options):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_observe_kernel", recording_kernel("observe", calls))
     monkeypatch.setattr(ops, "_suffix_clear_observed_kernel", recording_kernel("clear", calls))
     states = [

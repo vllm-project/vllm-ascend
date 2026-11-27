@@ -3,11 +3,12 @@
 
 from types import SimpleNamespace
 
+from tests.ut.ops.triton.spec_decode.conftest import KernelCall
 from vllm_ascend.ops.triton.spec_decode import suffix_local_scan as ops
 
 
 def test_local_scan_uses_active_mapping_not_buffer_capacity(monkeypatch, recording_kernel, suffix_options):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_local_scan_kernel", recording_kernel("scan", calls))
     token_ids = SimpleNamespace(shape=(128, 2048), stride=lambda axis: 2048)
     scratch = SimpleNamespace(shape=(128, 8), stride=lambda axis: 8)
