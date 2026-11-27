@@ -14,30 +14,77 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
-def test_interleaved_fp8_indexer_writes_physical_byte_rows(monkeypatch):
+@pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])
+def test_interleaved_fp8_indexer_writes_physical_byte_rows(monkeypatch, scale_dtype):
     block = width = 128
-    page_bytes = block * (width + 4)
+    scale_bytes = scale_dtype.itemsize
+    page_bytes = block * (width + scale_bytes)
     backing = torch.full((2 * page_bytes + 512,), 91, dtype=torch.uint8)
     pages = backing[256:-256].view(2, page_bytes)
     cache = pages[:, : block * width].view(torch.float8_e4m3fn).view(2, block, 1, width)
+    scale_cache = pages[:, block * width :].view(scale_dtype).view(2, block, 1, 1)
     slots = torch.tensor([127, -1, 128, 255], dtype=torch.int32)
     updates = torch.arange(4 * width).reshape(4, width).to(torch.uint8)
+    scales = torch.arange(4, dtype=scale_dtype).view(-1, 1)
     expected = backing.clone()
     for row, slot in enumerate(slots.tolist()):
         if slot >= 0:
             offset = 256 + (slot // block) * page_bytes + (slot % block) * width
             expected[offset : offset + width] = updates[row]
+            scale_offset = 256 + (slot // block) * page_bytes + block * width + (slot % block) * scale_bytes
+            expected[scale_offset : scale_offset + scale_bytes] = scales[row].view(torch.uint8)
 
     def scatter(rows, indices, values):
-        assert rows.dtype == values.dtype == torch.uint8
-        assert rows.is_contiguous() and rows.data_ptr() == cache.data_ptr()
-        assert indices.flatten().tolist() == [127, -1, 132, 259]
-        valid = indices.flatten() >= 0
-        rows[indices.flatten()[valid].long()] = values[valid]
+        assert rows.dtype == values.dtype
+        if rows.dtype == torch.uint8:
+            assert rows.is_contiguous() and rows.data_ptr() == cache.data_ptr()
+            scale_rows = block * scale_bytes // width
+            assert indices.flatten().tolist() == [127, -1, 128 + scale_rows, 255 + scale_rows]
+        valid = indices[:, 0] >= 0
+        rows.view(torch.uint8)[tuple(indices[valid].long().T)] = values.view(torch.uint8)[valid]
 
     monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter)
-    AscendSFAIndexerBackend._write_cache_tensor(cache, updates.view(cache.dtype), slots)
+    indexer = SimpleNamespace(
+        enable_sparse_li_c8=True,
+        enable_sparse_li_quant=True,
+        k_cache=SimpleNamespace(kv_cache=(cache, scale_cache)),
+        _write_cache_tensor=AscendSFAIndexerBackend._write_cache_tensor,
+    )
+    indices = torch.stack((slots // block, slots % block), dim=-1)
+    AscendSFAIndexerBackend.write_cache(indexer, updates.view(cache.dtype), scales, slots, indices)
     torch.testing.assert_close(backing, expected)
+
+
+@pytest.mark.parametrize("scale_layout", ["separate_storage", "shifted_offset"])
+def test_fp8_byte_row_workaround_requires_adjacent_scale_cache(monkeypatch, scale_layout):
+    block = width = 128
+    page_bytes = block * (width + torch.float32.itemsize)
+    backing = torch.zeros(2 * page_bytes + 256, dtype=torch.uint8)
+    pages = backing[: 2 * page_bytes].view(2, page_bytes)
+    cache = pages[:, : block * width].view(torch.float8_e4m3fn).view(2, block, 1, width)
+    scale_cache = pages[:, block * width :].view(torch.float32).view(2, block, 1, 1)
+    if scale_layout == "separate_storage":
+        scale_cache = scale_cache.clone()
+    else:
+        scale_cache = scale_cache.as_strided(scale_cache.shape, scale_cache.stride(), scale_cache.storage_offset() + 1)
+    slots = torch.tensor([127, 128], dtype=torch.int32)
+    indices = torch.stack((slots // block, slots % block), dim=-1)
+    updates = torch.zeros(2, width, dtype=torch.float8_e4m3fn)
+    scales = torch.ones(2, 1, dtype=torch.float32)
+    scatter = Mock()
+    monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter)
+    indexer = SimpleNamespace(
+        enable_sparse_li_c8=True,
+        enable_sparse_li_quant=True,
+        k_cache=SimpleNamespace(kv_cache=(cache, scale_cache)),
+        _write_cache_tensor=AscendSFAIndexerBackend._write_cache_tensor,
+    )
+    AscendSFAIndexerBackend.write_cache(indexer, updates, scales, slots, indices)
+    assert scatter.call_count == 2
+    assert scatter.call_args_list[0].args[0] is cache
+    assert scatter.call_args_list[0].args[1] is indices
+    assert scatter.call_args_list[1].args[0].data_ptr() == scale_cache.data_ptr()
+    assert scatter.call_args_list[1].args[0].dtype == scale_cache.dtype
 
 
 def pa_writer(write):

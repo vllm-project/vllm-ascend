@@ -53,22 +53,21 @@ def build_groups(config: VllmConfig, specs: dict[str, KVCacheSpec]) -> list[KVCa
     # The scheduler unwraps a uniform group to its first spec. Prefer the
     # main MLA layer over an indexer even when the indexer registered first.
     target = dict(sorted(target.items(), key=lambda item: isinstance(item[1], AscendSFAIndexerCacheSpec)))
+    layer_groups = (target, draft)
     if uses_kvpp and target and draft and all(type(spec) is FullAttentionSpec for spec in draft.values()):
         # KVPP promotes draft pages to full allocation. Compatible full layers
         # share scheduler block IDs while retaining independent physical pages.
         combined = {**target, **draft}
-        uniform = UniformTypeKVCacheSpecs.from_specs(combined)
-        if uniform is not None:
-            uniform.max_num_blocks_per_req(config, config.model_config.max_model_len)
-            return [KVCacheGroupSpec(list(combined), uniform)]
+        if UniformTypeKVCacheSpecs.is_uniform_type(combined):
+            layer_groups = (combined,)
+
     groups = []
-    for layers in (target, draft):
+    for layers in layer_groups:
         if not layers:
             continue
         uniform = UniformTypeKVCacheSpecs.from_specs(layers)
         if uniform is None:
             raise ValueError("GLM DFlash HND group members must have compatible attention and block-table semantics")
-        uniform.max_num_blocks_per_req(config, config.model_config.max_model_len)
         groups.append(KVCacheGroupSpec(list(layers), uniform))
     return groups
 
