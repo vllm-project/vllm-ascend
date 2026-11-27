@@ -4,7 +4,7 @@
 A proposer drafts tokens, and the target model verifies them in one decode step.
 This guide covers Model Runner V2 on Ascend.
 
-## Quickstart {: #common-configuration }
+## Quickstart
 
 For offline inference, set `speculative_config` in `LLM()`. For online serving, pass the same
 settings as JSON to `vllm serve --speculative-config` (`-sc`). Each example below
