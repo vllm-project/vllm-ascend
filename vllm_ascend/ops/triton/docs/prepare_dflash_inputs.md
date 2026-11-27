@@ -56,11 +56,6 @@
   6. Independently split `num_speculative_steps` across the same workers and write `sample_indices`, `sample_pos`, and `sample_idx_mapping`.
   7. Worker 0 writes the per-request scalar outputs `query_start_loc`, `seq_lens`, `temperature`, and `seeds`.
   8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`.
-- **PCP owner queries**: A DSpark owner graph passes `query_rows` and
-  `num_query_reqs`. Context positions and slots still cover every scheduled
-  request. Query and sample outputs are compacted to the owner's rows, and
-  graph padding starts after the last local query. In this mode, each block
-  table row is addressed by the persistent request-state index.
 - **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. This change was
   validated on Atlas A3.
 
@@ -98,8 +93,6 @@
 | `max_model_len` | Input/Attribute | Maximum model sequence length; query positions are clamped to `max_model_len - 1` | int | scalar |
 | `sample_from_anchor` | Input/Attribute | Whether query offset 0 is sampled; the legacy DFlash integration uses `False` | bool | scalar |
 | `num_reqs_override` | Input/Attribute | Number of requests to process. Defaults to `input_batch.num_reqs` when `None`. Otherwise, `0 < num_reqs_override <= input_batch.num_reqs`. | int or None | scalar |
-| `query_rows` | Input | Maps global request rows to local query rows. Other owners use `-1`. Omit for replicated queries. | int64 or None | dense tensor |
-| `num_query_reqs` | Input/Attribute | Number of local queries before graph padding when `query_rows` is set. | int or None | scalar |
 
 ## Constraints
 
