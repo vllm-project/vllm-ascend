@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -22,14 +24,31 @@ def require_extension():
     assert hasattr(torch.ops._C_ascend, "moe_counts_cumsum")
 
 
-@pytest.mark.parametrize("n", [1, 7, 8, 9, 31, 32, 33, 64, 255, 256, 257, 512, 1023, 1024, 4095, 4096])
-def test_exact_int64_nondefault_stream(n):
+@pytest.mark.parametrize(
+    ("n", "offset"),
+    [
+        (1, 0),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+        (7, 0),
+        (8, 0),
+        (9, 1),
+        (4095, 0),
+        (4096, 0),
+    ],
+)
+def test_exact_int64_nondefault_stream(n, offset):
     stream = torch.npu.Stream()
     with torch.npu.stream(stream):
-        x = torch.arange(n, dtype=torch.int64, device="npu") + (1 << 40)
+        base = torch.arange(n + offset, dtype=torch.int64, device="npu") + (1 << 40)
+        x = base[offset:] if offset else base
+        assert x.is_contiguous() and x.storage_offset() == offset
+        if offset:
+            assert x.data_ptr() % 32 != 0
         before = x.clone()
         expected = independent_scan(x)
-        result = cumsum_group_list(x, 1, 0)
+        result = torch.ops._C_ascend.moe_counts_cumsum(x)
     stream.synchronize()
     assert result.dtype == torch.int64 and result.shape == x.shape
     assert result.data_ptr() != x.data_ptr()
@@ -41,11 +60,11 @@ def test_exact_int64_nondefault_stream(n):
 def test_graph_replay_uses_updated_counts(n):
     x = torch.ones(n, dtype=torch.int64, device="npu")
     for _ in range(3):
-        cumsum_group_list(x, 1, 0)
+        torch.ops._C_ascend.moe_counts_cumsum(x)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        result = cumsum_group_list(x, 1, 0)
+        result = torch.ops._C_ascend.moe_counts_cumsum(x)
     for value in [2, 7, 1 << 40, (1 << 53) + 17]:
         x.fill_(value)
         graph.replay()
@@ -56,21 +75,21 @@ def test_graph_replay_uses_updated_counts(n):
 def test_int64_extreme_and_zero_prefixes():
     max_int64 = (1 << 63) - 1
     zeros = torch.zeros(256, dtype=torch.int64, device="npu")
-    assert torch.equal(cumsum_group_list(zeros, 1, 0), zeros)
+    assert torch.equal(torch.ops._C_ascend.moe_counts_cumsum(zeros), zeros)
 
     at_end = torch.zeros(256, dtype=torch.int64, device="npu")
     at_end[-1] = max_int64
-    assert torch.equal(cumsum_group_list(at_end, 1, 0), independent_scan(at_end))
+    assert torch.equal(torch.ops._C_ascend.moe_counts_cumsum(at_end), independent_scan(at_end))
 
     # Values above FP64 exact integer range (2**53) and sums reaching INT64_MAX.
     above_fp64 = torch.ones(64, dtype=torch.int64, device="npu")
     above_fp64[0] = (1 << 53) + 17
-    assert torch.equal(cumsum_group_list(above_fp64, 1, 0), independent_scan(above_fp64))
+    assert torch.equal(torch.ops._C_ascend.moe_counts_cumsum(above_fp64), independent_scan(above_fp64))
 
     q, r = divmod(max_int64, 257)
     sum_max = torch.full((257,), q, dtype=torch.int64, device="npu")
     sum_max[-1] += r
-    assert torch.equal(cumsum_group_list(sum_max, 1, 0), independent_scan(sum_max))
+    assert torch.equal(torch.ops._C_ascend.moe_counts_cumsum(sum_max), independent_scan(sum_max))
 
 
 def test_temporary_prefix_under_async_allocator_pressure():
@@ -80,7 +99,7 @@ def test_temporary_prefix_under_async_allocator_pressure():
     expected = independent_scan(x) + 1
     results = []
     for _ in range(2048):
-        results.append(cumsum_group_list(x, 1, 0) + 1)
+        results.append(torch.ops._C_ascend.moe_counts_cumsum(x) + 1)
     torch.npu.synchronize()
     assert all(torch.equal(result, expected) for result in results)
 
@@ -94,11 +113,20 @@ def test_cross_stream_producer_and_temporary_consumer():
             x = torch.arange(32, dtype=torch.int64, device="npu") + value
         main.wait_stream(auxiliary)
         x.record_stream(main)
-        results.append(cumsum_group_list(x, 1, 0) + 1)
+        results.append(torch.ops._C_ascend.moe_counts_cumsum(x) + 1)
     torch.npu.synchronize()
     base = torch.arange(32, dtype=torch.int64, device="npu")
     for value, result in enumerate(results):
         assert torch.equal(result, independent_scan(base + value) + 1)
+
+
+def test_wrapper_dispatches_to_custom_op():
+    x = torch.arange(32, dtype=torch.int64, device="npu") + (1 << 40)
+    orig = torch.ops._C_ascend.moe_counts_cumsum
+    with patch.object(torch.ops._C_ascend, "moe_counts_cumsum", wraps=orig) as spy:
+        result = cumsum_group_list(x, 1, 0)
+    spy.assert_called_once_with(x)
+    assert torch.equal(result, independent_scan(x))
 
 
 @pytest.mark.parametrize(
