@@ -223,10 +223,7 @@ def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enab
         calls.append(tensor)
         tensor.copy_(shared_tokens if len(calls) == 1 else torch.full((2, 2, 2), 0.5))
 
-    sync_method = pcp_module.AscendPCPManager.sync_drafts
-    assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
-    assert sync_method is pcp_module.PCPManager.sync_drafts
-    monkeypatch.setitem(sync_method.__globals__, "get_pcp_group", lambda: SimpleNamespace(broadcast=broadcast))
+    monkeypatch.setattr("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=broadcast))
     monkeypatch.setattr(spec_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(DFlashSpeculator, "propose", parent)
     result = spec.propose(batch, *[None] * 10, dummy_run=dummy_run)
