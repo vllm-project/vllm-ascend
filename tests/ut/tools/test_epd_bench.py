@@ -413,6 +413,38 @@ def test_broken_baseline_still_writes_the_report(tmp_path) -> None:
     assert any("comparison skipped" in note for note in report["notes"])
 
 
+def test_regression_is_reported_with_exit_code_one(tmp_path) -> None:
+    bench_output = tmp_path / "bench.txt"
+    bench_output.write_text(SERVING_OUTPUT, encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "request_throughput_rps": 100.0,
+                    "output_token_throughput": 1000.0,
+                    "mean_ttft_ms": 100.0,
+                    "mean_tpot_ms": 50.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code, _, report_json = _run_cli(
+        tmp_path,
+        "--bench-output",
+        str(bench_output),
+        "--baseline-json",
+        str(baseline),
+        "--fail-on-regression",
+    )
+
+    assert exit_code == 1, "the documented regression exit code is 1"
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["comparison"]["has_regression"] is True
+
+
 def test_benchmark_timeout_is_a_user_error(monkeypatch, tmp_path) -> None:
     def _timeout(*args: object, **kwargs: object) -> None:
         raise subprocess.TimeoutExpired(cmd="vllm", timeout=1, output="partial stdout\n")
