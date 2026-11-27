@@ -314,6 +314,22 @@ def test_instance_helpers_expose_pids_and_teardown(monkeypatch):
     assert stuck.terminate_instance(0) is None, "a process that ignores SIGTERM reports no exit code"
 
 
+def test_stop_is_idempotent(monkeypatch):
+    """A second stop must not signal already-reaped pids again."""
+    reaped: list[int] = []
+
+    def _record_reap(self, proc):
+        reaped.append(proc.pid)
+
+    monkeypatch.setattr(RemoteOpenAIServer, "_terminate_process_tree", _record_reap)
+    server, _ = _make_server(monkeypatch, exit_codes=[0, 0])
+
+    assert server.stop() == [0, 0]
+    assert len(reaped) == 2
+    assert server.stop() == [0, 0], "the recorded exit codes are returned again"
+    assert len(reaped) == 2, "an already-reaped pid must not be signalled twice"
+
+
 def test_readiness_loop_fails_fast_when_an_instance_died(monkeypatch):
     """A crashed instance must abort the startup wait instead of timing out."""
     terminated: list[bool] = []

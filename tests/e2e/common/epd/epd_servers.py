@@ -52,6 +52,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
     ) -> None:
         self._proc_list = []
         self.exit_codes: list[int | None] = []
+        self._terminated = False
         self.assert_clean_exit = assert_clean_exit
 
         self.env_dict: dict[str, str] = {}
@@ -189,7 +190,15 @@ class RemoteEPDServer(RemoteOpenAIServer):
         return proc
 
     def _terminate_server(self) -> list[int | None]:
-        """Kill server processes and their children, returning their exit codes."""
+        """Kill server processes and their children, returning their exit codes.
+
+        Idempotent: after the first stop the recorded exit codes are returned
+        unchanged. This matters on the failure path, where the readiness wait and
+        the constructor both ask for cleanup: signalling an already-reaped pid a
+        second time could hit a pid recycled by the OS.
+        """
+        if self._terminated:
+            return self.exit_codes
         print("vllm instance is stopping")
         self.exit_codes = []
         for proc in self._proc_list:
@@ -199,6 +208,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             except subprocess.TimeoutExpired:
                 code = None
             self.exit_codes.append(code)
+        self._terminated = True
         return self.exit_codes
 
     def instance_pids(self) -> list[int]:
@@ -263,6 +273,7 @@ class DisaggEpdProxy(RemoteEPDServer):
             self.env_dict.update(env_dict)
         self._proc_list = list()
         self.exit_codes: list[int | None] = []
+        self._terminated = False
         self.assert_clean_exit = assert_clean_exit
         self.host = server_host
 
