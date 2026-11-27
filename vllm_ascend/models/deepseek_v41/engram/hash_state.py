@@ -26,11 +26,6 @@ from vllm.models.deepseek_v41.common.engram import (
 )
 from vllm.triton_utils import triton
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.33.0"):
-    from vllm.models.deepseek_v41.common.engram import _write_hash_cache_kernel
-
 
 class AscendEngramSlotCache:
     """``swa_cache_module`` view for upstream ``NgramHashState``."""
@@ -80,14 +75,12 @@ class AscendNgramHashState(NgramHashState):
     Keep that compiler workaround in this subclass, without changing vLLM.
     """
 
-    if not vllm_version_is("0.33.0"):
-        # Main removed the MRv1 history cache; Ascend callers still share the
-        # slotless and legacy launch adapter while v0.33.0 is supported.
-        use_slot_cache = False
+    # Ascend callers share the slotless and legacy launch adapter.
+    use_slot_cache = False
 
-        @property
-        def block_size(self) -> int:
-            return self.swa_cache_module.block_size
+    @property
+    def block_size(self) -> int:
+        return self.swa_cache_module.block_size
 
     def forward(
         self,
@@ -125,23 +118,6 @@ class AscendNgramHashState(NgramHashState):
             query_start_loc.stride(0),
             BLOCK_T=32,
         )
-        if self.use_slot_cache:
-            assert cache is not None and slot_mapping is not None
-            assert block_table is not None
-            # Finish writes before other thread blocks read fallback history.
-            _write_hash_cache_kernel[(triton.cdiv(num_tokens, 256),)](
-                input_ids,
-                self.token_map,
-                dead_mask,
-                slot_mapping,
-                cache,
-                num_tokens,
-                input_ids.stride(0),
-                dead_mask.stride(0),
-                slot_mapping.stride(0),
-                256,
-                DEAD_ID,
-            )
         from vllm_ascend.ops.triton.engram_hash import _hash_ids_kernel
 
         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](

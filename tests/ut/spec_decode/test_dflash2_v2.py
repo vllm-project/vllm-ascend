@@ -91,7 +91,6 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     )
     # Keep the real V2 loader's config cloning, causality and model-tag scopes.
     fields = {
-        "use_v2_model_runner": True,
         "model_config": target_config,
         "speculative_config": spec,
         "attention_config": AttentionConfig(),
@@ -104,8 +103,12 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     draft_model = SimpleNamespace(model=object(), config=draft_config.hf_config)
     target_model = SimpleNamespace(model=object())
     monkeypatch.setattr(loader, "get_draft_load_config", lambda _: config.load_config)
-    if dflash_module.vllm_version_is("0.33.0"):
-        monkeypatch.setattr(loader, "get_pp_safe_draft_load_config", lambda value: value)
+    # v0.34.0 resolves the PP-safe draft config through get_pp_group().
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+        raising=False,
+    )
     monkeypatch.setattr(loader, "maybe_share_target_embed", lambda *_: None)
     monkeypatch.setattr(loader, "get_target_lm_head", lambda *_: None)
     monkeypatch.setattr(
@@ -608,7 +611,9 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     speculator.draft_logits = None
     speculator.input_buffers = InputBuffers(8, 8, torch.device("cpu"))
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     monkeypatch.setattr(pcp_utils, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
     sync_state = SimpleNamespace(num_reqs=1)

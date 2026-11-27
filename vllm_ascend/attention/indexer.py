@@ -15,8 +15,9 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -46,7 +47,11 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
-from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.attention.utils import (
+    has_requests_to_run_as_prefill,
+    split_decodes_and_prefills,
+    uses_pcp_sharded_layout,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -330,6 +335,41 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
+
+    @staticmethod
+    def prepare_layerwise_cache_view(
+        raw_cache: torch.Tensor,
+        spec: AscendSFAIndexerCacheSpec,
+        layer: AscendSFAIndexerCache,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Expose the native K and scale layout from a shared offload slot.
+
+        Without offload, allocation already provides separate K and scale
+        views. Before the first KV write, slice the shared slot into the same
+        two views, with all N K blocks followed by all N scale blocks.
+
+            | K B0 ... K B(N-1) | optional padding | scale B0 ... scale B(N-1) |
+            ^                   ^                  ^
+            0                   k_bytes            scale_offset
+
+        Padding aligns the start of the scale view to its dtype. Both views
+        share the slot's storage. Indexers without scales use one K view.
+        """
+        if not spec.scale_dim:
+            return raw_cache
+        num_blocks, remainder = divmod(raw_cache.numel(), spec.page_size_bytes)
+        assert remainder == 0
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads * spec.sfa_dcp_replicated_indexer_size
+        k_bytes = num_rows * spec.head_size * get_dtype_size(spec.dtype)
+        scale_elem_size = get_dtype_size(spec.scale_dtype)
+        scale_offset = round_up(k_bytes, scale_elem_size)
+        required_bytes = scale_offset + num_rows * spec.scale_dim * scale_elem_size
+        if required_bytes > raw_cache.numel():
+            raise ValueError(
+                f"Indexer KV cache for {layer.prefix} requires {required_bytes} bytes "
+                f"for aligned K/scale views, got {raw_cache.numel()} bytes."
+            )
+        return raw_cache[:k_bytes], raw_cache[scale_offset:required_bytes]
 
     @staticmethod
     def get_builder_cls():
@@ -1066,6 +1106,18 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
                 raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
+            pack_visible_lengths = indexer_metadata.local_visible_lengths
+            if pack_visible_lengths is not None and (
+                pack_visible_lengths.ndim not in (1, 2)
+                or (pack_visible_lengths.ndim == 2 and pack_visible_lengths.size(1) != 1)
+                or pack_visible_lengths.size(0) < q_li_shape_ori[0]
+                or pack_visible_lengths.dtype != torch.int32
+                or pack_visible_lengths.device != q_li.device
+                or not pack_visible_lengths.is_contiguous()
+            ):
+                pack_visible_lengths = None
+            elif pack_visible_lengths is not None:
+                pack_visible_lengths = pack_visible_lengths[: q_li_shape_ori[0]]
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
@@ -1078,9 +1130,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     q_li_scale,
                     qli_metadata=qli_metadata,
                     topk=self.topk_tokens,
+                    initialize_outputs=pack_visible_lengths is None,
                     **indexer_metadata.qli_dcp_args,
                 )
             elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+                # With no usable row metadata, QLI prefills rows it may leave
+                # untouched; pack still rejects negative IDs/nonfinite scores.
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
                     weights,
@@ -1094,6 +1149,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     cp_world=get_dcp_group().world_size,
                     cp_rank=get_dcp_group().rank_in_group,
                     cp_interleave=self._dcp_interleave,
+                    initialize_outputs=pack_visible_lengths is None,
                     qli_metadata=qli_metadata,
                     topk=self.topk_tokens,
                 )
@@ -1119,6 +1175,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.topk_tokens,
                 self._dcp_interleave,
                 return_local=self._local_topk,
+                visible_lengths=pack_visible_lengths,
             )
         return DeviceOperator.indexer_select_post_process(
             q_li,
@@ -1426,7 +1483,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         buffer_key: object,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pcp_slot_mapping = None
-        if self.use_pcp and pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if self.use_pcp and pcp_context is not None and has_requests_to_run_as_prefill(pcp_context.global_batch):
             if pcp_cache_group_idx is None:
                 raise RuntimeError("PCP+DCP indexer metadata requires the PCP cache-group index.")
             pcp_slot_mapping = self._build_pcp_ordered_slot_mapping(
@@ -1757,12 +1814,13 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     cp_rank=group.rank_in_group,
                     cp_interleave=interleave,
                 )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                build_local_key_lengths(
-                    seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
-                )
             else:
-                local_visible = visible_buffer[:num_input_tokens]
+                visible_rows = num_input_tokens
+                if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+                    # Captured packs can retain a longer view across graph replays.
+                    max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
+                    visible_rows = max(visible_rows, max_capture)
+                local_visible = visible_buffer[:visible_rows]
                 build_local_lengths(
                     seq_lens,
                     cum_query_lens,

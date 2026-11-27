@@ -12,22 +12,16 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 
 ## 1. Run Docker container
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
+
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
@@ -182,6 +176,12 @@ P99 ITL (ms):                            28.85
 ```
 
 #### 3.2.2 Offline Throughput Benchmark
+
+Then run the following command in the same container. It runs an offline
+throughput test with the random dataset, where both the input and output lengths
+are 128, to measure the model throughput when no online serving is started. The
+expected output reports request throughput (requests/s), total token throughput,
+and output token throughput.
 
 ```bash
 export VLLM_USE_MODELSCOPE=True

@@ -53,13 +53,11 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
-from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     get_kv_cache_tensor_layers,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -840,18 +838,14 @@ class NPUModelRunner310V2(NPUModelRunner):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
-            **{},
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.decode_query_len
-            if vllm_version_is("0.33.0")
-            else self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len),
+            self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len),
             self,
             lora_capture_cases=self.lora_capture_cases,
         )
@@ -988,10 +982,9 @@ class NPUModelRunner310V2(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = layer_backends[layer_name]
                     group_id = layer_group_ids[layer_name]
-                    storage_block_size = get_storage_block_size(kv_cache_spec)
                     kernel_block_size = (
-                        storage_block_size
-                        if storage_block_size != kv_cache_spec.block_size
+                        kv_cache_spec.num_states
+                        if kv_cache_spec.num_states != kv_cache_spec.block_size
                         else self.kernel_block_sizes[group_id]
                     )
                     cache_key = (kv_cache_spec, backend, kernel_block_size)

@@ -7,6 +7,7 @@ import __future__
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -23,6 +24,8 @@ def test_device_length_graph_replay_preserves_fia_fallback(backend_kind):
     cls.body = [n for n in cls.body if getattr(n, "name", None) == "run_fullgraph"]
 
     class Parent:
+        parent_replay: Mock
+
         def run_fullgraph(self, desc):
             self.parent_replay(desc)
             return "device replay"
@@ -38,7 +41,8 @@ def test_device_length_graph_replay_preserves_fia_fallback(backend_kind):
         },
     )
     fia = type("FIA", (), {"full_cls_name": staticmethod(lambda: ("fia", "Attention"))})
-    namespace = {
+    namespace: dict[str, Any] = {
+        "AscendGraphManagerMixin": type("GraphManagerMixin", (), {}),
         "DFlashCudaGraphManager": Parent,
         "AscendFlashAttentionBackend": cann,
         "use_updatable_graph": lambda _: False,

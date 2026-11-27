@@ -40,6 +40,8 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
 === "950DT Products"
@@ -50,29 +52,15 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=500g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host  \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -87,34 +75,11 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -128,26 +93,11 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -162,24 +112,9 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash
@@ -237,7 +172,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --max-num-seqs 128 \
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.90 \
-      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --additional-config '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel":false}}' \
       --enable-prefix-caching
@@ -263,7 +198,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
     - `--max-num-batched-tokens 4096` limits the number of tokens processed in one scheduler step. Increase it only after checking prefill throughput and activation memory usage.
     - `--gpu-memory-utilization 0.90` sets the fraction of device memory available to the model executor when calculating KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'` enables Qwen3.5-style MTP speculative decoding with three draft tokens per step. Tune the number of speculative tokens based on acceptance rate, request concurrency, and measured latency and throughput.
+    - `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` enables MTP speculative decoding with three draft tokens per step. Tune the number of speculative tokens based on acceptance rate, request concurrency, and measured latency and throughput.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
     - `--additional-config` enables Ascend-native CPU binding with `enable_cpu_binding`. Its `ascend_compilation_config` enables npugraph_ex and static kernel generation; `enable_super_kernel:false` keeps Super Kernel disabled instead of inheriting the static kernel setting.
     - `--enable-prefix-caching` enables reuse of cached KV blocks for requests with shared prefixes. Monitor KV cache usage for long-context workloads.
@@ -306,7 +241,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --trust-remote-code \
       --safetensors-load-strategy lazy \
       --gpu-memory-utilization 0.90 \
-      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
       --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true}'
@@ -324,7 +259,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
     - `--max-num-batched-tokens 4096` limits the number of tokens processed in one scheduler step. Increase it only after checking prefill throughput and activation memory usage.
     - `--gpu-memory-utilization 0.90` sets the fraction of device memory available to the model executor when calculating KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'` enables Qwen3.5-style MTP speculative decoding with three draft tokens per step.
+    - `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` enables MTP speculative decoding with three draft tokens per step.
     - `--additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'` enables Ascend-native CPU binding and shared-expert computation overlap.
     - `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model used in this example.
@@ -476,7 +411,7 @@ Recommended tuning order:
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I Duo (see [Section 5.1](#51-single-node-online-deployment)). |
-| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I Duo configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
+| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I Duo configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 

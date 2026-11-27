@@ -35,7 +35,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.33.0
+ARG VLLM_TAG=v0.34.0
 ARG VLLM_COMMIT=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 ARG CARGO_BUILD_JOBS
@@ -110,7 +110,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     FLASH_ATTN_BUILD_NPU=950 python3 -m pip install --no-build-isolation --no-deps \
         "flash-attn-npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
-    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
+    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH

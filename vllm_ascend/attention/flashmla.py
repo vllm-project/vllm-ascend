@@ -17,11 +17,19 @@ import numpy as np
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
-from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops, get_quant_flashmla_ops
+from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
+    apply_prefill_as_decode_mask,
+    get_flashmla_ops,
+    get_quant_flashmla_ops,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+
+from .a3_mla_sink import A3MLAAdapter
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
+    from vllm.v1.worker.utils import AttentionGroup
 
 FLASHMLA_QK_DIM = 576
 FLASHMLA_V_DIM = 512
@@ -34,16 +42,46 @@ FLASHMLA_KV_LAYOUT = "PA_BBND"
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
+def target_attn_groups_without_draft_flashmla(
+    attn_groups: list[list["AttentionGroup"]], draft_layer_names: set[str]
+) -> list[list["AttentionGroup"]]:
+    """Keep cache-group indices while leaving draft metadata to its own runner.
+
+    Only dedicated A3 MLA draft groups are removed. Other backends and
+    mixed target/draft groups retain their existing metadata preparation.
+    """
+    target_groups = attn_groups
+    for index, groups in enumerate(attn_groups):
+        kept = [
+            group
+            for group in groups
+            if not (
+                group.layer_names
+                and all(name in draft_layer_names for name in group.layer_names)
+                and getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
+            )
+        ]
+        if len(kept) != len(groups):
+            if target_groups is attn_groups:
+                target_groups = attn_groups.copy()
+            target_groups[index] = kept
+    return target_groups
+
+
 def prepare_flashmla_batch_req_state(
     batch_state: "BatchReqState", uniform_token_count: int | None
 ) -> tuple["BatchReqState", int | None]:
     """Order real decode before FIA prefill before inputs and graph dispatch.
 
     Reorder the release request-state fields together so positions, KV slots
-    and sampling indices inherit the same order. A one-token prompt remains
-    FIA prefill and cannot reuse a graph captured for FlashMLA decode.
+    and sampling indices inherit the same order. Cached one-token prompt tails
+    use the PCP decode classification, while fresh one-token prompts remain
+    FIA prefills.
     """
-    order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+    effective_is_prefilling = apply_prefill_as_decode_mask(
+        batch_state.is_prefilling_np, getattr(batch_state, "prefill_runs_as_decode_np", None)
+    )
+    order = np.argsort(effective_is_prefilling, kind="stable")
     reordered_fields: dict[str, Any] = dict(
         req_ids=[batch_state.req_ids[index] for index in order],
         num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
@@ -58,7 +96,7 @@ def prepare_flashmla_batch_req_state(
             values = getattr(batch_state, field)
             reordered_fields[field] = values[order] if values is not None else None
     batch_state = batch_state._replace(**reordered_fields)
-    if batch_state.has_prefill:
+    if effective_is_prefilling.any():
         if "decode_graph_eligible" in batch_state._fields:
             batch_state = batch_state._replace(decode_graph_eligible=False)
         uniform_token_count = None
@@ -71,8 +109,9 @@ def prepare_flashmla_batch_req_state(
 def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     """Split real generation stages after the runner's stable phase ordering.
 
-    Read only CPU scheduler metadata. A one-token prompt suffix is still FIA
-    prefill; query length alone must never opt a request into FlashMLA.
+    Read only CPU scheduler metadata. Query length alone must never opt a
+    fresh prompt into FlashMLA; PCP supplies an explicit override for cached
+    one-token prompt tails.
     """
     flags = common.is_prefilling
     offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
@@ -425,21 +464,22 @@ class FlashMLACurrent:
 
 @dataclass
 class FlashMLADecode:
-    adapter: Any
-    query: torch.Tensor
-    schedule: torch.Tensor
+    adapter: FlashMLAImpl | QuantFlashMLAImpl | A3MLAAdapter
+    query: torch.Tensor | None
+    schedule: torch.Tensor | None
     cu: torch.Tensor
     used_q: torch.Tensor
     cache_lens: torch.Tensor
     block_table: torch.Tensor
     slots: torch.Tensor
     positions: torch.Tensor
-    token_live: torch.Tensor
-    live_boundaries: torch.Tensor
+    token_live: torch.Tensor | None
+    live_boundaries: torch.Tensor | None
     attn_mask: torch.Tensor | None
     cos: torch.Tensor | None
     sin: torch.Tensor | None
     current: FlashMLACurrent | None = None
+    output_mask: torch.Tensor | None = None
 
 
 class FlashMLAMetadataBuilder:
@@ -448,7 +488,7 @@ class FlashMLAMetadataBuilder:
         impl,
         device: torch.device,
         max_num_reqs: int,
-        attn_mask: torch.Tensor,
+        attn_mask: torch.Tensor | None,
         adapter: Any | None = None,
         *,
         max_query_len: int | None = None,
@@ -465,6 +505,8 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
+        if adapter is None:
+            adapter = getattr(impl, "a3_mla_adapter", None)
         if adapter is None:
             adapter = FlashMLAImpl.load(
                 FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1)
@@ -509,36 +551,53 @@ class FlashMLAMetadataBuilder:
             "max_seqlen_kv": max_query_len if current else max_cache_len,
         }
 
-    def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
-        ints = {"dtype": torch.int32, "device": self.device}
-        adapter = self.adapters[causal]
-        cu = torch.zeros(rows + 1, **ints)
-        used = torch.zeros(rows, **ints)
-        lengths = torch.zeros(rows, **ints)
+    def _allocate_schedule(self, adapter, tokens, columns, lengths, cu, used):
+        if isinstance(adapter, A3MLAAdapter):
+            return adapter.for_capacity(columns, tokens), None
         schedule_meta = adapter.build_metadata(
             torch.empty_like(lengths, device="meta"),
             torch.empty_like(cu, device="meta"),
             torch.empty_like(used, device="meta"),
             **self._metadata_bounds(),
         )
+        return adapter, torch.empty_like(schedule_meta, device=self.device)
+
+    def _refresh_schedule(self, batch, lengths, cu, used):
+        schedule = batch.adapter.build_metadata(lengths, cu, used, **self._metadata_bounds())
+        if batch.schedule is None:
+            # The first real A3 schedule provides the buffer retained by graph capture.
+            batch.schedule = schedule
+        else:
+            batch.schedule.copy_(schedule)
+
+    def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
+        ints = {"dtype": torch.int32, "device": self.device}
+        cu = torch.zeros(rows + 1, **ints)
+        used = torch.zeros(rows, **ints)
+        lengths = torch.zeros(rows, **ints)
+        adapter, schedule = self._allocate_schedule(self.adapters[causal], tokens, columns, lengths, cu, used)
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
+        split_current = self.dcp_size > 1 and causal and self.use_spec_decode
+        a3 = isinstance(adapter, A3MLAAdapter)
+        use_boundaries = not (a3 and split_current)
         flash = FlashMLADecode(
             adapter=adapter,
-            query=torch.empty(
-                (tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device
-            ),
-            schedule=torch.empty_like(schedule_meta, device=self.device),
+            query=torch.empty((tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device)
+            if not a3
+            else None,
+            schedule=schedule,
             cu=cu,
             used_q=used,
             cache_lens=lengths,
             block_table=torch.zeros((rows, columns), **ints),
             slots=torch.full((tokens,), -1, dtype=torch.int64, device=self.device),
             positions=torch.zeros(tokens, dtype=torch.int64, device=self.device),
-            token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
-            live_boundaries=torch.zeros(tokens + 1, **ints),
+            token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device) if use_boundaries else None,
+            live_boundaries=torch.zeros(tokens + 1, **ints) if use_boundaries else None,
             attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
             cos=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
             sin=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
+            output_mask=torch.empty(tokens, dtype=torch.bool, device=self.device) if a3 else None,
         )
         if self.dcp_size > 1 and causal and self.use_spec_decode:
             # As in split DCP attention, each rank retains every current row.
@@ -592,18 +651,11 @@ class FlashMLAMetadataBuilder:
         rows = num_decodes + 1 if has_prefill else max(num_decodes, min(tokens, self.max_num_reqs)) + 1
         columns = common.block_table_tensor.shape[1]
         key = tokens, rows, columns, common.causal
-        if has_prefill:
-            if retain_for_graph:
-                raise ValueError("FlashMLA graph buffers require a decode-only batch")
+        if has_prefill and retain_for_graph:
+            raise ValueError("FlashMLA graph buffers require a decode-only batch")
+        flash = None if has_prefill else self.buffers.get(key)
+        if flash is None:
             flash = self._allocate(tokens, rows, columns, common.causal)
-        else:
-            cached_flash = self.buffers.get(key)
-            if cached_flash is None:
-                flash = self._allocate(tokens, rows, columns, common.causal)
-                if retain_for_graph:
-                    self.buffers[key] = flash
-            else:
-                flash = cached_flash
 
         def refresh():
             # The extra zero-used request owns physical graph/SP padding.
@@ -632,6 +684,7 @@ class FlashMLAMetadataBuilder:
             flash.slots.fill_(-1)
             slots = common.slot_mapping[:num_decode_tokens]
             flash.slots[: slots.numel()].copy_(slots)
+            assert flash.live_boundaries is not None and flash.token_live is not None
             flash.live_boundaries.zero_()
             live = (flash.used_q > 0).to(torch.int32)
             flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
@@ -646,9 +699,10 @@ class FlashMLAMetadataBuilder:
                 cos, sin = get_cos_and_sin_mla(flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
-            flash.schedule.copy_(
-                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds())
-            )
+            self._refresh_schedule(flash, flash.cache_lens, flash.cu, flash.used_q)
+            if flash.output_mask is not None and flash.current is None:
+                assert isinstance(flash.adapter, A3MLAAdapter)
+                flash.output_mask.copy_(flash.adapter.build_output_mask(flash.cache_lens, flash.cu, tokens))
             if flash.current is not None:
                 current = flash.current
                 page_counts = (flash.used_q + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
@@ -669,4 +723,6 @@ class FlashMLAMetadataBuilder:
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.
         refresh()
+        if retain_for_graph:
+            self.buffers[key] = flash
         return flash

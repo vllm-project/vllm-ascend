@@ -17,20 +17,21 @@ class InFlightSaveBlockTracker:
     def retain(
         self,
         req_meta: ReqMeta,
-        speculative_blocks_by_group: dict[int, int],
         block_pool: BlockPool | None,
     ) -> None:
-        if not req_meta.can_save or not speculative_blocks_by_group:
+        if not req_meta.can_save:
+            return
+        if req_meta.event_id is not None:
+            # Finish-time handoffs are pinned before request teardown and then
+            # emitted on the next scheduler step. Never take a second pin.
+            assert req_meta.event_id in self.sending_events
             return
 
-        block_ids: list[int] = []
-        for group_id, num_speculative_blocks in speculative_blocks_by_group.items():
-            group_block_ids = req_meta.block_ids_by_group[group_id]
-            # Speculative scratch slots must remain exclusively owned for relocation.
-            non_spec_block_ids = (
-                group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
-            )
-            block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
+        block_ids = [put.block_id for put in req_meta.boundary_puts or []]
+        assert all(block_id > 0 for block_id in block_ids), "Null block cannot back a boundary save"
+        block_ids = list(dict.fromkeys(block_ids))
+        if not block_ids:
+            return
 
         assert block_pool is not None
         event_id = uuid.uuid4().int

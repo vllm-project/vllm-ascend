@@ -14,6 +14,14 @@
 #
 # Collect every domain with a matching glob. A file can match multiple domains.
 domains:
+  - name: doc-quality
+    description: documentation accuracy, completeness, readability and Chinese translations
+    paths:
+      - "README.md"
+      - "README.zh.md"
+      - "docs/*.md"
+      - "vllm_ascend/ops/triton/docs/*.md"
+      - "docs/source/locale/zh_CN/LC_MESSAGES/*.po"
   - name: ci
     description: CI workflows, bot jobs, runner images, test selection
     paths:

@@ -4,17 +4,14 @@
 import importlib
 import inspect
 import sys
-from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, call
+from types import MethodType, ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
-
-from vllm_ascend.utils import vllm_version_is
 
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "_get_sleep_parameters",
     "discard",
     "checkpoint_prepare",
     "checkpoint_restore",
@@ -23,7 +20,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
     "_get_cudagraph_capture_context",
-    "get_draft_model",
     "_set_draft_weight_update_target",
     "get_compilation_match_table",
     "get_encoder_timing_stats",
@@ -74,6 +70,57 @@ def test_shutdown_weight_transfer_engine_is_inherited():
     assert NPUWorker.shutdown_weight_transfer_engine is GPUWorker.shutdown_weight_transfer_engine
 
 
+@pytest.mark.parametrize(
+    "name",
+    ("reset_mm_cache", "compute_weight_checksums", "reset_weights"),
+)
+def test_model_accessors_are_inherited(name):
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Every supported runner exposes get_model()/reset_mm_cache(), so these
+    # worker RPCs need no Ascend override.
+    assert getattr(NPUWorker, name) is getattr(GPUWorker, name)
+
+
+@pytest.mark.parametrize("drafter", ["absent", "draft-model", "other-speculator"])
+def test_get_draft_model_reports_the_runner_drafter(drafter):
+    """This RPC used to raise on Ascend; it now reports the runner's drafter.
+
+    Bind the real upstream runner implementation so both branches of its
+    isinstance() gate run: a configured DraftModelSpeculator yields its draft
+    module, while no drafter (or a non-draft speculator) yields None.
+    """
+    import torch
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    draft_model = torch.nn.Linear(2, 2) if drafter == "draft-model" else None
+    # The runner only reads isinstance()/attribute state from this slot, so the
+    # parameterization mixes a mock with plain objects on purpose. Annotate the
+    # union up front so mypy does not pin it to the first MagicMock branch.
+    speculator: object | None
+    if drafter == "draft-model":
+        mock_speculator = MagicMock(spec=DraftModelSpeculator)
+        mock_speculator.model = draft_model
+        speculator = mock_speculator
+    elif drafter == "other-speculator":
+        speculator = object()  # e.g. a speculator that carries no draft model
+    else:
+        speculator = None
+
+    runner = SimpleNamespace(speculator=speculator)
+    runner.get_draft_model = MethodType(GPUModelRunner.get_draft_model, runner)
+
+    worker = object.__new__(NPUWorker)
+    worker.model_runner = runner
+
+    assert worker.get_draft_model() is draft_model
+
+
 @pytest.mark.parametrize("configured", [False, True])
 def test_shutdown_weight_transfer_engine_releases_trainer_connection(configured):
     from vllm_ascend.worker.worker import NPUWorker
@@ -103,20 +150,6 @@ def test_shutdown_weight_transfer_engine_rejects_active_update():
     worker.weight_transfer_engine.shutdown.assert_not_called()
 
 
-@pytest.mark.parametrize("reset", [None, "absent", "callable"])
-def test_reset_mm_cache_preserves_optional_runner_method(reset):
-    from vllm_ascend.worker.worker import NPUWorker
-
-    worker = object.__new__(NPUWorker)
-    reset_fn = Mock() if reset == "callable" else reset
-    runner = SimpleNamespace() if reset == "absent" else SimpleNamespace(reset_mm_cache=reset_fn)
-    worker.model_runner = runner
-    worker.reset_mm_cache()
-    if reset == "callable":
-        reset_fn.assert_called_once_with()
-    assert worker.model_runner is runner
-
-
 @pytest.fixture
 def worker_constructor(monkeypatch):
     """Mock external setup while retaining both real Worker constructors."""
@@ -125,8 +158,8 @@ def worker_constructor(monkeypatch):
     from vllm.v1.worker import gpu_worker
 
     import vllm_ascend
-    from vllm_ascend import ascend_forward_context, mrv2_utils, utils
     from vllm_ascend import logger as ascend_logger
+    from vllm_ascend import mrv2_utils, utils
     from vllm_ascend.worker import worker as worker_module
 
     events = []
@@ -135,7 +168,6 @@ def worker_constructor(monkeypatch):
         return Mock(side_effect=lambda *args, **kwargs: events.append(name))
 
     monkeypatch.setattr(mrv2_utils, "apply_v2_model_runner_config_patch", record("runner_config"))
-    monkeypatch.setattr(ascend_forward_context, "sync_v2_extra_kwargs", record("sync"))
     monkeypatch.setattr(utils, "adapt_patch", record("patches"))
     kda = ModuleType("vllm_ascend.patch.worker.patch_kda_recoverssm")
     kda.patch_kda_recoverssm = record("kda")  # type: ignore[attr-defined]
@@ -159,7 +191,13 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_ascend_config",
-        Mock(return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=False))),
+        Mock(
+            return_value=SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_npugraph_ex=False, enable_static_kernel=False, enable_super_kernel=False
+                )
+            )
+        ),
     )
     sleep_manager = SimpleNamespace()
 
@@ -239,10 +277,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.local_rank == 2
     assert worker.distributed_init_method == "env://"
     assert worker.is_driver_worker is True
-    assert worker._sleep_saved_buffers == {}
-    assert worker._sleep_saved_parameters == {}
-    if vllm_version_is("0.33.0"):
-        assert worker._sleep_saved_draft_buffers == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False
@@ -261,7 +295,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.use_v2_model_runner is True
     assert setup.events == [
         "runner_config",
-        "sync",
         "patches",
         "kda",
         "ops",

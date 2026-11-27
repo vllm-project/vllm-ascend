@@ -47,7 +47,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
+from vllm_ascend.utils import is_internal_npu_format, maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -283,7 +283,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         disable_tp: bool = False,
         padding_size: int = 0,
     ):
-        if vllm_version_is("0.33.0") and padding_size:
+        if vllm_version_is("0.34.0") and padding_size:
             raise ValueError("Merged-linear output padding requires the verified vLLM main revision")
         # #66784's inherited weight loaders read this even without padding.
         self.padding_size = padding_size
@@ -308,7 +308,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         )
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
+        # #66784's pad-fill helpers only exist on the verified main revision.
+        if not vllm_version_is("0.34.0"):
             for name in self.padding_fill_params():
                 param = getattr(self, name)
                 self._zero_output_padding(param)
@@ -411,6 +412,58 @@ class AscendRowParallelLinear(RowParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
+
+    def try_forward_into(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        """Try to write a plain BF16 projection into a separate output buffer.
+
+        Return False without writing if the caller needs the regular forward path.
+        The caller selects a supported hardware path and supplies an output
+        buffer that does not alias x or weight.
+        """
+        if (
+            type(self) is not AscendRowParallelLinear
+            or type(self.quant_method) is not AscendUnquantizedLinearMethod
+            or self.custom_op is not None
+            or not self.input_is_parallel
+            or (self.reduce_results and self.tp_size > 1)
+            or self.bias is not None
+            or not self.return_bias
+            or self.out_dtype is not None
+        ):
+            return False
+
+        # Direct dispatch bypasses the ordinary module call.
+        module = nn.modules.module
+        if (
+            self._forward_hooks
+            or self._forward_pre_hooks
+            or module._global_forward_hooks
+            or module._global_forward_pre_hooks
+            or "forward" in vars(self)
+            or "apply" in vars(self.quant_method)
+            or self._compiled_call_impl is not None
+            or torch.is_grad_enabled()
+            or torch.is_autocast_enabled("npu")
+        ):
+            return False
+
+        weight = self.weight
+        if not (
+            x.device.type == "npu"
+            and x.device == weight.device == out.device
+            and x.dtype == weight.dtype == out.dtype == torch.bfloat16
+            and x.ndim == weight.ndim == out.ndim == 2
+            and x.shape[1] == weight.shape[1]
+            and out.shape == (x.shape[0], weight.shape[0])
+            and x.is_contiguous()
+            and weight.is_contiguous()
+            and out.is_contiguous()
+            and not is_internal_npu_format(out)
+        ):
+            return False
+
+        torch.matmul(x, weight.t(), out=out)
+        return True
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):

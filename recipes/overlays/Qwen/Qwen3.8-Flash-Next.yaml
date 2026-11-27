@@ -1108,10 +1108,10 @@ guide_sections:
     image ships no copy of its own. The site's Docker tab does not mount it — if you
     take that command, add `-v /etc/hccn.conf:/etc/hccn.conf:ro`.
 
-    **The router container is not `--privileged`.** Under a host seccomp profile
-    that predates `clone3` (Docker before 20.10.10, or a custom or older profile)
-    it exits immediately with `RuntimeError: can't start new thread`. Add
-    `--security-opt seccomp=unconfined` or `--privileged` to its `docker run`.
+    If the router exits with `RuntimeError: can't start new thread`, check the
+    host's seccomp profile. Docker Engine 20.10.10 added `clone3` support to its
+    default profile; upgrade older versions or update a custom profile to allow
+    the required syscall while keeping seccomp enabled.
 
     The generated commands carry the recipe's environment as `-e` flags. Only if you
     start `vllm serve` from a shell instead, prepare it first:

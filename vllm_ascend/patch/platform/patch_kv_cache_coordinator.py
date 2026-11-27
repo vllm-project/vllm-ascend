@@ -165,8 +165,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         }
         # Fall back to flagging only full-attention groups when no group is
         # flagged. Mamba/GDN state hits do not use the eagle drop (a draft
-        # model has no mamba layers), and flagging mamba groups truncates
-        # cached state writes, collapsing hybrid prefix-cache hits to 0.
+        # model has no mamba layers). Checkpoint-write drop is configured
+        # separately below using the scheduler's common replay boundary.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = {
                 i
@@ -259,8 +259,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Keep Mamba checkpoint writes on the same boundary as prefill split
         # and cache lookup. Only roles using EAGLE replay need the block drop.
         if use_eagle and not self.skips_eagle_block_drop:
-            for group_id, manager in enumerate(self.single_type_managers):
-                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
+            for manager in self.single_type_managers:
+                # All recurrent groups share the scheduler's checkpoint
+                # boundary, including groups outside the draft model.
+                if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
 
     @property

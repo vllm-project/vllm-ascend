@@ -6,6 +6,8 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) 26.3.0 or later on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`. If the installed release is older, mount the two paths named in that section, or upgrade.
+
 === "Local (CPU)"
 
     You can run the unit tests on CPUs with the following steps:
@@ -65,22 +67,14 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     ```bash
 
-    # Update DEVICE according to your device (/dev/davinci[0-7])
-    export DEVICE=/dev/davinci0
+    # Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+    export ASCEND_VISIBLE_DEVICES=0
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device $DEVICE \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -107,18 +101,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES=0-3 \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -216,7 +199,7 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_eplb
     ```
 
 This will reproduce the E2E test behavior.
@@ -466,6 +449,18 @@ owners before the PR can merge. Key points:
   handled by maintainers at their own pace).
 - Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
   deliberately unowned and do not require an owner approval.
+- A maintainer with **write** permission or above can waive files from the
+  approval gate with a `/ignore-owner [path ...]` PR comment. The argument
+  names the *files* to waive by path, directory, or glob (CODEOWNERS pattern
+  semantics) — not an owner's `@handle`. A bare `/ignore-owner` waives the
+  whole PR, and `/ignore-owner-clear` revokes. The newest valid command
+  replaces earlier ones (a command from a user without write+ is ignored, not
+  counted), and the waiver persists for the lifetime of the PR across pushes.
+  The gate re-validates the commenter's permission on every run, and each
+  waived file is reported as a warning in the job log and in the gate comment,
+  so waivers stay visible. The CODEOWNERS health check is not waivable. This
+  is an escape hatch for cases like small docs fixes a maintainer can judge
+  directly — use it sparingly; a waived file gets no owner review at all.
 - If an owner is unresponsive, contact the module's other owners or a
   maintainer; maintainers can merge with an admin override in exceptional
   cases.

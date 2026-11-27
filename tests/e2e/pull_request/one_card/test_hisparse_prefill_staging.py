@@ -12,17 +12,12 @@ from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 
 from vllm_ascend.attention import sfa_hisparse
 from vllm_ascend.attention.sfa_hisparse import build_hisparse_prefill_staging_plan
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.33.0"):
-    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
-
-pytestmark = pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0")
 
 
 @pytest.mark.parametrize("resident_block_size", [128, 64, 32])

@@ -49,6 +49,8 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT products"
@@ -59,27 +61,13 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
     export NAME=vllm-ascend
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name $NAME \
         --net=host \
         --shm-size=512g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/hisi_hdc \
-        --device /dev/ummu \
-        --device /dev/uburma \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -itd $IMAGE bash
     ```
@@ -92,35 +80,11 @@ Select an image based on your machine type and start the docker image on your no
 
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -135,27 +99,11 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -175,7 +123,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 !!! note
 
-    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to your own path.
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/DeepSeek-V4-Flash-0731`. Feel free to change it to your own path.
 
     It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
@@ -484,7 +432,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -557,7 +505,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -616,7 +564,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     }
                 }' \
                 --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
                 }' \
                 2>&1 | tee "v4_flash_d_dp${4}.log"
             ```
@@ -733,7 +681,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             parser.add_argument(
                 "--dp-rpc-port",
                 type=str,
-                default=12345,
+                default="12345",
                 help="Port for data parallel master node."
             )
             parser.add_argument(
@@ -820,7 +768,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_SOCKET_IFNAME=$nic_name
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -887,7 +835,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export TASK_QUEUE_ENABLE=1
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -950,7 +898,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     },
                     "enable_cpu_binding":true,
                     "multistream_overlap_shared_expert":true,
-                    "recompute_scheduler_enable":true
+                    "scheduler_config": {"recompute_scheduler_enable": true}
                 }'
             ```
 
@@ -1042,7 +990,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1200
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1123,7 +1071,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1800
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1184,7 +1132,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
       sleep 3
     done
     wait
@@ -1296,7 +1244,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1394,7 +1342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1470,7 +1418,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             }' \
             --additional-config '{
                 "ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
             }' \
             2>&1 | tee "v4_flash_d_memcache_dp${4}.log"
         ```
@@ -1689,7 +1637,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_SOCKET_IFNAME=$nic_name
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
@@ -1793,7 +1741,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -1884,7 +1832,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                 },
                 "enable_cpu_binding":true,
                 "multistream_overlap_shared_expert":true,
-                "recompute_scheduler_enable":true
+                "scheduler_config": {"recompute_scheduler_enable": true}
             }'
         ```
 
@@ -2078,7 +2026,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2192,7 +2140,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2302,7 +2250,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2394,7 +2342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
@@ -2422,7 +2370,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2509,7 +2457,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait

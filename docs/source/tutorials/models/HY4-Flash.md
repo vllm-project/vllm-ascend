@@ -63,7 +63,6 @@ docker run \
     --name "$CONTAINER_NAME" \
     --network host \
     --ipc host \
-    --privileged \
     --shm-size=100g \
     --device /dev/davinci_manager \
     --device /dev/hisi_hdc \

@@ -73,6 +73,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
+from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -100,7 +101,6 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_scheduling_enabled,
 )
-from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
@@ -676,7 +676,6 @@ def _make_output(scheduler):
     req_ids = [req.request_id for req in scheduler.running]
     return ModelRunnerOutput(
         req_ids=req_ids,
-        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -777,7 +776,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         "num_sampled_tokens_per_step": 1,
         "has_mamba_layers": False,
         "scheduler_reserve_full_isl": False,
-        "use_v2_model_runner": False,
         "needs_kv_cache_zeroing": False,
         "num_spec_tokens": 0,
         "dynamic_sd_lookup": None,
@@ -821,6 +819,46 @@ def test_balance_schedule_waiting_and_running_paths():
     out2 = scheduler.schedule()
     assert out2.total_num_scheduled_tokens >= 0
     scheduler.schedule(throttle_prefills=True)
+
+
+def test_balance_schedule_iteration_details_stay_main_only():
+    """Iteration logging must not build main-only ``IterationDetails`` on 0.34.0.
+
+    Regression guard for the v0.34.0 lane: the import and the output field are
+    version-gated, but the creation site used to run whenever iteration logging
+    was enabled, raising ``NameError: name 'IterationDetails' is not defined``
+    on the first request.
+    """
+    scheduler = _make_balance_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.add_request(_create_requests(1, num_tokens=32, max_tokens=8)[0])
+
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens > 0
+    if vllm_version_is("0.34.0"):
+        assert not hasattr(output, "iteration_details")
+        assert output.scheduled_encoder_input_stats is None
+    else:
+        assert output.iteration_details is not None
+        assert output.iteration_details.num_prefill_requests == 1
+
+
+def test_balance_schedule_profiler_does_not_build_iteration_details_on_release():
+    """The profiler also triggered the main-only ``IterationDetails`` creation."""
+    scheduler = _make_balance_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = False
+    scheduler.vllm_config.profiler_config.profiler = "proton"
+    scheduler.add_request(_create_requests(1, num_tokens=32, max_tokens=8)[0])
+
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens > 0
+    if vllm_version_is("0.34.0"):
+        assert not hasattr(output, "iteration_details")
+        assert output.scheduled_encoder_input_stats is None
+    else:
+        assert output.iteration_details is not None
 
 
 def test_balance_schedule_records_local_prefix_cache_stats():
@@ -966,7 +1004,6 @@ def test_balance_schedule_pause_freeze_and_v2():
 
     v2_sched = _make_balance_scheduler()
     v2_sched._pause_state = PauseState.UNPAUSED
-    v2_sched.use_v2_model_runner = True
     v2_sched.dynamic_sd_lookup = {1: 2}
     v2_sched.defer_block_free = True
     connector = MagicMock()
@@ -1120,7 +1157,6 @@ def _make_step_output(output, sampled):
     req_ids = list(output.num_scheduled_tokens)
     return ModelRunnerOutput(
         req_ids=req_ids,
-        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000] if sampled[req_id] else [] for req_id in req_ids],
         logprobs=None,
         prompt_logprobs_dict={},
