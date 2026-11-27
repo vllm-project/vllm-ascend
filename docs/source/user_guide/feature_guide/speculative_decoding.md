@@ -21,9 +21,6 @@ shows both forms. Use local checkpoint paths when you already have the weights.
     draft checkpoint. Use a local path or a checkpoint ID.
 - Set `draft_tensor_parallel_size` to 1 or the target TP size, subject to the
     drafter's requirements.
-- For prefill/decode (P/D) separation, use the same `K` on both roles for
-    hybrid Mamba models. Use the model tutorial for role-specific serving and
-    parallelism settings. See the [model tutorials](../../tutorials/models/index.md).
 
 ## Speculative Decoding Methods
 
@@ -621,6 +618,15 @@ requests. The NPU rejection kernel draws uniform values with FP32 Triton
 upstream vLLM.
 
 ## Other Speculative Decoding Settings
+
+### P/D Separation
+
+Set `num_speculative_tokens` on the prefill and decode roles when speculative decoding is enabled.
+
+- For hybrid Mamba models, set the same value on both roles.
+- For other models, set `1` on prefill and at least `1` on decode.
+
+See the [P/D deployment guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for role-specific serving and parallelism settings.
 
 ### Dynamic Speculative Decoding
 
