@@ -1,58 +1,15 @@
 pr: 21675
 entries:
   - category: feature
-    text: Added MLA attention mode support for DFlash2 draft models in speculative decoding on Ascend NPUs, enabled via dflash_config.attention_mode="mla" for checkpoints such as Kimi-K3.1-Dflash2-Preview.
-  - category: performance
-    text: Kimi DFlash2 MLA drafts on A5 can use non-quantized FlashMLA for causal sliding-window decode when both CANN operators support BAND. The draft supplies valid query lengths on device, including partially filled query blocks at the model length limit. A3 continues to use FIA.
+    text: >-
+      Added support for DFlash2 draft checkpoints that declare `dflash_config.attention_mode="mla"`,
+      including `Kimi-K3.1-Dflash2-Preview`. Sliding-window layers must be causal and require
+      a decode context parallel size of 1. A3 uses FIA for these layers, and eligible A5
+      configurations can use FlashMLA for uniform causal windows.
   - category: bugfix
-    text: Fixed DFlash2 MLA draft attention causality being resolved from a
-      non-existent layer attribute, which silently routed every draft layer
-      through the non-causal attention path and collapsed the speculative
-      acceptance rate for causal checkpoints such as Kimi-K3.1-Dflash2-Preview.
-      Causality is now resolved from the checkpoint config (is_causal, then
-      dflash_config.causal, then the layer_types sliding-attention fallback),
-      matching upstream vLLM.
+    text: >-
+      Fixed missing Kimi K3.1 input embeddings on the last pipeline stage when a speculative
+      draft shares the target model's embeddings.
   - category: bugfix
-    text: Updated the DFlash2 draft attention metadata refresh to write
-      per-request query lengths onto the nested decode metadata used by
-      current upstream vLLM mains, keeping the flat-metadata fallback.
-  - category: bugfix
-    text: Initialized loaded_shard_ids on AscendColumnParallelLinear so
-      stacked-shard weight validation from upstream vLLM#63752 finds the
-      tracking dict on the plain column-parallel path used by the MLA draft.
-  - category: bugfix
-    text: Kimi-K3.1-Dflash2-Preview declares dflash_config.aux_hidden_stream="attn_res"
-      (the draft was trained against the AttnRes mixture), but the target always
-      fed the raw residual prefix sum; the target now captures the materialized
-      AttnRes stream for DFlash drafts that declare it, keeping prefix-sum capture
-      as the default for DFlash checkpoints without the declaration.
-  - category: bugfix
-    text: DFlash2 draft checkpoints whose layers mix causal and non-causal
-      attention, or declare different sliding windows, now fail fast at
-      startup when those layers would share one KV cache group, instead of
-      silently applying the last layer's attention mode to the whole group
-      and corrupting draft attention.
-  - category: bugfix
-    text: Fixed the Kimi K3.1 target model not building its input embedding on
-      the last pipeline-parallel stage when a speculative draft that reads
-      target embeddings runs with pipeline parallelism, which left the stage
-      without embedding weights to share with the draft.
-  - category: bugfix
-    text: Starting a sliding-window DFlash2 MLA draft (e.g.
-      Kimi-K3.1-Dflash2-Preview) with decode context parallelism now fails
-      fast at startup with a clear error, instead of silently dropping the
-      draft sliding window that the DCP attention path does not enforce
-      (matching the restriction upstream vLLM#68214 encodes).
-  - category: bugfix
-    text: Starting a non-causal DFlash2 MLA draft that declares a sliding
-      window now fails fast at startup with a clear error, instead of
-      silently dropping the window, because the Ascend MLA decode path only applies
-      the sliding-window band in the causal branch.
-  - category: bugfix
-    text: Fixed the DFlash2 MLA draft sliding window right-aligning to the
-      optimistic CPU sequence-length upper bound after partial rejections,
-      which pulled up to num_speculative_tokens stale rows into the window
-      band. The draft metadata now mirrors the rejection-adjusted device
-      lengths to host (the DSpark pattern) and builds with
-      attn_state=ChunkedPrefill, so both eager and full-graph FIA calls see
-      the accepted context and apply the configured sliding window.
+    text: >-
+      Fixed incorrect draft token selection in DFlash2 when candidate scores contain NaN.
