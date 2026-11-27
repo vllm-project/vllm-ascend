@@ -978,15 +978,15 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths(use_
     assert metadata.sin is sin
 
 
-def _make_req_metadata() -> AscendDSAReqMetadata:
+def _make_req_metadata(layer_name: str = "layer") -> AscendDSAReqMetadata:
     return AscendDSAReqMetadata(
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         seq_lens=torch.ones(2, dtype=torch.int32),
         slot_mapping=None,
         storage_block_size=128,
         query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
-        sin=cast(Any, {"layer": torch.zeros(1)}),
-        cos=cast(Any, {"layer": torch.ones(1)}),
+        sin=cast(Any, {layer_name: torch.zeros(1)}),
+        cos=cast(Any, {layer_name: torch.ones(1)}),
     )
 
 
@@ -1058,6 +1058,9 @@ def _make_impl(
 
 def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     impl = _make_impl()
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     hidden_states = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     unified_output = torch.arange(10, dtype=torch.float32).reshape(5, 1, 2)
     output = torch.empty((5, 2), dtype=torch.float32)
@@ -1066,7 +1069,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         num_decodes=1,
         num_decode_tokens=2,
         num_prefills=1,
-        req_metadata=_make_req_metadata(),
+        req_metadata=_make_req_metadata(layer_name),
     )
     captured_o_proj_input: list[torch.Tensor] = []
 
@@ -1084,7 +1087,8 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
             return_value=SimpleNamespace(num_tokens=5, additional_kwargs={"num_tokens": 5}),
         ),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch.object(
             torch.ops.vllm,
             "maybe_all_gather_and_maybe_unpad",
@@ -1104,14 +1108,17 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
     ):
         actual = impl.forward(
-            layer_name="layer",
+            layer_name=layer_name,
             hidden_states=hidden_states,
             kv_cache=(torch.empty(0),),
-            attn_metadata={"swa_cache": metadata},
+            attn_metadata={swa_name: metadata},
             output=output,
         )
 
     assert actual is output
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once()
+    assert save.call_args.args[0] == swa_name
     assert len(captured_o_proj_input) == 1
     assert torch.equal(captured_o_proj_input[0], unified_output)
     forward_attention.assert_called_once()
@@ -2678,9 +2685,12 @@ def test_o_proj_capacity_tracks_decode_graph_not_profile_budget(tp_size, decode_
 
 def test_forward_empty_rank_still_participates_in_otp_collectives():
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     impl.turboquant = None
     impl._get_o_proj_input_shape = lambda metadata: (4, 1, 2)
-    layer_metadata = SimpleNamespace(attention=SimpleNamespace(num_actual_tokens=0), swa=None)
+    layer_metadata = SimpleNamespace(attention=None, swa=SimpleNamespace(num_actual_tokens=0))
     impl._get_layer_metadata = lambda layer_name, metadata: layer_metadata
     impl._prepare_caches_and_query = lambda *args: (False, None)
     impl._forward_o_proj = MagicMock()
@@ -2690,14 +2700,17 @@ def test_forward_empty_rank_still_participates_in_otp_collectives():
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch("vllm_ascend.attention.dsa_v1.attention_transfer_window", return_value=MagicMock()),
     ):
-        result = impl.forward("layer", torch.zeros((4, 2)), (), {"layer": object()}, output)
+        result = impl.forward(layer_name, torch.zeros((4, 2)), (), {swa_name: layer_metadata.swa}, output)
 
     assert result is output
     assert torch.count_nonzero(output) == 0
     impl._forward_o_proj.assert_called_once()
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once_with(swa_name, [])
 
 
 def test_reserve_oproj_buffers_initializes_missing_pool():

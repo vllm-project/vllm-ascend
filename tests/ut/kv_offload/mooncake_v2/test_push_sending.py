@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
 )
+from vllm_ascend.models.deepseek_v4 import cache_reuse
 
 
 class Event:
@@ -43,14 +44,14 @@ class Event:
         assert self.recorded
 
 
-def descriptor():
+def descriptor(layer_name="model.layers.0.attn"):
     return MooncakeTransferMetadata(
         engine_id="p",
         te_rpc_port=1,
         block_size=4,
         cp_kv_cache_interleave_size=4,
         num_blocks=100,
-        layer_names=["model.layers.0.attn"],
+        layer_names=[layer_name],
         layer_block_sizes=[4],
         group_indices=[0],
         kv_caches_base_addr=[[1000]],
@@ -63,7 +64,7 @@ def descriptor():
     )
 
 
-def remote_metadata(pcp_size=1, tp_size=1, heads=2):
+def remote_metadata(pcp_size=1, tp_size=1, heads=2, *, layer_name="model.layers.0.attn"):
     return MooncakeTransferMetadataGroups(
         engine_id="d",
         scheduler_host="127.0.0.1",
@@ -78,7 +79,7 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
                 block_size=4,
                 cp_kv_cache_interleave_size=4,
                 num_blocks=100,
-                layer_names=["model.layers.0.attn"],
+                layer_names=[layer_name],
                 layer_block_sizes=[4],
                 group_indices=[0],
                 block_strides=[[heads * 16]],
@@ -170,9 +171,11 @@ def worker(monkeypatch, request):
         self.vllm_config.kv_transfer_config = self.kv_transfer_config
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
         self.kvpp_layer_owners = {}
-        self.transfer_metadata = descriptor()
         layout = getattr(request, "param", None)
-        if layout is not None:
+        self.transfer_metadata = (
+            descriptor("model.layers.0.self_attn.swa_cache") if layout == "swa_only" else descriptor()
+        )
+        if layout is not None and layout != "swa_only":
             names = ["model.layers.0.attn", "model.layers.0.indexer", "model.layers.1.attn"]
             if layout == "longcat":
                 config.model_config.hf_text_config.model_type = "longcat_flash"
@@ -209,7 +212,12 @@ def worker(monkeypatch, request):
         SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1)), "p", None
     )
     obj.register_kv_caches({})
-    monkeypatch.setattr(obj, "_get_remote_metadata", lambda message: remote_metadata())
+    if getattr(request, "param", None) == "swa_only":
+        monkeypatch.setattr(
+            obj, "_get_remote_metadata", lambda _: remote_metadata(layer_name=obj.transfer_metadata.layer_names[0])
+        )
+    else:
+        monkeypatch.setattr(obj, "_get_remote_metadata", lambda _: remote_metadata())
     monkeypatch.setattr(obj, "_send_done", Mock(return_value=True))
     yield obj
     obj.shutdown()
@@ -260,6 +268,34 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     worker.start_load_kv(terminal)
     results = worker.get_transfer_results()
     assert results.finished_sending == {"p-request"}
+
+
+@pytest.mark.parametrize("worker", ["swa_only"], indirect=True)
+@pytest.mark.parametrize("shared", [False, True], ids=["resident", "rotating"])
+def test_save_uses_registered_cache_name_only_for_rotating_layers(worker, monkeypatch, shared):
+    owner = worker.transfer_metadata.layer_names[0]
+    layer_name = "model.layers.0.self_attn.attn"
+    layout = SimpleNamespace(reused_cache_names={owner if shared else "model.layers.1.self_attn.swa_cache"})
+    monkeypatch.setattr(cache_reuse, "is_v1_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(cache_reuse, "get_kv_transfer_group", SimpleNamespace)
+    monkeypatch.setattr(cache_reuse, "get_layerwise_reuse_layout", lambda _: layout)
+    if shared:
+        worker._shared_layer_indices[owner] = 0
+    worker.start_load_kv(source_meta())
+
+    save_layer_name = cache_reuse.get_swa_save_layer_name(layer_name, owner)
+    assert save_layer_name == (owner if shared else layer_name)
+    worker.save_kv_layer(save_layer_name)
+    if shared:
+        worker.wait_for_layer_reuse(0)
+        worker.engine.batch_transfer_sync_write.assert_called_once()
+        ((batch, _),) = worker._pending_sends
+        assert batch.layer_name == owner and batch.requests[0].end_token == 4
+    else:
+        worker.engine.batch_transfer_sync_write.assert_not_called()
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_called_once()
+    assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
 
 
 def test_shared_layer_hook_does_not_schedule_a_transfer(worker, monkeypatch):

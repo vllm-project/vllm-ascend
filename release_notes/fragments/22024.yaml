@@ -1,0 +1,9 @@
+pr: 22024
+entries:
+  - category: feature
+    text: >-
+      DeepSeek-V4 Flash and Pro prefill producers can rotate main-model KV through
+      AscendStore and Memcache while the decoder and MTP draft caches remain resident.
+      To enable shared buffers, set `use_layerwise` to `true` and choose a smaller
+      `layerwise_num_shared_buffers` than the number of eligible layers.
+    model: deepseek-v4
