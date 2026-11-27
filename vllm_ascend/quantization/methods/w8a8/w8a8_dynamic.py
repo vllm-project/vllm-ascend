@@ -151,7 +151,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         return output
 
     def input_quant_key(self):
-        return kInt8DynamicTokenSym
+        if self.act_quant_type is torch.int8:
+            return kInt8DynamicTokenSym
+        return None 
 
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
