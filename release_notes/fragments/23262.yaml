@@ -1,0 +1,13 @@
+pr: 23262
+entries:
+  - category: feature
+    hardware: [A3]
+    text: >-
+      Qwen3.6-27B supports experimental DMTP speculative decoding on two Ascend A3 NPUs
+      with the Piggy12/Qwen3.6-27B-DMTP draft. Set `method` to `dmtp` and
+      `num_speculative_tokens` to 7 for BF16 greedy text generation,
+      with synchronous scheduling, prefix caching disabled, and up to 3,072 tokens of context.
+      Installing `flash_attn_npu_3` enables FA3 automatically for the target's full-attention
+      layers and the DMTP draft on supported A3 hardware. Without `--enforce-eager`,
+      the native MTP predictor also uses batched FA3 and supports ACLGraph decode
+      with the default graph configuration.

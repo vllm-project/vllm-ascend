@@ -61,6 +61,10 @@ def init_speculator(
         )
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
+    if getattr(speculative_config, "custom_method", None) == "dmtp":
+        from vllm_ascend.worker.v2.spec_decode.dmtp.speculator import AscendDMTPSpeculator
+
+        return AscendDMTPSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,

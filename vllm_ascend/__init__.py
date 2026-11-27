@@ -117,6 +117,16 @@ def register_model():
     from .models import register_model
 
     register_model()
+    # vLLM added the custom-method registry in v0.34. Older deployments
+    # can still load the Ascend plugin and use the existing model adapters.
+    try:
+        from vllm.v1.worker.gpu.spec_decode import speculator_config
+    except ImportError:
+        return
+
+    register_method = getattr(speculator_config, "register_speculative_method", None)
+    if register_method is not None:
+        register_method("dmtp", "vllm_ascend.worker.v2.spec_decode.dmtp.config.AscendDMTPSpeculatorConfig")
 
 
 import vllm_ascend.logger  # noqa: E402, F401

@@ -823,6 +823,16 @@ class NPUPlatform(Platform):
         ascend_config = init_ascend_config(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
+        if getattr(vllm_config.speculative_config, "custom_method", None) == "dmtp" or (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.draft_model_config is not None
+            and "DFlash2T1ResidualDraftModel" in (vllm_config.speculative_config.draft_model_config.architectures or ())
+        ):
+            from vllm_ascend.worker.v2.spec_decode.dmtp.config import validate_dmtp_engine_config
+
+            validate_dmtp_engine_config(vllm_config)
+            if ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size > 1:
+                raise ValueError("DMTP requires the standard tensor-parallel LM head.")
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
         _update_compilation_modes(vllm_config, ascend_config)
@@ -2133,10 +2143,12 @@ def _uses_qwen_fa3(config: VllmConfig) -> bool:
         return False
     # DFlash keeps the target model config while loading the draft.
     spec = config.speculative_config
-    return (
-        backends.model_tag in ("backbone", "dflash_head")
-        and spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+    return backends.model_tag in ("backbone", "dflash_head") and (
+        (spec.method == "dflash" and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ()))
+        or (
+            getattr(spec, "custom_method", None) == "dmtp"
+            and "DFlash2T1ResidualDraftModel" in (spec.draft_model_config.architectures or ())
+        )
     )
 
 

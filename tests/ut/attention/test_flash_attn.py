@@ -285,16 +285,22 @@ FIA = "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
 
 @pytest.mark.parametrize(
-    "target,draft,tag,expected",
+    "target,draft,tag,custom_method,expected",
     [
-        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "backbone", FA3),
-        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "dflash_head", FA3),
-        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash_head", FIA),
-        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", "backbone", FIA),
-        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "eagle_head", FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "backbone", None, FA3),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "dflash_head", None, FA3),
+        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash_head", None, FIA),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", "backbone", None, FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "eagle_head", None, FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2T1ResidualDraftModel", "backbone", "dmtp", FA3),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2T1ResidualDraftModel", "dflash_head", "dmtp", FA3),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2T1ResidualDraftModel", "eagle_head", "dmtp", FIA),
+        ("Qwen4ExpForCausalLM", "DFlash2T1ResidualDraftModel", "dflash_head", "dmtp", FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2T1ResidualDraftModel", "backbone", None, FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "backbone", "dmtp", FIA),
     ],
 )
-def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, tag, expected):
+def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, tag, custom_method, expected):
     from vllm_ascend import platform
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -304,6 +310,9 @@ def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, ta
     config.model_config.hf_text_config = SimpleNamespace(model_type="qwen3_5_text")
     config.speculative_config.target_model_config = config.model_config
     config.speculative_config.draft_model_config.architectures = [draft]
+    config.speculative_config.custom_method = custom_method
+    if custom_method is not None:
+        config.speculative_config.method = "custom_class"
     monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
     monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))

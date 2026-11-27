@@ -1444,9 +1444,17 @@ class NPUModelRunner(GPUModelRunner):
                 return (
                     architecture == "Qwen3_5ForConditionalGeneration"
                     and spec is not None
-                    and spec.method == "dflash"
                     and spec.draft_model_config is not None
-                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+                    and (
+                        (
+                            spec.method == "dflash"
+                            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+                        )
+                        or (
+                            getattr(spec, "custom_method", None) == "dmtp"
+                            and "DFlash2T1ResidualDraftModel" in (spec.draft_model_config.architectures or ())
+                        )
+                    )
                     and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                     and self.vllm_config.kv_transfer_config is None
                 )

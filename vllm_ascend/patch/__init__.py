@@ -1640,3 +1640,7 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# platform/patch_dmtp_sampling.py: SamplingParams._validate_spec_decode has
+# the engine's spec config at request admission. Remove the wrapper once
+# upstream provides a per-method sampling-parameter validation hook.
