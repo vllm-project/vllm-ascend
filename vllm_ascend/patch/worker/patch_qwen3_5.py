@@ -27,6 +27,9 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -125,7 +128,7 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor | QuantizedActivation, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
