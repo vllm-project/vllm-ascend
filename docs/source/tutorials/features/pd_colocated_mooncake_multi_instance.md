@@ -255,8 +255,9 @@ configuration.
 
 ## Benchmark
 
-Use AISBench to measure time to first token (TTFT). Locate its streaming chat
-model configuration with `ais_bench --models vllm_api_stream_chat --search`.
+This example uses AISBench 3.1.0 to measure time to first token (TTFT).
+Locate its streaming chat model configuration with
+`ais_bench --models vllm_api_stream_chat --search`.
 Set `path` to the Qwen2.5-72B-Instruct model directory, `model` to `qwen`,
 and `host_ip` and `host_port` to Instance 1. Set `batch_size=25`,
 `max_out_len=10`, and `generation_kwargs=dict(temperature=0, ignore_eos=True)`.
@@ -266,6 +267,7 @@ AISBench QA prompt and Qwen2.5-72B-Instruct chat template, 988 random digits
 give 1,024 input tokens including formatting. If you change either template,
 adjust the digit count using the input token count reported by the service.
 Keep `dataset_a.jsonl` for all three measurements so they use identical prompts.
+Run the following block and the replay commands in the same Bash session.
 
 ```bash
 python - <<'PY'
@@ -288,8 +290,10 @@ run_dataset() {
 
 ### Step 1: Baseline (No Cache)
 
-Start with cold caches. Run `run_dataset dataset_a.jsonl` against Instance 1
-and record **TTFT1**.
+Start with fresh instances and an empty Mooncake store so that A has no entries
+from an earlier run. Keep other traffic off the instances during the benchmark.
+Run `run_dataset dataset_a.jsonl` against Instance 1 and record **TTFT1**.
+Use the same TTFT statistic from the AISBench summary for each run.
 
 ### Preparation for Step 2
 
@@ -298,18 +302,24 @@ distinct KV blocks fill the device KV cache while the Mooncake store still
 has room for A and B. The 200 requests above are an example. Adjust the count
 using the device KV cache capacity in tokens from the vLLM startup log.
 
-### Step 2: Local DRAM Hit
+### Step 2: Replay on Instance 1 {id="step-2-local-dram-hit"}
 
 Run `run_dataset dataset_a.jsonl` again against Instance 1 and record **TTFT2**.
 Compare the changes in `vllm:prefix_cache_hits_total` (device) and
 `vllm:external_prefix_cache_hits_total` (Mooncake) on its `/metrics` endpoint
-over this replay. The hits for A's evicted blocks should come from Mooncake.
+before and after this replay. Both counters count tokens. External hits should
+account for most of A's cacheable input tokens. If most hits still come from
+the device, repeat from the cold baseline with a larger B. If both counts are
+low, check whether A's blocks were stored and retained in Mooncake.
 
-### Step 3: Cross-Node DRAM Hit
+### Step 3: Replay on Instance 2 {id="step-3-cross-node-dram-hit"}
 
 Set `host_ip` and `host_port` in the AISBench model configuration to Instance 2
 and run `run_dataset dataset_a.jsonl`. Record **TTFT3** and check the external
-prefix cache hits on Instance 2.
+prefix cache hit counter before and after this replay on Instance 2. Compare
+the increase with A's cacheable input tokens to see how much was reused
+through the connector. To attribute reads to Node 1's DRAM,
+verify that the Mooncake transfers read A's blocks from segments on Node 1.
 
 ### Test Results
 
