@@ -1,0 +1,6 @@
+pr: 20986
+entries:
+  - category: bugfix
+    text: >-
+      Layerwise AscendStore initialization now reports transfer-thread device-binding failures
+      and stops any transfer thread already started by that worker, allowing initialization to be retried.

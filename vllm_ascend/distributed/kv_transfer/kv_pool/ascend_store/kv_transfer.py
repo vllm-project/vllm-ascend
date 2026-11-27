@@ -355,9 +355,14 @@ class KVTransferThread(threading.Thread):
             pass
 
     def _initialize_for_transfer(self) -> bool:
-        self._set_os_thread_name()
-        self.m_store.set_device()
-        self.ready_event.set()
+        try:
+            self._set_os_thread_name()
+            self.m_store.set_device()
+        except BaseException as error:
+            self._fatal_error = error
+            return False
+        finally:
+            self.ready_event.set()
         return True
 
     def run(self):
@@ -497,19 +502,7 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-class _WholeBlockKVTransferThread(KVTransferThread):
-    """Report startup failure to the whole-block worker waiting on readiness."""
-
-    def _initialize_for_transfer(self) -> bool:
-        try:
-            return super()._initialize_for_transfer()
-        except BaseException as error:
-            self._fatal_error = error
-            self.ready_event.set()
-            return False
-
-
-class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
+class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -1172,7 +1165,7 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
         return True
 
 
-class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
+class KVCacheStoreRecvingThread(KVTransferThread):
     def __init__(
         self,
         m_store: Backend,
