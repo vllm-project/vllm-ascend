@@ -25,7 +25,8 @@ shows both forms. Use local checkpoint paths when you already have the weights.
 | `method` | Draft source or purpose |
 | --- | --- |
 | [`ngram_gpu`](#n-gram) | Prompt n-gram matches on the NPU |
-| [`eagle`, `eagle3`](#eagle-and-eagle-3) | A matching EAGLE or EAGLE-3 checkpoint |
+| [`eagle`](#eagle) | A matching EAGLE checkpoint |
+| [`eagle3`](#eagle-3) | A matching EAGLE-3 checkpoint |
 | [`mtp`](#mtp) | Multi-Token Prediction weights built into the target or supplied by a matching assistant checkpoint |
 | [`dflash`](#dflash) | A DFlash, [DFlash2](#dflash2), or [LiLiCorr](#lilicorr) checkpoint |
 | [`dspark`](#dspark) | A matching DSpark checkpoint |
@@ -63,12 +64,10 @@ vllm serve Qwen/Qwen3-1.7B \
   --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
 ```
 
-### EAGLE and EAGLE-3
+### EAGLE
 
-Set `method` to `eagle` or `eagle3` according to the draft checkpoint. Set
-`model` to the matching draft and use `draft_tensor_parallel_size=1` for EAGLE.
-
-EAGLE with ModelScope checkpoints:
+Set `method` to `eagle`, `model` to the matching draft checkpoint, and
+`draft_tensor_parallel_size` to 1. The example uses ModelScope checkpoints.
 
 **Offline inference**
 
@@ -104,7 +103,9 @@ VLLM_USE_MODELSCOPE=True vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct \
   }'
 ```
 
-EAGLE-3:
+### EAGLE-3
+
+Set `method` to `eagle3` and `model` to the matching draft checkpoint.
 
 **Offline inference**
 
@@ -168,41 +169,9 @@ vllm serve Qwen/Qwen3.5-4B \
   --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
-For Gemma 4 with an assistant, set `model` to the matching assistant checkpoint
-and keep `method="mtp"`. This example uses two A5 NPUs.
-
-**Offline inference**
-
-```python
-from vllm import LLM, SamplingParams
-
-llm = LLM(
-    model="google/gemma-4-31B-it",
-    tensor_parallel_size=2,
-    max_model_len=2048,
-    compilation_config={
-        "cudagraph_mode": "FULL_DECODE_ONLY",
-    },
-    speculative_config={
-        "method": "mtp",
-        "model": "google/gemma-4-31B-it-assistant",
-        "num_speculative_tokens": 3,
-    },
-)
-sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
-outputs = llm.generate(["The future of AI is"], sampling_params)
-print(outputs[0].outputs[0].text)
-```
-
-**Online serving**
-
-```shell
-vllm serve google/gemma-4-31B-it \
-  --tensor-parallel-size 2 \
-  --max-model-len 2048 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method":"mtp","model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":3}'
-```
+For a target that uses an assistant, such as Gemma 4, set `model` in the
+speculative config to the matching assistant checkpoint. See the
+[Gemma 4 tutorial](../../tutorials/models/Gemma4.md) for deployment.
 
 !!! note "Single-layer MTP"
 
@@ -241,45 +210,9 @@ vllm serve Qwen/Qwen3-8B \
 
 #### DFlash2
 
-Use a `DFlash2DraftModel` checkpoint and the
-target's unquantized, full-vocabulary LM head. The checkpoint supplies the
-candidate selector settings and supported draft lengths.
-
-**Offline inference**
-
-```python
-from vllm import LLM, SamplingParams
-
-llm = LLM(
-    model="Qwen/Qwen3.8-27B",
-    tensor_parallel_size=2,
-    max_model_len=2048,
-    enable_prefix_caching=False,
-    compilation_config={
-        "cudagraph_mode": "FULL_AND_PIECEWISE",
-        "cudagraph_capture_sizes": [8, 16],
-    },
-    speculative_config={
-        "method": "dflash",
-        "model": "z-lab/Qwen3.8-27B-DFlash2",
-        "num_speculative_tokens": 7,
-    },
-)
-sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
-outputs = llm.generate(["The future of AI is"], sampling_params)
-print(outputs[0].outputs[0].text)
-```
-
-**Online serving**
-
-```shell
-vllm serve Qwen/Qwen3.8-27B \
-  --tensor-parallel-size 2 \
-  --max-model-len 2048 \
-  --no-enable-prefix-caching \
-  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[8,16]}' \
-  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
-```
+Use a `DFlash2DraftModel` checkpoint and the target's unquantized,
+full-vocabulary LM head. The checkpoint supplies the candidate selector
+settings and supported draft lengths.
 
 Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
 `FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
@@ -288,52 +221,7 @@ Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
 
 Use a matching `LiLiCorrDraftModel` checkpoint and set `K` at or below the
 trained block size minus one. Both plain and convolutional checkpoints support
-greedy and probabilistic drafting with standard TP. The example uses a draft
-checkpoint from ModelScope.
-
-**Offline inference**
-
-```python
-import os
-
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
-from vllm import LLM, SamplingParams
-
-llm = LLM(
-    model="Qwen/Qwen3.8-27B",
-    tensor_parallel_size=2,
-    max_model_len=4096,
-    enforce_eager=True,
-    enable_prefix_caching=False,
-    speculative_config={
-        "method": "dflash",
-        "model": "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
-        "num_speculative_tokens": 7,
-        "draft_tensor_parallel_size": 2,
-        "enforce_eager": True,
-    },
-)
-sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
-outputs = llm.generate(["The future of AI is"], sampling_params)
-print(outputs[0].outputs[0].text)
-```
-
-**Online serving**
-
-```shell
-VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3.8-27B \
-  --tensor-parallel-size 2 \
-  --max-model-len 4096 \
-  --enforce-eager \
-  --no-enable-prefix-caching \
-  --speculative-config '{
-    "method":"dflash",
-    "model":"niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
-    "num_speculative_tokens":7,
-    "draft_tensor_parallel_size":2,
-    "enforce_eager":true
-  }'
-```
+greedy and probabilistic drafting with standard TP.
 
 Set `"enforce_eager":true` inside `speculative_config` for the draft.
 Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
