@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, MLAAttentionS
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter, A3MLAConfig, get_a3_mla_ops, supports_a3_mla
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -62,12 +63,15 @@ from vllm_ascend.attention.utils import (
     notify_kv_cache_written,
     split_decodes_and_prefills,
     supports_strided_mla_cache,
+    use_component_major_mla_pd_layout,
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_context_rows, load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -168,9 +172,11 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        parallel = getattr(vllm_config, "parallel_config", None)
+        glm_pcp = model_type == "glm_moe_dsa" and getattr(parallel, "prefill_context_parallel_size", 1) > 1
         storage_heads = self.num_heads
-        if model_type == "kimi_linear":
-            # Preserve the existing Kimi Linear cache head-count contract.
+        if model_type == "kimi_linear" or glm_pcp:
+            # The planner describes the stored latent head, independent of the query heads.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
             spec
@@ -455,7 +461,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
         flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
-        if len(flashmla_choices) > 1:
+        a3_choices = {getattr(static_forward_context[name].impl, "use_a3_mla_sink", False) for name in layer_names}
+        self.use_a3_mla_sink = True in a3_choices
+        if len(flashmla_choices) > 1 or len(a3_choices) > 1:
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
             first_impl = static_forward_context[layer_names[0]].impl
@@ -463,10 +471,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                backend_name if True in flashmla_choices else "FIA",
+                "A3 MLA sink" if self.use_a3_mla_sink else backend_name if True in flashmla_choices else "FIA",
             )
-        if True in flashmla_choices:
+        if True in flashmla_choices or self.use_a3_mla_sink:
             impl = static_forward_context[layer_names[0]].impl
+            attn_mask = None if self.use_a3_mla_sink else self.attn_mask_builder.get_splitfuse_attn_mask()
             adapter = None
             if impl.use_quant_flashmla:
                 adapter = QuantFlashMLAImpl.load(
@@ -480,7 +489,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 impl,
                 device,
                 scheduler_config.max_num_seqs,
-                self.attn_mask_builder.get_splitfuse_attn_mask(),
+                attn_mask,
                 adapter=adapter,
                 max_query_len=self.decode_threshold,
             )
@@ -519,7 +528,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 self.num_prefills > 0,
                 retain_for_graph=retain_for_graph,
             )
-            decode_tokens = flash.query.shape[0]
+            decode_tokens = flash.slots.shape[0]
             decode = self.decode_metadata_cls(
                 input_positions=flash.positions,
                 block_table=flash.block_table,
@@ -1157,6 +1166,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._mlapo_uses_native_weights = False
         self.use_quant_flashmla: bool = self._can_use_quant_flashmla()
         self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla()
+        self.a3_mla_adapter = None
+        if supports_a3_mla(
+            self,
+            is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+            is_draft=backends.model_tag == "dspark_head",
+            supports_pd_layout=use_component_major_mla_pd_layout,
+        ):
+            ops = get_a3_mla_ops()
+            if ops is not None:
+                self.a3_mla_adapter = A3MLAAdapter(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype), *ops)
+        self.use_a3_mla_sink = self.a3_mla_adapter is not None
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
 
@@ -1169,7 +1189,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.qk_rope_head_dim == FLASHMLA_QK_DIM - FLASHMLA_V_DIM
             and not self.enable_kv_nz
             and not self.use_pcp
-            and supports_component_major_mla_pd(self.vllm_config)
+            and use_component_major_mla_pd_layout(self.vllm_config)
         )
 
     def _can_use_quant_flashmla(self) -> bool:
@@ -3069,15 +3089,18 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         flash = metadata.external_flashmla
         assert flash is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        if not isinstance(fused_cache, torch.Tensor) and not getattr(self, "use_a3_mla_sink", False):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
-        # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
-        # TND(576) query. The backend retains this buffer for captured capacities
-        # so replay reuses its address.
-        flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-        flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+        if getattr(self, "use_a3_mla_sink", False):
+            query = (preprocessed.ql_nope, preprocessed.q_pe)
+            output_kwargs = {"output_mask": flash.output_mask, "return_softmax_lse": False}
+        else:
+            output_kwargs = {}
+            flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+            flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+            query = flash.query
         record_attention_compute_start()
         quant_kwargs = {}
         if self.use_quant_flashmla:
@@ -3089,7 +3112,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "k_descale": self.fak_descale_float.view(1),
             }
         latent, _ = flash.adapter.attention(
-            flash.query,
+            query,
             fused_cache,
             block_table=flash.block_table,
             cache_seqlens=flash.cache_lens,
@@ -3097,6 +3120,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             seqused_q=flash.used_q,
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
+            **output_kwargs,
             **quant_kwargs,
         )
         return self._v_up_proj(latent)
@@ -3479,7 +3503,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # MLA implementation still expects separate NoPE/RoPE logical tensors.
         # Split it here as zero-copy views.
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
-        external_flash_cache = kv_cache if fused_mla_cache else None
+        external_flash_cache = kv_cache if fused_mla_cache or getattr(self, "use_a3_mla_sink", False) else None
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
                 kv_cache[..., : self.kv_lora_rank],

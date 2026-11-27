@@ -1,0 +1,4 @@
+---
+features:
+  - Support pipeline-parallel Prefill and TP1 Prefill context parallelism for
+    layerwise Mooncake MemFabric Push into Ascend HiSparse Decode.

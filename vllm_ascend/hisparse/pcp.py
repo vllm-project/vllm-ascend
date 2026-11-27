@@ -7,7 +7,6 @@ Core retains residency scheduling, DMA and the Host write completion fence.
 """
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
@@ -172,6 +171,8 @@ def adapt_pcp_hisparse_connector(runner):
     connector = runner.kv_connector
     if runner.pcp_manager is None:
         return connector
+
+    from vllm_ascend.hisparse.connector import HiSparseConnector
 
     # Taking over ActiveKVConnector state must not discard a subclass's lifecycle.
     if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
