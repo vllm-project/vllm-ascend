@@ -950,7 +950,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     },
                     "enable_cpu_binding":true,
                     "multistream_overlap_shared_expert":true,
-                    "recompute_scheduler_enable":true
+                    "scheduler_config": {"recompute_scheduler_enable": true}
                 }'
             ```
 
@@ -1184,7 +1184,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
       sleep 3
     done
     wait
@@ -1884,7 +1884,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                 },
                 "enable_cpu_binding":true,
                 "multistream_overlap_shared_expert":true,
-                "recompute_scheduler_enable":true
+                "scheduler_config": {"recompute_scheduler_enable": true}
             }'
         ```
 
@@ -2394,7 +2394,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
@@ -2509,7 +2509,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
