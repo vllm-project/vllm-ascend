@@ -15,6 +15,12 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    pcp_shard_namespace: str = ""
+
+    def _with_pcp_rank(self, key: str, group_id: int, pcp_rank: int) -> str:
+        if self.pcp_size > 1 and group_id in self.pcp_sharded_group_ids:
+            return f"{key}{self.pcp_shard_namespace}@pcp_size:{self.pcp_size}@pcp_rank:{pcp_rank}"
+        return key
 
     def make_full_key(
         self,
@@ -26,9 +32,7 @@ class LayerwiseKeyBuilder:
         dcp_rank: int | None = None,
     ) -> str:
         key = self.make_base_key(group_id, block_hash, rank, stage)
-        if self.pcp_size > 1 and group_id in self.pcp_sharded_group_ids:
-            # State head partitions depend on the PCP topology.
-            key = f"{key}@pcp_size:{self.pcp_size}@pcp_rank:{pcp_rank}"
+        key = self._with_pcp_rank(key, group_id, pcp_rank)
         if self.dcp_size > 1:
             if dcp_rank is None:
                 raise ValueError("dcp_rank is required when dcp_size > 1")
@@ -55,6 +59,7 @@ class LayerwiseKeyBuilder:
         end_token: int,
         head_or_tp_rank: int,
         pp_rank: int = 0,
+        pcp_rank: int = 0,
     ) -> str:
         """Address of one in-flight partial save object (GVA plane).
 
@@ -65,4 +70,5 @@ class LayerwiseKeyBuilder:
         drift from the scheduler's full-key format.
         """
         pp_tag = f"@pp{pp_rank}" if self.pp_size > 1 else ""
-        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+        key = f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+        return self._with_pcp_rank(key, group_id, pcp_rank)

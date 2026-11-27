@@ -21,6 +21,36 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_memcache_dcp_across_pcp_uses_physical_workers_for_pages_and_snapshots(self):
+        config = self.make_config(pp_size=2)
+        config.parallel_config.prefill_context_parallel_size = 4
+        cache = self.make_cache_config(2)
+        previous_keys: set[str] = set()
+        for tp_size, dcp_size, interleave in ((1, 1, 1), (1, 2, 1), (1, 4, 1), (1, 4, 128), (2, 4, 128)):
+            config.parallel_config.tensor_parallel_size = tp_size
+            config.parallel_config.decode_context_parallel_size = dcp_size
+            config.parallel_config.cp_kv_cache_interleave_size = interleave
+            builder = MemcacheBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[16, 32],
+            )
+            for group in range(2):
+                full, partial = set(), set()
+                for stage, pcp, tp in product(range(2), range(4), range(tp_size)):
+                    dcp = (pcp * tp_size + tp) % dcp_size
+                    full.add(builder.make_full_key(group, "hash", tp, stage, pcp, dcp))
+                    partial.add(builder.make_partial_key("model", "req", group, 0, 13, tp, stage, pcp))
+                probes = builder.make_hit_check_keys(group, "hash", tp_size)
+                self.assertEqual(set(probes), full)
+                self.assertEqual(len(probes), len(full))
+                self.assertEqual(len(partial), len(full))
+                self.assertEqual(len(full), 2 * tp_size * (4 if dcp_size > 1 else 1))
+                self.assertTrue(previous_keys.isdisjoint(full | partial))
+                previous_keys.update(full | partial)
+
     def test_attention_keys_share_pcp_replicas(self):
         for pp_size in (1, 2):
             for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):

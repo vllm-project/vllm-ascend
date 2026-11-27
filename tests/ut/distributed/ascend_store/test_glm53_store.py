@@ -23,7 +23,7 @@ from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolSpec, AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
@@ -41,12 +41,23 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
-def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
+def make_glm53_plan(layer_offset=0, *, use_recoverssm=False, dcp_size=1):
     register_all_kvcache_specs(None)
     specs = {}
     for name, spec in make_specs(pool=4).items():
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
+        if dcp_size > 1 and name.endswith(".indexer.k_cache"):
+            spec = AscendIndexerKPoolSpec(
+                block_size=spec.block_size,
+                num_kv_heads=spec.num_kv_heads,
+                head_size=spec.head_size,
+                dtype=spec.dtype,
+                model_version=spec.model_version,
+                tokens_per_state=4,
+                dcp_replication_size=dcp_size,
+                indexes_kv_by_block_stride=True,
+            )
         if isinstance(spec, MambaSpec):
             spec = replace(spec, mamba_cache_mode="align", mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
             if use_recoverssm:
@@ -57,10 +68,11 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
                 )
         specs[".".join(parts)] = spec
     config = make_config()
+    config.parallel_config.decode_context_parallel_size = dcp_size
     # Round-trip fixtures persist every recurrent checkpoint, not sparse tails.
     config.cache_config.prefix_cache_retention_interval = None
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
+    return get_glm5_next_kv_cache_config(config, groups, 32 * get_glm5_next_pool_bytes_per_block(groups))
 
 
 def make_glm53_caches(plan):
@@ -97,11 +109,12 @@ def make_glm53_caches(plan):
                     offset += views[-1][0].numel() * view.element_size()
                 caches[name] = tuple(views)
             else:
-                shape = (
-                    (2, 4, 128)
-                    if isinstance(spec, AscendIndexerKPoolTailSpec)
-                    else ((128, 1, 128) if "k_cache" in name else (512, 1, 512))
-                )
+                if isinstance(spec, AscendIndexerKPoolTailSpec):
+                    shape = (2, 4, 128)
+                elif "k_cache" in name:
+                    shape = (128 * getattr(spec, "dcp_replication_size", 1), 1, 128)
+                else:
+                    shape = (512, 1, 512)
                 view = raw.view(spec.dtype)
                 strides = torch.empty(shape).stride()
                 view = view.as_strided(
@@ -327,6 +340,9 @@ class TestGLM53Store(unittest.TestCase):
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         self.check_layerwise_round_trip()
 
+    def test_memcache_layerwise_round_trip_keeps_pcp_dcp_attention_shards(self):
+        self.check_layerwise_round_trip(tp_size=1, pcp_size=4, pp_size=1, dcp_size=4)
+
     def test_layerwise_recoverssm_restores_model_state_shards(self):
         for backend, tp_size, pcp_size in (("memcache", 2, 1), ("memcache", 1, 2), ("mooncake", 1, 2)):
             with self.subTest(backend=backend, tp_size=tp_size, pcp_size=pcp_size):
@@ -345,9 +361,12 @@ class TestGLM53Store(unittest.TestCase):
         tp_size=2,
         pcp_size=1,
         pp_size=2,
+        dcp_size=1,
         use_recoverssm=False,
     ):
-        block_hash = bytes([1]) * 32
+        hashes = [bytes([i + 1]) * 32 for i in range(dcp_size)]
+        block_hash = hashes[-1]
+        tokens = len(hashes) * 512
         buffers: dict[str, Any] = {}
         range_store = MemoryRangeStore()
         readable = range_store.complete if backend == "mooncake" else set()
@@ -383,11 +402,13 @@ class TestGLM53Store(unittest.TestCase):
                 ctypes.memmove(gva if direction == 0 else address, address if direction == 0 else gva, size)
             return 0
 
-        source = [[1], [2], [3], [4], [5]]
-        target = [[6], [7], [8], [9], [10]]
+        block_ids = iter(range(1, 32))
+        block_counts = (1, 1, dcp_size, dcp_size, dcp_size)
+        source = [[next(block_ids) for _ in range(count)] for count in block_counts]
+        target = [[next(block_ids) for _ in range(count)] for count in block_counts]
         workers = []
         for pp_rank, pcp_rank, rank in product(range(pp_size), range(pcp_size), range(tp_size)):
-            plan = make_glm53_plan(layer_offset=4 * pp_rank, use_recoverssm=use_recoverssm)
+            plan = make_glm53_plan(layer_offset=4 * pp_rank, use_recoverssm=use_recoverssm, dcp_size=dcp_size)
             worker = make_worker(
                 self,
                 kv_cache_config=plan,
@@ -398,6 +419,8 @@ class TestGLM53Store(unittest.TestCase):
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
                 tp_rank=rank,
+                dcp_size=dcp_size,
+                dcp_rank=(pcp_rank * tp_size + rank) % dcp_size,
                 pp_size=pp_size,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
@@ -415,15 +438,20 @@ class TestGLM53Store(unittest.TestCase):
                 worker.m_store.store.batch_copy.side_effect = copy
             caches = make_glm53_caches(plan)
             worker.register_kv_caches(caches)
+            self.assertEqual(worker.grouped_block_size, [tokens, 4, 512, 512, 512])
             state_rank = rank * pcp_size + pcp_rank
             self.fill_caches(plan, caches, source, target, state_rank)
-            metadata = self.make_metadata(source, [block_hash])
+            if dcp_size > 1:
+                for name in plan.kv_cache_groups[0].layer_names:
+                    if name.endswith(".attn"):
+                        caches[name][0][source[0]] = 40 + worker.dcp_rank
+            metadata = self.make_metadata(source, hashes)
             metadata.requests[0].is_last_chunk = True
             # Layerwise state is prepared when metadata is bound (#17487);
             # start_load_kv is a no-op for layerwise workers.
             worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
-            saves_attention = rank == 0 and pcp_rank == 0
+            saves_attention = dcp_size > 1 or (rank == 0 and pcp_rank == 0)
             expected_groups = {2, 3, 4} | ({0} if saves_attention else set())
             self.assertEqual(task_groups, expected_groups)
             self.finish_layerwise_step(worker, metadata)
@@ -431,7 +459,7 @@ class TestGLM53Store(unittest.TestCase):
             self.doCleanups()
 
         state_shards = tp_size * pcp_size
-        self.assertEqual(len(readable), pp_size * (1 + 3 * state_shards))
+        self.assertEqual(len(readable), pp_size * (dcp_size + 3 * state_shards * len(hashes)))
         backend_class = worker.layerwise_backend
         start_patch(self, f"{backend_class.__module__}.{backend_class.__name__}.create_scheduler_client")
         # The scheduler builds its coordinator from vllm_config, which
@@ -445,22 +473,31 @@ class TestGLM53Store(unittest.TestCase):
         )
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
-            request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
+            request_id="hit", prompt_token_ids=[1] * (tokens + 1), num_tokens=tokens + 1, block_hashes=hashes
         )
-        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (512, False))
+        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (tokens, False))
         self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), pp_size * state_shards)
 
         for worker, caches in workers:
-            metadata = self.make_metadata(target, [block_hash], load=True)
+            metadata = self.make_metadata(target, hashes, load=True)
             metadata.requests[0].is_last_chunk = True
             worker.prepare_layerwise_step(metadata)
             self.finish_layerwise_step(worker, metadata, load=True)
-            self.assert_restored(worker, caches, source, target)
-        for key in scheduler._make_layerwise_hit_check_keys(4, block_hash.hex()):
-            readable.remove(key)
-            hit_request.request_id = "missing"
-            self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
-            readable.add(key)
+            # Replay needs each attention page and the last KDA checkpoint.
+            # Earlier state pages belong to shorter prefix boundaries.
+            checkpoint_mask = [False] * (dcp_size - 1) + [True]
+            masks = [[True], [False], checkpoint_mask, checkpoint_mask, checkpoint_mask]
+            self.assert_restored(worker, caches, source, target, masks=masks)
+            for group_id, group in enumerate(worker.kv_cache_config.kv_cache_groups[2:], start=2):
+                for name in group.layer_names:
+                    for cache in caches[name]:
+                        self.assertTrue(torch.all(cache[target[group_id][:-1]] == -1))
+        for group in (0, 4):
+            for key in scheduler._make_layerwise_hit_check_keys(group, block_hash.hex()):
+                readable.remove(key)
+                hit_request.request_id = "missing"
+                self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+                readable.add(key)
         self.doCleanups()
 
     def test_mooncake_layerwise_excludes_private_tail(self):

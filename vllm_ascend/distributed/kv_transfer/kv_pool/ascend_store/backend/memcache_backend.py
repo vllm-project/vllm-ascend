@@ -197,12 +197,24 @@ class MemcacheBackend(Backend):
         parallel = vllm_config.parallel_config
         pp_size = parallel.pipeline_parallel_size
         pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+        dcp_size = getattr(parallel, "decode_context_parallel_size", 1)
         pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
+        # TP-only DCP stripes a single GVA. When DCP spans PCP, each
+        # physical worker owns its full object, including mixed SFA/KPool groups.
+        pcp_shard_namespace = ""
+        if pcp_size > 1 and dcp_size > parallel.tensor_parallel_size:
+            pcp_sharded_group_ids = set(range(num_groups))
+            pcp_shard_namespace = (
+                f"@pp_size:{pp_size}@tp_size:{parallel.tensor_parallel_size}@dcp_size:{dcp_size}"
+                f"@interleave:{parallel.cp_kv_cache_interleave_size}"
+            )
 
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
+        return LayerwiseKeyBuilder(
+            make_key, pp_size, pcp_size, pcp_sharded_group_ids, pcp_shard_namespace=pcp_shard_namespace
+        )
 
     def __init__(
         self,
