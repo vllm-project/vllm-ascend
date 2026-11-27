@@ -140,9 +140,10 @@ runner_mapping:
   # Directory name is historical; the A5 pool cases run on the 8-die runner.
   tests/e2e/pull_request/four_card_a5:
     default: a5-8
-  # Qwen3.8-27B hybrid Mamba runs on the 2-card A5 runner.
+  # Qwen3.8-27B hybrid Mamba needs all eight on-board localIds visible for
+  # the HYBM full mesh, so run it on the 8-die A5 runner.
   tests/e2e/pull_request/two_card/pool:
-    default: a5-2
+    default: a5-8
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
