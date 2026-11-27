@@ -8,7 +8,9 @@ from vllm.model_executor.models.qwen3_vl import (
     pos_embed_interpolate_native,
 )
 
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.ops.triton.vision_pos_embed import supports_vision_pos_embed, vision_pos_embed_interpolate
 from vllm_ascend.utils import enable_sp
 
 
@@ -70,10 +72,15 @@ Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wr
 
 
 def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+    interpolate = (
+        vision_pos_embed_interpolate
+        if not is_310p() and supports_vision_pos_embed(self.pos_embed.weight, self.dtype)
+        else pos_embed_interpolate_native
+    )
     outputs = []
     for t, h, w in grid_thw:
         outputs.append(
-            pos_embed_interpolate_native(
+            interpolate(
                 self.pos_embed.weight,
                 t,
                 h,

@@ -68,6 +68,7 @@ configuration rather than the runner input or sampling interface.
 
 | Module | Functional area |
 | --- | --- |
+| [vision_pos_embed.py](vision_pos_embed.py) | Qwen visual learned position interpolation; [operator document](docs/vision_pos_embed.md) |
 | [activation/swiglu_quant.py](activation/swiglu_quant.py) | Activation/quantization |
 | [activation/swiglustep.py](activation/swiglustep.py) | Activation/quantization |
 | [ascend_jit_warmup.py](ascend_jit_warmup.py) | Shared JIT warmup infrastructure |
