@@ -9,7 +9,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Re
 class InFlightSaveBlockTracker:
     """Keep bulk-save source blocks alive until every worker reports completion."""
 
-    def __init__(self, expected_worker_count: int) -> None:
+    def __init__(self, expected_worker_count: int, swa_group_ids: set[int] | None = None) -> None:
+        self.swa_group_ids = swa_group_ids or set()
         self.expected_worker_count = expected_worker_count
         self.sending_blocks: dict[int, list[int]] = {}
         self.sending_events: dict[int, int] = {}
@@ -29,6 +30,11 @@ class InFlightSaveBlockTracker:
 
         block_ids = [put.block_id for put in req_meta.boundary_puts or []]
         assert all(block_id > 0 for block_id in block_ids), "Null block cannot back a boundary save"
+        # A boundary-only job reads its explicit sources, not the ordinary table.
+        if req_meta.token_len_chunk > 0:
+            for group_id in self.swa_group_ids:
+                if group_id < len(req_meta.block_ids_by_group):
+                    block_ids.extend(block for block in req_meta.block_ids_by_group[group_id] if block > 0)
         block_ids = list(dict.fromkeys(block_ids))
         if not block_ids:
             return

@@ -810,7 +810,7 @@ class BaseKVPoolScheduler(ABC):
             req_meta.block_ids_by_group = [list(group) for group in block_ids]
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Retain in-flight Mamba blocks according to the transfer mode. It is only used in Blockwise."""
+        """Bulk transfers override this hook to retain their save sources."""
         return None
 
     def has_pending_push_work(self) -> bool:
@@ -826,7 +826,7 @@ class BaseKVPoolScheduler(ABC):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free blocks after synchronous saving."""
+        """Release request ownership; bulk save events hold their own block references."""
         return False, None
 
     def request_finished_all_groups(
@@ -834,7 +834,7 @@ class BaseKVPoolScheduler(ABC):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free all groups after synchronous saving."""
+        """Release request ownership across all groups."""
         return False, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
@@ -886,7 +886,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._failed_external_load_req_ids: set[str] = set()
-        self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
+        self._in_flight_save_blocks = InFlightSaveBlockTracker(
+            vllm_config.parallel_config.world_size, self.swa_group_ids
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         if connector_output.failed_recving and has_hisparse_cache_layout(self.kv_cache_config):
@@ -920,7 +922,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         return super().reset_store()
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Keep Mamba source blocks alive until bulk save completes."""
+        """Retain checkpoint sources and live SWA blocks for the bulk save."""
         if req_meta.can_save and req_meta.event_id is None and self.cache_coordinator is not None:
             if tail := self._partial_tail_non_mamba_puts(req_meta):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]

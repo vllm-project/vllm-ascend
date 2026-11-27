@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     BoundaryPut,
     LoadSpec,
@@ -558,19 +559,49 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(touched, [6, 12])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_swa_group_selected_for_save_retention(self, mock_client_cls):
+    def test_swa_save_retains_live_blocks_until_all_workers_finish(self, mock_client_cls):
         groups = [
             KVCacheGroupSpec(
                 ["layer.0"],
                 SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
             )
         ]
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.parallel_config.world_size = 2
         scheduler = KVPoolScheduler(
-            self._make_config(extra_config={"backend": "memcache"}),
+            config,
             use_layerwise=False,
             kv_cache_config=MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=16),
         )
         self.assertEqual(scheduler.swa_group_ids, {0})
+        pool = MagicMock()
+        pool.blocks = [object(), object(), object()]
+        scheduler.bind_gpu_block_pool(pool)
+        # A compact request table may omit a configured group.
+        scheduler.swa_group_ids.add(1)
+        empty = ReqMeta("empty", token_len_chunk=32, block_ids_by_group=[[0]], can_save=True)
+        scheduler.retain_blocks_for_save(empty)
+        self.assertIsNone(empty.event_id)
+        pool.touch.assert_not_called()
+
+        tracker_table = [[0, 1, 2]]
+        request = ReqMeta("r1", token_len_chunk=48, can_save=True)
+        meta = AscendConnectorMetadata(preempted_req_ids=set())
+        meta.add_request(request)
+        state = SimpleNamespace(get_block_ids=MagicMock(return_value=tracker_table))
+        scheduler._apply_current_save_block_ids(meta, SimpleNamespace(kv_connector_block_state=state))
+        scheduler.retain_blocks_for_save(request)
+        tracker_table[0][:] = [0, 0, 3]
+        self.assertEqual(request.block_ids_by_group, [[0, 1, 2]])
+        pool.touch.assert_called_once_with(pool.blocks[1:])
+        assert request.event_id is not None
+
+        output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({request.event_id: 1}))
+        scheduler.update_connector_output(output)
+        pool.free_blocks.assert_not_called()
+        scheduler.update_connector_output(output)
+        pool.free_blocks.assert_called_once()
+        self.assertCountEqual(pool.free_blocks.call_args.args[0], pool.blocks[1:])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.infer_cacheable_group_ids")

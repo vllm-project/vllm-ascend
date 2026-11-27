@@ -77,6 +77,26 @@ def test_normal_save_without_boundary_puts_does_not_pin_ordinary_tables():
     assert not tracker.has_pending_work()
 
 
+@pytest.mark.parametrize(("tokens", "expected"), [(0, [2, 5]), (48, [2, 5, 1])])
+def test_boundary_and_swa_sources_share_one_event(tokens, expected):
+    tracker = InFlightSaveBlockTracker(2, swa_group_ids={0})
+    pool = _pool()
+    meta = ReqMeta(
+        "r",
+        token_len_chunk=tokens,
+        can_save=True,
+        block_ids_by_group=[[0, 1, 2], [3, 4]],
+        boundary_puts=[BoundaryPut(0, 2, 48), BoundaryPut(1, 5, 48)],
+    )
+    tracker.retain(meta, pool)
+    tracker.retain(meta, pool)
+    pool.touch.assert_called_once_with(expected)
+    tracker.complete({meta.event_id: 1}, pool)
+    pool.free_blocks.assert_not_called()
+    tracker.complete({meta.event_id: 1}, pool)
+    pool.free_blocks.assert_called_once_with(expected[::-1])
+
+
 def test_out_of_order_completion_does_not_release_another_job():
     tracker = InFlightSaveBlockTracker(1)
     pool = _pool()

@@ -1966,9 +1966,10 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_submits_batch_and_joins_queue(self):
+    def test_wait_for_save_submits_batch_without_draining_queue(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.host_memory_group_ids = frozenset()
         worker.kv_send_thread.request_queue = MagicMock()
         save_batch = MagicMock()
         worker.kv_send_thread.add_save_batch.return_value = save_batch
@@ -1987,7 +1988,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             worker.wait_for_save(meta)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
-        worker.kv_send_thread.request_queue.join.assert_called_once_with()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_hisparse_waits_for_draft_host_bytes_before_bulk_save(self):
@@ -2148,6 +2149,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.host_memory_group_ids = frozenset({0})
         worker.kv_send_thread.request_queue = MagicMock()
         for pending in (False, True):
             with self.subTest(pending=pending):
@@ -2222,9 +2224,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertTrue(mirror._draft_mirror_pending)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_not_called()
-        worker.kv_send_thread.request_queue.join.assert_called_once_with()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
 
-    def test_get_finished_producer_clears_synchronous_completions(self):
+    def test_get_finished_producer_clears_request_level_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
         send_thread = MagicMock()
@@ -4303,6 +4305,18 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         # addrs = [1256+0*16+8, 1256+1*16+8, 1256+2*16+8] = [1264, 1280, 1296]
         self.assertEqual(addrs, [1264, 1280, 1296])
         self.assertEqual(sizes, [8, 8, 8])
+
+    def test_tp_mismatch_skips_null_slots_after_pcp_sharding(self):
+        worker = self._make_strided_worker(tp_rank=1)
+        for rank, expected in [(0, []), (1, [11, 11])]:
+            with self.subTest(rank=rank):
+                keys, addrs, sizes, blocks = worker._build_tp_mismatch_keys_and_addrs(
+                    [b"h0", b"h1"], [0, 11], 8, shard_rank=rank, shard_size=2
+                )
+                self.assertEqual(blocks, expected)
+                self.assertEqual(len(keys), len(expected))
+                self.assertEqual(len(addrs), len(expected))
+                self.assertEqual(len(sizes), len(expected))
 
     def test_build_tp_mismatch_keys_and_addrs(self):
         worker = self._make_strided_worker(tp_rank=1)

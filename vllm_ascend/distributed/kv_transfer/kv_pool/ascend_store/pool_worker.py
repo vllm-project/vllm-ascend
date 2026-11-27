@@ -970,8 +970,8 @@ class BaseKVPoolWorker(ABC):
                         send_thread.reset_saved_request(req_id)
                         self._retired_store_req_ids.discard(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # Saves complete synchronously in wait_for_save(), so the scheduler
-            # never waits for a request-level finished_sending notification.
+            # Bulk save pins are released by per-event worker acknowledgements.
+            # The scheduler does not defer request-level cleanup for these saves.
             self.kv_send_thread.get_and_clear_finished_requests()
             done_sending: set[str] = set()
         else:
@@ -1721,11 +1721,9 @@ class KVPoolWorker(BaseKVPoolWorker):
                 request.skip_null_blocks_by_group = self.group_uses_align_state
                 request.current_event = current_event
             self._previous_save_batch = send_thread.add_save_batch(requests)
-        # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
-        # Sender-side event waits protect byte visibility; this drain separately
-        # protects the lifetime of the source pages. Removing it requires page
-        # reservations or an owned snapshot until every queued PUT completes.
-        send_thread.request_queue.join()
+            if send_thread.host_memory_group_ids:
+                # Device block references do not reserve HiSparse's host mirror pages.
+                send_thread.request_queue.join()
         send_thread.raise_if_failed()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
@@ -1790,7 +1788,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             shard_rank=shard_rank,
             shard_size=shard_size,
         ):
-            if end <= save_start_token:
+            if block_id <= 0 or end <= save_start_token:
                 continue
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
@@ -1962,7 +1960,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 shard_size=self.pcp_size,
             )
             for relative_idx, (start, end, _base_key, _hash, _block_id) in enumerate(
-                chunk for chunk in store_chunks if chunk[1] > save_start_token
+                chunk for chunk in store_chunks if chunk[1] > save_start_token and chunk[4] > 0
             ):
                 if relative_idx not in completed_block_indices:
                     continue
