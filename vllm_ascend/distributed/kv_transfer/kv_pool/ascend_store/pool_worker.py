@@ -1805,7 +1805,7 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _wait_for_block_zeroing_before_get(self) -> None:
         # A native GET can race with block zeroing on the prefill compute stream.
         # The async receiver runs on a different thread with a different current stream.
-        if not self.load_async and self.backend_name == "mooncake" and self.kv_role in ("kv_producer", "kv_both"):
+        if not self.load_async and self.kv_role in ("kv_producer", "kv_both"):
             torch.npu.current_stream().synchronize()
 
     def _load_kv_tp_mismatch(

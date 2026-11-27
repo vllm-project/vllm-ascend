@@ -13,10 +13,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
-from vllm_ascend.patch.platform.patch_speculative_config import (
-    _ascend_verify_with_parallel_config,
-    _normalize_deepseek_dspark_draft,
-)
+from vllm_ascend.patch.platform.patch_speculative_config import _normalize_deepseek_dspark_draft
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -263,61 +260,6 @@ def test_glm_speculators_rejects_malformed_mla_dimensions(initialize_dspark, glm
     hf_config.q_lora_rank = q_lora_rank
     with pytest.raises(ValueError, match="cannot use GQA"):
         initialize_dspark(hf_config, model=str(glm_dspark_checkpoint))
-
-
-@pytest.mark.parametrize("pcp_size", [1, 2])
-def test_gqa_dcp_keeps_upstream_validation(monkeypatch, pcp_size):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=pcp_size,
-        decode_context_parallel_size=2,
-    )
-    validated = []
-
-    def validate_config(model, config):
-        validated.append((model, config))
-        assert config is parallel_config
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
-    _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert validated == [(model_config, parallel_config)]
-    assert parallel_config.decode_context_parallel_size == 2
-
-
-def test_non_moe_draft_keeps_original_parallel_validation_bypass(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=False, runner_type="draft")
-    parallel_config = SimpleNamespace(enable_expert_parallel=True)
-    validated = []
-    monkeypatch.setattr(
-        patch_speculative_config, "_orig_verify_with_parallel_config", lambda *args: validated.append(args)
-    )
-    assert _ascend_verify_with_parallel_config(model_config, parallel_config) is None
-    assert not validated
-
-
-def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=2,
-        decode_context_parallel_size=2,
-    )
-
-    def fail(model, config):
-        assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 2
-        assert config is parallel_config
-        raise ValueError("other upstream validation failed")
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", fail)
-    with pytest.raises(ValueError, match="other upstream validation failed"):
-        _ascend_verify_with_parallel_config(model_config, parallel_config)
-
-    assert parallel_config.enable_expert_parallel is True
-    assert parallel_config.decode_context_parallel_size == 2
 
 
 @pytest.mark.parametrize("flattened", [False, True])

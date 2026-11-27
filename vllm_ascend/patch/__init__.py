@@ -241,7 +241,9 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -405,19 +407,6 @@
 #   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
 #   from `vllm_ascend/attention/mla_prefill.py`.
 #
-# ** 16. File: platform/patch_multiproc_executor.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
-#    Why:
-#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
-#       a new process which is not allowed by daemon=True.
-#    How：
-#       Set daemon=False in MultiprocExecutor.
-#    Related PR (if no, explain why):
-#       Find a way to support daemon=False in vLLM
-#    Future Plan:
-#       Remove this patch when vLLM fix the issue.
-#
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
@@ -481,26 +470,6 @@
 #       Remove this normalization once upstream performs multimodal conversion
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
-#
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
 #
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
