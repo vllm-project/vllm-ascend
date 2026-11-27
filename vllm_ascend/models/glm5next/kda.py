@@ -394,7 +394,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if config.linear_head_dim != 128 or vllm_config.model_config.dtype != torch.bfloat16:
             raise ValueError("GLM AscendC KDA requires BF16 activations and head_dim=128.")
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        if num_spec + 1 > KDA_MAX_RECURRENT_TOKENS:
+        if not self.use_recoverssm and num_spec + 1 > KDA_MAX_RECURRENT_TOKENS:
             raise ValueError("GLM AscendC KDA supports at most seven speculative tokens.")
         if not 2 <= config.linear_conv_kernel_dim <= 4:
             raise ValueError("GLM AscendC causal-conv requires a kernel width in [2, 4].")

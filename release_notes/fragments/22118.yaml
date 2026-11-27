@@ -1,0 +1,5 @@
+pr: 22118
+entries:
+  - category: feature
+    text: GLM-5.3-Flash supports more than seven speculative tokens when KDA RecoverSSM is enabled.
+    model: GLM-5.3-Flash
