@@ -12,6 +12,7 @@ import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import (
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -53,6 +54,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode, gather_lm_head_outputs, lmhead_all_to_all
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
@@ -467,6 +469,16 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
+
+    def compute_pcp_owner_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Score each owner's rows against a head shared with the PCP target."""
+        pcp = get_pcp_group()
+        hidden_states = pcp.all_gather(self.model.norm(hidden_states).contiguous(), dim=0)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        # Every PCP rank has one vocabulary slice for all owners. Return each
+        # slice to the owner of its query rows before joining the TP columns.
+        logits = lmhead_all_to_all(logits, pcp)
+        return gather_lm_head_outputs(logits, VocabParallelMode.STANDARD)[..., : self.config.vocab_size]
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids

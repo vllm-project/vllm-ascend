@@ -163,9 +163,11 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
         return tensor
 
     sync_method = pcp_module.AscendPCPManager.sync_drafts
-    assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
-    assert sync_method is pcp_module.PCPManager.sync_drafts
-    monkeypatch.setitem(sync_method.__globals__, "get_pcp_group", lambda: SimpleNamespace(broadcast=broadcast))
+    monkeypatch.setitem(
+        pcp_module.PCPManager.sync_drafts.__globals__,
+        "get_pcp_group",
+        lambda: SimpleNamespace(broadcast=broadcast),
+    )
     monkeypatch.setattr(module.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
     monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
@@ -175,8 +177,8 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
     broadcasts = 1 + int(logits_buffer is not None)
     assert len(calls) == 0
     if pcp_enabled and not dummy_run:
-        # The upstream runner invokes the inherited method after propose returns.
-        assert spec.pcp_manager.sync_drafts(result, batch.idx_mapping, spec.draft_logits) is None
+        # The upstream runner invokes the manager after propose returns.
+        assert sync_method(spec.pcp_manager, result, batch.idx_mapping, spec.draft_logits) is None
     needs_sync = pcp_enabled and not dummy_run
     assert len(calls) == (broadcasts if needs_sync else 0)
     assert result is local_tokens
@@ -190,3 +192,113 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
             original_logits[batch.idx_mapping] = shared_logits
         # Noncontiguous request slots must be written back; unrelated slots stay intact.
         torch.testing.assert_close(logits_buffer, original_logits)
+
+
+def test_owner_drafts_merge_in_scheduler_order_after_owner_changes(monkeypatch):
+    managers = [object.__new__(pcp_module.AscendPCPManager) for _ in range(2)]
+    draft_buffers = [torch.full((6, 2), -9, dtype=torch.int64) for _ in managers]
+    for manager in managers:
+        manager.device = torch.device("cpu")
+    monkeypatch.setattr(pcp_module, "async_copy_to_gpu", lambda array, **kwargs: torch.from_numpy(array))
+    group = object()
+    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(device_group=group))
+
+    # State 11 changes owners when state 7 finishes ahead of it.
+    for states in (np.array([7, 11, 4, 19, 3]), np.array([11, 4, 19, 3])):
+        global_batch = SimpleNamespace(idx_mapping_np=states, num_reqs=len(states))
+        expected = torch.tensor(np.stack((states, states + 1), axis=1), dtype=torch.int64)
+        expected[0, 0] = 0
+        expected[-1, 1] = -1
+        outputs = []
+        staged = []
+        for rank, (manager, buffer) in enumerate(zip(managers, draft_buffers)):
+            local_states = states[rank::2]
+            manager._local_batch = SimpleNamespace(idx_mapping_np=local_states, num_reqs=len(local_states))
+            local_batch, query_rows, owned_rows = manager.owner_draft_rows(global_batch)
+            assert local_batch is manager._local_batch
+            torch.testing.assert_close(owned_rows, torch.arange(rank, len(states), 2))
+            torch.testing.assert_close(query_rows[owned_rows], torch.arange(len(local_states)))
+            assert torch.all(query_rows[1 - rank :: 2] == -1)
+            buffer[: len(local_states)].copy_(expected[rank::2])
+            output = buffer[: len(states)]
+            assert manager.stage_owner_drafts(output, owned_rows) is output
+            torch.testing.assert_close(output[: len(local_states)], expected[rank::2])
+            outputs.append(output)
+            staged.append(manager._staged_owner_drafts)
+
+        merged = torch.maximum(*staged)
+
+        def all_reduce(tokens, *, op, group, merged=merged):
+            assert op == torch.distributed.ReduceOp.MAX
+            assert group is pcp_module.get_pcp_group().device_group
+            assert tokens.dtype == torch.int32
+            tokens.copy_(merged)
+
+        monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+        for manager, buffer, result in zip(managers, draft_buffers, outputs):
+            tail = buffer[len(states) :].clone()
+            manager.sync_drafts(result, torch.from_numpy(states), None)
+            torch.testing.assert_close(result, expected)
+            assert result.dtype == torch.int64
+            assert result.data_ptr() == buffer.data_ptr()
+            result[:, 1:] = -1  # The runner truncates unused draft columns in place.
+            assert torch.all(buffer[: len(states), 1:] == -1)
+            torch.testing.assert_close(buffer[len(states) :], tail)
+            assert manager._staged_owner_drafts is None
+
+
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_aux_gather_is_joined_after_target_sampling(monkeypatch, has_prefill):
+    manager = object.__new__(pcp_module.AscendPCPManager)
+    manager.pcp_world_size = 2
+    batch = SimpleNamespace(num_reqs=2, num_tokens=3, is_prefilling_np=np.array([False, has_prefill]))
+    manager._global_batch = batch
+    manager._hidden_restore_idx = torch.tensor([0, 2, 1, 3])
+    manager._restore_unpadded_global_batch = lambda: True
+    manager._expose_unpadded_global_batch = lambda batch: batch
+    logits_stream = object()
+    device_group = object()
+    calls = []
+    aux_stream = SimpleNamespace(wait_stream=lambda producer: calls.append(("producer", producer)))
+    manager._draft_aux_stream = aux_stream
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: logits_stream)
+    monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, stream: None)
+    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(device_group=device_group))
+
+    def restore(manager, hidden, aux):
+        calls.append(("restore", aux is not None))
+        return hidden, aux, batch
+
+    def gather(output, local, *, group, async_op):
+        assert group is device_group and async_op
+        calls.append("gather")
+
+        def wait():
+            calls.append("wait")
+            output.copy_(torch.cat((local, local + 10)))
+
+        return SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(pcp_module.PCPManager, "restore_for_sampling", restore)
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", gather)
+    aux = [torch.tensor([[1], [2]]), torch.tensor([[3], [4]])]
+    _, eager_aux, global_batch = manager.restore_for_sampling(torch.zeros(3, 1), aux)
+    assert global_batch is batch
+    assert calls == [("restore", has_prefill)]
+
+    # The target's logits hook runs before sampling, while the draft joins later.
+    manager.start_draft_aux_restore()
+    calls.append("sample")
+    if has_prefill:
+        torch.testing.assert_close(eager_aux, aux)
+        assert calls == [("restore", True), "sample"]
+        assert manager.finish_draft_aux_restore() is None
+    else:
+        assert eager_aux is None
+        expected_calls = [("restore", False), ("producer", logits_stream), "gather", "gather", "sample"]
+        assert calls == expected_calls
+        restored = manager.finish_draft_aux_restore()
+        assert calls == [*expected_calls, "wait", "wait"]
+        torch.testing.assert_close(restored, [torch.tensor([[1], [11], [2]]), torch.tensor([[3], [13], [4]])])
+        assert manager.finish_draft_aux_restore() is None

@@ -41,6 +41,8 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_lens: Mapping[int, int],
         speculator: Any = None,
+        *,
+        register_graph_params: bool = True,
     ):
         super().__init__(
             vllm_config,
@@ -61,7 +63,7 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
         # path, independent of Eagle's prefill/decode split, so it always uses
         # the default draft params bucket (is_draft_model_prefill stays False in
         # both capture and replay to keep them consistent).
-        if super().needs_capture():
+        if register_graph_params and super().needs_capture():
             set_draft_graph_params(self.capture_sizes)
 
     def capture(

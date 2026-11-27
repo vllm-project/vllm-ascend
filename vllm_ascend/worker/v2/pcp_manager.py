@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
@@ -136,6 +136,10 @@ class AscendPCPManager(PCPManager):
     _is_draft_prefill_sharded: bool = False
     # The batch restore_for_sampling handed to sampling and the speculator.
     _sampling_global_batch: InputBatch | None = None
+    _staged_owner_drafts: torch.Tensor | None = None
+    _draft_aux_stream: torch.npu.Stream | None = None
+    _pending_draft_aux: list[torch.Tensor] | None = None
+    _draft_aux_gathers: list[tuple[torch.Tensor, torch.distributed.Work]] | None = None
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
@@ -230,6 +234,48 @@ class AscendPCPManager(PCPManager):
         self._draft_layer_names = frozenset(speculator.draft_attn_layer_names)
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self._dispatch_prefill_runs_as_decode_np = None
+
+    def enable_draft_aux_overlap(self) -> None:
+        self._draft_aux_stream = torch.npu.Stream(device=self.device)
+
+    def start_draft_aux_restore(self) -> None:
+        """Submit aux gathers after target logits communication has been enqueued."""
+        aux_states = self._pending_draft_aux
+        if aux_states is None:
+            return
+        self._pending_draft_aux = None
+        stream = self._draft_aux_stream
+        stream.wait_stream(torch.npu.current_stream())
+        group = get_pcp_group().device_group
+        gathers = []
+        self._draft_aux_gathers = gathers
+        with torch.npu.stream(stream):
+            for states in aux_states:
+                states.record_stream(stream)
+                local_states = states.contiguous()
+                gathered = local_states.new_empty(
+                    (local_states.shape[0] * self.pcp_world_size, *local_states.shape[1:])
+                )
+                work = torch.distributed.all_gather_into_tensor(gathered, local_states, group=group, async_op=True)
+                gathers.append((gathered, work))
+
+    def _wait_draft_aux_gathers(self) -> list[torch.Tensor]:
+        gathers = self._draft_aux_gathers
+        stream = torch.npu.current_stream()
+        for gathered, work in gathers:
+            work.wait()
+            gathered.record_stream(stream)
+        self._draft_aux_gathers = None
+        return [gathered for gathered, _ in gathers]
+
+    def finish_draft_aux_restore(self) -> list[torch.Tensor] | None:
+        """Join the aux gather at its first consumer and return compact global rows."""
+        self.start_draft_aux_restore()
+        if self._draft_aux_gathers is None:
+            return None
+        gathered_states = self._wait_draft_aux_gathers()
+        restore_idx = self._hidden_restore_idx[: self._sampling_global_batch.num_tokens]
+        return [states.index_select(0, restore_idx) for states in gathered_states]
 
     def bind_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -424,6 +470,9 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
+        if self._draft_aux_gathers is not None:
+            self._wait_draft_aux_gathers()
+        self._pending_draft_aux = None
         prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
         effective_is_prefilling = apply_prefill_as_decode_mask(input_batch.is_prefilling_np, prefill_runs_as_decode)
         partition_input = input_batch
@@ -470,7 +519,42 @@ class AscendPCPManager(PCPManager):
         # length equals the target metadata's last query offset.
         self._local_batch = local_batch
         self._sampling_global_batch = None
+        self._staged_owner_drafts = None
         return local_batch
+
+    def owner_draft_rows(self, global_batch: InputBatch) -> tuple[InputBatch, torch.Tensor, torch.Tensor]:
+        """Map global verification rows to compact draft query rows and back."""
+        local_batch = self._local_batch
+        global_rows = {state: row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])}
+        owned_rows = np.fromiter(
+            (global_rows[state] for state in local_batch.idx_mapping_np[: local_batch.num_reqs]),
+            dtype=np.int64,
+            count=local_batch.num_reqs,
+        )
+        num_global_reqs = global_batch.num_reqs
+        row_maps = np.full(num_global_reqs + local_batch.num_reqs, -1, dtype=np.int64)
+        row_maps[owned_rows] = np.arange(local_batch.num_reqs)
+        row_maps[num_global_reqs:] = owned_rows
+        row_maps_device = async_copy_to_gpu(row_maps, device=self.device)
+        return local_batch, row_maps_device[:num_global_reqs], row_maps_device[num_global_reqs:]
+
+    def stage_owner_drafts(self, draft_tokens: torch.Tensor, owned_rows: torch.Tensor) -> torch.Tensor:
+        """Stage the graph's local rows without overwriting the output view."""
+        # Exactly one owner writes each row. Token IDs are nonnegative and fit
+        # in int32, so MAX with -1 on the other ranks preserves every candidate.
+        staged = torch.full_like(draft_tokens, -1, dtype=torch.int32)
+        staged.index_copy_(0, owned_rows, draft_tokens[: owned_rows.numel()].to(torch.int32))
+        self._staged_owner_drafts = staged
+        return draft_tokens
+
+    def sync_drafts(self, draft_tokens, idx_mapping, draft_logits) -> None:
+        staged = self._staged_owner_drafts
+        if staged is not None:
+            self._staged_owner_drafts = None
+            torch.distributed.all_reduce(staged, op=torch.distributed.ReduceOp.MAX, group=get_pcp_group().device_group)
+            draft_tokens.copy_(staged)
+        else:
+            super().sync_drafts(draft_tokens, idx_mapping, draft_logits)
 
     def _finalize_partition(
         self,
@@ -696,6 +780,16 @@ class AscendPCPManager(PCPManager):
         last hidden states; replicated drafts (DSpark) consume them globally.
         """
         assert self._global_batch is not None
+        unpadded = self._restore_unpadded_global_batch()
+        if (
+            self._draft_aux_stream is not None
+            and aux_hidden_states is not None
+            and unpadded
+            and self._global_batch.num_reqs >= self.pcp_world_size
+            and not self._global_batch.is_prefilling_np[: self._global_batch.num_reqs].any()
+        ):
+            self._pending_draft_aux = aux_hidden_states
+            aux_hidden_states = None
         if self._is_draft_prefill_sharded:
             # Keep local aux states for the sharded draft; only sampling needs
             # the main hidden states restored to the global layout.
@@ -704,7 +798,7 @@ class AscendPCPManager(PCPManager):
             hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
                 hidden_states, aux_hidden_states
             )
-        if self._restore_unpadded_global_batch():
+        if unpadded:
             global_batch = self._expose_unpadded_global_batch(global_batch)
             num_tokens = global_batch.num_tokens
             hidden_states = hidden_states[:num_tokens]
