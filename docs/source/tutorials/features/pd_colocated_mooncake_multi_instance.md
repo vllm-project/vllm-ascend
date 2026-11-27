@@ -261,8 +261,10 @@ Set `path` to the Qwen2.5-72B-Instruct model directory, `model` to `qwen`,
 and `host_ip` and `host_port` to Instance 1. Set `batch_size=25`,
 `max_out_len=10`, and `generation_kwargs=dict(temperature=0, ignore_eos=True)`.
 
-On the benchmark client, generate two JSONL files once. Each question contains
-1,024 random digits (1,024 content tokens for Qwen2.5, plus prompt formatting).
+On the benchmark client, generate two JSONL files once. With the default
+AISBench QA prompt and Qwen2.5-72B-Instruct chat template, 988 random digits
+give 1,024 input tokens including formatting. If you change either template,
+adjust the digit count using the input token count reported by the service.
 Keep `dataset_a.jsonl` for all three measurements so they use identical prompts.
 
 ```bash
@@ -274,7 +276,7 @@ for name, count, seed in [("a", 100, 1), ("b", 200, 2)]:
     rng = random.Random(seed)
     with open(f"dataset_{name}.jsonl", "w", encoding="utf-8") as output:
         for _ in range(count):
-            question = "".join(rng.choices("0123456789", k=1024))
+            question = "".join(rng.choices("0123456789", k=988))
             print(json.dumps({"question": question, "answer": "", "max_tokens": 10}), file=output)
 PY
 
