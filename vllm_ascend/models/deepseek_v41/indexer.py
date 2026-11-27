@@ -22,6 +22,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     uses_a5_packed_cache,
 )
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
+from vllm_ascend.ops.triton.indexer_k_fusion import _INDEXER_K_FUSION_KERNEL
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
     register_indexer_warmup,
@@ -109,6 +110,10 @@ class DeepseekV41Indexer(nn.Module):
                 dtype=torch.bfloat16,
             )
             self.k_norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
+            if self.packed_cache_ops is None:
+                # The runner holds its registry active while constructing the
+                # model. Loaded-bias checkpoints keep the existing runtime path.
+                _INDEXER_K_FUSION_KERNEL.register_warmup(head_dim=self.width, rotary_dim=self.rope_width)
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
@@ -147,9 +152,32 @@ class DeepseekV41Indexer(nn.Module):
         return output[0] if isinstance(output, tuple) else output
 
     def update_keys(self, latent, slots, cos, sin):
-        """Publish source-owned index K before latent is RoPE'd as long KV."""
+        """Publish index K before applying main-attention RoPE to latent."""
         if not self.owns_k or latent.shape[0] == 0:
             return
+
+        # Fuse only the ordinary INT8 cache path without a loaded Norm bias.
+        # A5 packed/folded caches and biased Norm retain their original path.
+        if self.packed_cache_ops is None and not getattr(self.k_norm, "bias_loaded", False):
+            from vllm_ascend.ops.triton.indexer_k_fusion import indexer_k_norm_rope_int8_store
+
+            if cos.shape[-1] != self.rope_width:
+                raise ValueError("Source RoPE table width does not match indexer rope_width")
+            # bind_kv_cache stores the component tuple directly.
+            k_cache, scale_cache = self.k_cache.kv_cache
+            k_pre = self.wk(latent)
+            indexer_k_norm_rope_int8_store(
+                k_pre,
+                self.k_norm.weight,
+                self.k_norm.variance_epsilon,
+                cos,
+                sin,
+                slots,
+                k_cache,
+                scale_cache,
+            )
+            return
+
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
         DeviceOperator.apply_partial_rotary_inplace(key, cos, sin, start=self.width - self.rope_width, end=self.width)
         key = key.squeeze(1)

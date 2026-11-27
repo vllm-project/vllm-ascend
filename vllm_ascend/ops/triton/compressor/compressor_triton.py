@@ -10,11 +10,17 @@ slot. Concurrent execution could overwrite the residual before it is read.
 compressor_ref is the pure PyTorch reference implementation.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import LaunchSpec, TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
 DEV = "npu"
 MAX_CHUNK_ROWS = 8  # Max rows per pooling chunk; intermediates across three passes use <192 KB of UB.
@@ -239,10 +245,12 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
+    FUSE_TOKEN_NORM: tl.constexpr = False,
+    rms_eps=0.0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
-    if not TOKEN_ALIGNED:
+    if not TOKEN_ALIGNED or FUSE_TOKEN_NORM:
         norm_w = tl.load(norm_w_ptr + offs_h).to(tl.float32)
     for task_id in range(pid, total_group_slots, tl.num_programs(0)):
         batch = task_id // group_slots_per_batch
@@ -338,9 +346,14 @@ def _pool_kernel(
                         False,
                     )
             if TOKEN_ALIGNED:
-                # Keep Aurora's existing RMSNorm outside this kernel. Place
-                # each completed pair at its original completion-token row.
+                # Place each completed pair at its completion-token row.
+                # Optionally normalize before publishing the BF16 result.
                 out_row = seg_row_base + (group_idx + 1) * RATIO - 1 - start_pos
+                if FUSE_TOKEN_NORM:
+                    # Preserve the original BF16 pooling output boundary.
+                    pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
+                    mean_square = tl.sum(pooled_bf16 * pooled_bf16, axis=0) / HEAD_DIM
+                    pooled = pooled_bf16 * tl.rsqrt(mean_square + rms_eps) * norm_w
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, pooled.to(tl.bfloat16))
             else:
                 pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
@@ -734,13 +747,139 @@ def write_pcp_ring_rows(
         )
 
 
+class C2PoolKernel(AscendTritonJitKernel["C2PoolKernel.CompileKey"]):
+    """Compile-only warmup for the production token-aligned ratio-2 path."""
+
+    kernel = _pool_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        head_dim: int
+        has_prev_rows: bool
+        fuse_token_norm: bool
+        norm_dtype: torch.dtype
+
+    def dispatch(
+        self,
+        *,
+        head_dim: int,
+        has_prev_rows: bool,
+        fuse_token_norm: bool,
+        norm_dtype: torch.dtype,
+    ) -> "C2PoolKernel.CompileKey":
+        return self.CompileKey(
+            head_dim=head_dim,
+            has_prev_rows=has_prev_rows,
+            fuse_token_norm=fuse_token_norm,
+            norm_dtype=norm_dtype,
+        )
+
+    def get_warmup_keys(self, *, head_dim: int) -> list["C2PoolKernel.CompileKey"]:
+        # Bias is finalized after construction, so precompile both norm modes.
+        # With norm disabled the launcher passes the BF16 output as a dummy
+        # norm pointer; FP32 is reachable only when a weight is actually used.
+        return [
+            self.dispatch(
+                head_dim=head_dim,
+                has_prev_rows=has_prev_rows,
+                fuse_token_norm=fuse_token_norm,
+                norm_dtype=norm_dtype,
+            )
+            for has_prev_rows in (False, True)
+            for fuse_token_norm in (False, True)
+            for norm_dtype in ((torch.bfloat16, torch.float32) if fuse_token_norm else (torch.bfloat16,))
+        ]
+
+    def warmup_inputs(self, key: "C2PoolKernel.CompileKey") -> dict[str, Any]:
+        # Metadata represents aligned production buffers, without allocation
+        # or device reads. None must match the non-PCP pointer signature.
+        return dict(
+            out=TritonWarmupTensor(torch.bfloat16, shape=(2, key.head_dim)),
+            kv=TritonWarmupTensor(torch.float32, shape=(2, key.head_dim)),
+            score=TritonWarmupTensor(torch.float32, shape=(2, key.head_dim)),
+            cache=TritonWarmupTensor(torch.float32, shape=(2, STATE_RING_ROWS, 2 * key.head_dim)),
+            prev_rows=(
+                TritonWarmupTensor(torch.float32, shape=(1, 2 * key.head_dim)) if key.has_prev_rows else None
+            ),
+            prev_row_indices=TritonWarmupTensor(torch.int64, shape=(1,)) if key.has_prev_rows else None,
+            norm_w=TritonWarmupTensor(key.norm_dtype, shape=(key.head_dim,)),
+            meta=TritonWarmupTensor(torch.int32, shape=(5, 1)),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1,)),
+            total_group_slots=1,
+            group_slots_per_batch=1,
+            num_batch=1,
+            head_dim=key.head_dim,
+            rms_eps=1e-6,
+            has_prev_rows=key.has_prev_rows,
+            fuse_token_norm=key.fuse_token_norm,
+            num_cache_blocks=2,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        out: torch.Tensor,
+        kv: torch.Tensor,
+        score: torch.Tensor,
+        cache: torch.Tensor,
+        prev_rows: torch.Tensor | None,
+        prev_row_indices: torch.Tensor | None,
+        norm_w: torch.Tensor,
+        meta: torch.Tensor,
+        block_table: torch.Tensor,
+        *,
+        total_group_slots: int,
+        group_slots_per_batch: int,
+        num_batch: int,
+        head_dim: int,
+        rms_eps: float,
+        has_prev_rows: bool,
+        fuse_token_norm: bool,
+        num_cache_blocks: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            CACHE_SIZE=STATE_RING_ROWS,
+            HEAD_DIM=head_dim,
+            RATIO=2,
+            RATIO_PAD=2,
+            CHUNK_ROWS=2,
+            EPS=0.0,
+            SINGLE_BLOCK=True,
+            NO_PAD=True,
+            TOKEN_ALIGNED=True,
+            HAS_PREV_ROWS=has_prev_rows,
+            FUSE_TOKEN_NORM=fuse_token_norm,
+        )
+
+
+# Model construction registers this same owner used by runtime launches.
+# It retains framework compilation state, never per-request device buffers.
+_C2_POOL_KERNEL = C2PoolKernel()
+
+
 def compressor_from_projected(
-    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices
+    kv,
+    scores,
+    state_cache,
+    metadata,
+    out,
+    *,
+    max_query_len,
+    num_cores,
+    prev_rows,
+    prev_row_indices,
+    norm_w=None,
+    rms_eps=1e-20,
 ):
     """Pool C2 into token-aligned BF16 rows; PCP updates the ring after gathering.
 
     metadata is contiguous device INT32 [5, requests]: start positions, used
     lengths, output bases (reserved), input bases, and actual global block IDs.
+    Optional norm_w fuses RMSNorm after the BF16 pooling round-trip;
+    omit it to preserve the original unnormalized output for reference tests.
+    Positive rms_eps and finite weights are required for zero padding.
     Controls must be bounded by the input rows and request table; padded requests
     have used length and block ID zero. No tensor contents are read by the host.
     With prev_rows, chunk predecessors come from the gather or the old ring,
@@ -774,39 +913,45 @@ def compressor_from_projected(
         raise ValueError("Compressor tensors must share one device")
     if num_cores <= 0 or not 0 <= max_query_len <= tokens:
         raise ValueError("Invalid compressor launch bounds")
-    out.zero_()
+    if norm_w is not None:
+        if (
+            norm_w.shape != (width,)
+            or norm_w.device != kv.device
+            or norm_w.dtype not in (torch.bfloat16, torch.float32)
+            or not norm_w.is_contiguous()
+            or not 0 < rms_eps < float("inf")
+        ):
+            raise ValueError("Invalid C2 RMSNorm weight or epsilon")
     batches = metadata.shape[1]
-    if tokens == 0 or batches == 0 or max_query_len == 0:
-        return out
-    if kv.device.type != "npu":
+    has_work = tokens > 0 and batches > 0 and max_query_len > 0
+    if has_work and kv.device.type != "npu":
         raise ValueError("Projected Triton compressor requires an NPU")
+    # Validate before modifying the caller-owned output buffer.
+    out.zero_()
+    if not has_work:
+        return out
     groups = (max_query_len + 1) // 2
     writes = min(max_query_len, STATE_RING_ROWS)
     # Same-stream launch order is required: residual reads precede ring writes.
-    _pool_kernel[(min(num_cores, batches * groups),)](
-        out,
-        kv,
-        scores,
-        state_cache,
-        prev_rows,
-        prev_row_indices,
-        out,
-        metadata,
-        metadata[4],
-        batches * groups,
-        groups,
-        batches,
+    _C2_POOL_KERNEL(
+        out=out,
+        kv=kv,
+        score=scores,
+        cache=state_cache,
+        prev_rows=prev_rows,
+        prev_row_indices=prev_row_indices,
+        norm_w=norm_w if norm_w is not None else out,
+        meta=metadata,
+        block_table=metadata[4],
+        total_group_slots=batches * groups,
+        group_slots_per_batch=groups,
+        num_batch=batches,
+        head_dim=width,
+        rms_eps=float(rms_eps),
+        has_prev_rows=prev_rows is not None,
+        fuse_token_norm=norm_w is not None,
         num_cache_blocks=state_cache.shape[0],
-        CACHE_SIZE=STATE_RING_ROWS,
-        HEAD_DIM=width,
-        RATIO=2,
-        RATIO_PAD=2,
-        CHUNK_ROWS=2,
-        EPS=0.0,
-        SINGLE_BLOCK=True,
-        NO_PAD=True,
-        HAS_PREV_ROWS=prev_rows is not None,
-        TOKEN_ALIGNED=True,
+        grid_size=min(num_cores, batches * groups),
     )
     if prev_rows is not None:
         return out

@@ -1,0 +1,308 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""CPU validation tests; Triton import stubs do not execute kernel math."""
+
+import importlib.util
+import inspect
+import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_launcher(relative_path):
+    # Only stub the compiler boundary, leaving the production Python launcher
+    # and its real PyTorch shape/dtype/stride validation intact.
+    def jit(fn=None, **kwargs):
+        def decorate(kernel):
+            # The shared warmup helper binds pointers using JIT arg_names.
+            kernel.arg_names = tuple(inspect.signature(kernel).parameters)
+            return kernel
+
+        return decorate(fn) if fn is not None else decorate
+
+    triton_utils = ModuleType("vllm.triton_utils")
+    triton_utils.HAS_TRITON = False
+    triton_utils.triton = SimpleNamespace(
+        jit=jit,
+        autotune=lambda **kwargs: lambda fn: fn,
+        Config=MagicMock(),
+    )
+    triton_utils.tl = SimpleNamespace(constexpr=object())
+    spec = importlib.util.spec_from_file_location("_fusion_launcher_under_test", REPO_ROOT / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict("sys.modules", {"vllm.triton_utils": triton_utils, spec.name: module}):
+        spec.loader.exec_module(module)
+    return module
+
+
+class TestIndexerKFusionValidation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_launcher("vllm_ascend/ops/triton/indexer_k_fusion.py")
+
+    def setUp(self):
+        self.args = dict(
+            k_pre=torch.ones(3, 128, dtype=torch.bfloat16),
+            weight=torch.ones(128, dtype=torch.bfloat16),
+            eps=1e-6,
+            cos=torch.ones(3, 64),
+            sin=torch.zeros(3, 64),
+            slots=torch.zeros(3, 2, dtype=torch.int32),
+            k_cache=torch.zeros(2, 4, 1, 128, dtype=torch.int8),
+            scale_cache=torch.zeros(2, 4, 1, 1, dtype=torch.float16),
+        )
+
+    def test_invalid_inputs_fail_before_launch_and_leave_cache_untouched(self):
+        cases = [
+            ("k_pre", torch.ones(3, 128), "BF16"),
+            ("k_pre", torch.ones(3, 96, dtype=torch.bfloat16), "power of two"),
+            ("k_pre", torch.ones(3, 256, dtype=torch.bfloat16)[:, ::2], "stride"),
+            ("weight", torch.ones(127), "weight"),
+            ("weight", torch.ones(128, dtype=torch.float16), "weight"),
+            ("slots", torch.zeros(3, dtype=torch.int32), "slots"),
+            ("slots", torch.zeros(3, 2), "slots"),
+            ("cos", torch.ones(3, 64, dtype=torch.bfloat16), "FP32"),
+            ("cos", torch.ones(2, 64), "cos/sin"),
+            ("sin", torch.zeros(3, 32), "cos/sin"),
+            ("k_cache", torch.zeros(2, 4, 2, 128, dtype=torch.int8), "k_cache"),
+            ("k_cache", torch.zeros(2, 4, 1, 128), "INT8"),
+            ("scale_cache", torch.zeros(2, 4, 1, 1), "FP16"),
+            ("scale_cache", torch.zeros(2, 4, 1, dtype=torch.float16), "scale_cache"),
+            ("k_cache", self.args["k_cache"][:1].expand(2, -1, -1, -1), "nonoverlapping"),
+        ]
+        for name, value, message in cases:
+            with self.subTest(name=name, shape=value.shape):
+                args = {**self.args, name: value}
+                before = args["k_cache"].clone(), args["scale_cache"].clone()
+                with self.assertRaisesRegex(ValueError, message):
+                    self.module.indexer_k_norm_rope_int8_store(**args)
+                torch.testing.assert_close(args["k_cache"], before[0], rtol=0, atol=0)
+                torch.testing.assert_close(args["scale_cache"], before[1], rtol=0, atol=0)
+
+    def test_invalid_epsilon(self):
+        for eps in (0.0, -1e-6, float("inf"), float("nan")):
+            with self.subTest(eps=eps), self.assertRaisesRegex(ValueError, "positive"):
+                self.module.indexer_k_norm_rope_int8_store(**{**self.args, "eps": eps})
+
+    def test_invalid_rotary_width(self):
+        for width in (0, 3, 130):
+            args = {**self.args, "cos": torch.ones(3, width), "sin": torch.zeros(3, width)}
+            with self.subTest(width=width), self.assertRaisesRegex(ValueError, "R must"):
+                self.module.indexer_k_norm_rope_int8_store(**args)
+
+    def test_cpu_tensors_rejected_even_for_empty_batch(self):
+        for tokens in (0, 3):
+            for four_dimensional in (False, True):
+                args = dict(self.args)
+                for name in ("k_pre", "cos", "sin", "slots"):
+                    args[name] = args[name][:tokens]
+                if four_dimensional:
+                    for name in ("cos", "sin"):
+                        args[name] = args[name][:, None, None, :]
+                with (
+                    self.subTest(tokens=tokens, four_dimensional=four_dimensional),
+                    self.assertRaisesRegex(ValueError, "one NPU"),
+                ):
+                    self.module.indexer_k_norm_rope_int8_store(**args)
+
+    def test_runtime_layouts_and_vector_constants_are_forwarded(self):
+        # Metadata-only inputs exercise the real wrapper without NPU execution.
+        # Keep this launch-contract regression alongside the input validation.
+        device = SimpleNamespace(type="npu", index=0)
+
+        def tensor(shape, strides, dtype):
+            return SimpleNamespace(
+                shape=shape,
+                ndim=len(shape),
+                dtype=dtype,
+                device=device,
+                stride=lambda axis=None: strides if axis is None else strides[axis],
+            )
+
+        kernel = self.module._indexer_k_norm_rope_int8_store_kernel
+        for vector_stride in (1, 2):
+            for tokens, page, gap, slots_row, slots_col in (
+                (0, 16, 0, 2, 1),
+                (1, 16, 0, 2, 1),
+                (17, 32, 16, 6, 2),
+                (257, 64, 32, 8, 3),
+            ):
+                with self.subTest(tokens=tokens, page=page, vector_stride=vector_stride):
+                    blocks = 8 + gap
+                    key_row, scale_row = 128 + gap, 1 + gap // 16
+                    key_block, scale_block = page * key_row + 128, page * scale_row + 8
+                    args = dict(
+                        k_pre=tensor((tokens, 128), (128 + gap, 1), torch.bfloat16),
+                        weight=tensor((128,), (vector_stride,), torch.bfloat16),
+                        eps=1 if tokens == 257 else 1e-6,
+                        cos=tensor((tokens, 64), (64 * vector_stride + gap, vector_stride), torch.float32),
+                        sin=tensor((tokens, 64), (64 * vector_stride + gap + 16, vector_stride), torch.float32),
+                        slots=tensor((tokens, 2), (slots_row, slots_col), torch.int32),
+                        k_cache=tensor((blocks, page, 1, 128), (key_block, key_row, key_row, 1), torch.int8),
+                        scale_cache=tensor((blocks, page, 1, 1), (scale_block, scale_row, scale_row, 1), torch.float16),
+                    )
+                    owner = self.module._INDEXER_K_FUSION_KERNEL
+                    with patch.object(owner, "kernel", MagicMock(arg_names=kernel.arg_names)) as launcher:
+                        self.module.indexer_k_norm_rope_int8_store(**args)
+                    if tokens == 0:
+                        launcher.__getitem__.assert_not_called()
+                        continue
+                    self.assertEqual(launcher.__getitem__.call_args.args, ((tokens,),))
+                    call = launcher.__getitem__.return_value.call_args
+                    keywords = dict(call.kwargs)
+                    self.assertFalse(keywords.pop("enable_fp_fusion"))
+                    bound = inspect.signature(kernel).bind(*call.args, **keywords).arguments
+                    for pointer, name in (
+                        ("input_ptr", "k_pre"),
+                        ("weight_ptr", "weight"),
+                        ("cos_ptr", "cos"),
+                        ("sin_ptr", "sin"),
+                        ("slots_ptr", "slots"),
+                        ("key_cache_ptr", "k_cache"),
+                        ("scale_cache_ptr", "scale_cache"),
+                    ):
+                        self.assertIs(bound[pointer], args[name])
+                    expected_runtime = {
+                        "input_row_stride": 128 + gap,
+                        "cos_row_stride": 64 * vector_stride + gap,
+                        "sin_row_stride": 64 * vector_stride + gap + 16,
+                        "slots_row_stride": slots_row,
+                        "slots_col_stride": slots_col,
+                        "key_block_stride": key_block,
+                        "key_row_stride": key_row,
+                        "scale_block_stride": scale_block,
+                        "scale_row_stride": scale_row,
+                        "num_blocks": blocks,
+                        "page_size": page,
+                        "rms_eps": float(args["eps"]),
+                    }
+                    for name, value in expected_runtime.items():
+                        self.assertEqual(bound[name], value)
+                    self.assertIsInstance(bound["rms_eps"], float)
+                    self.assertEqual(
+                        {name: value for name, value in bound.items() if name.isupper()},
+                        {
+                            "HEAD_DIM": 128,
+                            "ROTARY_DIM": 64,
+                            "QUANT_MAX": 127.0,
+                            "WEIGHT_STRIDE": vector_stride,
+                            "COS_COL_STRIDE": vector_stride,
+                            "SIN_COL_STRIDE": vector_stride,
+                        },
+                    )
+
+
+class TestCompressorFusedNormValidation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_launcher("vllm_ascend/ops/triton/compressor/compressor_triton.py")
+
+    def setUp(self):
+        self.args = dict(
+            kv=torch.empty(0, 128),
+            scores=torch.empty(0, 128),
+            state_cache=torch.zeros(2, 32, 256),
+            metadata=torch.zeros(5, 1, dtype=torch.int32),
+            out=torch.empty(0, 128, dtype=torch.bfloat16),
+            max_query_len=0,
+            num_cores=1,
+            prev_rows=None,
+            prev_row_indices=None,
+        )
+
+    def test_empty_input_preserves_output_and_state_storage(self):
+        for dtype in (None, torch.bfloat16, torch.float32):
+            weight = None if dtype is None else torch.ones(128, dtype=dtype)
+            state = self.args["state_cache"].clone()
+            actual = self.module.compressor_from_projected(**self.args, norm_w=weight)
+            self.assertIs(actual, self.args["out"])
+            torch.testing.assert_close(self.args["state_cache"], state, rtol=0, atol=0)
+
+    def test_invalid_norm_weight_is_checked_on_empty_input(self):
+        for weight in (torch.ones(127), torch.ones(128, dtype=torch.float16), torch.ones(256)[::2]):
+            with (
+                self.subTest(shape=weight.shape, dtype=weight.dtype),
+                self.assertRaisesRegex(ValueError, "RMSNorm weight or epsilon"),
+            ):
+                self.module.compressor_from_projected(**self.args, norm_w=weight)
+
+    def test_invalid_norm_epsilon(self):
+        for eps in (0.0, -1e-6, float("inf"), float("nan")):
+            with self.subTest(eps=eps), self.assertRaisesRegex(ValueError, "RMSNorm weight or epsilon"):
+                self.module.compressor_from_projected(**self.args, norm_w=torch.ones(128), rms_eps=eps)
+
+    def test_nonempty_cpu_rejection_preserves_caller_output(self):
+        output = torch.full((2, 128), 7, dtype=torch.bfloat16)
+        args = {
+            **self.args,
+            "kv": torch.ones(2, 128),
+            "scores": torch.zeros(2, 128),
+            "out": output,
+            "max_query_len": 2,
+        }
+        before = output.clone()
+        with self.assertRaisesRegex(ValueError, "requires an NPU"):
+            self.module.compressor_from_projected(**args)
+        torch.testing.assert_close(output, before, rtol=0, atol=0)
+
+
+class TestCompressorModelNormDispatch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Constructor/cache registration dependencies are outside this focused
+        # test. Execute the actual pool_projected method on real CPU tensors.
+        names = (
+            "vllm.model_executor.layers.layernorm",
+            "vllm.v1.kv_cache_interface",
+            "vllm_ascend.attention.dsa_v41",
+            "vllm_ascend.core.kv_cache_interface",
+            "vllm_ascend.models.deepseek_v41.cache_config",
+        )
+        with patch.dict("sys.modules", {name: MagicMock() for name in names}):
+            cls.module = _load_launcher("vllm_ascend/models/deepseek_v41/compressor.py")
+
+    def test_bias_fallback_and_fused_output_are_each_normalized_once(self):
+        for bias_loaded in (False, True):
+            with self.subTest(bias_loaded=bias_loaded):
+                raw = torch.ones(2, 128, dtype=torch.bfloat16)
+                normalized = torch.full_like(raw, 3)
+                norm = MagicMock(
+                    return_value=normalized,
+                    weight=torch.ones(128, dtype=torch.bfloat16),
+                    variance_epsilon=1e-6,
+                    bias_loaded=bias_loaded,
+                )
+                pooled = torch.empty(4, 128, dtype=torch.bfloat16)
+                state = torch.zeros(2, 32, 1, 256)
+                compressor = SimpleNamespace(
+                    norm=norm,
+                    state_cache=SimpleNamespace(kv_cache=state),
+                    _ring_pooled=pooled,
+                    _ring_num_cores=8,
+                )
+                metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
+                kernel_module = ModuleType("vllm_ascend.ops.triton.compressor.compressor_triton")
+                kernel_module.compressor_from_projected = MagicMock(return_value=raw if bias_loaded else normalized)
+                with patch.dict("sys.modules", {kernel_module.__name__: kernel_module}):
+                    result = self.module.DeepseekV41Compressor.pool_projected(
+                        compressor,
+                        torch.ones(2, 128),
+                        torch.zeros(2, 128),
+                        metadata,
+                        prev_rows=None,
+                        prev_row_indices=None,
+                    )
+                self.assertIs(result, normalized)
+                call = kernel_module.compressor_from_projected.call_args
+                self.assertIs(call.kwargs["norm_w"], None if bias_loaded else norm.weight)
+                self.assertEqual(call.kwargs["rms_eps"], norm.variance_epsilon)
+                self.assertEqual(call.args[2].data_ptr(), state.data_ptr())
+                self.assertEqual(call.args[4].data_ptr(), pooled.data_ptr())
+                self.assertEqual(norm.call_count, int(bias_loaded))
+                if bias_loaded:
+                    norm.assert_called_once_with(raw)

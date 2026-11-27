@@ -24,6 +24,13 @@ class DeepseekV41Compressor(nn.Module):
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
             self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
+            if vllm_config is not None:
+                # Keep Triton loading scoped to the worker's ratio-2 owner.
+                from vllm_ascend.ops.triton.compressor.compressor_triton import _C2_POOL_KERNEL
+
+                # Registration only records keys inside the runner's active
+                # model-construction window; the worker owns compile timing.
+                _C2_POOL_KERNEL.register_warmup(head_dim=self.width)
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:
@@ -58,20 +65,23 @@ class DeepseekV41Compressor(nn.Module):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
+        # Fuse RMSNorm only when the loaded Norm has no bias.
+        # Keep the original path for checkpoints with a loaded bias.
+        fuse_norm = not getattr(self.norm, "bias_loaded", False)
         pooled = compressor_from_projected(
             kv,
             scores,
             ring_state.squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
-            # Metadata keeps the graph descriptor bound. A C2 launch cannot
-            # consume more rows than its physical projection carrier.
             max_query_len=min(metadata.max_query_len, kv.shape[0]),
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            norm_w=self.norm.weight if fuse_norm else None,
+            rms_eps=self.norm.variance_epsilon,
         )
-        return self.norm(pooled)
+        return pooled if fuse_norm else self.norm(pooled)
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
