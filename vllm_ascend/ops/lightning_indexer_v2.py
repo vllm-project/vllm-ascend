@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import lru_cache
+import re
+from functools import cache, lru_cache
 from importlib import import_module
 from importlib.util import find_spec
 from typing import NamedTuple
@@ -24,6 +25,28 @@ class LightningIndexerV2Plan(NamedTuple):
     windows: tuple[LightningIndexerV2Window, ...]
 
 
+@cache
+def get_lightning_indexer_v2_metadata_size(device: torch.device) -> int:
+    """Resolve the installed BF16 ACLNN output size once per worker device before capture."""
+    cu_query = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    lengths = torch.ones(1, device=device, dtype=torch.int32)
+    op = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata
+    try:
+        metadata = op(cu_query, lengths, 32, 2048, metadata_size=1024)
+    except RuntimeError as exc:
+        # The synchronous workspace check reports its required output length
+        # before any kernel is queued. Only retry this specific ABI mismatch.
+        message = str(exc).partition("TraceBack (most recent call last):")[0]
+        match = re.search(r"The element num of metadata must be (\d+), but got 1024\b", message)
+        if not message.startswith("call aclnnLightningIndexerV2MetadataGetWorkspaceSize failed") or match is None:
+            raise
+        required = int(match[1])
+        if required <= 1024 or required % 1024:
+            raise
+        metadata = op(cu_query, lengths, 32, 2048, metadata_size=required)
+    return metadata.numel()
+
+
 def build_lightning_indexer_v2_plan(
     block_table: torch.Tensor,
     request_rows: torch.Tensor,
@@ -32,6 +55,7 @@ def build_lightning_indexer_v2_plan(
     page_size: int,
     first_valid_page: int,
     num_heads_q: int,
+    metadata_size: int = 2048,
 ) -> LightningIndexerV2Plan:
     """Represent each query row as one request with its own rank-local causal prefix."""
     rows = request_rows.numel()
@@ -51,7 +75,9 @@ def build_lightning_indexer_v2_plan(
         stop = min(start + window_pages, pages.shape[1])
         width = (stop - start) * page_size
         visible = (lengths - start * page_size).clamp(0, width)
-        metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(cu_query, visible, num_heads_q, width)
+        metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+            cu_query, visible, num_heads_q, width, metadata_size=metadata_size
+        )
         windows.append(
             LightningIndexerV2Window(pages[:, start:stop].contiguous(), valid_pages[:, start:stop], visible, metadata)
         )
@@ -82,7 +108,10 @@ def get_lightning_indexer_v2_unavailable_reason(*, require_seqused_q: bool = Fal
         operator = binding.default
         if not operator.has_kernel_for_dispatch_key("PrivateUse1"):
             return f"{origin} has no NPU kernel registered for _C_ascend::{name}"
-        if require_seqused_q and "seqused_q" not in {arg.name for arg in operator._schema.arguments}:
+        arguments = {arg.name for arg in operator._schema.arguments}
+        if name.endswith("_metadata") and "metadata_size" not in arguments:
+            return f"{origin} lacks the metadata_size argument of _C_ascend::{name}; rebuild the vllm-ascend extension"
+        if require_seqused_q and "seqused_q" not in arguments:
             return f"{origin} lacks the seqused_q argument of _C_ascend::{name}; rebuild the vllm-ascend extension"
 
     # Older extensions expose only the boolean probe and can still run the unpadded ABI.

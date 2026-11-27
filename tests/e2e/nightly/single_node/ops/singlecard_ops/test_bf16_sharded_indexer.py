@@ -11,6 +11,7 @@ from vllm_ascend.ops.bf16_sharded_indexer import (
 )
 from vllm_ascend.ops.lightning_indexer_v2 import (
     build_lightning_indexer_v2_plan,
+    get_lightning_indexer_v2_metadata_size,
     get_lightning_indexer_v2_unavailable_reason,
     has_lightning_indexer_v2,
     lightning_indexer_v2_candidates,
@@ -100,7 +101,7 @@ def _reference_candidates(query, weights, keys, table, request_rows, visible, to
 
 
 @torch.inference_mode()
-def test_native_bf16_indexer_dcp_windows_and_graph_replay(require_native_indexer):
+def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadata_size):
     rows, heads, dim, page_size, topk = 6, 32, 128, 128, 2048
     first_valid_page = 2
     generator = torch.Generator().manual_seed(802)
@@ -127,7 +128,14 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(require_native_indexer
 
     def run():
         plan = build_lightning_indexer_v2_plan(
-            device_table, device_rows, device_visible, len(keys), page_size, first_valid_page, heads
+            device_table,
+            device_rows,
+            device_visible,
+            len(keys),
+            page_size,
+            first_valid_page,
+            heads,
+            metadata_size=native_indexer_metadata_size,
         )
         return lightning_indexer_v2_candidates(device_q, device_w, device_k, plan, topk)
 
@@ -178,16 +186,20 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(require_native_indexer
 
 
 @pytest.fixture
-def require_native_indexer():
+def native_indexer_metadata_size():
     if not is_950():
         pytest.skip("requires the A5 BF16 indexer path")
     torch_npu.npu.set_device(0)
     if not has_lightning_indexer_v2():
         pytest.skip("requires the BF16 LightningIndexerV2 and metadata operators")
+    # Probe on the real device before any of these tests capture a graph.
+    size = get_lightning_indexer_v2_metadata_size(torch.device("npu", 0))
+    assert size > 0 and size % 1024 == 0
+    return size
 
 
 @torch.inference_mode()
-def test_native_bf16_indexer_causal_prefill(require_native_indexer):
+def test_native_bf16_indexer_causal_prefill(native_indexer_metadata_size):
     rows, heads, page_size, topk = 4, 32, 128, 2048
     query = torch.ones(rows, heads, 128, dtype=torch.bfloat16)
     weights = torch.ones(rows, heads)
@@ -198,7 +210,16 @@ def test_native_bf16_indexer_causal_prefill(require_native_indexer):
     cu_query = torch.tensor([0, 2, 4], dtype=torch.int32, device="npu")
     kv_lengths = torch.tensor([2049, 127], dtype=torch.int32, device="npu")
     ops = torch.ops._C_ascend
-    metadata = ops.npu_lightning_indexer_v2_metadata(cu_query, kv_lengths, heads, topk, True)
+    metadata = ops.npu_lightning_indexer_v2_metadata(
+        cu_query, kv_lengths, heads, topk, True, metadata_size=native_indexer_metadata_size
+    )
+    meta_metadata = ops.npu_lightning_indexer_v2_metadata(
+        cu_query.to("meta"), kv_lengths.to("meta"), heads, topk, True, metadata_size=native_indexer_metadata_size
+    )
+    assert metadata.device == cu_query.device
+    assert meta_metadata.device.type == "meta"
+    assert metadata.shape == meta_metadata.shape == (native_indexer_metadata_size,)
+    assert metadata.dtype == meta_metadata.dtype == torch.int32
     ids, values = ops.npu_lightning_indexer_v2(
         query.npu(),
         keys.npu(),
@@ -222,7 +243,7 @@ def test_native_bf16_indexer_causal_prefill(require_native_indexer):
 
 
 @torch.inference_mode()
-def test_native_bf16_indexer_causal_tnd_padding_replay(require_native_indexer):
+def test_native_bf16_indexer_causal_tnd_padding_replay(native_indexer_metadata_size):
     reason = get_lightning_indexer_v2_unavailable_reason(require_seqused_q=True)
     if reason:
         pytest.skip(reason)
@@ -237,7 +258,9 @@ def test_native_bf16_indexer_causal_tnd_padding_replay(require_native_indexer):
 
     def run():
         ops = torch.ops._C_ascend
-        tiling = ops.npu_lightning_indexer_v2_metadata(cu, lengths, heads, topk, True, used_query)
+        tiling = ops.npu_lightning_indexer_v2_metadata(
+            cu, lengths, heads, topk, True, used_query, metadata_size=native_indexer_metadata_size
+        )
         ids, _ = ops.npu_lightning_indexer_v2(
             query, key, weights, cu, lengths, table, tiling, topk, True, False, used_query
         )

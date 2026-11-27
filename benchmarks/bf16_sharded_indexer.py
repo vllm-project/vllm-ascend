@@ -61,6 +61,7 @@ def main():
     from vllm_ascend.ops.bf16_sharded_indexer import bf16_paged_indexer_candidates
     from vllm_ascend.ops.lightning_indexer_v2 import (
         build_lightning_indexer_v2_plan,
+        get_lightning_indexer_v2_metadata_size,
         has_lightning_indexer_v2,
         lightning_indexer_v2_candidates,
     )
@@ -81,7 +82,8 @@ def main():
     keys = torch.randn(args.requests * cols + 1, page_size, 1, head_dim, dtype=torch.bfloat16, device="npu")
     query = torch.randn(rows, heads, head_dim, dtype=torch.bfloat16, device="npu")
     weights = torch.randn(rows, heads, dtype=torch.bfloat16, device="npu")
-    plan = build_lightning_indexer_v2_plan(table, owners, lengths, keys.size(0), page_size, 1, heads)
+    metadata_size = get_lightning_indexer_v2_metadata_size(table.device)
+    plan = build_lightning_indexer_v2_plan(table, owners, lengths, keys.size(0), page_size, 1, heads, metadata_size)
     reference = partial(
         bf16_paged_indexer_candidates,
         query,

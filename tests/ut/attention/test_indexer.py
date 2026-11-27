@@ -28,17 +28,21 @@ _KERNEL_BLOCK_SIZE = 128
 def test_bf16_li_v2_causal_metadata_uses_request_prefix_and_shares_across_layers(monkeypatch):
     context = SimpleNamespace()
     monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
-    op = Mock(side_effect=lambda cu_q, lengths, heads, k, causal: lengths.clone())
+    op = Mock(side_effect=lambda cu_q, lengths, heads, k, causal, metadata_size: lengths.clone())
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", op, raising=False)
-    first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048)
-    other = SimpleNamespace(k_cache=SimpleNamespace(prefix="other"), n_head=32, topk_tokens=2048)
+    first = SimpleNamespace(
+        k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048, _li_v2_metadata_size=1024
+    )
+    other = SimpleNamespace(
+        k_cache=SimpleNamespace(prefix="other"), n_head=32, topk_tokens=2048, _li_v2_metadata_size=1024
+    )
     cu_query = torch.tensor([0, 2, 6], dtype=torch.int32)
     lengths = torch.tensor([10, 14], dtype=torch.int32)
     meta = SimpleNamespace(query_start_loc=cu_query, actual_seq_lengths_key=lengths)
     get_inputs = AscendSFAIndexerBackend._get_bf16_li_v2_causal_inputs
     result = get_inputs(first, meta, 6, False)
     assert get_inputs(other, meta, 6, False) is result
-    op.assert_called_once_with(cu_query, lengths, 32, 2048, True)
+    op.assert_called_once_with(cu_query, lengths, 32, 2048, True, metadata_size=1024)
     assert result[0] is cu_query and result[1] is lengths and result[2] is None
     lengths.fill_(17)
     torch.testing.assert_close(get_inputs(first, meta, 6, False)[3], lengths)
@@ -58,24 +62,26 @@ def test_bf16_li_v2_causal_tnd_padding(monkeypatch, starts, kv_lengths, storage_
     monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
     op = Mock()
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", op, raising=False)
-    layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048)
+    layer = SimpleNamespace(
+        k_cache=SimpleNamespace(prefix="first"), n_head=32, topk_tokens=2048, _li_v2_metadata_size=2048
+    )
     meta = SimpleNamespace(query_start_loc=torch.IntTensor(starts), actual_seq_lengths_key=torch.IntTensor(kv_lengths))
     get_inputs = AscendSFAIndexerBackend._get_bf16_li_v2_causal_inputs
     cu, lengths, used_q, tiling = get_inputs(layer, meta, 8, True)
     torch.testing.assert_close(cu, torch.IntTensor(storage_starts))
     torch.testing.assert_close(used_q, torch.IntTensor(used))
     torch.testing.assert_close(meta.query_start_loc, torch.IntTensor(starts))
-    op.assert_called_once_with(cu, lengths, 32, 2048, True, seqused_q=used_q)
+    op.assert_called_once_with(cu, lengths, 32, 2048, True, metadata_size=2048, seqused_q=used_q)
     assert tiling is op.return_value
 
 
 def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch):
     context = SimpleNamespace()
     monkeypatch.setattr("vllm_ascend.attention.indexer.get_forward_context", lambda: context)
-    metadata_op = Mock(side_effect=lambda cu_q, lengths, heads, k: lengths.clone())
+    metadata_op = Mock(side_effect=lambda cu_q, lengths, heads, k, metadata_size: lengths.clone())
     monkeypatch.setattr(torch.ops._C_ascend, "npu_lightning_indexer_v2_metadata", metadata_op, raising=False)
-    first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32)
-    next_layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="next"), n_head=32)
+    first = SimpleNamespace(k_cache=SimpleNamespace(prefix="first"), n_head=32, _li_v2_metadata_size=1024)
+    next_layer = SimpleNamespace(k_cache=SimpleNamespace(prefix="next"), n_head=32, _li_v2_metadata_size=1024)
     table = torch.arange(132, dtype=torch.int32).reshape(2, 66)
     table[1, 1] = -1
     owners = torch.tensor([1, 1, 0, 1], dtype=torch.int32)
@@ -94,6 +100,7 @@ def test_bf16_li_v2_shares_window_metadata_and_rebuilds_for_capture(monkeypatch)
     assert metadata_op.call_count == 2
     torch.testing.assert_close(plan.cu_query, torch.arange(5, dtype=torch.int32))
     assert [call.args[-2:] for call in metadata_op.call_args_list] == [(32, 8192), (32, 256)]
+    assert all(call.kwargs == {"metadata_size": 1024} for call in metadata_op.call_args_list)
     for window, start, stop in zip(plan.windows, (0, 64), (64, 66)):
         pages = table[owners.long(), start:stop]
         expected_valid = (pages >= 2) & (pages < 130)

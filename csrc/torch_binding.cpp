@@ -1198,7 +1198,6 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
 
 namespace {
 constexpr int64_t LI_HEAD_DIM = 128;
-constexpr int64_t LI_METADATA_SIZE = 2048;
 constexpr int64_t LI_KV_HEADS = 1;
 constexpr int64_t LI_CMP_RATIO = 1;
 constexpr int64_t LI_DYNAMIC_LENGTH = -1;
@@ -1219,6 +1218,12 @@ void check_lightning_indexer_rows(const at::Tensor& starts, const at::Tensor& le
                 used_query->is_contiguous()), "Expected contiguous INT32 valid query lengths [B] on the same NPU");
 }
 }  // namespace
+
+void check_lightning_indexer_v2_metadata_size(int64_t metadata_size)
+{
+    TORCH_CHECK(metadata_size > 0 && metadata_size % 1024 == 0,
+                "LightningIndexerV2 metadata length must be a positive multiple of 1024, got ", metadata_size);
+}
 
 std::string get_lightning_indexer_v2_missing_symbols()
 {
@@ -1245,11 +1250,12 @@ bool is_lightning_indexer_v2_available()
 
 at::Tensor npu_lightning_indexer_v2_metadata(
     const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal,
-    const c10::optional<at::Tensor>& seqused_q)
+    const c10::optional<at::Tensor>& seqused_q, int64_t metadata_size)
 {
     check_lightning_indexer_rows(cu_seqlens_q, seqused_k, num_heads_q, topk, seqused_q);
+    check_lightning_indexer_v2_metadata_size(metadata_size);
     const c10_npu::NPUGuard guard(cu_seqlens_q.device());
-    auto metadata = at::empty({LI_METADATA_SIZE}, cu_seqlens_q.options());
+    auto metadata = at::empty({metadata_size}, cu_seqlens_q.options());
     // CANN's metadata wrapper represents omitted length tensors by empty INT32 tensors.
     auto unused = at::empty({0}, cu_seqlens_q.options());
     const auto& used_query = seqused_q.has_value() ? *seqused_q : unused;
@@ -1291,9 +1297,9 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2(
     TORCH_CHECK(block_table.scalar_type() == at::kInt && block_table.dim() == 2 &&
                 block_table.size(0) == seqused_k.size(0) && block_table.size(1) > 0 && block_table.is_contiguous(),
                 "Expected a contiguous INT32 page table [B, pages]");
-    TORCH_CHECK(metadata.scalar_type() == at::kInt && metadata.dim() == 1 &&
-                metadata.size(0) == LI_METADATA_SIZE && metadata.is_contiguous(),
-                "Lightning Indexer V2 metadata must be contiguous INT32 [2048]");
+    TORCH_CHECK(metadata.scalar_type() == at::kInt && metadata.dim() == 1 && metadata.is_contiguous(),
+                "LightningIndexerV2 metadata must be a contiguous 1-D INT32 tensor");
+    check_lightning_indexer_v2_metadata_size(metadata.size(0));
     const c10_npu::NPUGuard guard(query.device());
     // A TND plan can contain no work at all on a DCP owner. Unwritten
     // rows (including any graph tail) must be empty when candidates merge.
@@ -3079,8 +3085,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("get_lightning_indexer_v2_missing_symbols() -> str");
     ops.impl("get_lightning_indexer_v2_missing_symbols", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_lightning_indexer_v2_missing_symbols);
+    // Keep the historical allocation for direct callers. K3.1 workers pass the probed CANN size explicitly.
     ops.def("npu_lightning_indexer_v2_metadata(Tensor cu_seqlens_q, Tensor seqused_k, "
-            "int num_heads_q, int topk, bool causal=False, Tensor? seqused_q=None) -> Tensor");
+            "int num_heads_q, int topk, bool causal=False, Tensor? seqused_q=None, int metadata_size=2048) -> Tensor");
     ops.impl("npu_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2_metadata);
     ops.def("npu_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, Tensor cu_seqlens_q, "
             "Tensor seqused_k, Tensor block_table, Tensor metadata, int topk, "

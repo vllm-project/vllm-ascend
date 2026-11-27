@@ -733,8 +733,20 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     static auto getWorkspaceSizeFunc =                                        \
         ConvertToOpApiFunc(converted_params, getWorkspaceSizeFuncAddr);       \
     auto workspace_status = call(getWorkspaceSizeFunc, converted_params);     \
-    TORCH_CHECK(workspace_status == 0,                                        \
-                "call " #aclnn_api " failed, detail:", aclGetRecentErrMsg()); \
+    if (workspace_status != 0) {                                              \
+      const char *message = aclGetRecentErrMsg();                             \
+      std::string detail = message ? message : "";                            \
+      ReleaseConvertTypes(converted_params);                                  \
+      auto releaseMemFunc = reinterpret_cast<ReleaseHugeMem>(releaseMemAddr); \
+      if (releaseMemFunc) {                                                   \
+        releaseMemFunc(nullptr, false);                                       \
+      }                                                                       \
+      if (unInitMemFunc) {                                                    \
+        unInitMemFunc(nullptr, false);                                        \
+      }                                                                       \
+      TORCH_CHECK(false, "call " #aclnn_api "GetWorkspaceSize failed with "   \
+                  "status ", workspace_status, ", detail:", detail);          \
+    }                                                                         \
     void *workspace_addr = nullptr;                                           \
     if (workspace_size != 0) {                                                \
       at::TensorOptions options =                                             \

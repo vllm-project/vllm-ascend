@@ -36,6 +36,8 @@
  */
 
 namespace vllm_ascend {
+void check_lightning_indexer_v2_metadata_size(int64_t metadata_size);
+
 namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
@@ -1036,9 +1038,10 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
 
 at::Tensor npu_lightning_indexer_v2_metadata_meta(
     const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_k, int64_t num_heads_q, int64_t topk, bool causal,
-    const c10::optional<at::Tensor>& seqused_q)
+    const c10::optional<at::Tensor>& seqused_q, int64_t metadata_size)
 {
-    return at::empty({2048}, cu_seqlens_q.options().dtype(at::kInt));
+    check_lightning_indexer_v2_metadata_size(metadata_size);
+    return at::empty({metadata_size}, cu_seqlens_q.options().dtype(at::kInt));
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(

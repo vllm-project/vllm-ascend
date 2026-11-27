@@ -392,6 +392,8 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
         return None
 
     monkeypatch.setattr(module, "get_lightning_indexer_v2_unavailable_reason", probe)
+    size_probe = MagicMock(return_value=1024)
+    monkeypatch.setattr(module, "get_lightning_indexer_v2_metadata_size", size_probe)
     if scenario == "workspace":
         monkeypatch.setattr(module, "_BF16_LI_V2_MAX_SORT_ELEMENTS", 1024)
     monkeypatch.setattr(module, "is_950", lambda: scenario != "A3")
@@ -438,6 +440,8 @@ def test_kimi_lightning_indexer_v2_forward_dispatch(monkeypatch, dcp, scenario, 
     monkeypatch.setattr(sharded_indexer, "distributed_topk", merge)
     disabled = scenario in ("missing-symbol", "quantized", "A3")
     assert startup_log.call_args.args[1] == ("disabled" if disabled else "eligible")
+    assert size_probe.call_count == int(not disabled)
+    assert startup_log.call_args.args[-1] == (None if disabled else 1024)
     if scenario == "native-error":
         selectors["causal"].side_effect = RuntimeError("native launch failed")
         with pytest.raises(RuntimeError, match="native launch failed"):

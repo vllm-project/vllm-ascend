@@ -2184,7 +2184,7 @@ Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>
 | Log field | Meaning |
 |---|---|
 | `stage=probe` | The worker loaded the reported extension and resolved both CANN operators. |
-| `stage=init status=eligible` or `disabled` | The worker evaluated the model dtype, indexer cache dtype, DCP/PCP layout, head geometry and native bindings. The log includes the first blocking reason and any issue specific to the padding ABI. |
+| `stage=init status=eligible` or `disabled` | An eligible worker reports `metadata_elements`, the INT32 output length accepted by its CANN metadata operator before graph capture. A disabled worker reports the first blocking reason. The log also identifies issues specific to the padding ABI. |
 | `route=enter_causal`, `enter_causal_padded` or `enter_dcp_windows` | A forward entered the selected V2 path, before native metadata and scoring. |
 | `route=dispatched_causal`, `dispatched_causal_padded` or `dispatched_dcp_windows` | The host call returned. The DCP record includes the number of score windows submitted. |
 | `route=bf16_paged_fallback` or `device_postprocess` | The worker used the alternative scorer. The same line includes its reason, query and cache dtypes, cache shape/strides and sort budget. |

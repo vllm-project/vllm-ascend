@@ -56,6 +56,7 @@ from vllm_ascend.ops.bf16_sharded_indexer import (
 from vllm_ascend.ops.lightning_indexer_v2 import (
     LightningIndexerV2Plan,
     build_lightning_indexer_v2_plan,
+    get_lightning_indexer_v2_metadata_size,
     get_lightning_indexer_v2_unavailable_reason,
     lightning_indexer_v2_candidates,
 )
@@ -306,6 +307,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             type(config.model_config.hf_config), "is_kimi_k31", False
         )
         self._li_v2_disabled = self._bf16_li_v2_config_reason(config)
+        self._li_v2_metadata_size = (
+            get_lightning_indexer_v2_metadata_size(torch.device(torch.npu.current_device()))
+            if self._li_v2_disabled is None
+            else None
+        )
         self._li_v2_padding_disabled = None
         if self._li_v2_disabled is None and not self._sharded_dcp:
             self._li_v2_padding_disabled = get_lightning_indexer_v2_unavailable_reason(require_seqused_q=True)
@@ -313,7 +319,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if self._is_kimi_k31:
             logger.info_once(
                 "Kimi K3.1 LightningIndexerV2 stage=init status=%s reason=%s dcp=%s pcp=%s "
-                "model_dtype=%s indexer_kv_dtype=%s heads=%s head_dim=%s topk=%s padding_abi_issue=%s planned_route=%s",
+                "model_dtype=%s indexer_kv_dtype=%s heads=%s head_dim=%s topk=%s padding_abi_issue=%s "
+                "planned_route=%s metadata_elements=%s",
                 "disabled" if self._li_v2_disabled else "eligible",
                 self._li_v2_disabled,
                 parallel_config.decode_context_parallel_size,
@@ -325,6 +332,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.topk_tokens,
                 self._li_v2_padding_disabled,
                 ("dcp_windows" if self._sharded_bf16 else "causal") if self._li_v2_disabled is None else None,
+                self._li_v2_metadata_size,
                 scope="process",
             )
         if self._sharded_bf16:
@@ -750,7 +758,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 cu_query[-1] = num_rows
             kwargs = {"seqused_q": used_query} if padded else {}
             metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
-                cu_query, lengths, self.n_head, self.topk_tokens, True, **kwargs
+                cu_query,
+                lengths,
+                self.n_head,
+                self.topk_tokens,
+                True,
+                metadata_size=self._li_v2_metadata_size,
+                **kwargs,
             )
             cached = (owner, (cu_query, lengths, used_query, metadata))
             cache[key] = cached
@@ -781,6 +795,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # Warmup and capture can share a forward context. The first consuming
         # layer must record the metadata operations again during capture.
         if cached is None or cached[0] == owner:
+            assert self._li_v2_metadata_size is not None
             plan = build_lightning_indexer_v2_plan(
                 table[:, : indexer_metadata.max_local_indexer_pages],
                 request_rows,
@@ -789,6 +804,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 page_size,
                 indexer_metadata.first_valid_indexer_page,
                 self.n_head,
+                self._li_v2_metadata_size,
             )
             cached = (owner, plan)
             cache[key] = cached
