@@ -882,8 +882,6 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
 
 !!! warning
 
-    **Shared requirements**
-
     RecoverSSM is experimental. Validate accuracy and performance on your
     workload before deployment. Enable speculative decoding and disable
     stochastic rounding. With prefix caching, use Mamba cache mode `align`
