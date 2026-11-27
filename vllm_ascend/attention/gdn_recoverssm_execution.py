@@ -304,6 +304,9 @@ class GDNCommitExecutor:
             raise RuntimeError("Cannot prepare recovery graphs with an outstanding transition")
         jobs = self._merge_jobs(jobs)
         self._runtime()
+        # Merged contexts may create pointer tables on the current stream.
+        # Order the FIRST eager warmup too, not only the graph capture itself.
+        self.ready.record(torch.npu.current_stream())
         capacity = min(self.capacity, *(job.context.commit_plan.capacity for job in jobs))
         device = jobs[0].indices.device
 
@@ -311,7 +314,10 @@ class GDNCommitExecutor:
             return torch.empty_strided(shape, reference.stride(), dtype=reference.dtype, device=device).zero_()
 
         with torch.npu.stream(self.stream):
-            for dtype in (torch.int32, torch.int64):
+            self.stream.wait_event(self.ready)
+            # V2 MTP rejection sampling returns int32 num_sampled. Unexpected
+            # runtime dtypes retain the existing same-backend eager fallback.
+            for dtype in (torch.int32,):
                 accepted = torch.zeros(capacity, dtype=dtype, device=device)
                 for bucket in commit_buckets(capacity):
                     key = self._graph_key(jobs, accepted, bucket)

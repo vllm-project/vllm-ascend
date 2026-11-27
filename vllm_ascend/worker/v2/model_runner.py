@@ -462,9 +462,19 @@ class NPUModelRunner(GPUModelRunner):
                     executor.close()
             finally:
                 _teardown_profiling_state(self)
-        self.gdn_recovery_graph_memory_bytes = measured
-        logger.info("Reserved %d bytes for startup GDN recovery graphs before KV allocation", measured)
-        return measured
+        # Match the worker's existing non-Torch estimation safety allowance.
+        # Deduct it BEFORE KV allocation; do not silently waive a later excess.
+        # The second capture runs with a different allocator/ACL/HCCL state.
+        recovery_graph_safety_margin = 150 * (1 << 20)
+        reserve = measured + recovery_graph_safety_margin
+        self.gdn_recovery_graph_memory_bytes = reserve
+        logger.info(
+            "Reserved %d bytes for startup GDN recovery graphs before KV allocation (measured=%d, safety_margin=%d)",
+            reserve,
+            measured,
+            recovery_graph_safety_margin,
+        )
+        return reserve
 
     @torch.inference_mode()
     def capture_gdn_recovery_graphs(self, *, profile_only: bool = False) -> int:

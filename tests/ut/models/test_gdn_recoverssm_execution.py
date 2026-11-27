@@ -347,10 +347,12 @@ def test_graph_miss_never_captures_during_a_request(monkeypatch):
 
 @pytest.mark.parametrize("align", [False, True])
 def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatch, align):
-    fake_npu(monkeypatch, [])
+    log = []
+    fake_npu(monkeypatch, log)
     captures = []
 
     def stage(source, target, accepted, out_accepted, **kwargs):
+        assert ("side", "wait", "ready") in log
         assert not source.indices.count_nonzero() and not source.offsets.count_nonzero()
         assert source.indices.data_ptr() != target.indices.data_ptr()
         assert source.offsets.data_ptr() != target.offsets.data_ptr()
@@ -369,11 +371,18 @@ def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatc
     runner = execution.GDNCommitExecutor(config(capture_commit=True, merge_groups=False), 8)
     source = job(align=align)
     runner.prepare((source,))
-    assert len(captures) == 2 * len(execution.commit_buckets(8))
+    assert len(captures) == len(execution.commit_buckets(8))
+    assert all(graph.accepted.dtype == torch.int32 for graph in captures)
+    assert log.index(("main", "record", "ready")) < log.index(("side", "wait", "ready"))
     monkeypatch.setattr(execution, "stage_gdn_commit", Mock())
     runner._run((source,), torch.ones(3, dtype=torch.int32))
     assert sum(graph.graph.replay.call_count for graph in captures) == 1
     source.context.commit.assert_not_called()
+    # The unprepared dtype must never trigger an online capture.
+    capture_count = len(captures)
+    runner._run((source,), torch.ones(3, dtype=torch.int64))
+    assert len(captures) == capture_count
+    source.context.commit.assert_called_once()
     runner.close()
     assert not runner.graphs
 
@@ -447,8 +456,8 @@ def test_memory_probe_cleans_temporary_context(monkeypatch, fails):
             runner.profile_gdn_recovery_memory()
         assert not hasattr(runner, "gdn_recovery_graph_memory_bytes")
     else:
-        assert runner.profile_gdn_recovery_memory() == 50
-        assert runner.profile_gdn_recovery_memory() == 50
+        assert runner.profile_gdn_recovery_memory() == 50 + 150 * (1 << 20)
+        assert runner.profile_gdn_recovery_memory() == 50 + 150 * (1 << 20)
     executor.close.assert_called_once()
     cleanup.assert_called_once_with(runner)
     assert runner.initialize_kv_cache.call_args.kwargs == {"is_profiling": True}
