@@ -35,6 +35,7 @@ from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
+from vllm_ascend.worker.v2.spec_decode.mtp import get_mtp_draft_parallel_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
 )
@@ -55,10 +56,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             model_config_for_vllm = copy.copy(draft_model_config)
             model_config_for_vllm.hf_overrides = {}
 
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
+        parallel_config = get_mtp_draft_parallel_config(self.vllm_config)
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=model_config_for_vllm,
