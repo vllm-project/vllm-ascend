@@ -105,6 +105,19 @@ def test_fallback_rejected_on_shape_mismatch(tmp_path, caplog):
     assert "refusing to align" in messages[0]
 
 
+@pytest.mark.parametrize("shape", [(8, 4), (8, 16), (4, 8)])
+def test_fallback_rejected_on_non_square_shape(tmp_path, caplog, shape):
+    path = tmp_path / "optional" / "quarot.safetensors"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({"global_rotation": torch.zeros(shape, dtype=torch.float32)}, path)
+    config = make_config(tmp_path, is_rot_used=True, hidden_size=8)
+    with caplog.at_level(logging.WARNING, logger=QUAROT_LOGGER):
+        assert quarot_utils.resolve_rotation_path(config, allow_fallback=True) is None
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "refusing to align" in messages[0]
+
+
 def test_fallback_missing_file_warns_without_raising(tmp_path, caplog):
     config = make_config(tmp_path, is_rot_used=True)
     with caplog.at_level(logging.WARNING, logger=QUAROT_LOGGER):

@@ -163,7 +163,7 @@ def _rotation_shape_matches(rotation_path: Path, hidden_size: int | None) -> boo
             e,
         )
         return False
-    if len(shape) != 2 or shape[0] != hidden_size:
+    if tuple(shape) != (hidden_size, hidden_size):
         _warn_rotation_once(
             f"{rotation_path}:shape",
             "[spec_decode/quarot] Conventional rotation fallback %s has shape %s, expected "
