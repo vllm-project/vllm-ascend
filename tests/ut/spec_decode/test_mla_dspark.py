@@ -139,7 +139,9 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
     "choices,expected", [((True,), True), ((False,), False), ((True, True), True), ((True, False), False), ((), False)]
 )
 def test_dspark_flashmla_selection_requires_all_mla_groups(monkeypatch, choices, expected):
-    monkeypatch.setattr(shared, "_get_graph_update_backend", lambda _: AscendMLABackend)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dflash.speculator._get_graph_update_backend", lambda _: AscendMLABackend
+    )
     spec = initialize_attention(monkeypatch, AscendMLABackend, flashmla_choices=choices)
     assert spec.attn_architecture == "MLA"
     assert spec.use_flashmla is expected
