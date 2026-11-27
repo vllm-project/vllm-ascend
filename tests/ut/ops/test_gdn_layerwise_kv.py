@@ -56,11 +56,11 @@ class _Norm(nn.Module):
         self,
         hidden_states: torch.Tensor,
         z: torch.Tensor,
-        output: torch.Tensor,
+        out: torch.Tensor,
     ) -> torch.Tensor:
         del z
-        output.copy_(hidden_states)
-        return output
+        out.copy_(hidden_states)
+        return out
 
 
 class _OutputProjection(nn.Module):
