@@ -2148,6 +2148,19 @@ Use the role-specific values in the 950DT products example when deploying on tha
   role. The reference uses 64 sequences and 16384 batched tokens on Prefill,
   and 40 sequences and 240 batched tokens on Decode. Measure time to first
   token, time per output token, and throughput before changing these limits.
+- Prefill uses EPLB `window_size=300` and `step_interval=300` for faster
+  feedback in short benchmark or accuracy runs. A smaller window uses
+  fewer load samples, and a shorter interval can increase how often
+  experts are rearranged and reduce stability. For production, use the
+  defaults of `window_size=1000` and `step_interval=3000`. See
+  [Asynchronous EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#asynchronous-eplb).
+- For workloads with stable shapes, consider setting
+  `ascend_compilation_config.enable_static_kernel` to `true` on Decode.
+  Enable it with caution because static kernel compilation can
+  substantially increase service startup time.
+- If chat-template rendering becomes a bottleneck on the Prefill frontend,
+  consider changing `--api-server-count 1` to `--api-server-count 4` in
+  `run_p.sh` to distribute the work across four API server processes.
 - Set `--max-model-len` to the required context length and adjust
   `--gpu-memory-utilization` to the available NPU memory. The reference uses
   1048576 tokens and a utilization of 0.92 on both roles.
