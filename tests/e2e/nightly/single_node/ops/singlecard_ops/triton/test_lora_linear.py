@@ -329,20 +329,20 @@ def test_lora_linear_triton_v2_aclgraph_capture_and_no_lora_skip() -> None:
         patch.object(lora_ops, "_EXTRA_CTX", SimpleNamespace(capturing=None)),
         patch.object(lora_ops, "_try_lora_linear_triton", side_effect=AssertionError("should skip when no_lora")),
         patch.object(wrapper, "_lora_linear_matmul", side_effect=AssertionError("should skip when no_lora")),
+        torch.npu.graph(base_graph),
     ):
-        with torch.npu.graph(base_graph):
-            lora_ops.lora_linear(
-                wrapper._wrapper_id,
-                y_base,
-                x,
-                lora_a_stacked,
-                lora_b_stacked,
-                scale,
-                list(output_slices),
-                packed_lora_a,
-                packed_lora_b,
-                True,
-            )
+        lora_ops.lora_linear(
+            wrapper._wrapper_id,
+            y_base,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            scale,
+            list(output_slices),
+            packed_lora_a,
+            packed_lora_b,
+            True,
+        )
     y_base.copy_(y_initial)
     base_graph.replay()
     torch.npu.synchronize()
