@@ -258,8 +258,8 @@ if (BUILD_OPEN_PROJECT)
                 --enable_experimental ${ENABLE_EXPERIMENTAL}
                 --enable_ccache ${ENABLE_CCACHE}
                 --cann_3rd_lib_path ${CANN_3RD_LIB_PATH}
-                --build_type ${BUILD_TYPE}
-                --version ${VERSION}
+                --build_type "${CMAKE_BUILD_TYPE}"
+                --version "${VERSION}"
                 --enable_oom ${ENABLE_OOM}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
