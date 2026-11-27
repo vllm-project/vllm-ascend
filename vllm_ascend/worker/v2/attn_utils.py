@@ -1497,6 +1497,14 @@ def create_kv_cache_runtime_views(
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             raw_cache = backing[start : start + span]
             block_stride = descriptor.block_stride
+            if is_hidden_state_cache_spec(spec):
+                # Handle the upstream cache-only backend here to avoid patching
+                # it with Ascend's runtime view hook. Its writer expects BHND.
+                itemsize = get_dtype_size(spec.dtype)
+                shape = (num_blocks, spec.num_heads, spec.num_states, spec.state_content_size_bytes // itemsize)
+                (caches[name],) = create_cache_component_views(raw_cache, (shape,), (spec.dtype,), block_stride)
+                continue
+
             # Migrate allocation callers from get_kv_cache_shape to this interface gradually.
             # Keep the legacy hook for other models and allocation paths until they migrate.
             # Backend shapes already use the final runtime axis order; do not transpose between HND and NHD here.
