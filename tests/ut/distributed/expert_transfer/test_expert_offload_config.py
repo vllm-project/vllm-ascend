@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import TypeAdapter
 
-from vllm_ascend.ascend_config import ExpertOffloadConfig
+from vllm_ascend.ascend_config import AscendConfig, ExpertOffloadConfig
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.distributed.expert_transfer.expert_offload_config import (
     validate_expert_offload_config,
@@ -98,3 +98,93 @@ def test_full_decode_graph_configuration():
     vc.model_config.enforce_eager = False
     vc.compilation_config = SimpleNamespace(mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
     validate_expert_offload_config(ExpertOffloadConfig(enabled=True, num_device_experts=68), vc, ac)
+
+
+def make_pool_configs(protected=2, suffix=2, *, method="dspark", draft_tokens=5):
+    vc, ac = make_configs()
+    if method is not None:
+        dspark = method == "dspark"
+        vc.model_config.hf_text_config.model_type = "deepseek_v4" if dspark else "glm5_next_text"
+        vc.speculative_config = SimpleNamespace(
+            method=method,
+            num_speculative_tokens=draft_tokens,
+            enforce_eager=True,
+            enable_adaptive_verification=False,
+            draft_model_config=SimpleNamespace(
+                model=vc.model_config.model,
+                hf_config=SimpleNamespace(
+                    model_type="deepseek_v4" if dspark else "glm5_next_mtp",
+                    architectures=["DSparkDraftModel" if dspark else "Glm5NextMTPModel"],
+                ),
+            ),
+        )
+    config = ExpertOffloadConfig(
+        enabled=True,
+        num_device_experts=84,
+        dspark_protected_positions=protected,
+        dspark_suffix_experts=suffix,
+    )
+    ac.expert_offload_config = config
+    return config, vc, ac
+
+
+@pytest.mark.parametrize("suffix", [0, 2])
+def test_pool_validation_rejects_enabled_pool_before_disabled_offload_returns(suffix):
+    config = TypeAdapter(ExpertOffloadConfig).validate_python(
+        {"enabled": False, "dspark_protected_positions": 2, "dspark_suffix_experts": suffix}
+    )
+    with pytest.raises(ValueError, match="requires enabled expert offload"):
+        validate_expert_offload_config(config, None, None)
+
+
+@pytest.mark.parametrize("protected,suffix", [(None, 0), (None, 2), (2, None)])
+@pytest.mark.parametrize("offload_enabled", [False, True])
+def test_pool_validation_requires_both_parameters_before_any_early_return(protected, suffix, offload_enabled):
+    config = ExpertOffloadConfig(
+        enabled=offload_enabled,
+        num_device_experts=84 if offload_enabled else None,
+        dspark_protected_positions=protected,
+        dspark_suffix_experts=suffix,
+    )
+    with pytest.raises(ValueError, match="dspark_protected_positions and.*dspark_suffix_experts.*together"):
+        validate_expert_offload_config(config, None, None)
+
+
+@pytest.mark.parametrize("protected,suffix", [(0, 2), (7, 2), (2, -1), (2, 7)])
+def test_pool_validation_rejects_out_of_range_parameters(protected, suffix):
+    config, vc, ac = make_pool_configs(protected, suffix)
+    with pytest.raises(ValueError, match="protected_positions|suffix_experts"):
+        validate_expert_offload_config(config, vc, ac)
+
+
+@pytest.mark.parametrize("protected,suffix", [(1, 0), (1, 6), (6, 0), (6, 6)])
+def test_pool_validation_accepts_inclusive_parameter_boundaries(protected, suffix):
+    validate_expert_offload_config(*make_pool_configs(protected, suffix))
+
+
+@pytest.mark.parametrize(
+    "method,draft_tokens", [(None, 5), ("mtp", 5), ("dspark", None), ("dspark", 0), ("dspark", -1)]
+)
+def test_pool_validation_requires_dspark_with_positive_draft_tokens(method, draft_tokens):
+    config, vc, ac = make_pool_configs(method=method, draft_tokens=draft_tokens)
+    with pytest.raises(ValueError, match="requires DSpark with a positive number of speculative tokens"):
+        validate_expert_offload_config(config, vc, ac)
+
+
+@pytest.mark.parametrize("offload_enabled", [False, True])
+@pytest.mark.parametrize("explicit_nulls", [False, True])
+def test_pool_validation_keeps_native_routing_when_parameters_are_omitted(offload_enabled, explicit_nulls):
+    options = {"dspark_protected_positions": None, "dspark_suffix_experts": None} if explicit_nulls else {}
+    config = ExpertOffloadConfig(
+        enabled=offload_enabled,
+        num_device_experts=84 if offload_enabled else None,
+        **options,
+    )
+    assert config.dspark_protected_positions is None and config.dspark_suffix_experts is None
+    validate_expert_offload_config(config, *make_configs())
+
+
+def test_pool_validation_runs_during_config_derivation():
+    _, vc, ac = make_pool_configs(protected=0)
+    with pytest.raises(ValueError, match="protected_positions"):
+        AscendConfig.derive_and_validate(ac, vc)

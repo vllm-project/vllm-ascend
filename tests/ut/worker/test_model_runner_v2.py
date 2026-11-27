@@ -47,6 +47,7 @@ from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.model = torch.nn.Module()
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
@@ -1226,6 +1227,7 @@ def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, p
     from vllm_ascend.worker.v2.model_states import default
 
     state = default.AscendModelState.__new__(default.AscendModelState)
+    state.model = torch.nn.Module()
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     state.model_config = SimpleNamespace(max_model_len=2048)
     state.kvpp_runtime = None

@@ -15,6 +15,7 @@ import torch
 
 from vllm_ascend.ascend_config import ExpertOffloadConfig
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.distributed.expert_transfer.expert_offload_method import ExpertOffloadMoEMethod
 from vllm_ascend.ops.fused_moe import routed_experts
@@ -103,6 +104,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     runner.pcp_manager = None
     runner.model = torch.nn.Module()
     if manager is not None:
+        manager.dspark_expert_pool = None
         runner.model._expert_offload_manager = manager
     runner._target_uses_flashmla = False
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None, model_config=object())
@@ -137,6 +139,7 @@ def test_load_preserves_parent_contract_and_accounts_pool_memory(load_hook_class
     assert runner.model_memory_usage == 1064
     assert runner.pd_dspark_aux_layer_ids == [9]
     manager.unsubscribe_graph_streams.side_effect = lambda: events.append("unsubscribe_reports")
+    manager.shutdown.side_effect = lambda: manager.unsubscribe_graph_streams()
     runner.shutdown()
     assert events[-2:] == ["unsubscribe_reports", "parent_shutdown"]
     assert expert_offload.get_manager(runner.model) is None
@@ -155,6 +158,41 @@ def test_disabled_load_does_not_initialize_offload(load_hook_class, loading_memo
     assert expert_offload.get_manager(runner.model) is None
     assert runner.model_memory_usage == 1000
     loading_memory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "rows,drafts,prefilling,structured,invalid,width,expected",
+    [
+        ([6, 6], [5, 5], [False, False], False, False, 6, 6),
+        ([6, 6], [5, 5], [True, False], False, False, 6, None),
+        ([6], [5], [False], True, False, 6, None),
+        ([6], [5], [False], False, True, 6, None),
+        ([3, 3], [2, 2], [False, False], False, False, 3, None),
+        ([1, 6], [0, 5], [False, False], False, False, None, None),
+        ([1], None, [False], False, False, 1, 1),
+    ],
+)
+def test_expert_pool_graph_dispatch_preserves_offload_metadata(
+    load_hook_class, rows, drafts, prefilling, structured, invalid, width, expected
+):
+    manager = ExpertOffloadManager()
+    runner, _ = make_runner(load_hook_class, manager=manager)
+    manager.dspark_expert_pool = DSparkExpertPool(
+        torch.device("cpu"), 12, 2, 2, num_speculative_tokens=5, num_device_experts=84
+    )
+    state = SimpleNamespace(
+        num_scheduled_tokens=rows,
+        num_draft_tokens_np=drafts,
+        is_prefilling_np=prefilling,
+        has_prefill=any(prefilling),
+    )
+    scheduled = SimpleNamespace(has_structured_output_requests=structured, num_invalid_spec_tokens=int(invalid))
+    parent = type(runner).__bases__[0]
+    with patch.object(parent, "gather_batch_req_state", return_value=(state, width)):
+        actual_state, actual_width = runner.gather_batch_req_state(scheduled, False)
+    assert actual_state is state
+    assert actual_width == expected
+    assert manager.has_prefill is state.has_prefill
 
 
 def test_execute_preserves_dummy_pool_and_restores_decode_phase(load_hook_class):
@@ -275,12 +313,15 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
     original_comm, slot_comm, view = object(), object(), object()
     context = SimpleNamespace(moe_comm_method=original_comm)
     logical, physical = torch.tensor([[4, 5]]), torch.tensor([[0, 1]])
+    logical_weights = torch.ones(1, 2)
+    execution_weights = torch.zeros_like(logical_weights)
     x = torch.ones(1, 4)
 
     class Parent:
         def apply(self, **kwargs):
             assert kwargs["layer"] is view
             assert torch.equal(kwargs["topk_ids"], physical)
+            assert kwargs["topk_weights"] is execution_weights
             assert context.moe_comm_method is slot_comm
             return kwargs["x"]
 
@@ -292,8 +333,8 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
         {"_EXTRA_CTX": context},
     )
     binding = Mock()
-    binding.prepare.return_value = view, physical, slot_comm
+    binding.prepare.return_value = view, physical, execution_weights, slot_comm
     layer = SimpleNamespace(_expert_offload_binding=binding)
-    assert cls().apply(layer, x, torch.ones(1, 2), logical) is x
-    binding.prepare.assert_called_once_with(layer, logical)
+    assert cls().apply(layer, x, logical_weights, logical) is x
+    binding.prepare.assert_called_once_with(layer, logical, logical_weights)
     assert context.moe_comm_method is original_comm

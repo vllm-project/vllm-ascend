@@ -1,0 +1,25 @@
+pr: 21680
+entries:
+  - category: feature
+    text: >-
+      Added optional DSpark expert-pool routing for compatible DeepSeek models
+      using ModelRunner V2 and single-device expert offload on Ascend 950 (A5).
+      This is a lossy optimization that can change model outputs and accuracy.
+      It is disabled by default; with expert offload enabled, opt in by setting both
+      `expert_offload_config.dspark_protected_positions` and
+      `expert_offload_config.dspark_suffix_experts` under `--additional-config`.
+  - category: performance
+    text: >-
+      Improved DeepSeek-V4-Flash decode performance with DSpark expert-pool routing
+      and expert offload on a single Ascend 950 (A5).
+      In the 10-request benchmark with 65,536 input tokens and a 1,024-token output
+      limit, mean TPOT fell 27.5% at BS1 and 31.4% at BS2.
+      Aggregate output throughput rose 26.6% and 35.0%, respectively.
+  - category: bugfix
+    text: >-
+      Fixed extra host-to-device expert-weight traffic and slower decode when
+      replaying padded ACL Graph batches with expert offload enabled.
+  - category: bugfix
+    text: >-
+      Expert offload now reports a clear startup error when a model has no
+      compatible expert layers or its native expert-weight storage is unsupported.

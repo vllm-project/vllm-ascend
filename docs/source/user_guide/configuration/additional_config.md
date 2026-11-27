@@ -75,8 +75,47 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+| `expert_offload_config` | dict | `{}` | Single-device MoE expert offload and optional lossy DSpark expert-pool routing. See <a href="#expert_offload_config">expert_offload_config</a>. |
 
 The details of each configuration option are as follows:
+
+<span id="expert_offload_config"></span>**expert_offload_config**
+
+Single-device expert offload keeps part of the MoE expert weights in CPU memory
+and loads selected experts onto the device. It requires ModelRunner V2, compatible
+quantized expert layers, and Ascend 950 hardware. Tensor, data, pipeline, expert,
+and context parallelism are not supported by this offload path.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Enable expert-weight offload. |
+| `num_device_experts` | int or null | `null` | Required when enabled. Resident expert slots per layer; must satisfy `top_k <= num_device_experts < num_experts`. |
+| `dspark_protected_positions` | int or null | `null` | Leading protected verification positions, including the anchor. Range: `1` through `num_speculative_tokens + 1`. Set together with `dspark_suffix_experts` to enable expert-pool routing. |
+| `dspark_suffix_experts` | int or null | `null` | Candidates contributed by each restricted verification row, from `0` through the supported router's TopK. Each row still selects TopK experts from the shared pool. |
+
+The optional DSpark expert pool is a **lossy optimization**: restricting expert
+choices can change generated text and model accuracy. Both DSpark fields must be
+set to enable it; omitting both, or setting both to `null`, keeps native routing.
+Setting only one field, or setting them with offload disabled, raises an error.
+The pool supports compatible `sqrtsoftplus` routers with the model-specific
+TopK, checkpoint-native DSpark, eager drafting, and fixed verification.
+
+```bash
+--additional-config '{"expert_offload_config":{"enabled":true,"num_device_experts":84,"dspark_protected_positions":2,"dspark_suffix_experts":2}}'
+```
+
+For P2E2, the anchor and first draft position each contribute TopK experts, while
+each later position contributes two candidates. Every verification row selects
+TopK experts. In a batch without prefill, real one-token decode requests with no
+scheduled drafts also contribute their TopK experts and use the pool computation.
+Padding rows never contribute. Any batch containing prefill uses native routing
+for the whole batch, since offload already loads all experts for prefill.
+Mixed or short verification retains the eager fallback; supported uniform
+verification batches can replay a full decode graph. Draft-model execution,
+profiling, and incompatible routers use native routing.
+
+For the algorithm, input constraints, and tests, see the
+[expert-pool operator document](https://github.com/vllm-project/vllm-ascend/blob/159767fb7d15bdc21002737c459fe35d1fb4535c/vllm_ascend/ops/triton/docs/deepseek_expert_pool.md).
 
 <span id="runtime_guard"></span>**runtime_guard**
 

@@ -2091,6 +2091,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
+        model_state.model = torch.nn.Module()
         model_state.decoder_replay = None
         # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
         # model_config.

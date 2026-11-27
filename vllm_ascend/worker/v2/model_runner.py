@@ -801,6 +801,7 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        expert_offload.before_execute(self)
         with dp_coordination_context:
             d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
@@ -928,7 +929,7 @@ class NPUModelRunner(GPUModelRunner):
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         if self.pcp_manager is not None:
             self.pcp_manager.set_dispatch_batch_req_state(batch_state)
-        expert_offload.prepare_batch(self, batch_state)
+        uniform_token_count = expert_offload.prepare_batch(self, batch_state, uniform_token_count, scheduler_output)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1224,6 +1225,8 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        expert_offload.prepare_inputs(self, input_batch, scheduler_output)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

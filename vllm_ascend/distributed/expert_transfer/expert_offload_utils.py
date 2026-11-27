@@ -110,11 +110,25 @@ def initialize(runner: NPUModelRunner) -> None:
     initialize_expert_offload(runner)
 
 
-def prepare_batch(runner: NPUModelRunner, batch_state) -> None:
-    expert_offload_manager = get_manager(getattr(runner, "model", None))
-    if expert_offload_manager is not None:
-        # Dummy batches have no request state and use the full expert pool.
-        expert_offload_manager.has_prefill = batch_state is None or batch_state.has_prefill
+def before_execute(runner: NPUModelRunner) -> None:
+    if (manager := get_manager(getattr(runner, "model", None))) is not None:
+        manager.before_execute()
+
+
+def prepare_batch(runner: NPUModelRunner, batch_state, uniform_token_count: int | None, scheduler_output) -> int | None:
+    if (manager := get_manager(getattr(runner, "model", None))) is not None:
+        return manager.prepare_batch(batch_state, uniform_token_count, scheduler_output)
+    return uniform_token_count
+
+
+def prepare_inputs(runner: NPUModelRunner, input_batch, scheduler_output) -> None:
+    if (manager := get_manager(getattr(runner, "model", None))) is not None:
+        manager.prepare_inputs(input_batch, scheduler_output)
+
+
+def prepare_capture(model: torch.nn.Module | None, input_batch) -> None:
+    if (manager := get_manager(model)) is not None:
+        manager.prepare_capture(input_batch)
 
 
 def prepare_graph_capture(graph_manager: ModelAclGraphManager, needs_capture: Callable[[], bool]) -> None:
@@ -126,5 +140,5 @@ def prepare_graph_capture(graph_manager: ModelAclGraphManager, needs_capture: Ca
 def shutdown(runner: NPUModelRunner) -> None:
     expert_offload_manager = get_manager(getattr(runner, "model", None))
     if expert_offload_manager is not None:
-        expert_offload_manager.unsubscribe_graph_streams()
+        expert_offload_manager.shutdown()
         del runner.model._expert_offload_manager

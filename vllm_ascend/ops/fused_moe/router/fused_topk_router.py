@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
@@ -25,6 +26,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.expert_transfer.expert_offload_manager import LayerOffloadBinding
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
@@ -119,6 +123,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+        self._expert_pool_binding: LayerOffloadBinding | None = None
         # Model routing configuration (including capture) must be finalized before the first call.
         self._use_gating_top_k_with_map: bool | None = None
         self.routing_input_ids_buffer: torch.Tensor | None = None
@@ -191,6 +196,24 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         return table
 
     def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        binding = self._expert_pool_binding
+        pool = binding.dspark_expert_pool if binding is not None else None
+        if pool is not None and pool.active and (not _EXTRA_CTX.in_profile_run) and (not _EXTRA_CTX.is_draft_model):
+            routed = pool.route(self, router_logits)
+            if not pool.has_native_rows:
+                return routed
+            native = self._compute_native_routing(hidden_states, router_logits, indices_type, input_ids=input_ids)
+            return pool.merge_native(routed, native)
+        return self._compute_native_routing(hidden_states, router_logits, indices_type, input_ids=input_ids)
+
+    def _compute_native_routing(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
