@@ -89,7 +89,7 @@ ACLGraph. FP32 projected state uses `rtol=2^-10, atol=2^-16`.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dsv4_compressor.py
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_dsv4_compressor_lora.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dsv4_compressor_lora.py
 ```
 
 ## Performance measurement
