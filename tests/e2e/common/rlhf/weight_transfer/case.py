@@ -149,25 +149,15 @@ def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.devic
 
 # DeepSeek-V4.1 weight-transfer coverage, without Engram.
 #
-# Engram is disabled here on purpose (`engram_layer_ids: []`): on this branch
-# `AscendParallelEngramEmbedding._weight_loader` ignores `loaded_weight` and re-reads
-# the rows from the indexed shard bound by `bind_checkpoint`, so a lane whose payload
-# differs from that checkpoint cannot reproduce it (the update would either stream
-# the stale rows or fail when the shard is absent). Serving the table from a
-# synthesised checkpoint instead would make the lane green without ever exercising
-# the update, which is the opposite of what a regression guard should do.
+# Engram is off (`engram_layer_ids: []`) because this branch's loader ignores
+# `loaded_weight` and re-reads the table from the bound checkpoint: a payload that
+# differs from that checkpoint either streams stale rows or fails on a missing shard,
+# and serving a synthesised checkpoint instead would make the lane green without
+# testing the update. Its coverage returns with the loader change that installs a
+# transferred table.
 #
-# Engram coverage therefore waits for the loader change that installs the
-# transferred tensor inside the reload window; until then this lane keeps the
-# non-Engram half honest: every parameter is generated from the published
-# safetensors headers and must survive sleep(level 2) -> wake weights -> two update
-# rounds -> wake KV cache against a reference started from the same payload.
-#
-# `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only:
-# `pytest_model_cases` selects a non-matrix case for `npu_ipc` with
-# `packed=False` and drops it from every other lane, so the packed buffer
-# lifecycle cannot mask a reload regression here.
-DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
+# `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only.
+DEEPSEEK_V41_CASE = WeightUpdateModelCase(
     id="deepseek-v4.1-flash-bf16-6l",
     # Served from the published repo like the V4 lanes (config/tokenizer via HF cache).
     model="deepseek-ai/DeepSeek-V4.1-Flash",
@@ -175,15 +165,11 @@ DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
     # overrides, so a nested ``{"text_config": {...}}`` would replace the sub-config
     # instead (see ``_dsv41_text_config``).
     #
-    # Six layers, as a plain prefix of the released stack. The payload comes from the
-    # published safetensors headers, so a kept layer has to keep the role the
-    # checkpoint gives it: promoting a layer to an ``index``/``kv`` *source* owns
-    # ``compressor``/``indexer`` weights that only the released sources (2, 8, 14,
-    # 20, ...) have, and asking for them fails with "Following weights were not
-    # initialized from checkpoint: ...layers.4.self_attn.compressor.wkv.weight".
-    # The prefix covers ratio 0 at 0-1, the first source at 2 and its ratio-2
-    # consumers at 3-5. The ratio-1 group and candidate-block emission start
-    # at layer 20, i.e. 21 kept layers - a nightly-sized lane rather than this one.
+    # A plain six-layer prefix of the released stack: the payload comes from the
+    # published headers, so a layer promoted to an ``index``/``kv`` *source* would
+    # need ``compressor``/``indexer`` weights only the real sources have. Covers
+    # ratio 0 at 0-1, the first source at 2 and its consumers at 3-5; ratio 1 and
+    # candidate blocks start at layer 20 (21 layers), a nightly-sized lane.
     hf_overrides={
         "num_hidden_layers": 6,
         "compress_ratios": [0, 0, 2, 2, 2, 2],
@@ -212,7 +198,7 @@ DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
 )
 
 
-DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
+DEEPSEEK_V41_CASES = (DEEPSEEK_V41_CASE,)
 
 
 DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(

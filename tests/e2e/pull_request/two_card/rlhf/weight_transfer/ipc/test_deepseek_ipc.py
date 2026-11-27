@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """DeepSeek-V4.1 Engram host-offload over unpacked NPU IPC, timed independently.
 
-The scope is documented above ``DEEPSEEK_V41_ENGRAM_CASE``: this lane covers
+The scope is documented above ``DEEPSEEK_V41_CASE``: this lane covers
 sleep/restore and the non-Engram updates, not an Engram value update.
 """
 

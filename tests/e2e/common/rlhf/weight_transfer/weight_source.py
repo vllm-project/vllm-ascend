@@ -25,7 +25,7 @@ import struct
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -153,7 +153,9 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
+        config_path = _model_file(case.model, "config.json")
+        assert config_path is not None, f"{case.id}: could not resolve config.json"
+        config = AutoConfig.from_pretrained(str(config_path.parent), trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
@@ -264,12 +266,13 @@ class FixedRandomWeightSource(WeightSource):
         published file nor survives vLLM's config validation once
         ``num_hidden_layers`` is reduced.
         """
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import save_file
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        config_path = _model_file(self._case.model, "config.json")
+        assert config_path is not None, f"{self._case.id}: could not resolve config.json"
+        shutil.copyfile(config_path, target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
@@ -317,39 +320,35 @@ class TensorSpec:
     shape: tuple[int, ...]
 
 
-def _dsv41_file(case: Any, name: str) -> Path | None:
+def _model_file(model: str, name: str) -> Path | None:
     """One of the model's own files, from a local directory or the HF cache."""
-    local = Path(case.model) / name
+    local = Path(model) / name
     if local.is_file():
         return local
     try:
         from huggingface_hub import hf_hub_download
 
-        return Path(hf_hub_download(case.model, name))
+        return Path(hf_hub_download(model, name))
     except Exception:  # noqa: BLE001 - the caller decides whether it is required
         return None
 
 
-def _dsv41_config(case: Any) -> dict[str, Any]:
-    """The model's ``config.json``, from a local directory or the HF cache."""
-    path = _dsv41_file(case, "config.json")
+@cache
+def _read_model_config(model: str) -> dict[str, Any]:
+    """The model's ``config.json`` as a dict, read once per model."""
+    path = _model_file(model, "config.json")
     if path is None:
-        raise FileNotFoundError(f"{case.id}: could not read config.json from {case.model!r}")
+        raise FileNotFoundError(f"could not read config.json from {model!r}")
     return json.loads(path.read_text())
 
 
 def _dsv41_text_config(case: Any) -> dict[str, Any]:
-    """The reduced model's effective ``text_config``.
+    """The case's effective ``text_config``: the released one, then its overrides.
 
-    The released config is read from wherever the lane is served from (a local
-    directory or the HuggingFace cache), then the case's overrides are applied to
-    the text fields — the same result vLLM reaches: ``DeepseekV41Config`` flattens
-    the released ``text_config`` onto the top level and ``get_config`` applies
-    ``hf_overrides`` afterwards, so the overrides are *flat* keys.  A nested
-    ``{"text_config": {...}}`` override would instead replace the sub-config and
-    drop every field it does not restate, ``num_attention_heads`` among them.
+    Overrides are flat because ``DeepseekV41Config`` flattens ``text_config`` before
+    ``get_config`` applies them; a nested override would replace the sub-config.
     """
-    text = dict(_dsv41_config(case).get("text_config") or {})
+    text = dict(_read_model_config(case.model).get("text_config") or {})
     for key, value in (case.hf_overrides or {}).items():
         if key in text:
             text[key] = value
@@ -487,7 +486,9 @@ class DeepseekV41WeightSource(WeightSource):
         self._num_nextn = int(text.get("num_nextn_predict_layers", 0))
         self._engram_layer_ids = tuple(text.get("engram_layer_ids") or ())
         self._engram_shapes = _dsv41_engram_table_shapes(text) if self._engram_layer_ids else {}
-        self._num_vision_blocks = int(_dsv41_config(case).get("vision_config", {}).get("num_hidden_layers", 2))
+        self._num_vision_blocks = int(
+            _read_model_config(case.model).get("vision_config", {}).get("num_hidden_layers", 2)
+        )
         self._specs = self._read_layout()
 
     # -- layout -------------------------------------------------------------
@@ -630,7 +631,7 @@ class DeepseekV41WeightSource(WeightSource):
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
         for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
-            source = _dsv41_file(self._case, name)
+            source = _model_file(self._case.model, name)
             if source is not None:
                 shutil.copyfile(source, target / name)
             elif name == "config.json":
