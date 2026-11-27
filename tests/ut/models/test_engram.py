@@ -5,6 +5,7 @@
 
 import ctypes
 import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -454,6 +455,77 @@ def _fake_host_library(device_offset):
             return 0
 
     return Library()
+
+
+@pytest.fixture
+def host_engram_table_on_cpu(monkeypatch):
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.part_num_embeddings, table.dim, table.block_size = 8, 64, 32
+    table.storage_dtype, table.scale_dtype = torch.int8, torch.float32
+    table.cpu_offload, table.local_vmm = True, False
+    table.checkpoint_layer_id = 14
+    table._shared_group = None
+    table._shared_pool_spec = (None, None, None)
+    table._codes_uva = table._scales_uva = None
+    device = torch.device("cpu")
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    monkeypatch.setattr(torch, "device", lambda *_: device)
+    return table
+
+
+def test_failed_private_scales_allocation_closes_codes(host_engram_table_on_cpu, monkeypatch):
+    table = host_engram_table_on_cpu
+    codes = Mock()
+    allocate = Mock(side_effect=[codes, RuntimeError("scales allocation failed")])
+    monkeypatch.setattr(embedding_mod, "HostUvaBuffer", allocate)
+    with pytest.raises(RuntimeError, match="scales allocation failed"):
+        table._allocate_weights()
+    assert [call.args[3] for call in allocate.call_args_list] == ["_codes_uva", "_scales_uva"]
+    codes.close.assert_called_once_with()
+    assert table._codes_uva is table._scales_uva is None
+
+
+@pytest.mark.parametrize("failure", ["register", "end_clock", "codes_cleanup"])
+def test_failed_shared_scales_allocation_releases_codes(host_engram_table_on_cpu, monkeypatch, caplog, failure):
+    table = host_engram_table_on_cpu
+    table._shared_group = SimpleNamespace(cpu_group=None, rank_in_group=0, world_size=2)
+    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: (1, 3)[rank])
+    monkeypatch.setattr(npu.dist, "broadcast_object_list", lambda *a, **kw: None)
+    monkeypatch.setattr(npu.dist, "barrier", lambda **kw: None)
+    monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(0, error))
+    lib = _fake_host_library(0)
+    monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    monkeypatch.setattr(npu, "DeviceOperator", SimpleNamespace(host_register_flags=lambda: 0))
+    lib.aclrtHostRegisterV2 = Mock(side_effect=[0, 0 if failure == "end_clock" else 207001])
+    lib.aclrtHostUnregister = Mock(return_value=0)
+    message = "rc=207001"
+    if failure == "end_clock":
+        caplog.set_level(logging.INFO, logger=npu.logger.name)
+        monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[1.0, 2.0, 3.0, OSError("scales end clock failed")]))
+        message = "scales end clock failed"
+    elif failure == "codes_cleanup":
+        lib.aclrtHostUnregister.side_effect = [1, 0]
+
+    try:
+        with pytest.raises(RuntimeError, match=message) as caught:
+            table._allocate_weights()
+        codes, scales = (call.args[0] for call in lib.aclrtHostRegisterV2.call_args_list)
+        if failure == "codes_cleanup":
+            assert isinstance(caught.value, npu.HostUvaBufferCleanupError)
+            assert caught.value.host_buffer is table._codes_uva
+            assert caught.value.host_buffer.pointer.value == codes.value
+            caught.value.host_buffer.close()
+            expected = [codes, codes]
+        else:
+            assert table._codes_uva is None
+            assert "_codes_uva_ptrs" not in table._buffers
+            expected = [scales, codes] if failure == "end_clock" else [codes]
+        assert [call.args[0] for call in lib.aclrtHostUnregister.call_args_list] == expected
+    finally:
+        lib.aclrtHostUnregister.side_effect = None
+        if table._codes_uva is not None:
+            table._codes_uva.close()
 
 
 @pytest.mark.parametrize("leader_rank", [0, 16])

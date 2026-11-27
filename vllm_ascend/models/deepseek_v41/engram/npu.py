@@ -342,6 +342,7 @@ class SharedUvaBuffer:
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
             _madvise_hugepage(self.shm, size)
             flags = DeviceOperator.host_register_flags()
+            reporting_error = ""
             log_registration = checkpoint_layer_id is not None and logger.isEnabledFor(logging.INFO)
             if log_registration:
                 rank = dist.get_global_rank(cpu_group, group.rank_in_group)
@@ -354,10 +355,15 @@ class SharedUvaBuffer:
                 # Let close() unregister the range even if the end clock or logger raises.
                 self.pointer = address_of_mapping
             if log_registration:
-                elapsed = monotonic() - started
-                logger.info("Shared Engram registration end %s elapsed=%.6fs rc=%d", registration, elapsed, rc)
+                try:
+                    elapsed = monotonic() - started
+                    logger.info("Shared Engram registration end %s elapsed=%.6fs rc=%d", registration, elapsed, rc)
+                except Exception as exc:
+                    if not rc:
+                        raise
+                    reporting_error = f"; completion reporting failed: {type(exc).__name__}: {exc}"
             if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
+                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}{reporting_error}")
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
@@ -376,7 +382,11 @@ class SharedUvaBuffer:
 
         errors: list[str | None] = [None] * group.world_size
         dist.all_gather_object(errors, error, group=cpu_group)
-        failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
+        failures = "; ".join(
+            f"rank {dist.get_global_rank(cpu_group, index)}: {failure}"
+            for index, failure in enumerate(errors)
+            if failure is not None
+        )
         # Fence every mapping (or every failure) before the leader unlinks.
         dist.barrier(group=cpu_group)
         # Unlink while the leader still owns the SharedMemory handle: close()

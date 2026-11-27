@@ -40,6 +40,7 @@ from .local_shared_vmm import (
 )
 from .npu import (
     HostUvaBuffer,
+    HostUvaBufferCleanupError,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
@@ -301,40 +302,39 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 assert codes.scales is not None
                 self._scales_uva = codes.scales
                 return codes.tensor, codes.scales.tensor
-        if self._shared_group is not None:
-            # One physical copy of the mapped range, registered by each
-            # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(
-                codes_shape,
-                self.storage_dtype,
-                device,
-                self._shared_group,
-                "_codes_uva",
-                self,
-                checkpoint_layer_id=self.checkpoint_layer_id,
-            )
-            if quantized:
-                self._scales_uva = SharedUvaBuffer(
-                    scales_shape,
-                    self.scale_dtype,
-                    device,
-                    self._shared_group,
-                    "_scales_uva",
-                    self,
-                    checkpoint_layer_id=self.checkpoint_layer_id,
-                )
-            return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
-        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device, "_codes_uva", self)
+        self._codes_uva = self._allocate_host_table(codes_shape, self.storage_dtype, device, "_codes_uva")
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device, "_scales_uva", self)
-            assert self._scales_uva.tensor is not None
-            self._scales_uva.tensor.zero_()
-        # Same reason as the device path: aclrtMallocHost hands back whatever
-        # was in the pages, and the profiling forward looks up before the
-        # checkpoint load fills them.
-        assert self._codes_uva.tensor is not None
-        self._codes_uva.tensor.zero_()
+            try:
+                self._scales_uva = self._allocate_host_table(scales_shape, self.scale_dtype, device, "_scales_uva")
+            except BaseException as initialization_error:
+                try:
+                    self._codes_uva.close()
+                except Exception as cleanup_error:
+                    # The scales error can itself carry a buffer that needs a cleanup retry.
+                    raise HostUvaBufferCleanupError(
+                        self._codes_uva, initialization_error, cleanup_error
+                    ) from initialization_error
+                self._codes_uva = None
+                self._buffers.pop("_codes_uva_ptrs", None)
+                raise
+        if self._shared_group is None:
+            # aclrtMallocHost may return dirty pages that the profiling forward
+            # reads before the checkpoint load fills them.
+            if self._scales_uva is not None:
+                assert self._scales_uva.tensor is not None
+                self._scales_uva.tensor.zero_()
+            assert self._codes_uva.tensor is not None
+            self._codes_uva.tensor.zero_()
         return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
+
+    def _allocate_host_table(
+        self, shape: tuple[int, int], dtype: torch.dtype, device: torch.device, name: str
+    ) -> HostUvaBuffer | SharedUvaBuffer:
+        if self._shared_group is None:
+            return HostUvaBuffer(shape, dtype, device, name, self)
+        return SharedUvaBuffer(
+            shape, dtype, device, self._shared_group, name, self, checkpoint_layer_id=self.checkpoint_layer_id
+        )
 
     def close_host_offload(self) -> None:
         """Release the registered host ranges (shutdown / reload path).

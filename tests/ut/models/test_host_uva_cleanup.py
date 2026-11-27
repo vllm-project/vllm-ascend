@@ -37,7 +37,7 @@ def shared_buffer_factory(monkeypatch):
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
     monkeypatch.setattr(npu.DeviceOperator, "host_register_flags", lambda: 0)
     monkeypatch.setattr(npu.shared_memory, "SharedMemory", make_shm)
-    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: 0)
+    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: (1, 3)[rank])
     monkeypatch.setattr(npu.dist, "broadcast_object_list", lambda *a, **kw: None)
     monkeypatch.setattr(npu.dist, "barrier", lambda **kw: None)
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(0, error))
@@ -74,14 +74,13 @@ def shared_buffer_factory(monkeypatch):
         shm.close()
 
 
-@pytest.mark.parametrize(("layer", "table", "rc"), [(1, "codes", 0), (14, "scales", 0), (14, "codes", 207001)])
+@pytest.mark.parametrize(("layer", "table", "rc"), [(1, "codes", 0), (14, "scales", 207001)])
 def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, caplog, layer, table, rc):
     construct, lib, names, real_shm = shared_buffer_factory
     caplog.set_level(logging.INFO, logger=npu.logger.name)
     events = []
     clock = Mock(side_effect=[10.0, 11.25])
     monkeypatch.setattr(npu, "monotonic", clock)
-    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: 16)
 
     def log(fmt, *args):
         events.append(fmt % args)
@@ -95,14 +94,14 @@ def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, c
     monkeypatch.setattr(npu.logger, "info", log)
     lib.aclrtHostRegisterV2.side_effect = register
     if rc:
-        with pytest.raises(RuntimeError, match=f"aclrtHostRegisterV2 failed: rc={rc}"):
+        with pytest.raises(RuntimeError, match=f"rank 1: .*aclrtHostRegisterV2 failed: rc={rc}"):
             construct(f"_{table}_uva", layer)
         lib.aclrtHostGetDevicePointer.assert_not_called()
         lib.aclrtHostUnregister.assert_not_called()
     else:
         construct(f"_{table}_uva", layer).close()
         lib.aclrtHostUnregister.assert_called_once()
-    key = f"rank=16 layer={layer} table={table} bytes=512 shm={names[0]}"
+    key = f"rank=1 layer={layer} table={table} bytes=512 shm={names[0]}"
     assert events == [
         f"Shared Engram registration start {key}",
         f"Shared Engram registration end {key} elapsed=1.250000s rc={rc}",
@@ -159,6 +158,28 @@ def test_end_clock_failure_releases_registered_range(shared_buffer_factory, monk
         real_shm(name=names[0])
 
 
+@pytest.mark.parametrize("reporter", ["clock", "logger"])
+def test_failed_registration_preserves_cann_error_if_reporting_fails(
+    shared_buffer_factory, monkeypatch, caplog, reporter
+):
+    construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
+    lib.aclrtHostRegisterV2.return_value = 207001
+    failure = OSError(f"end {reporter} failed")
+    if reporter == "clock":
+        monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[10.0, failure]))
+    else:
+        monkeypatch.setattr(npu.logger, "info", Mock(side_effect=[None, failure]))
+
+    with pytest.raises(RuntimeError, match=rf"rank 1: .*rc=207001.*end {reporter} failed"):
+        construct("_scales_uva", 14)
+
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    lib.aclrtHostUnregister.assert_not_called()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
 @pytest.mark.parametrize("failure", ["register", "device_pointer", "peer"])
 def test_failed_initialization_unlinks_shared_name(shared_buffer_factory, monkeypatch, failure):
     construct, lib, names, real_shm = shared_buffer_factory
@@ -170,7 +191,8 @@ def test_failed_initialization_unlinks_shared_name(shared_buffer_factory, monkey
         monkeypatch.setattr(
             npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(1, "peer failed")
         )
-    with pytest.raises(RuntimeError, match="initialization failed"):
+    failed_rank = 3 if failure == "peer" else 1
+    with pytest.raises(RuntimeError, match=f"initialization failed: rank {failed_rank}:"):
         construct()
     with pytest.raises(FileNotFoundError):
         real_shm(name=names[0])
