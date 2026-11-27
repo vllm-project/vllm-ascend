@@ -10,8 +10,20 @@ The module only imports the standard library at import time, so
 vllm installed. Actual benchmarking is delegated to the repository-standard
 ```vllm bench serve``` command; this tool parses its text output, optionally
 aggregates EPD proxy stage metrics, compares against a baseline report, and
-renders a markdown + JSON report. Missing measurements are reported as
-"未采集" instead of being invented.
+renders a markdown + JSON report.
+
+Reporting rules:
+
+- A value that was not measured renders as "未采集". A missing histogram, a
+  missing +Inf bucket or an unparsable field is never replaced by a mean.
+- P50/P99 parsed from a Prometheus endpoint are histogram bucket upper bounds,
+  not exact quantiles, and the report states that next to the table.
+- ec_transfer_bytes collected from --ec-shared-storage-path is the sum of the
+  *.safetensors file sizes at report time, not the bytes moved by this run.
+
+Exit codes: 0 report written; 1 regression exceeded --tolerance with
+--fail-on-regression; 2 the harness could not produce a trustworthy report
+(bad input path, benchmark failure or timeout, unreachable report directory).
 """
 
 from __future__ import annotations
@@ -37,6 +49,8 @@ MILLISECONDS_PER_SECOND = 1000.0
 OUTPUT_TAIL_CHARS = 1000
 ERROR_EXIT_CODE = 2
 REGRESSION_EXIT_CODE = 1
+STAGE_PERCENTILE_EXACT = "exact"
+STAGE_PERCENTILE_BUCKET = "prometheus_bucket_upper_bound"
 
 BENCHMARK_KEYS = (
     "successful_requests",
@@ -355,7 +369,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     command = report.get("command")
     if command:
-        lines.append(f"- Benchmark command: {' '.join(str(part) for part in command)}")
+        executed = report.get("benchmark_executed", True)
+        label = "Benchmark command" if executed else "Benchmark command (not executed)"
+        lines.append(f"- {label}: {' '.join(str(part) for part in command)}")
     else:
         lines.append(f"- Benchmark command: {UNMEASURED}")
 
@@ -390,6 +406,12 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"| {stage} | {_fmt_int(summary.get('count'))} | {_fmt(summary.get('mean_ms'))} | "
                 f"{_fmt(summary.get('p50_ms'))} | {_fmt(summary.get('p99_ms'))} | {_stage_status(summary)} |"
+            )
+        if report.get("stage_percentile_source") == STAGE_PERCENTILE_BUCKET:
+            lines.append("")
+            lines.append(
+                "P50/P99 are Prometheus histogram bucket upper bounds, not exact quantiles: "
+                "the proxy /metrics endpoint does not expose the individual stage durations."
             )
     else:
         lines.append(UNMEASURED)
@@ -465,6 +487,7 @@ def _fetch_text(url: str) -> str:
 
 
 def _build_bench_command(args: argparse.Namespace) -> list[str]:
+    """Return the vllm bench serve argv the report records."""
     command = [
         "vllm",
         "bench",
@@ -500,18 +523,20 @@ def _build_bench_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def _load_stage_metrics(args: argparse.Namespace) -> dict[str, Any]:
+def _load_stage_metrics(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
+    """Return the stage summary and how its percentiles were obtained."""
     if args.stage_metrics_json:
         rows = json.loads(Path(args.stage_metrics_json).read_text(encoding="utf-8"))
         if not isinstance(rows, list):
             raise ValueError("--stage-metrics-json must contain a JSON list of {stage, seconds} rows")
-        return aggregate_stage_metrics(rows)
+        return aggregate_stage_metrics(rows), STAGE_PERCENTILE_EXACT
     if args.proxy_metrics_url:
-        return parse_proxy_metrics(_fetch_text(args.proxy_metrics_url))
-    return {}
+        return parse_proxy_metrics(_fetch_text(args.proxy_metrics_url)), STAGE_PERCENTILE_BUCKET
+    return {}, None
 
 
 def _load_ec_bytes(args: argparse.Namespace) -> int | None:
+    """Return manually supplied EC bytes or the safetensors file sizes on disk."""
     if args.ec_transfer_bytes is not None:
         return int(args.ec_transfer_bytes)
     if args.ec_shared_storage_path:
@@ -570,7 +595,14 @@ def _write_reports(args: argparse.Namespace, report: dict[str, Any]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run or parse an EPD benchmark and emit markdown + JSON reports.")
+    parser = argparse.ArgumentParser(
+        description="Run or parse an EPD benchmark and emit markdown + JSON reports.",
+        epilog=(
+            "Exit codes: 0 report written; 1 a regression exceeded --tolerance "
+            "(with --fail-on-regression); 2 the harness could not produce a trustworthy "
+            "report (bad input path, benchmark failure or timeout, missing report directory)."
+        ),
+    )
     parser.add_argument("--model", required=True, help="Model name used by vllm bench serve and the report")
     parser.add_argument("--num-prompts", type=int, default=100, help="Number of benchmark prompts (default: 100)")
     parser.add_argument("--input-len", type=int, default=1024, help="Random-dataset input length (default: 1024)")
@@ -660,9 +692,10 @@ def main(argv: list[str] | None = None) -> int:
 
     benchmark = parse_bench_output(text)
     stages: dict[str, Any] = {}
+    stage_percentile_source: str | None = None
     stages_collected = True
     try:
-        stages = _load_stage_metrics(args)
+        stages, stage_percentile_source = _load_stage_metrics(args)
     except (OSError, RuntimeError, ValueError) as exc:
         stages_collected = False
         notes.append(f"stage metrics were not collected: {exc}")
@@ -691,8 +724,10 @@ def main(argv: list[str] | None = None) -> int:
         # --bench-output parses a previous run, so the command in this report was
         # not executed; --dry-run does not run it either but still records it.
         "command": None if args.bench_output else command,
+        "benchmark_executed": not (args.dry_run or args.bench_output),
         "benchmark": benchmark,
         "stages": stages,
+        "stage_percentile_source": stage_percentile_source,
         "ec_transfer_bytes": ec_transfer_bytes,
         "hbm_peak_gb": args.hbm_peak_gb,
         "comparison": None,

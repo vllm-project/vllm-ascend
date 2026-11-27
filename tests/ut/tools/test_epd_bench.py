@@ -338,9 +338,12 @@ def test_dry_run_records_the_command_without_running_it(tmp_path) -> None:
     assert exit_code == 0
     report = json.loads(report_json.read_text(encoding="utf-8"))
     assert report["command"][:3] == ["vllm", "bench", "serve"]
+    assert report["benchmark_executed"] is False
     assert any("not executed" in note for note in report["notes"])
     assert all(value is None for value in report["benchmark"].values())
     assert not list(tmp_path.glob("*.tmp")), "no temporary report file may be left behind"
+    markdown = report_md.read_text(encoding="utf-8")
+    assert "- Benchmark command (not executed): vllm bench serve" in markdown
 
 
 def test_bench_output_does_not_record_a_command(tmp_path) -> None:
@@ -364,6 +367,7 @@ def test_bench_output_does_not_record_a_command(tmp_path) -> None:
     assert exit_code == 0
     report = json.loads(report_json.read_text(encoding="utf-8"))
     assert report["command"] is None, "a parsed previous run must not claim a command was executed"
+    assert report["benchmark_executed"] is False
     assert any("no benchmark command was executed" in note for note in report["notes"])
     assert report["benchmark"]["successful_requests"] == 10
 
@@ -441,6 +445,54 @@ def test_reports_are_written_as_a_pair(monkeypatch, tmp_path) -> None:
     assert not (tmp_path / "r.md").exists(), "the markdown half must not be committed alone"
     assert not (tmp_path / "r.json").exists()
     assert not list(tmp_path.glob("*.tmp")), "temporary files must be cleaned up"
+
+
+def test_executed_benchmark_is_marked_as_executed(monkeypatch, tmp_path) -> None:
+    completed = SimpleNamespace(returncode=0, stdout=SERVING_OUTPUT, stderr="")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+
+    exit_code, report_md, report_json = _run_cli(tmp_path)
+
+    assert exit_code == 0
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["benchmark_executed"] is True
+    markdown = report_md.read_text(encoding="utf-8")
+    assert "- Benchmark command: vllm bench serve" in markdown
+    assert "(not executed)" not in markdown
+
+
+def test_proxy_percentiles_are_annotated_as_bucket_bounds(tmp_path) -> None:
+    metrics_path = tmp_path / "metrics.txt"
+    metrics_path.write_text(BUCKET_METRICS, encoding="utf-8")
+    report = {
+        "model": "m",
+        "stages": parse_proxy_metrics(BUCKET_METRICS),
+        "stage_percentile_source": "prometheus_bucket_upper_bound",
+        "notes": [],
+    }
+    markdown = render_markdown(report)
+    assert "histogram bucket upper bounds, not exact quantiles" in markdown
+
+
+def test_stage_metrics_json_reports_exact_percentiles(tmp_path) -> None:
+    stage_rows = tmp_path / "stages.json"
+    stage_rows.write_text(json.dumps([{"stage": "encode", "seconds": 0.01}]), encoding="utf-8")
+
+    exit_code, report_md, report_json = _run_cli(tmp_path, "--dry-run", "--stage-metrics-json", str(stage_rows))
+
+    assert exit_code == 0
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["stage_percentile_source"] == "exact"
+    markdown = report_md.read_text(encoding="utf-8")
+    assert "bucket upper bounds" not in markdown
+
+
+def test_help_documents_the_exit_codes(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+
+    assert excinfo.value.code == 0
+    assert "Exit codes" in capsys.readouterr().out
 
 
 def test_stage_rows_report_unmeasured_percentiles() -> None:
