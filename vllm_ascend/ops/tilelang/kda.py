@@ -114,6 +114,14 @@ def compose(c, layout, lower):
     vb = ("asc_sync_intra_wait(PIPE_MTE2,10);\n"+calls["mid"]+fence+
           "asc_sync_inter_arrive(PIPE_MTE3,13); asc_sync_inter_wait(PIPE_MTE3,13);\n"+
           "asc_sync_intra_arrive(PIPE_MTE3,11);\n")
+    if c.batch == 10:
+        from .kda_batch10 import schedule_batch10
+
+        try:
+            helpers, cb, vb = schedule_batch10(helpers, calls, layout)
+        except ValueError:
+            # A different TileLang lowering can use the generic phase schedule.
+            pass
     for tag,body in [('c',cb),('v',vb)]:
         helpers.append("__aicore__ inline int fused_tilelang_body_"+tag+"("+sign+") {\n"+body+"return 0;\n}")
     return "\n".join(helpers), shared_bytes, fields
@@ -127,10 +135,10 @@ from functools import lru_cache
 from types import SimpleNamespace
 
 @lru_cache(maxsize=128)
-def compile_hybrid(eps, lower_bound, layout, m, single, simd):
+def compile_hybrid(eps, lower_bound, layout, m, single, simd, paired_batch10=False):
     from tilelang.jit.kernel import JITKernel
     import re
-    cfg=SimpleNamespace(eps=eps, lower_bound=lower_bound,batch=1 if single else 2,
+    cfg=SimpleNamespace(eps=eps, lower_bound=lower_bound,batch=10 if paired_batch10 else (1 if single else 2),
                         tile_rows=m,simd=simd,tokens=6,heads=64,hidden=4096,dim=128)
     class ComposedKernel(JITKernel):
         def _compile_artifact(self, *args, **kwargs):
@@ -173,6 +181,7 @@ class WholeKDA:
         if any(stride % width for stride, width in zip(strides, widths)):
             raise ValueError("Cache strides must be multiples of the corresponding head width")
         layout = tuple(stride // width for stride, width in zip(strides, widths))
+        self.paired_batch10 = torch.npu.get_device_name(conv.device) == "Ascend950DT_9581"
         self.config = (layer.o_norm.eps, layer.kda_lower_bound, layout)
 
         def flat(t, width):
@@ -221,7 +230,7 @@ class WholeKDA:
         p, y, out, gf, gg = buffers
         batch = rows // 6
         m = (rows + 15) // 16 * 16 if batch <= 50 else 64
-        kernel = compile_hybrid(*self.config, m, batch == 1, batch >= 10)
+        kernel = compile_hybrid(*self.config, m, batch == 1, batch >= 10, batch == 10 and self.paired_batch10)
         kernel(x, self.win, self.wo, out, p, self.wf, self.wg, self.cw, self.conv,
                     self.state, metadata, self.a, self.dt, self.nw, y, self.corr, gf, gg, self.kg)
         return out[:rows]

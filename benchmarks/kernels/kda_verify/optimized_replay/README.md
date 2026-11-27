@@ -4,6 +4,16 @@ The fused operator lives in [vllm_ascend/ops/tilelang/kda.py](../../../../vllm_a
 
 The BF16 kernel processes six verification tokens per request from QKV projection through output projection. The CSV includes the unfused path (不融合), cannbotDSL, the published multi-kernel TileLang path, the first single-kernel measurement, and the optimized kernel. Positive savings indicate a latency reduction from the published multi-kernel path. Each optimized point is the median of 11 device tasks. Model weights are packed before timing.
 
+### Atlas 850E batch 1–80 sweep
+
+At batch 10, 30 Cube cores handle QKV while two compute the low-rank gate projections. Vector cores synchronize before consuming the projected values. During replay, Cube stages checkpoint tiles and five output-weight panels in L1. The specialization runs on Ascend950DT_9581 with ten six-token requests.
+
+Each point below covers one `main_kernel` device task per invocation, after six warmups. The sweep checks projection, gated normalization, output, convolution cache, correction, KG, checkpoint preservation and unused pages at every batch size. The batch-10 comparison interleaves 40 samples per schedule.
+
+![Atlas 850E device latency for batches 1–80](850e-tilelang-b1-80.svg)
+
+[Per-batch P50, P95 and output error](850e-tilelang-b1-80.csv) · [Device samples and numerical checks](850e-tilelang-b1-80-samples.json)
+
 ### Six-token BF16 ReplaySSM comparison
 
 The benchmark compares the unfused path (不融合), optimized single-launch TileLang, and cannbotDSL from CANN ops-transformer commit `48f71c57`. The cannbotDSL retest covers batches 1–50 on each device. Every point is the median of 11 msprof device timings. The unfused and TileLang columns use the previously measured results for the same input.
