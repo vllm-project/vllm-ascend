@@ -46,12 +46,11 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
 from vllm_ascend.utils import vllm_version_is
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.packed_tensor"
-_RELEASE_PACKING = vllm_version_is("0.34.0")
 _ALIGNED_CAPACITY = 16
 
 
 def _hccl_stream_count(producer, num_buffers):
-    return num_buffers if producer or _RELEASE_PACKING else num_buffers + 1
+    return num_buffers if producer or vllm_version_is("0.34.0") else num_buffers + 1
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +223,9 @@ def test_packed_broadcast_producer_splits_when_exceeding_buffer():
     )
 
     first, second = (tensor for _, tensor in tensors)
-    expected = [first, second] if _RELEASE_PACKING else [first[:8], torch.cat([first[8:], second[:4]]), second[4:]]
+    expected = (
+        [first, second] if vllm_version_is("0.34.0") else [first[:8], torch.cat([first[8:], second[:4]]), second[4:]]
+    )
     assert len(payloads) == len(expected)
     for payload, values in zip(payloads, expected, strict=True):
         assert torch.equal(payload.view(torch.float32), values)
@@ -343,7 +344,7 @@ def test_packed_broadcast_consumer_handles_multiple_dtypes():
     f16 = torch.tensor([1.5, 2.5], dtype=torch.float16)
     f32 = torch.tensor([3.0, 4.0], dtype=torch.float32)
     prefix = f16.view(torch.uint8)
-    if not _RELEASE_PACKING:
+    if not vllm_version_is("0.34.0"):
         prefix = torch.nn.functional.pad(prefix, (0, _ALIGNED_CAPACITY - prefix.numel()))
     packed = torch.cat([prefix, f32.view(torch.uint8)])
     group = _make_group_mock()
@@ -689,7 +690,7 @@ def test_packed_broadcast_consumer_unpacks_multiple_dtypes_in_one_buffer():
     f16 = torch.tensor([1.5, 2.5], dtype=torch.float16)
     i32 = torch.tensor([10, 20, 30], dtype=torch.int32)
     prefix = f16.view(torch.uint8)
-    if not _RELEASE_PACKING:
+    if not vllm_version_is("0.34.0"):
         prefix = torch.nn.functional.pad(prefix, (0, _ALIGNED_CAPACITY - prefix.numel()))
     packed = torch.cat([prefix, i32.view(torch.uint8)])
     group = _make_group_mock()
@@ -983,7 +984,7 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
     return chunk_count
 
 
-@pytest.mark.parametrize("buffer_size", [1, 8, 128] if _RELEASE_PACKING else [16, 32, 128])
+@pytest.mark.parametrize("buffer_size", [1, 8, 128] if vllm_version_is("0.34.0") else [16, 32, 128])
 def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size):
     tensors = [
         ("byte", torch.tensor([7], dtype=torch.uint8)),
@@ -996,7 +997,7 @@ def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size
 
 def test_packed_broadcast_roundtrip_with_split_tensor_and_slot_reuse():
     tensors = [("matrix", torch.arange(48, dtype=torch.float32).reshape(6, 8))]
-    assert _assert_packed_roundtrip("hccl", tensors, 32) == (1 if _RELEASE_PACKING else 6)
+    assert _assert_packed_roundtrip("hccl", tensors, 32) == (1 if vllm_version_is("0.34.0") else 6)
 
 
 @pytest.mark.parametrize("empty_only", [False, True])
@@ -1290,7 +1291,7 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
         nonlocal packed_items
         # Another slot can pack while the previous transfer is still pending.
         # A single slot must finish its own transfer before it can be reused.
-        if _RELEASE_PACKING:
+        if vllm_version_is("0.34.0"):
             assert bool(pending) == (packed_items > 0 and num_buffers > 1)
         else:
             assert not active  # Native producer prepares on the caller stream.
@@ -1303,14 +1304,14 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
         patch.object(torch.npu, "stream", side_effect=StreamContext) as context,
         patch.object(torch.npu, "current_stream", side_effect=lambda device=None: active[-1] if active else streams[0]),
     ):
-        width = 1 if _RELEASE_PACKING else 4
-        capacity = 1 if _RELEASE_PACKING else _ALIGNED_CAPACITY
+        width = 1 if vllm_version_is("0.34.0") else 4
+        capacity = 1 if vllm_version_is("0.34.0") else _ALIGNED_CAPACITY
         weights = ((f"w{i}", torch.ones(width)) for i in range(7))
         packed_broadcast_producer(weights, group, 0, prepare, capacity, num_buffers)
     expected = [streams[i % num_buffers] for i in range(7)]
     assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == expected
     contexts = [call.args[0] for call in context.call_args_list]
-    assert contexts[:7] == expected if _RELEASE_PACKING else contexts[1::2] == expected
+    assert contexts[:7] == expected if vllm_version_is("0.34.0") else contexts[1::2] == expected
     assert active == []
     assert pending == []
     assert packed_items == 7
@@ -1411,7 +1412,9 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
-@pytest.mark.parametrize("buffer_size", [4, 32] if _RELEASE_PACKING else [32, 48], ids=["full-chunk", "final-chunk"])
+@pytest.mark.parametrize(
+    "buffer_size", [4, 32] if vllm_version_is("0.34.0") else [32, 48], ids=["full-chunk", "final-chunk"]
+)
 def test_packed_consumer_does_not_retry_receive_when_loader_raises_stop_iteration(buffer_size):
     failure = StopIteration("loader failed")
     loaded = []

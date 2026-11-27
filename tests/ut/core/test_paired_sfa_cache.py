@@ -219,14 +219,13 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *a, **k: None)
     monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 
-    release = vllm_version_is("0.34.0")
-    inputs = specs if release else make_layer_cache_configs(specs)
+    inputs = specs if vllm_version_is("0.34.0") else make_layer_cache_configs(specs)
     actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, inputs)
 
     # The same hybrid cache geometry must not opt unrelated models into K3.1.
     # K3.1's nested text config still reports kimi_linear.
     selected, other = (paired, upstream) if model_type == "kimi_k31" else (upstream, paired)
-    if not release and model_type == "kimi_k31":
+    if not vllm_version_is("0.34.0") and model_type == "kimi_k31":
         assert actual == selected.return_value
         selected.assert_called_once_with(config, specs, layer_configs=inputs)
     else:

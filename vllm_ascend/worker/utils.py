@@ -157,10 +157,9 @@ def prepare_ascend_kernel_block_sizes(
 
     # The release excludes encoder-only groups, whereas main preserves every
     # group including empty PP projections.
-    release = vllm_version_is("0.34.0")
     index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        if release:
+        if vllm_version_is("0.34.0"):
             spec = group.kv_cache_spec
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 spec = next(iter(spec.kv_cache_specs.values()))

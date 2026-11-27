@@ -1554,8 +1554,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.connector = multi
         scheduler.requests = {"r1": request}
-        release = vllm_version_is("0.34.0")
-        if not release:
+        if not vllm_version_is("0.34.0"):
             hisparse.connector_scheduler.requests = {"r1": request}
         scheduler._aborted_kv_loads = set()
         scheduler.deferred_loads = {}
@@ -1654,7 +1653,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         if abort:
             with patch.object(scheduler, "_connector_finished", return_value=(False, None)):
                 scheduler.finish_requests("r1", RequestStatus.FINISHED_ABORTED)
-            if not release:
+            if not vllm_version_is("0.34.0"):
                 hisparse.request_finished_all_groups(request, ([2], [3]))
             assert scheduler._aborted_kv_loads == {"r1"}
             cache_manager.free.assert_not_called()
@@ -1668,7 +1667,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             scheduler._update_from_kv_xfer_finished(result)
         if any(rank_failures):
             publish.assert_not_called()
-        elif release:
+        elif vllm_version_is("0.34.0"):
             publish.assert_called_once_with("r1", 16)
         else:
             publish.assert_called_once_with("r1", 16, restore=not abort)

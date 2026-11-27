@@ -43,7 +43,6 @@ def initialize_kv_cache(
     kv_cache_allocation_context: AbstractContextManager | None = None,
     extensible: bool = False,
 ) -> None:
-    release_lane = vllm_version_is("0.34.0")
     # GPUWorker finalizes the PD interleave before KV cache initialization.
     self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
     kv_cache_config = upstream.deepcopy(kv_cache_config)
@@ -73,7 +72,7 @@ def initialize_kv_cache(
     dcp_sharded = []
     sliding_window_reach = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
-        if not release_lane:
+        if not vllm_version_is("0.34.0"):
             block_sizes.append(kv_cache_group.block_size)
             slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
             dcp_sharded.append(kv_cache_group.dcp_sharded)
@@ -212,7 +211,7 @@ def initialize_kv_cache(
             self.block_tables,
             self.input_buffers,
             self.attn_groups,
-            **({} if release_lane else {"kernel_block_sizes": self.kernel_block_sizes}),
+            **({} if vllm_version_is("0.34.0") else {"kernel_block_sizes": self.kernel_block_sizes}),
         )
     if self.speculator is not None:
         # After set_attn, so the speculator can size its cudagraph mode

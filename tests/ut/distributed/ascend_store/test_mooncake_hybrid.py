@@ -303,8 +303,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [True] * len(keys)
         for eagle in (False, True):
-            release = vllm_version_is("0.34.0")
-            scheduler.use_eagle = release and eagle
+            scheduler.use_eagle = vllm_version_is("0.34.0") and eagle
             scheduler.vllm_config.num_hash_lookahead_tokens = 2 if eagle else 0
             request = SimpleNamespace(
                 request_id="full-hit", num_tokens=64, prompt_token_ids=list(range(64)), block_hashes=[b"h"] * 4
@@ -312,7 +311,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64 if release and eagle else 32)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64 if vllm_version_is("0.34.0") and eagle else 32)
         # The full hit is a write-skip extent, not the recurrent resume point.
         worker.use_eagle = False
         request = ReqMeta(

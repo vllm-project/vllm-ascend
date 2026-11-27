@@ -413,17 +413,16 @@ def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
         retention_interval=0,
         num_hash_lookahead_tokens=lookahead_tokens,
     )
-    release = vllm_version_is("0.34.0")
     # num_prompt=100 -> boundary 64 -> chunks 7, 8 (8 is the EAGLE peek).
     masks = coord.store_mask(96, num_prompt_tokens=100)
     assert masks[0] == [True] * 3
     # Whole-page external lookup does not drop: keep its tail at 96 too.
     # Main retains both the hash-proven resend and the extension boundary.
-    tails = (7, 8, 11) if release else (7, 11)
+    tails = (7, 8, 11) if vllm_version_is("0.34.0") else (7, 11)
     assert masks[1] == [i in tails for i in range(12)]
     # Aligned num_prompt=96 -> boundaries 32 (resend) and 64 (longer sibling).
     masks = coord.store_mask(96, num_prompt_tokens=96)
-    tails = (3, 4, 7, 8) if release else (7, 11)
+    tails = (3, 4, 7, 8) if vllm_version_is("0.34.0") else (7, 11)
     assert masks[1] == [i in tails for i in range(12)]
 
 
@@ -637,9 +636,8 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
         KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
     ]
     lookahead_tokens = 3
-    release = vllm_version_is("0.34.0")
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=lookahead_tokens)
-    if release:
+    if vllm_version_is("0.34.0"):
         assert coord.eagle_group_ids == {2}
         assert coord.eagle_reachable_group_ids == {1, 2}
     else:
@@ -662,7 +660,7 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
                 exists.add((g_idx, bytes(ghashes[i])))
     _masks, hit = coord.find_longest_cache_hit(
         hs,
-        max_length=128 if release else prompt_tokens - lookahead_tokens,
+        max_length=128 if vllm_version_is("0.34.0") else prompt_tokens - lookahead_tokens,
         cached_block_pool=ExternalCachedBlockPool(16, exists, num_hash_lookahead_tokens=lookahead_tokens),
     )
     assert hit == 64

@@ -1779,10 +1779,9 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
 def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
-    release = vllm_version_is("0.34.0")
-    layers = specs if release else make_layer_cache_configs(specs)
+    layers = specs if vllm_version_is("0.34.0") else make_layer_cache_configs(specs)
     groups = planning._get_kv_cache_groups_uniform_page_size(layers)
-    if release:
+    if vllm_version_is("0.34.0"):
         assert any(not g.kv_cache_spec.dcp_sharded and isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
     else:
         assert any(
@@ -1796,7 +1795,7 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     scheduler, hashed = resolve_kv_cache_block_sizes(cache, config)
     assert scheduler == 384 * dcp
     assert hashed == 384
-    if release:
+    if vllm_version_is("0.34.0"):
         coordinator = _make_coordinator_for_effective_block_size(dcp_world_size=dcp, enable_caching=True)
         for group in groups:
             spec = group.kv_cache_spec

@@ -268,8 +268,7 @@ def packed_broadcast_consumer(
             expected.append((shape, dtype))
             yield name, ([math.prod(shape) * dtype.itemsize], torch.uint8)
 
-    release_packing = vllm_version_is("0.34.0")
-    stream_count = num_buffers if release_packing else num_buffers + 1
+    stream_count = num_buffers if vllm_version_is("0.34.0") else num_buffers + 1
     with _hccl_group(group, stream_count) as transport:
         reader_streams = [*transport.streams, torch.npu.current_stream()]
         upstream.packed_nccl_broadcast_consumer(
@@ -281,7 +280,7 @@ def packed_broadcast_consumer(
             num_buffers,
             device=f"npu:{torch.npu.current_device()}",
         )
-        if not release_packing:
+        if not vllm_version_is("0.34.0"):
             # Native vLLM drains the unpack stream. Drain the HCCL slots too
             # before another transfer can reuse the cached receive streams.
             for stream in transport.streams[:-1]:

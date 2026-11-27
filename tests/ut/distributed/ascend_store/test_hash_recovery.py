@@ -45,16 +45,15 @@ def test_same_group_hits_as_upstream(eagle):
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(32)]
     # Start with a shared prefix, then leave different holes in each group.
     exists = {(g, bytes(h)) for g in range(2) for i, h in enumerate(hashes) if i not in (12 + g, 21 + g)}
-    release = vllm_version_is("0.34.0")
     cache_groups = groups()
-    if not release:
+    if not vllm_version_is("0.34.0"):
         from vllm.v1.kv_cache_interface import KVCacheGroup
 
         cache_groups = [
             KVCacheGroup(group.kv_cache_specs, group.manager_config, group.block_size) for group in cache_groups
         ]
     lookahead_tokens = 4 if eagle else 0
-    policy = {"use_eagle": eagle} if release else {"num_hash_lookahead_tokens": lookahead_tokens}
+    policy = {"use_eagle": eagle} if vllm_version_is("0.34.0") else {"num_hash_lookahead_tokens": lookahead_tokens}
     results = []
     for module, cls in [
         (coordinator, coordinator.AscendStoreCoordinator),
@@ -67,7 +66,7 @@ def test_same_group_hits_as_upstream(eagle):
         )
         coord = cls(cache_groups, 16, 4, enable_partial_hash_hits=True, **policy, **geometry)
         pool = module.ExternalCachedBlockPool(4, exists)
-        if not release:
+        if not vllm_version_is("0.34.0"):
             # Both native coordinators pass the hash lookahead through the
             # block pool to the allocation managers.
             pool.num_hash_lookahead_tokens = lookahead_tokens
@@ -209,15 +208,14 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(
 ):
     # Both pins checkpoint at token 68. The release needs attention KV through
     # token 72, while the main pin encodes lookahead proof in the hash.
-    release = vllm_version_is("0.34.0")
     scheduler = object.__new__(KVPoolScheduler)
     scheduler.cache_coordinator = SimpleNamespace(
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=release,
+        use_eagle=vllm_version_is("0.34.0"),
         num_hash_lookahead_tokens=7,
-        eagle_proof_margin_by_group={0: 4} if release else {},
+        eagle_proof_margin_by_group={0: 4} if vllm_version_is("0.34.0") else {},
     )
     scheduler.grouped_block_size = [4, 16]
     scheduler.cacheable_group_ids = [0, 1]
@@ -231,7 +229,9 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(
         boundary_puts=[metadata.BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
     )
-    assert scheduler._partial_tail_non_mamba_puts(req_meta) == (release_puts if release else main_puts)
+    assert scheduler._partial_tail_non_mamba_puts(req_meta) == (
+        release_puts if vllm_version_is("0.34.0") else main_puts
+    )
 
 
 @pytest.mark.parametrize("blocks, expected", [([1, 2, 0], []), ([1, 2], []), ([1, 2, 3], [(0, 3, 44)])])

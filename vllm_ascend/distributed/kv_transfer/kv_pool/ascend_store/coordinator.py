@@ -196,11 +196,13 @@ class AscendStoreCoordinator:
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
-            release = vllm_version_is("0.34.0")
-            manager_cls = _get_manager_class(spec) if release else group.manager_cls
+            manager_cls = _get_manager_class(spec) if vllm_version_is("0.34.0") else group.manager_cls
 
             for existing_spec, group_ids, existing_cls in attention_groups:
-                same_policy = release or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                same_policy = (
+                    vllm_version_is("0.34.0")
+                    or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                )
                 if existing_spec == effective_spec and same_policy:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
                     group_ids.append(group_id)
