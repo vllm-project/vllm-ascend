@@ -49,8 +49,6 @@ class _FallbackCleanupContext:
     context_keys: dict[int, set[Any]]
     static_all_moe_layers: dict[int, tuple[list[Any], list[Any]]]
     rope_cache: dict[Any, Any] | None
-    eplb_layers: list[nn.Module]
-    eplb_layer_count: int
     memory_baseline: tuple[int, int] | None
 
 
@@ -205,16 +203,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return getattr(model_config, "runner_type", None) == "draft"
 
     @staticmethod
-    def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
+    def _is_eplb_enabled(vllm_config: VllmConfig) -> bool:
         """EPLB rebinding invalidates the donor's cached transfer manifest (same policy as rfork)."""
         parallel_config = getattr(vllm_config, "parallel_config", None)
-        if bool(getattr(parallel_config, "enable_eplb", False)):
-            return True
-
-        from vllm_ascend.ascend_config import get_ascend_config
-
-        eplb_config = get_ascend_config().eplb_config
-        return eplb_config.dynamic_eplb or bool(eplb_config.expert_map_record_path)
+        return bool(getattr(parallel_config, "enable_eplb", False))
 
     @staticmethod
     def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
@@ -384,22 +376,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        # This serves the always-load-a-model fallback path: degrade to no-EPLB
-        # cleanup instead of crashing on import failures.
-        try:
-            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-        except Exception as exc:
-            logger.debug("Netloader fallback: EPLB adaptor unavailable, skipping: %s", exc)
-            VllmEplbAdaptor = None  # type: ignore[misc, assignment]
-
-        # Some EPLB adaptors expose no static layer registry; treat it as empty.
-        eplb_layers = getattr(VllmEplbAdaptor, "_registered_moe_layers", []) if VllmEplbAdaptor is not None else []
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
             static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
             rope_cache=cls._snapshot_rope_cache(),
-            eplb_layers=eplb_layers,
-            eplb_layer_count=len(eplb_layers),
             memory_baseline=cls._get_npu_memory_usage(device_type),
         )
 
@@ -416,7 +396,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
         cls._remove_new_static_forward_context_keys(vllm_config, context.context_keys, model)
         cls._restore_static_all_moe_layers(context.static_all_moe_layers)
         cls._restore_rope_cache(context.rope_cache)
-        del context.eplb_layers[context.eplb_layer_count :]
         return model_ref
 
     @staticmethod
@@ -505,12 +484,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
             )
-        elif self._is_dynamic_eplb_enabled(vllm_config):
+        elif self._is_eplb_enabled(vllm_config):
             # EPLB rebalancing rebinds weight storages, staling the donor's
             # registered manifest; fall back to the default loader.
-            logger.warning(
-                "Netloader transfer is disabled when dynamic EPLB is enabled; using the default model loader."
-            )
+            logger.warning("Netloader transfer is disabled when EPLB is enabled; using the default model loader.")
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
             )

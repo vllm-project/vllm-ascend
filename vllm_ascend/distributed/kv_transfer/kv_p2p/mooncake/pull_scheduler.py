@@ -19,8 +19,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -601,6 +603,19 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         meta.reqs_in_batch = self._reqs_in_batch
         self._reqs_in_batch = set()
         return meta
+
+    def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
+        """Publish only the retained SWA tail, after trimming speculative blocks."""
+        prompt_block_ids = super()._get_transfer_block_ids(block_ids, prompt_len)
+        transfer_block_ids = []
+        for blocks, block_size, group_specs in zip(prompt_block_ids, self.group_block_size, self.group_unique_specs):
+            if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs):
+                # A uniform group may contain different windows; keep enough
+                # replay history for every layer, including an unaligned boundary page.
+                window = max(spec.sliding_window + spec.extra_retained_tokens for spec in group_specs)
+                blocks = blocks[-(cdiv(window, block_size) + 1) :]
+            transfer_block_ids.append(blocks)
+        return tuple(transfer_block_ids)
 
     def request_finished(
         self,

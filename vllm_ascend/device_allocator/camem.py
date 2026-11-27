@@ -19,12 +19,12 @@
 import atexit
 import gc
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import contextmanager
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.device_allocator import AllocationData, HandleType  # noqa: F401
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType  # noqa: F401
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.logger import logger
 from vllm.utils.system_utils import find_loaded_library
@@ -53,6 +53,19 @@ def create_and_map(allocation_handle: HandleType) -> None:
 
 def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
+
+
+# TODO: Use the upstream implementation once torch_npu provides the
+# required memory-pool snapshot support.
+def discardable_allocations(tensors: Collection[int]) -> set[int]:
+    """Map parameter storages to allocation addresses, like upstream."""
+    if not tensors:
+        return set()
+    return {
+        allocation["address"]
+        for allocation in torch.npu.memory_snapshot()
+        if all(block["state"] == "inactive" or block["address"] in tensors for block in allocation["blocks"])
+    }
 
 
 def get_pluggable_allocator(
@@ -135,6 +148,16 @@ class CaMemAllocator(CuMemAllocator):
         super().__init__()
         self.current_tag: str = CaMemAllocator.default_tag
 
+    @staticmethod
+    def _create_cpu_backup(size_in_bytes: int) -> torch.Tensor:
+        return torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
+
+    @staticmethod
+    def _release_cpu_backup(backup: torch.Tensor) -> None:
+        # Pin-memory backups are owned by PyTorch's host allocator. Dropping
+        # the tensor releases the block; no ACL/CUDA unregister is needed.
+        return None
+
     def _python_free_callback(self, ptr: int) -> HandleType:
         """Internal method to look up the allocation data
         when memory is freed in the memory pool.
@@ -156,7 +179,11 @@ class CaMemAllocator(CuMemAllocator):
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -173,40 +200,40 @@ class CaMemAllocator(CuMemAllocator):
 
         assert isinstance(offload_tags, tuple)
 
-        offload_count = sum(1 for data in self.pointer_to_data.values() if data.tag in offload_tags)
-        logger.info(
-            "CaMem sleep: offloading %s/%s allocations (tags=%s)",
-            offload_count,
-            len(self.pointer_to_data),
-            offload_tags,
-        )
         # Workaround for verl v0.8.0: synchronize pending NPU work before
         # unmapping tensor memory. The exact root cause is unclear, but this
         # avoids rtMemcpy errors observed when releasing the mappings too early.
         torch.npu.synchronize()
 
+        total_bytes = 0
+        backup_bytes = 0
         has_policy_conflict = False
+        # Keep only live weights allocations; the snapshot covers every pool.
+        discarded = {
+            ptr
+            for ptr in discardable_allocations(discardable)
+            if ptr in self.pointer_to_data and self.pointer_to_data[ptr].tag == "weights"
+        }
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
-            handle = data.handle
-            if data.tag in offload_tags:
-                size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
-                cpu_ptr = cpu_backup_tensor.data_ptr()
-                ACL_MEMCPY_DEVICE_TO_HOST = 2
-                dest_max = cpu_ptr + size_in_bytes * 2
-                memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
-                data.cpu_backup_tensor = cpu_backup_tensor
-            try:
-                unmap_and_release(handle)
-            finally:
-                data.is_asleep = True
+            total_bytes += data.handle[1]
+            if offload:
+                backup_bytes += data.handle[1]
+            self._put_to_sleep(ptr, data, offload)
+
+        logger.info(
+            "CaMemAllocator: sleep freed %.2f GiB memory in total, of which "
+            "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
+            "directly.",
+            total_bytes / 1024**3,
+            backup_bytes / 1024**3,
+            (total_bytes - backup_bytes) / 1024**3,
+        )
 
         if has_policy_conflict:
             logger.warning(
@@ -217,36 +244,22 @@ class CaMemAllocator(CuMemAllocator):
         gc.collect()
         torch.npu.empty_cache()
 
-    def discard(self, tags: tuple[str, ...] | str) -> None:
-        """Discard mapped allocations with the given tags without CPU backup."""
-        if isinstance(tags, str):
-            tags = (tags,)
-
-        discarded_bytes = 0
-        has_policy_conflict = False
-        for data in self.pointer_to_data.values():
-            if data.tag not in tags:
-                continue
-            if data.is_asleep:
-                if data.cpu_backup_tensor is not None:
-                    has_policy_conflict = True
-                continue
-            torch.accelerator.synchronize(data.handle[0])
+    def _put_to_sleep(self, ptr: int, data: AllocationData, offload: bool) -> None:
+        if offload:
+            if data.cpu_backup_tensor is None:
+                data.cpu_backup_tensor = self._create_cpu_backup(data.handle[1])
+            size_in_bytes = data.handle[1]
+            cpu_ptr = data.cpu_backup_tensor.data_ptr()
+            ACL_MEMCPY_DEVICE_TO_HOST = 2
+            dest_max = cpu_ptr + size_in_bytes * 2
+            memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+        elif data.cpu_backup_tensor is not None:
+            self._release_cpu_backup(data.cpu_backup_tensor)
+            data.cpu_backup_tensor = None
+        try:
             unmap_and_release(data.handle)
+        finally:
             data.is_asleep = True
-            discarded_bytes += data.handle[1]
-
-        logger.info(
-            "CaMemAllocator: discarded %.2f GiB for tags %s.",
-            discarded_bytes / 1024**3,
-            tags,
-        )
-
-        if has_policy_conflict:
-            logger.warning(
-                "CaMemAllocator: discard cannot change the policy of "
-                "already-asleep allocations; the existing policy was kept."
-            )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -256,29 +269,19 @@ class CaMemAllocator(CuMemAllocator):
         gc.collect()
         torch.accelerator.empty_cache()
 
-        restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
-        logger.info(
-            "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
-            restore_count,
-            len(self.pointer_to_data),
-            tags or "all",
-        )
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
-            if tags is None or data.tag in tags:
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        ACL_MEMCPY_HOST_TO_DEVICE = 1
-                        dest_max = ptr + size_in_bytes * 2
-                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
-                        data.cpu_backup_tensor = None
+                    size_in_bytes = handle[1]
+                    cpu_ptr = data.cpu_backup_tensor.data_ptr()
+                    ACL_MEMCPY_HOST_TO_DEVICE = 1
+                    dest_max = ptr + size_in_bytes * 2
+                    memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -317,3 +320,9 @@ class CaMemAllocator(CuMemAllocator):
             # TODO: we need to find a way to release the memory,
             # i.e. calling torch.cuda.empty_cache()
             self.current_tag = old_tag
+
+    def _trim(self, pool) -> None:
+        raise NotImplementedError("CaMemAllocator._trim is not supported on Ascend.")
+
+    def cudagraph_pool(self):
+        raise NotImplementedError("CaMemAllocator.cudagraph_pool is not supported on Ascend.")

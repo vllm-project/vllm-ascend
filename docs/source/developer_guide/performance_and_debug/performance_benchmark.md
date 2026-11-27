@@ -177,6 +177,12 @@ P99 ITL (ms):                            28.85
 
 #### 3.2.2 Offline Throughput Benchmark
 
+Then run the following command in the same container. It runs an offline
+throughput test with the random dataset, where both the input and output lengths
+are 128, to measure the model throughput when no online serving is started. The
+expected output reports request throughput (requests/s), total token throughput,
+and output token throughput.
+
 ```bash
 export VLLM_USE_MODELSCOPE=True
 vllm bench throughput \
