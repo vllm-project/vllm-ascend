@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+import ctypes
 import os
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,20 +13,97 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
+from vllm_ascend.distributed.expert_transfer.conditional_expert_graph import ConditionalExpertGraph
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
+
+
+def test_conditional_replay_writes_flag_only_on_overflow():
+    stream = Mock(npu_stream=23)
+    binding = Mock()
+    binding.manager.graph_load_stream = stream
+    binding.load_first_graph_group.side_effect = [False, True, False]
+    runtime = object.__new__(ConditionalExpertGraph)
+    runtime.overflow_flag = torch.ones(1, dtype=torch.int64)
+    runtime.acl = SimpleNamespace(rt=SimpleNamespace(memcpy_async=Mock(return_value=0)))
+
+    for _ in range(3):
+        runtime._prepare_and_select((binding, 4, 2, 37))
+
+    assert binding.load_first_graph_group.call_count == 3
+    runtime.acl.rt.memcpy_async.assert_called_once_with(37, 8, runtime.overflow_flag.data_ptr(), 8, 1, 23)
+    stream.synchronize.assert_called_once_with()
+    binding.fail_graph_callback.assert_not_called()
+
+
+def test_grouped_replay_preserves_routes_and_only_loads_second_group_on_overflow(
+    expert_factory, manager_factory, monkeypatch
+):
+    layer, _ = expert_factory()
+    manager_factory(layer)
+    binding = layer._expert_offload_binding
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(set_device=lambda _: None, stream=lambda _: nullcontext()))
+    load_resident = Mock(wraps=binding.load_resident)
+    monkeypatch.setattr(binding, "load_resident", load_resident)
+    routes_fit = [[0, 1], [1, 0]]
+    routes_overflow = [[0, 1], [2, 3]]
+    for routes, should_overflow in (
+        (routes_fit, False),
+        (routes_overflow, True),
+        (routes_fit, False),
+    ):
+        load_resident.reset_mock()
+        ids = torch.tensor(routes)
+        num_ids = binding.stage_graph_routes(ids)
+        assert binding.load_first_graph_group(num_ids, binding.top_k) is should_overflow
+        for index, original_ids in enumerate(routes):
+            if index == 1:
+                binding.update_second_graph_group(())
+            slots = binding.mapping.remap(ids[index])
+            assert [binding.slot_to_expert[i] for i in slots.tolist()] == original_ids
+        assert load_resident.call_count == (2 if should_overflow else 1)
+        assert binding._pending_graph_experts is None
 
 
 def test_graph_capacity_includes_speculative_and_padding_rows():
     manager = ExpertOffloadManager()
     manager.bindings = {"layer": SimpleNamespace(top_k=8, num_slots=68)}
-    for tokens, uniform, expected in ((4, 4, True), (8, 4, True), (16, 4, False), (4, None, False)):
+    for tokens, uniform, expected in ((4, 4, True), (8, 4, True), (16, 4, True), (20, 4, False), (4, None, False)):
         desc = SimpleNamespace(num_tokens=tokens, uniform_token_count=uniform)
         assert manager._supports_graph_descriptor(desc) is expected
-    descs = [SimpleNamespace(num_tokens=n, uniform_token_count=4) for n in (4, 8, 16)]
-    graph = SimpleNamespace(_capture_descs={"full": descs}, _candidates={(3, 0): [descs[-1]]})
+    descs = [SimpleNamespace(num_tokens=n, uniform_token_count=4) for n in (4, 8, 16, 20)]
+    graph = SimpleNamespace(_capture_descs={"full": descs}, _candidates={(3, 0): descs[2:]})
     manager.prepare_graph_capture(graph, lambda: False)
-    assert graph._capture_descs["full"] == descs[:2]
-    assert graph._candidates[(3, 0)] == []
+    assert graph._capture_descs["full"] == descs[:3]
+    assert graph._candidates[(3, 0)] == [descs[2]]
+
+
+@pytest.mark.parametrize("runtime_error", [None, OSError, AttributeError])
+def test_wide_graph_capture_selects_conditional_when_runtime_supports_it(native_runtime, monkeypatch, runtime_error):
+    manager = ExpertOffloadManager()
+    manager.bindings = {"layer": SimpleNamespace(top_k=2, num_slots=2)}
+    desc = SimpleNamespace(num_tokens=2, uniform_token_count=1)
+    graph = SimpleNamespace(device=torch.device("cpu"), _capture_descs={"full": [desc]}, _candidates={}, capture=Mock())
+    capture_stream = object()
+    monkeypatch.setattr(
+        ctypes, "CDLL", Mock(return_value=object(), side_effect=OSError if runtime_error is OSError else None)
+    )
+
+    def initialize(runtime, device, library):
+        if runtime_error is AttributeError:
+            raise AttributeError("missing conditional API")
+        runtime.capture_stream = capture_stream
+
+    monkeypatch.setattr(ConditionalExpertGraph, "__init__", initialize)
+
+    manager.prepare_graph_capture(graph, lambda: True)
+
+    assert graph._capture_descs["full"] == [desc]
+    if runtime_error is None:
+        assert isinstance(manager.conditional_graph, ConditionalExpertGraph)
+        native_runtime.npu._subscribe_report.assert_called_once_with(capture_stream)
+    else:
+        assert manager.conditional_graph is None
+        native_runtime.npu._subscribe_report.assert_not_called()
 
 
 @pytest.mark.parametrize("uniform_token_count", [1, 4])
@@ -38,20 +117,22 @@ def test_decode_dispatch_respects_filtered_graph_capacity(uniform_token_count):
             num_reqs=n,
             uniform_token_count=uniform_token_count,
         )
-        for n in (1, 2, 4)
+        for n in (1, 2, 4, 5)
     }
     graph = object.__new__(CudaGraphManager)
     graph._capture_descs = {CUDAGraphMode.FULL: list(descs.values())}
-    graph._candidates = {(n * uniform_token_count, 0): [descs[n if n < 3 else 4]] for n in range(1, 5)}
-    graph._decode_descs = {(uniform_token_count, 0, 1): [descs[1], descs[1], descs[2], descs[4], descs[4]]}
+    graph._candidates = {(n * uniform_token_count, 0): [descs[4 if n == 3 else n]] for n in range(1, 6)}
+    graph._decode_descs = {(uniform_token_count, 0, 1): [descs[1], descs[1], descs[2], descs[4], descs[4], descs[5]]}
     graph._graphs_captured = True
     graph._lora_dispatch_map = {}
     manager.prepare_graph_capture(graph, lambda: False)
 
-    for n in (1, 2, 3, 4):
+    for n in (1, 2, 3, 4, 5):
         actual = graph.dispatch(n, n * uniform_token_count, uniform_token_count, 0)
         if n <= 2:
             assert actual == descs[n]
+        elif n <= 4:
+            assert actual == descs[4]
         else:
             assert actual.cg_mode == CUDAGraphMode.NONE
             assert actual.num_tokens == n * uniform_token_count

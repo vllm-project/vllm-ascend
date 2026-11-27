@@ -324,8 +324,8 @@ def _generate_batches(llm, batches):
 
 def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_checkpoint):
     """A different model name must pass the same loader/layout contract end to end."""
-    prompts = [[2 + (offset + index) % 200 for index in range(40)] for offset in range(3)]
-    batches = [[prompts[0]], prompts[:2], prompts, [prompts[1]]]
+    prompts = [[2 + (offset + index) % 200 for index in range(40)] for offset in range(5)]
+    batches = [[prompts[0]], prompts[:2], prompts[:3], prompts, [prompts[1]]]
     common = dict(
         model=tiny_checkpoint,
         skip_tokenizer_init=True,
@@ -334,8 +334,8 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
         quantization="ascend",
         async_scheduling=False,
         max_model_len=128,
-        max_num_seqs=4,
-        max_num_batched_tokens=128,
+        max_num_seqs=5,
+        max_num_batched_tokens=256,
         kv_cache_memory_bytes=32 * 1024 * 1024,
         enable_prefix_caching=False,
         seed=17,
@@ -343,19 +343,20 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
     llm = LLM(
         **common,
         additional_config={"expert_offload_config": {"enabled": True, "num_device_experts": 4}},
-        compilation_config={"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]},
+        compilation_config={"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 5]},
     )
     try:
         before = llm.collective_rpc("expert_offload_test_audit", args=("install",))[0]
         actual = _generate_batches(llm, batches)
         after = llm.collective_rpc("expert_offload_test_audit", args=("snapshot",))[0]
         assert before["loaded"] and len(before["layer_names"]) == 2
-        assert set(before["capture_sizes"]) == {1, 2}
+        assert set(before["capture_sizes"]) == {1, 2, 4}
         assert after["addresses"] == before["addresses"]
         assert after["replays"] > 0
         assert any(step["prefill"] for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "FULL" for step in after["steps"])
-        assert any(not step["prefill"] and step["mode"] == "NONE" and step["tokens"] > 2 for step in after["steps"])
+        assert any(not step["prefill"] and step["mode"] == "FULL" and step["tokens"] > 2 for step in after["steps"])
+        assert any(not step["prefill"] and step["mode"] == "NONE" and step["tokens"] == 5 for step in after["steps"])
         closed = llm.collective_rpc("expert_offload_test_audit", args=("close",))[0]
         assert closed["released"]
     finally:

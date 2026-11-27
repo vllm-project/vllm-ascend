@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from itertools import takewhile
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import logger
@@ -17,8 +17,50 @@ from .expert_weight_transfer import TorchExpertTransfer
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
+    from .conditional_expert_graph import ConditionalExpertGraph
+
 ACL_MEMCPY_DEVICE_TO_HOST = 2
 EXPERTS_PER_HOST_CHUNK = 32
+# Reserve bandwidth savings for the second eager MoE invocation and remap.
+DECODE_SPLIT_MIN_H2D_SAVINGS_BYTES = 64 * 1024**2
+
+
+@dataclass(frozen=True)
+class DecodeSplitPlan:
+    cut: int
+    first_slots: tuple[int, ...]
+    first_loads: tuple[tuple[int, int], ...]
+    second_experts: set[int]
+
+
+def _find_decode_split(routed_ids: list[int], top_k: int, capacity: int) -> int | None:
+    """Find a feasible contiguous cut, starting as close to the midpoint as possible."""
+    midpoint = len(routed_ids) // top_k // 2
+    offset = midpoint * top_k
+    left_fits = len(set(routed_ids[:offset])) <= capacity
+    right_fits = len(set(routed_ids[offset:])) <= capacity
+    if left_fits and right_fits:
+        return midpoint
+    if not left_fits and not right_fits:
+        return None
+
+    # Shorten only the overflowing group. Stop when the other group outgrows
+    # resident capacity, since it can only gain experts as the cut moves.
+    if not left_fits:
+        for cut in range(midpoint - 1, 0, -1):
+            offset = cut * top_k
+            if len(set(routed_ids[offset:])) > capacity:
+                break
+            if len(set(routed_ids[:offset])) <= capacity:
+                return cut
+    else:
+        for cut in range(midpoint + 1, len(routed_ids) // top_k):
+            offset = cut * top_k
+            if len(set(routed_ids[:offset])) > capacity:
+                break
+            if len(set(routed_ids[offset:])) <= capacity:
+                return cut
+    return None
 
 
 class MXFPExpertAdapter:
@@ -144,10 +186,12 @@ class LayerOffloadBinding:
         self.adapter = MXFPExpertAdapter(layer, quant_scheme)
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.slot_to_expert: tuple[int, ...]
-        self.manager: ExpertOffloadManager | None = None
+        self.expert_weight_bytes = 0
+        self.manager: ExpertOffloadManager
         self.resident: dict[str, torch.Tensor] = {}
-        self.mapping: ExpertMapBuffer | None = None
+        self.mapping: ExpertMapBuffer
         self.topk_ids_cpu: torch.Tensor
+        self._pending_graph_experts: set[int] | None = None
 
     def initialize_storage(self, layer) -> None:
         self.host_store.copy_from_layer(layer, pin_memory=self.device.type == "npu")
@@ -155,10 +199,11 @@ class LayerOffloadBinding:
         if self.device.type == "npu":
             torch.npu.current_stream(self.device).synchronize()
             self.host_store.convert_to_native_layout(self.adapter, self.device)
+            self.expert_weight_bytes = sum(prepared.expert_bytes for prepared in self.host_store.prepared.values())
         self.mapping = ExpertMapBuffer(self.num_experts, self.device)
-        # Capturable descriptors bound route entries by the resident capacity.
+        # Both groups share a single D2H snapshot of the entire layer's routes.
         self.topk_ids_cpu = torch.empty(
-            self.num_slots, dtype=torch.int32, device="cpu", pin_memory=self.device.type == "npu"
+            2 * self.num_slots, dtype=torch.int32, device="cpu", pin_memory=self.device.type == "npu"
         )
         # Preserve Parameter objects and their loader metadata.
         for name, tensor in self.resident.items():
@@ -166,27 +211,24 @@ class LayerOffloadBinding:
         self.slot_to_expert = tuple(range(self.num_slots))
 
     def prepare(self, layer, topk_ids):
-        # Loading attaches the manager and creates the map before any forward.
-        manager = cast(ExpertOffloadManager, self.manager)
-        mapping = cast(ExpertMapBuffer, self.mapping)
-        if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
-            return (
-                ExpertWeightView(layer, self.resident),
-                self.prepare_graph(topk_ids),
-                manager.get_comm(self, layer.moe_config, self.num_slots),
-            )
+        manager = self.manager
         if not manager.has_prefill:
             # Only resident selection needs routes on the CPU; prefill loads all experts.
-            selected_expert_ids = set(topk_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist())
+            routed_ids = topk_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist()
+            selected_expert_ids = set(routed_ids)
             if len(selected_expert_ids) <= self.num_slots:
                 # The blocking route D2H above also fences the previous use of this host map.
                 slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
                 self.load_resident(slot_to_expert, expert_loads)
                 return (
                     ExpertWeightView(layer, self.resident),
-                    mapping.remap(topk_ids),
+                    self.mapping.remap(topk_ids),
                     manager.get_comm(self, layer.moe_config, self.num_slots),
                 )
+            if len(selected_expert_ids) <= 2 * self.num_slots:
+                split = self._plan_decode_split(routed_ids)
+                if split is not None:
+                    return split
         # Prefill and decode batches exceeding resident capacity use all experts.
         return (
             ExpertWeightView(layer, manager.full_pool.load_layer(self)),
@@ -206,35 +248,83 @@ class LayerOffloadBinding:
             slot_to_expert[slot] = expert_id
         return tuple(slot_to_expert), expert_loads
 
+    def _plan_decode_split(self, routed_ids: list[int]) -> DecodeSplitPlan | None:
+        cut = _find_decode_split(routed_ids, self.top_k, self.num_slots)
+        if cut is None:
+            return None
+        offset = cut * self.top_k
+        first_slots, first_loads = self.plan_expert_loads(set(routed_ids[:offset]))
+        second_experts = set(routed_ids[offset:])
+        split_loads = len(first_loads) + len(second_experts.difference(first_slots))
+        # The shared full pool on this path copies the entire layer from host.
+        if (self.num_experts - split_loads) * self.expert_weight_bytes < DECODE_SPLIT_MIN_H2D_SAVINGS_BYTES:
+            return None
+        return DecodeSplitPlan(cut, first_slots, first_loads, second_experts)
+
     def load_resident(self, slot_to_expert, expert_loads) -> None:
         """Update slots and their map after every weight/scale copy completes."""
         TorchExpertTransfer.copy_experts(self.adapter, self.host_store, self.resident, expert_loads, self.device)
         self.slot_to_expert = slot_to_expert
-        cast(ExpertMapBuffer, self.mapping).update(slot_to_expert)
+        self.mapping.update(slot_to_expert)
 
     @torch.inference_mode()
     def update_graph(self, num_topk_ids) -> None:
         try:
-            manager = cast(ExpertOffloadManager, self.manager)
             # Each graph supplies its own fixed length; unused tail entries are stale.
-            selected_expert_ids = set(self.topk_ids_cpu[:num_topk_ids].tolist())
-            slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
-            # Report threads have their own current device/stream state.
-            torch.npu.set_device(self.device)
-            with torch.npu.stream(manager.graph_load_stream):
-                self.load_resident(slot_to_expert, expert_loads)
+            self._load_graph_experts(set(self.topk_ids_cpu[:num_topk_ids].tolist()))
         except Exception:
-            # torch_npu reports and clears callback exceptions. Do not let the
-            # graph continue with partially overwritten weights and an old map.
-            logger.exception("Expert offload graph callback failed for %s; terminating worker", self.layer_name)
-            os._exit(1)
+            self.fail_graph_callback()
 
-    def prepare_graph(self, topk_ids):
+    def _load_graph_experts(self, selected_experts: set[int]) -> None:
+        slots, loads = self.plan_expert_loads(selected_experts)
+        # Report threads have their own current device/stream state.
+        torch.npu.set_device(self.device)
+        with torch.npu.stream(self.manager.graph_load_stream):
+            self.load_resident(slots, loads)
+
+    def fail_graph_callback(self) -> None:
+        # torch_npu reports and clears callback exceptions. A graph must not
+        # keep running with an invalid expert map or partially loaded weights.
+        logger.exception("Expert offload graph callback failed for %s; terminating worker", self.layer_name)
+        os._exit(1)
+
+    def load_first_graph_group(self, num_topk_ids: int, cut_ids: int) -> bool:
+        routed_ids = self.topk_ids_cpu[:num_topk_ids].tolist()
+        selected_experts = set(routed_ids)
+        overflow = len(selected_experts) > self.num_slots
+        if overflow:
+            self._pending_graph_experts = set(routed_ids[cut_ids:])
+            selected_experts = set(routed_ids[:cut_ids])
+        self._load_graph_experts(selected_experts)
+        return overflow
+
+    @torch.inference_mode()
+    def update_first_graph_group(self, route_counts: tuple[int, int]) -> None:
+        try:
+            self.load_first_graph_group(*route_counts)
+        except Exception:
+            self.fail_graph_callback()
+
+    @torch.inference_mode()
+    def update_second_graph_group(self, _unused: object) -> None:
+        try:
+            selected_experts = self._pending_graph_experts
+            self._pending_graph_experts = None
+            if selected_experts is not None:
+                self._load_graph_experts(selected_experts)
+        except Exception:
+            self.fail_graph_callback()
+
+    def stage_graph_routes(self, topk_ids: torch.Tensor) -> int:
         num_topk_ids = topk_ids.numel()
         # Convert on the device so D2H writes directly into pinned storage.
         self.topk_ids_cpu[:num_topk_ids].copy_(topk_ids.reshape(-1).to(self.topk_ids_cpu.dtype), non_blocking=True)
+        return num_topk_ids
+
+    def prepare_graph(self, topk_ids):
+        num_topk_ids = self.stage_graph_routes(topk_ids)
         torch.npu._launch_host_func(torch.npu.current_stream(self.device), self.update_graph, num_topk_ids)
-        return cast(ExpertMapBuffer, self.mapping).remap(topk_ids)
+        return self.mapping.remap(topk_ids)
 
 
 class FullExpertPool:
@@ -298,14 +388,18 @@ class ExpertOffloadManager:
         self.has_prefill = True
         self.graph_load_stream = None
         self.graph_streams = set()
+        self.conditional_graph: ConditionalExpertGraph | None = None
 
     def capture_stream(self, _desc):
         # Use the actual NPU stream rather than torch_cuda_wrapper's CUDA cache.
         stream = torch.npu.current_stream(self.device)
+        self.subscribe_graph_stream(stream)
+        return stream
+
+    def subscribe_graph_stream(self, stream) -> None:
         if stream not in self.graph_streams:
             torch.npu._subscribe_report(stream)
             self.graph_streams.add(stream)
-        return stream
 
     def unsubscribe_graph_streams(self) -> None:
         torch.npu.synchronize()
@@ -320,7 +414,10 @@ class ExpertOffloadManager:
             and desc.uniform_token_count is not None
             and desc.uniform_token_count > 0
             and desc.num_tokens % desc.uniform_token_count == 0
-            and all(0 < desc.num_tokens * binding.top_k <= binding.num_slots for binding in self.bindings.values())
+            and all(
+                0 < (desc.num_tokens + 1) // 2 * binding.top_k <= binding.num_slots
+                for binding in self.bindings.values()
+            )
         )
 
     def prepare_graph_capture(self, graph_manager, needs_capture) -> None:
@@ -343,6 +440,17 @@ class ExpertOffloadManager:
         if needs_capture():
             self.device = graph_manager.device
             self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)
+            if self.conditional_graph is None and any(
+                desc.num_tokens * binding.top_k > binding.num_slots
+                for binding in self.bindings.values()
+                for descs in graph_manager._capture_descs.values()
+                for desc in descs
+            ):
+                from .conditional_expert_graph import ConditionalExpertGraph
+
+                self.conditional_graph = ConditionalExpertGraph.create_if_supported(self.device)
+                if self.conditional_graph is not None:
+                    self.subscribe_graph_stream(self.conditional_graph.capture_stream)
             graph_manager._capture_stream = self.capture_stream
             graph_manager.capture = partial(self.capture, graph_manager.capture)
 
