@@ -9,6 +9,7 @@ import torch
 from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
@@ -1299,6 +1301,111 @@ def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, tex
             kv_cache_config=config,
         )
         assert result is legacy_reshape.return_value
+
+
+@pytest.fixture
+def k26_basic_mla(monkeypatch, request):
+    names = ["layers.0.mla", "layers.1.mla"]
+    spec = AscendMLAAttentionSpec(
+        block_size=getattr(request, "param", 128),
+        num_heads=16,
+        num_kv_heads=1,
+        head_size=576,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        dtype=torch.bfloat16,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k25"), hf_text_config=SimpleNamespace(model_type="kimi_k2")
+        ),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        speculative_config=None,
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    layers = {name: _make_mla_layer() for name in names}
+    for layer in layers.values():
+        layer.kv_lora_rank = spec.kv_lora_rank
+        layer.num_heads = spec.num_heads
+        layer.is_draft_layer = False
+        layer.get_kv_cache_spec = lambda _: spec
+        layer.impl.supports_strided_mla_writer = lambda: True
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+    group = KVCacheGroupSpec(layer_names=names, kv_cache_spec=AscendMLAAttentionSpec.merge(list(specs.values())))
+    config = get_kv_cache_config_from_groups(vllm_config, [group], 3 * len(names) * spec.page_size_bytes)
+    return config, vllm_config, layers
+
+
+@pytest.mark.parametrize("k26_basic_mla", [128, 256], indirect=True)
+def test_k26_basic_mla_preserves_strided_views(k26_basic_mla):
+    config, _, layers = k26_basic_mla
+    spec = config.kv_cache_groups[0].kv_cache_spec
+    descriptor = config.kv_cache_tensors[0]
+    assert spec.num_heads == spec.num_kv_heads == 1
+    assert descriptor.block_stride == spec.page_size_bytes
+    kernel_size = 128
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [kernel_size])
+    reference = torch.zeros(descriptor.size, dtype=torch.int8)
+    ratio = spec.block_size // kernel_size
+    prefix = (config.num_blocks * ratio, kernel_size, 1)
+    for index, name in enumerate(layers):
+        start = index * descriptor.layer_stride
+        expected = attn_utils._reshape_combined_mla_kv_cache(
+            reference[start : start + descriptor.layer_stride],
+            (*prefix, 512),
+            (*prefix, 64),
+            spec.dtype,
+            spec.page_size_bytes,
+            ratio,
+        )
+        for component, (actual, legacy) in enumerate(zip(caches[name], expected, strict=True)):
+            assert (actual.shape, actual.stride(), actual.storage_offset(), actual.dtype) == (
+                legacy.shape,
+                legacy.stride(),
+                legacy.storage_offset(),
+                legacy.dtype,
+            )
+            assert not actual.is_contiguous()
+            for block in range(prefix[0]):
+                value = 32 * index + 8 * component + block + 1
+                actual[block].fill_(value)
+                legacy[block].fill_(value)
+    first_cache = caches[descriptor.layers[0]][0]
+    assert all(
+        t.untyped_storage().data_ptr() == first_cache.untyped_storage().data_ptr()
+        for pair in caches.values()
+        for t in pair
+    )
+    assert torch.equal(torch.as_tensor(first_cache.untyped_storage(), dtype=torch.int8), reference)
+
+
+@pytest.mark.parametrize("feature", ["speculative", "pd", "writer", "block_outer"])
+def test_k26_basic_mla_keeps_legacy_path(k26_basic_mla, feature):
+    config, vllm_config, layers = k26_basic_mla
+    if feature == "speculative":
+        vllm_config.speculative_config = object()
+    elif feature == "pd":
+        vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    elif feature == "writer":
+        layers["layers.1.mla"].impl.supports_strided_mla_writer = lambda: False
+    else:
+        descriptor = config.kv_cache_tensors[0]
+        page = descriptor.block_stride
+        config.kv_cache_tensors[0] = replace(descriptor, layer_stride=page, block_stride=page * len(layers))
+    assert not attn_utils._can_unify_kimi_mla_cache(vllm_config, config)
+    if feature != "block_outer":
+        assert all(spec.num_heads == 16 for spec in attn_utils.get_kv_cache_spec(vllm_config).values())
 
 
 @pytest.mark.parametrize("use_flashmla", [False, True])

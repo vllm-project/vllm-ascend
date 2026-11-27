@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import numpy as np
 import torch
@@ -304,6 +304,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         return align_hisparse_indexer_specs(
             resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
         )
+    if _is_standalone_kimi_mla(vllm_config) and _all_strided_kimi_mla_layers(kv_cache_spec, vllm_config):
+        # The planner strides over stored KV heads. Query heads belong to the
+        # attention layer and would multiply the physical page stride under TP.
+        return {name: replace(spec, num_heads=spec.num_kv_heads) for name, spec in kv_cache_spec.items()}
     return kv_cache_spec
 
 
@@ -1574,6 +1578,47 @@ def unified_allocate_kv_cache(
     )
 
 
+def _is_standalone_kimi_mla(vllm_config: VllmConfig) -> bool:
+    model = getattr(vllm_config, "model_config", None)
+    return (
+        getattr(getattr(model, "hf_config", None), "model_type", None) == "kimi_k25"
+        and vllm_config.speculative_config is None
+        and vllm_config.kv_transfer_config is None
+        and vllm_config.parallel_config.prefill_context_parallel_size == 1
+        and vllm_config.parallel_config.decode_context_parallel_size == 1
+        and KVPPConfig.from_vllm_config(vllm_config).size == 1
+    )
+
+
+def _all_strided_kimi_mla_layers(
+    layer_specs: Mapping[str, KVCacheSpec], vllm_config: VllmConfig
+) -> TypeGuard[Mapping[str, AscendMLAAttentionSpec]]:
+    return bool(layer_specs) and all(
+        isinstance(spec, AscendMLAAttentionSpec)
+        and spec.mla_cache_layout == "component_major"
+        and spec.kv_lora_rank is not None
+        and spec.qk_rope_head_dim is not None
+        and not spec.store_on_host
+        and _uses_single_raw_mla_cache(vllm_config, name, spec)
+        for name, spec in layer_specs.items()
+    )
+
+
+def _can_unify_kimi_mla_cache(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> bool:
+    if not _is_standalone_kimi_mla(vllm_config) or len(kv_cache_config.kv_cache_groups) != 1:
+        return False
+    if len(kv_cache_config.kv_cache_tensors) != 1 or get_layerwise_reuse_layout(kv_cache_config) is not None:
+        return False
+    (descriptor,) = kv_cache_config.kv_cache_tensors
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
+    return (
+        not descriptor.host_resident
+        and descriptor.layer_stride > 0
+        and all(descriptor.block_stride == spec.page_size_bytes for spec in layer_specs.values())
+        and _all_strided_kimi_mla_layers(layer_specs, vllm_config)
+    )
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1593,7 +1638,9 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear") or _can_unify_kimi_mla_cache(
+        vllm_config, kv_cache_config
+    ):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
