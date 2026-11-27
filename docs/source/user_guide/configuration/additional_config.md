@@ -42,7 +42,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
-| `expert_offload_config`             | dict | `{}`    | Single-worker MXFP expert offload on Ascend 950. See [Expert offload](#expert-offload). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
@@ -292,22 +291,6 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
-
-### Expert offload
-
-Set `enabled` to `true` and `num_device_experts` to the number of expert
-slots per layer. Expert offload supports W4A8-MXFP and W8A8-MXFP with Model
-Runner V2 on Ascend 950.
-
-Eager decode tries two groups when a layer's routed experts exceed its slots.
-It splits when each group fits and the estimated host-to-device savings reach
-64 MiB. Otherwise it uses the shared full-layer expert pool.
-
-`FULL_DECODE_ONLY` ACLGraph capture admits padded batches whose routes fit in
-one or two groups. For BF16 activations, runtimes with CANN conditional subgraphs
-and `torch_npu` synchronous capture can run the layer in one pass when its routed
-experts fit at replay. Other runtimes and activation dtypes use fixed groups for
-those larger batches.
 
 ### Example
 
