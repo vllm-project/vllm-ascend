@@ -1,0 +1,19 @@
+pr: 23575
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in A5 CANN side-group backend for shared host Engram. Set
+      `shared_engram.backend` to `a5-cann` and start the owner with
+      `python -m vllm_ascend.shared_engram_cann`; the backend requires FP8 E8M0
+      tables, tensor parallel size 1, and fixed membership of 1-8 readers.
+    model: deepseek-v4.1
+    hardware: [A5]
+  - category: performance
+    text: >-
+      On an A5 DeepSeek V4.1 Flash DP8/TP1/EP8 decode workload (5- and 321-token
+      prompts, concurrency 1 and 8, 64 output tokens per request), the `a5-cann`
+      shared Engram backend reduced per-token latency by 8.8-13.5% and increased
+      output throughput by 8.9-20.3% versus the shared HIXL backend under the same
+      placement and load.
+    model: deepseek-v4.1
+    hardware: [A5]
