@@ -40,6 +40,7 @@ def qsa_select_paged_tokens_lightning_v2(
     compress_ratio: int,
     out: torch.Tensor | None = None,
     *,
+    out_initialized: bool = False,
     main_key: torch.Tensor | None = None,
     main_value: torch.Tensor | None = None,
     main_key_cache: torch.Tensor | None = None,
@@ -78,7 +79,8 @@ def qsa_select_paged_tokens_lightning_v2(
     output_width = token_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
-    out.fill_(-1)
+    if not out_initialized:
+        out.fill_(-1)
     if not rows:
         return out
 
@@ -88,8 +90,14 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
+    compressed_lengths = getattr(attn_metadata, "qsa_compressed_lengths", None)
+    residual_lengths = getattr(attn_metadata, "qsa_residual_lengths", None)
+    if compressed_lengths is None or residual_lengths is None:
+        compressed_lengths = lengths.floor_divide(compress_ratio)
+        residual_lengths = lengths.remainder(compress_ratio)
+    else:
+        compressed_lengths = compressed_lengths[:requests]
+        residual_lengths = residual_lengths[:requests]
     common = dict(
         cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
         seqused_k=compressed_lengths,
@@ -103,7 +111,8 @@ def qsa_select_paged_tokens_lightning_v2(
     # MRV2 prepares one schedule outside the layer loop. A caller that trims
     # the query further must regenerate it for the new boundary instead.
     metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
-    if metadata is None or rows != attn_metadata.num_actual_tokens:
+    prepared_rows = int(getattr(attn_metadata, "qsa_num_live_tokens", attn_metadata.num_actual_tokens))
+    if metadata is None or rows != prepared_rows:
         metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
             query.shape[1],
             1,
@@ -118,12 +127,16 @@ def qsa_select_paged_tokens_lightning_v2(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
         -_LI_V2_WEIGHT_FRACTION_BITS,
     )
-    weights = torch.full(
-        (rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
+    weights = getattr(attn_metadata, "qsa_score_weights", None)
+    if weights is None:
+        weights = torch.full(
+            (rows, query.shape[1]),
+            score_weight,
+            dtype=torch.float32,
+            device=query.device,
+        )
+    else:
+        weights = weights[:rows, : query.shape[1]]
     groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,

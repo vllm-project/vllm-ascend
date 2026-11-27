@@ -14,6 +14,7 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+import math
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -553,6 +554,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
+            out_initialized=out is not None,
             main_key=main_key,
             main_value=main_value,
             main_key_cache=main_key_cache,
@@ -717,15 +719,15 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     ) -> None:
         """Prepare shared QSA inputs after all cache metadata has been built."""
         from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
-        from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import prepare_qsa_visible_lengths
+        from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import (
+            prepare_qsa_lengths,
+            prepare_qsa_visible_lengths,
+        )
 
         if not layer_names:
             return
         main_metadata = attn_metadata.get(layer_names[0])
         if main_metadata is None:
-            return
-        request_plan = getattr(main_metadata, "qsa_request_plan", None)
-        if request_plan is None:
             return
         layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
         if not hasattr(layer, "indexer"):
@@ -737,26 +739,63 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             return
         device = compressed_metadata.seq_lens.device
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
-        signature = (device, max_tokens)
-        buffer_cache = getattr(self, "_qsa_visible_length_buffers", None)
+        max_requests = max(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            compressed_metadata.seq_lens.shape[0],
+        )
+        index_heads = int(layer.indexer.index_n_heads)
+        signature = (device, max_requests, max_tokens, index_heads)
+        buffer_cache = getattr(self, "_qsa_step_buffers", None)
         if buffer_cache is None:
             buffer_cache = {}
-            self._qsa_visible_length_buffers = buffer_cache
-        visible_lengths = buffer_cache.get(signature)
-        if visible_lengths is None:
-            visible_lengths = torch.empty(max_tokens, dtype=torch.int32, device=device)
-            buffer_cache[signature] = visible_lengths
+            self._qsa_step_buffers = buffer_cache
+        buffers = buffer_cache.get(signature)
+        if buffers is None:
+            score_weight = math.ldexp(
+                round(math.ldexp(1.0 / math.sqrt(int(layer.indexer.index_head_dim)), 11)),
+                -11,
+            )
+            buffers = {
+                "compressed_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "residual_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "score_weights": torch.full(
+                    (max_tokens, index_heads),
+                    score_weight,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "visible_lengths": torch.empty(max_tokens, dtype=torch.int32, device=device),
+            }
+            buffer_cache[signature] = buffers
+
+        requests = compressed_metadata.seq_lens.shape[0]
+        prepare_qsa_lengths(
+            compressed_metadata.seq_lens,
+            buffers["compressed_lengths"],
+            buffers["residual_lengths"],
+            requests,
+            int(layer.indexer.compress_ratio),
+        )
+        compressed_metadata.qsa_num_live_tokens = rows
+        compressed_metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        compressed_metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        compressed_metadata.qsa_score_weights = buffers["score_weights"]
+
+        request_plan = getattr(main_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            prepared_metadata_ids.add(id(main_metadata))
+            return
 
         prepare_qsa_visible_lengths(
             compressed_metadata.logical_positions,
             compressed_metadata.seq_lens,
             compressed_metadata.token_to_req,
-            visible_lengths,
+            buffers["visible_lengths"],
             rows,
         )
         main_metadata.qsa_request_plan = prepare_qsa_union_batches(
             request_plan,
-            visible_lengths,
+            buffers["visible_lengths"],
             compressed_metadata.seq_lens,
             main_metadata.block_table,
         )

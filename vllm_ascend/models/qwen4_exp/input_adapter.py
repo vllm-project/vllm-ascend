@@ -263,7 +263,7 @@ class Qwen4ExpPreparedInputAdapter:
     ) -> None:
         # QSA forward slices query rows to this existing metadata field.
         # Keep padded request capacity and use the same device boundaries as LI.
-        rows = metadata.num_actual_tokens
+        rows = int(getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens))
         requests = metadata.seq_lens.shape[0]
         lengths = metadata.seq_lens[:requests]
         query_start_loc = metadata.query_start_loc[: requests + 1]

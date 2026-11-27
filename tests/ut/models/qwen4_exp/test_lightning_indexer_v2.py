@@ -166,3 +166,26 @@ def test_further_trimmed_query_regenerates_prepared_schedule(selector):
         bindings.lightning_indexer_v2_metadata.call_args.kwargs["cu_seqlens_q"],
         torch.tensor([0, 2, 4, 4], dtype=torch.int32),
     )
+
+
+def test_cross_layer_prepared_inputs_are_reused(selector):
+    module, bindings, _, _ = selector
+    inputs = _inputs()
+    metadata = inputs["attn_metadata"]
+    metadata.qsa_num_live_tokens = inputs["query"].shape[0]
+    metadata.qsa_lightning_v2_metadata = torch.empty(1024, dtype=torch.int32)
+    metadata.qsa_compressed_lengths = torch.tensor([8, 8, 0], dtype=torch.int32)
+    metadata.qsa_residual_lengths = torch.tensor([1, 2, 0], dtype=torch.int32)
+    metadata.qsa_score_weights = torch.full((8, 4), 0.125, dtype=torch.float32)
+    inputs["out"].fill_(-1)
+    inputs["out_initialized"] = True
+
+    module.qsa_select_paged_tokens_lightning_v2(**inputs)
+
+    bindings.lightning_indexer_v2_metadata.assert_not_called()
+    _, kwargs = bindings.lightning_indexer_v2.call_args
+    assert kwargs["metadata"] is metadata.qsa_lightning_v2_metadata
+    assert kwargs["seqused_k"].data_ptr() == metadata.qsa_compressed_lengths.data_ptr()
+    assert kwargs["cmp_residual_k"].data_ptr() == metadata.qsa_residual_lengths.data_ptr()
+    args = bindings.lightning_indexer_v2.call_args.args
+    assert args[2].data_ptr() == metadata.qsa_score_weights.data_ptr()
