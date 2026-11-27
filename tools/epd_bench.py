@@ -16,14 +16,20 @@ Reporting rules:
 
 - A value that was not measured renders as "未采集". A missing histogram, a
   missing +Inf bucket or an unparsable field is never replaced by a mean.
+- benchmark_outcome records how the numbers were obtained: completed, failed,
+  timeout, dry_run, or parsed_output (a previous run saved with --bench-output).
+  A failed or timed-out run still writes the report, with empty numbers and a
+  note, so readers must check this field instead of the presence of a command.
 - P50/P99 parsed from a Prometheus endpoint are histogram bucket upper bounds,
   not exact quantiles, and the report states that next to the table.
 - ec_transfer_bytes collected from --ec-shared-storage-path is the sum of the
   *.safetensors file sizes at report time, not the bytes moved by this run.
 
 Exit codes: 0 report written; 1 regression exceeded --tolerance with
---fail-on-regression; 2 the harness could not produce a trustworthy report
-(bad input path, benchmark failure or timeout, unreachable report directory).
+--fail-on-regression; 2 the harness could not produce a trustworthy report.
+Input-validation and report-write errors return 2 without a report; a benchmark
+failure or timeout returns 2 with the report and a note. When a run both fails
+and regresses, 2 takes precedence over 1.
 """
 
 from __future__ import annotations
@@ -51,6 +57,11 @@ ERROR_EXIT_CODE = 2
 REGRESSION_EXIT_CODE = 1
 STAGE_PERCENTILE_EXACT = "exact"
 STAGE_PERCENTILE_BUCKET = "prometheus_bucket_upper_bound"
+BENCHMARK_OUTCOME_COMPLETED = "completed"
+BENCHMARK_OUTCOME_FAILED = "failed"
+BENCHMARK_OUTCOME_TIMEOUT = "timeout"
+BENCHMARK_OUTCOME_DRY_RUN = "dry_run"
+BENCHMARK_OUTCOME_PARSED_OUTPUT = "parsed_output"
 METRICS_FETCH_TIMEOUT_SECONDS = 30.0
 P50_QUANTILE = 0.50
 P99_QUANTILE = 0.99
@@ -360,10 +371,16 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Generated at: {report.get('generated_at') or UNMEASURED}",
     ]
     command = report.get("command")
+    outcome = report.get("benchmark_outcome")
     if command:
-        executed = report.get("benchmark_executed", True)
-        label = "Benchmark command" if executed else "Benchmark command (not executed)"
-        lines.append(f"- {label}: {' '.join(str(part) for part in command)}")
+        suffix = {
+            BENCHMARK_OUTCOME_DRY_RUN: " (not executed: dry run)",
+            BENCHMARK_OUTCOME_FAILED: " (failed)",
+            BENCHMARK_OUTCOME_TIMEOUT: " (timed out)",
+        }.get(outcome, "")
+        lines.append(f"- Benchmark command{suffix}: {' '.join(str(part) for part in command)}")
+    elif outcome == BENCHMARK_OUTCOME_PARSED_OUTPUT:
+        lines.append(f"- Benchmark command: {UNMEASURED} (parsed an existing benchmark output file)")
     else:
         lines.append(f"- Benchmark command: {UNMEASURED}")
 
@@ -594,7 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Exit codes: 0 report written; 1 a regression exceeded --tolerance "
             "(with --fail-on-regression); 2 the harness could not produce a trustworthy "
-            "report (bad input path, benchmark failure or timeout, missing report directory)."
+            "report (invalid input, unwritable report path, benchmark failure or timeout). "
+            "A failed or timed-out benchmark still writes the report; 2 takes precedence over 1."
         ),
     )
     parser.add_argument("--model", required=True, help="Model name used by vllm bench serve and the report")
@@ -648,11 +666,19 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     command = _build_bench_command(args)
     exit_code = 0
+    benchmark_outcome = BENCHMARK_OUTCOME_COMPLETED
 
     if args.bench_output:
-        text = Path(args.bench_output).read_text(encoding="utf-8")
+        benchmark_outcome = BENCHMARK_OUTCOME_PARSED_OUTPUT
+        try:
+            text = Path(args.bench_output).read_text(encoding="utf-8")
+        except OSError as exc:
+            # Validated above, but the file can disappear between the checks.
+            print(f"error: failed to read --bench-output {args.bench_output}: {exc}", file=sys.stderr)
+            return ERROR_EXIT_CODE
         notes.append(f"parsed existing benchmark output from {args.bench_output}; no benchmark command was executed")
     elif args.dry_run:
+        benchmark_outcome = BENCHMARK_OUTCOME_DRY_RUN
         text = ""
         notes.append("dry-run: the benchmark command was not executed and no numbers were produced")
     else:
@@ -665,6 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.bench_timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
+            benchmark_outcome = BENCHMARK_OUTCOME_TIMEOUT
             text = ""
             notes.append(f"benchmark command timed out after {args.bench_timeout_seconds:g}s and was killed")
             tail = _tail("\n".join(part for part in (exc.stdout, exc.stderr) if isinstance(part, str)))
@@ -672,12 +699,14 @@ def main(argv: list[str] | None = None) -> int:
                 notes.append(f"benchmark output before the timeout: {tail}")
             exit_code = ERROR_EXIT_CODE
         except OSError as exc:
+            benchmark_outcome = BENCHMARK_OUTCOME_FAILED
             text = ""
             notes.append(f"failed to execute benchmark command: {exc}")
             exit_code = ERROR_EXIT_CODE
         else:
             text = completed.stdout + "\n" + completed.stderr
             if completed.returncode != 0:
+                benchmark_outcome = BENCHMARK_OUTCOME_FAILED
                 notes.append(f"benchmark command failed with exit code {completed.returncode}")
                 tail = _tail(text)
                 if tail:
@@ -690,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
     stages_collected = True
     try:
         stages, stage_percentile_source = _load_stage_metrics(args)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, OverflowError, RuntimeError, ValueError) as exc:
         stages_collected = False
         notes.append(f"stage metrics were not collected: {exc}")
     if stages_collected and not stages:
@@ -718,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         # --bench-output parses a previous run, so the command in this report was
         # not executed; --dry-run does not run it either but still records it.
         "command": None if args.bench_output else command,
-        "benchmark_executed": not (args.dry_run or args.bench_output),
+        "benchmark_outcome": benchmark_outcome,
         "benchmark": benchmark,
         "stages": stages,
         "stage_percentile_source": stage_percentile_source,
@@ -736,7 +765,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             report["comparison"] = compare_with_tolerance(report, baseline, args.tolerance)
 
-    _write_reports(args, report)
+    try:
+        _write_reports(args, report)
+    except OSError as exc:
+        # A read-only or full directory must not surface as a traceback (and
+        # Python would exit 1, the documented regression code).
+        print(f"error: failed to write {args.report_md} / {args.report_json}: {exc}", file=sys.stderr)
+        return ERROR_EXIT_CODE
     print(f"wrote {args.report_md} and {args.report_json}")
 
     if exit_code != 0:

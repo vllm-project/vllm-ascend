@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import tools.epd_bench as epd_bench
 from tools.epd_bench import (
     _fetch_text,
     _load_ec_bytes,
@@ -338,12 +339,12 @@ def test_dry_run_records_the_command_without_running_it(tmp_path) -> None:
     assert exit_code == 0
     report = json.loads(report_json.read_text(encoding="utf-8"))
     assert report["command"][:3] == ["vllm", "bench", "serve"]
-    assert report["benchmark_executed"] is False
+    assert report["benchmark_outcome"] == "dry_run"
     assert any("not executed" in note for note in report["notes"])
     assert all(value is None for value in report["benchmark"].values())
     assert not list(tmp_path.glob("*.tmp")), "no temporary report file may be left behind"
     markdown = report_md.read_text(encoding="utf-8")
-    assert "- Benchmark command (not executed): vllm bench serve" in markdown
+    assert "- Benchmark command (not executed: dry run): vllm bench serve" in markdown
 
 
 def test_bench_output_does_not_record_a_command(tmp_path) -> None:
@@ -367,9 +368,11 @@ def test_bench_output_does_not_record_a_command(tmp_path) -> None:
     assert exit_code == 0
     report = json.loads(report_json.read_text(encoding="utf-8"))
     assert report["command"] is None, "a parsed previous run must not claim a command was executed"
-    assert report["benchmark_executed"] is False
+    assert report["benchmark_outcome"] == "parsed_output"
     assert any("no benchmark command was executed" in note for note in report["notes"])
     assert report["benchmark"]["successful_requests"] == 10
+    markdown = (tmp_path / "r.md").read_text(encoding="utf-8")
+    assert "parsed an existing benchmark output file" in markdown
 
 
 def _run_cli(tmp_path, *extra: str) -> tuple[int, Path, Path]:
@@ -445,6 +448,46 @@ def test_regression_is_reported_with_exit_code_one(tmp_path) -> None:
     assert report["comparison"]["has_regression"] is True
 
 
+def test_failed_benchmark_is_marked_failed(monkeypatch, tmp_path) -> None:
+    completed = SimpleNamespace(returncode=1, stdout="", stderr="boom\n")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+
+    exit_code, report_md, report_json = _run_cli(tmp_path)
+
+    assert exit_code == 2
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["benchmark_outcome"] == "failed"
+    assert all(value is None for value in report["benchmark"].values())
+    markdown = report_md.read_text(encoding="utf-8")
+    assert "- Benchmark command (failed): vllm bench serve" in markdown
+
+
+def test_unwritable_report_is_a_user_error(monkeypatch, tmp_path, capsys) -> None:
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated read-only directory")
+
+    monkeypatch.setattr(Path, "write_text", _fail)
+
+    exit_code, report_md, report_json = _run_cli(tmp_path, "--dry-run")
+
+    assert exit_code == 2, "a write failure must use the documented harness error code"
+    assert "failed to write" in capsys.readouterr().err
+    assert not report_md.exists() and not report_json.exists()
+
+
+def test_unparsable_stage_metrics_degrade_to_a_note(monkeypatch, tmp_path) -> None:
+    def _overflow(args: object) -> None:
+        raise OverflowError("bucket count out of range")
+
+    monkeypatch.setattr(epd_bench, "_load_stage_metrics", _overflow)
+
+    exit_code, _, report_json = _run_cli(tmp_path, "--dry-run")
+
+    assert exit_code == 0
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert any("stage metrics were not collected" in note for note in report["notes"])
+
+
 def test_benchmark_timeout_is_a_user_error(monkeypatch, tmp_path) -> None:
     def _timeout(*args: object, **kwargs: object) -> None:
         raise subprocess.TimeoutExpired(cmd="vllm", timeout=1, output="partial stdout\n")
@@ -456,8 +499,10 @@ def test_benchmark_timeout_is_a_user_error(monkeypatch, tmp_path) -> None:
     assert exit_code == 2
     assert report_md.is_file()
     report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["benchmark_outcome"] == "timeout"
     assert any("timed out" in note for note in report["notes"])
     assert any("partial stdout" in note for note in report["notes"])
+    assert "- Benchmark command (timed out): vllm bench serve" in report_md.read_text(encoding="utf-8")
 
 
 def test_reports_are_written_as_a_pair(monkeypatch, tmp_path) -> None:
@@ -488,10 +533,10 @@ def test_executed_benchmark_is_marked_as_executed(monkeypatch, tmp_path) -> None
 
     assert exit_code == 0
     report = json.loads(report_json.read_text(encoding="utf-8"))
-    assert report["benchmark_executed"] is True
+    assert report["benchmark_outcome"] == "completed"
     markdown = report_md.read_text(encoding="utf-8")
     assert "- Benchmark command: vllm bench serve" in markdown
-    assert "(not executed)" not in markdown
+    assert "(not executed" not in markdown
 
 
 def test_proxy_percentiles_are_annotated_as_bucket_bounds(tmp_path) -> None:
