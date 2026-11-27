@@ -96,7 +96,6 @@ def _check_gdn_verification_logprobs(base_seq, comp_seq, prompt_idx):
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "LCCL_DETERMINISTIC": "1",
         "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "HCCL_DETERMINISTIC": "true",
         "CLOSE_MATMUL_K_SHIFT": "1",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
@@ -195,7 +194,6 @@ def _read_verification_cost_probe(worker):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         # collective_rpc transports the test-only cost probe callable across
         # the engine boundary; this fallback is needed only for this test.
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",

@@ -1,0 +1,8 @@
+pr: 20311
+entries:
+  - category: feature
+    text: >-
+      Added Qwen3.8-Next support for pipeline parallelism, sequence parallelism,
+      speculative decoding, and pipeline-disaggregated KV-cache pooling on
+      Model Runner V2.
+    model: qwen3.8-next

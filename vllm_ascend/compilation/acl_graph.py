@@ -14,7 +14,6 @@ import torch_npu
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
 from vllm.logger import logger
@@ -31,6 +30,8 @@ from .updatable_graph import (
 )
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -188,9 +189,6 @@ class ACLGraphWrapper:
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
                 logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
-            # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
-
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
             aclgraph = UpdatableGraph()

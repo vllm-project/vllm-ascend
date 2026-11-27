@@ -10,6 +10,7 @@ import json
 from copy import copy
 from typing import Any
 
+from vllm.config.utils import hash_config
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
@@ -68,14 +69,18 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
             size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
         )
     speculative = vllm_config.speculative_config
+    # Normalized config copies must not use the object-identity hash cache.
+    model_hash = hash_config(model)
+    cache_hash = hash_config(cache)
+    speculative_hash = hash_config(speculative) if speculative is not None else None
     identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
-        model.compute_hash(),
-        cache.compute_hash(),
+        model_hash,
+        cache_hash,
         cache.cache_dtype,
         cache.block_size,
-        speculative.compute_hash() if speculative is not None else None,
+        speculative_hash,
     )
     if kvpp_namespace:
         identity += (kvpp_namespace,)

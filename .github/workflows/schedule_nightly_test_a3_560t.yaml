@@ -21,7 +21,7 @@ name: Nightly-A3-560T
 
 run-name: >-
   ${{ inputs.request_id != '' &&
-      (inputs.request_id == 'daily' &&
+      ((inputs.request_id == 'daily' || startsWith(inputs.request_id, 'daily-')) &&
         'Nightly-A3-560T (Daily)' ||
         format('Nightly-A3-560T (PR) {0}', inputs.request_id)) ||
       'Nightly-A3-560T (scheduled)' }}
@@ -109,7 +109,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -138,7 +138,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
       profile_options: ${{ steps.profile-options.outputs.value }}
@@ -309,6 +309,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -361,6 +362,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -426,7 +428,7 @@ jobs:
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true

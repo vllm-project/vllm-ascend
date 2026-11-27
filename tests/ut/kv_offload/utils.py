@@ -242,7 +242,6 @@ def create_model_runner_output(
     """Make dummy model runner output for testing."""
 
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
@@ -258,7 +257,6 @@ def create_model_runner_output(
 
     model_runner_output = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},

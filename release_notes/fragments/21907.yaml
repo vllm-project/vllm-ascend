@@ -1,0 +1,6 @@
+pr: 21907
+entries:
+  - category: performance
+    text: All2AllV MoE dispatch now overlaps split D2H copies with the local token permutation and waits for both copies through a single NPU event, using reusable pinned CPU staging buffers. It also passes an explicit repeat_interleave output size and removes full-device synchronization for the single-local-expert path; on A3 with Qwen3.8-Flash-Next, host dispatch latency improved from 0.4015 ms to 0.3697 ms (7.9%) and 8K-prefill mean TTFT from 1088.13 ms to 1081.25 ms (0.63%).
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

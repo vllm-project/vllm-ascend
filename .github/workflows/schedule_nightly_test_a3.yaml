@@ -22,7 +22,7 @@ name: Nightly-A3
 
 run-name: >-
   ${{ inputs.request_id != '' &&
-      (inputs.request_id == 'daily' &&
+      ((inputs.request_id == 'daily' || startsWith(inputs.request_id, 'daily-')) &&
         'Nightly-A3 (Daily)' ||
         format('Nightly-A3 (PR) {0}', inputs.request_id)) ||
       'Nightly-A3 (scheduled)' }}
@@ -148,7 +148,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
@@ -302,6 +302,7 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
+      tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
@@ -328,6 +329,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -358,6 +360,7 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
+      tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
@@ -384,6 +387,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -411,6 +415,7 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
       image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
+      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
@@ -438,6 +443,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -492,6 +498,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -626,7 +633,7 @@ jobs:
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true

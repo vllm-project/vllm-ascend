@@ -52,7 +52,7 @@ class TestCumsumGroupList(unittest.TestCase):
 
 
 class TestFusionFlags(unittest.TestCase):
-    def test_custom_gmm_swiglu_requires_fusion_dynamic_eplb(self):
+    def test_custom_gmm_swiglu_requires_fusion_use_expert_weight_list(self):
         self.assertFalse(_custom_gmm_swiglu_enabled(False, True))
         self.assertFalse(_custom_gmm_swiglu_enabled(True, False))
         with patch("vllm_ascend.ops.fused_moe.moe_utils.enable_custom_op", return_value=True):

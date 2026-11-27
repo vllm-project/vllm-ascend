@@ -38,9 +38,8 @@ class KVCacheState:
                 self.emit("kv_trace.violation", operation="bind", reason="cached_request_array_length_mismatch")
             for request, added, start in zip(cached.req_ids, cached.new_block_ids, cached.num_computed_tokens):
                 computed[request] = start
-                if request in cached.resumed_req_ids:
-                    self.requests[request] = tuple(tuple(group) for group in added) if added is not None else ()
-                elif added is not None:
+                # Resumed requests are resent through scheduled_new_reqs.
+                if added is not None:
                     old = self.requests.get(request)
                     if old is None:
                         self.emit(

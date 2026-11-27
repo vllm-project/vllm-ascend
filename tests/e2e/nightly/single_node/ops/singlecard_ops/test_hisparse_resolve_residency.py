@@ -3,7 +3,7 @@
 """HiSparse residency resolver single-op accuracy tests.
 
 The operator under test is the native ACLNN kernel registered by
-csrc/attention/hi_sparse_resolve_residency
+csrc/attention/hisparse_resolve_residency
 (torch.ops._C_ascend.hisparse_resolve_residency). Accuracy is checked
 against a pure-torch CPU reference of the resolution semantics; no
 vllm_ascend Python plumbing is involved beyond loading the native
@@ -16,10 +16,9 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.utils import bootstrap_custom_op_env, vllm_version_is
+from vllm_ascend.utils import bootstrap_custom_op_env
 
 pytestmark = [
-    pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0"),
     pytest.mark.skipif(
         get_ascend_device_type() != AscendDeviceType.A5,
         reason="The HiSparse resolver is a SIMT-only op targeting Ascend A5",
@@ -35,11 +34,10 @@ pytestmark = [
     ),
 ]
 
-if not vllm_version_is("0.33.0"):
-    bootstrap_custom_op_env()
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+bootstrap_custom_op_env()
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
 
-    resolve = torch.ops._C_ascend.hisparse_resolve_residency
+resolve = torch.ops._C_ascend.hisparse_resolve_residency
 
 SEED = 45
 

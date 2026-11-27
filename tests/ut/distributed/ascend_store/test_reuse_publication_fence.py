@@ -10,33 +10,57 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import p
 
 
 class TestReusePublicationFence(unittest.TestCase):
+    def test_wait_for_previous_save_drains_once(self):
+        worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
+        worker._pending_last_save_drain = True
+        worker.kv_send_thread = object()
+        worker.num_layers = 2
+
+        with patch.object(worker, "_wait_for_final_layer_save") as wait:
+            worker.wait_for_previous_save()
+            worker.wait_for_previous_save()
+
+        wait.assert_called_once_with(2)
+        self.assertFalse(worker._pending_last_save_drain)
+
     def test_fence_order_and_scope(self):
-        for transfer, reuse, tp_size, sync in [
-            (True, True, 16, True),
-            (True, True, 1, False),
-            (True, False, 16, False),
-            (False, True, 16, False),
+        for transfer, reuse, tp_size, pcp_size, barriers in [
+            (True, True, 16, 4, ["tp", "pcp"]),
+            (True, True, 1, 4, ["pcp"]),
+            (True, True, 16, 1, ["tp"]),
+            (True, True, 1, 1, []),
+            (True, False, 16, 4, []),
+            (False, True, 16, 4, []),
         ]:
             for requests in ([], [object()]):
-                with self.subTest(transfer=transfer, reuse=reuse, tp_size=tp_size, empty=not requests):
+                with self.subTest(
+                    transfer=transfer, reuse=reuse, tp_size=tp_size, pcp_size=pcp_size, empty=not requests
+                ):
                     worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
                     worker.use_layerwise = True
                     worker.use_kvpp = False
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
+                    worker.pcp_size = pcp_size
                     worker.tp_size = tp_size
                     worker._save_disabled = threading.Event()
                     worker.kv_recv_thread = None
                     calls: list[str] = []
-                    worker._drain_deferred_last_save = lambda calls=calls: calls.append("drain")
-                    worker.process_layer_data = lambda requests, calls=calls: calls.append("prepare")
-                    group = SimpleNamespace(barrier=lambda calls=calls: calls.append("barrier"))
+                    tp_group = SimpleNamespace(barrier=lambda calls=calls: calls.append("tp"))
+                    pcp_group = SimpleNamespace(barrier=lambda calls=calls: calls.append("pcp"))
                     with (
-                        patch.object(module, "get_tp_group", return_value=group),
-                        patch.object(module, "reset_attention_compute_start_gate"),
+                        patch.object(
+                            worker, "_drain_deferred_last_save", side_effect=lambda calls=calls: calls.append("drain")
+                        ),
+                        patch.object(
+                            worker, "process_layer_data", side_effect=lambda _, calls=calls: calls.append("prepare")
+                        ),
+                        patch.object(module, "get_tp_group", return_value=tp_group),
+                        patch.object(module, "get_pcp_group", return_value=pcp_group),
+                        patch.object(module, "reset_attention_gates"),
                     ):
                         worker.prepare_layerwise_step(SimpleNamespace(requests=requests))
-                    self.assertEqual(calls, ["drain", "barrier", "prepare"] if sync else ["drain", "prepare"])
+                    self.assertEqual(calls, ["drain", *barriers, "prepare"])
 
     def test_failed_local_save_does_not_query(self):
         worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)

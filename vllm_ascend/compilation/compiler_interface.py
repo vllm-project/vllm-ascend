@@ -23,7 +23,7 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
-from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
+import torch_npu
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
@@ -35,6 +35,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
+from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
@@ -76,7 +77,7 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
     compilation_config = vllm_config.compilation_config
     capture_sizes = set(compilation_config.cudagraph_capture_sizes)
-    if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
+    if compilation_config.cudagraph_mode.separate_routine():
         # V2 uniform decode capture rounds token counts up to the query length.
         # With MTP5, for example, configured size 56 captures 60 tokens. Keep
         # the raw sizes as well for routines that do not perform this rounding.
@@ -87,52 +88,6 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
             if (rounded := round_up(size, uniform_decode_query_len)) <= max_capture_size
         )
     return sorted(x for x in capture_sizes if max_num_tokens >= x >= uniform_decode_query_len)
-
-
-def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
-    if "LOCAL_WORLD_SIZE" not in os.environ:
-        # External DP config counts one replica; runtime topology includes all local ranks.
-        # shortcut: uniform workers and contiguous node ranks; revisit for other layouts.
-        parallel_config = vllm_config.parallel_config
-        actual_local_world_size = parallel_config.local_world_size * parallel_config.data_parallel_size_local
-        topology_source = "parallel_config"
-        if parallel_config.data_parallel_external_lb:
-            from vllm.distributed.parallel_state import get_node_count
-
-            runtime_world_size = torch.distributed.get_world_size()
-            node_count = get_node_count()
-            if runtime_world_size != parallel_config.world_size_across_dp:
-                raise RuntimeError("External DP static compilation requires the full DP worker world")
-            actual_local_world_size, remainder = divmod(runtime_world_size, node_count)
-            if remainder:
-                raise RuntimeError("Static compilation requires worker world size divisible by node count")
-            topology_source = f"runtime_world_size={runtime_world_size}, node_count={node_count}"
-        os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
-        logger.info_once(
-            "Setting LOCAL_WORLD_SIZE=%d for static kernel "
-            "(source=%s, local_world_size=%d, data_parallel_size_local=%d).",
-            actual_local_world_size,
-            topology_source,
-            parallel_config.local_world_size,
-            parallel_config.data_parallel_size_local,
-            scope="global",
-        )
-
-    # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
-    incompatible_ops = [
-        "TopKV2",  # minimax-m3 910C
-        "GenericBlockSparseAttention",  # minimax-m3 910C
-        "QuantBatchMatmulV3",  # glm5.2 910C
-        "TransposeQuantBatchMatMul",  # dsv4 950
-        "QuantLightningIndexer",  # glm5.2 950
-        "PoolKeyIndexer",  # glm5.3-flash
-    ]
-    logger.info_once(
-        "Skipping static kernel compilation for incompatible ops: %s.",
-        ",".join(incompatible_ops),
-        scope="global",
-    )
-    _set_static_kernel_blacklist(incompatible_ops)
 
 
 def _configure_backend(
@@ -154,14 +109,26 @@ def _configure_backend(
             "clone_output": False,
         }
         if ascend_compilation_config.enable_static_kernel:
-            logger.info_once(
-                "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
-                scope="global",
-            )
-
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
-            options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            # PIECEWISE graphs capture and replay exactly at the cudagraph capture
+            # sizes, so compile those shapes; other routes use decode batch sizes.
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_mode.requires_piecewise_compilation():
+                # Pieces are captured and replayed exactly at the cudagraph
+                # capture sizes. Newer vllm resolves the prefill token grid
+                # and the decode request grid separately, so prefer them and
+                # cover both; fall back to the legacy unified sizes.
+                prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+                decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None)
+                if prefill_sizes is None and decode_sizes is None:
+                    sym_range = list(compilation_config.cudagraph_capture_sizes or [])
+                else:
+                    sym_range = list(prefill_sizes or [])
+                    sym_range.extend(size for size in decode_sizes or [] if size not in sym_range)
+                options["_vllm_aclnn_static_kernel_sym_range"] = sym_range
+            else:
+                options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
             if ascend_compilation_config.enable_super_kernel:
                 options["super_kernel_optimize"] = True
                 options["super_kernel_optimize_options"] = {
@@ -176,10 +143,6 @@ def _configure_backend(
         # Disable reinplace pass to avoid gelu fallback to CPU causing host-device copy error.
         config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
         if ascend_compilation_config.enable_static_kernel:
-            logger.info_once(
-                "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
-                scope="global",
-            )
             config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
             config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = (
                 _compute_decode_cudagraph_batch_sizes(vllm_config)
@@ -272,13 +235,9 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
-    # TODO(wxs): add passes related to compilation in compute_hash
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, Any]:
         self.vllm_config = vllm_config
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        from hashlib import sha256
-
-        import torch_npu
 
         factors = {
             "torch_npu_version": torch_npu.__version__,
@@ -287,7 +246,7 @@ class AscendCompiler(CompilerInterface):
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
-        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
+        return factors
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
         """Initialize cache settings and runtime state before compiling or loading a graph."""
@@ -295,7 +254,7 @@ class AscendCompiler(CompilerInterface):
         self.disable_cache = disable_cache
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
-            _initialize_static_kernel_runtime(self.vllm_config)
+            initialize_static_kernel_runtime(self.vllm_config)
 
     def compile(
         self,

@@ -455,7 +455,6 @@ def baseline_outputs() -> dict[str, str]:
         auto_port=False,
         env_dict={
             "ASCEND_RT_VISIBLE_DEVICES": "0",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
         },
     ) as baseline_server:
         return _run_requests(baseline_server)
@@ -550,7 +549,6 @@ def test_cross_encoder_store_put_then_remote_hit(
         "MOONCAKE_CONFIG_PATH": mooncake_store_config,
         "MOONCAKE_EC_PROTOCOL": "ascend",
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         # CI defaults to ERROR; the PUT and remote-hit assertions need INFO.
         "VLLM_LOGGING_LEVEL": "INFO",
     }
