@@ -1,0 +1,9 @@
+pr: 23481
+entries:
+  - category: performance
+    text: >-
+      Improved decode performance for expert-offloaded MXFP models on Ascend 950.
+      Eager decode can split expert work to reduce host weight transfers, and
+      compatible CANN runtimes can skip the second graph group when the routed
+      experts fit in the resident slots.
+    hardware: [A5]
