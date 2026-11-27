@@ -27,13 +27,17 @@ def muls_add_kernel(
 
 
 def muls_add_triton(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
-    assert x.shape == y.shape, "Input tensors must have the same shape."
+    if x.shape != y.shape:
+        raise ValueError(f"Input tensors must have the same shape, got {x.shape} and {y.shape}.")
     # The kernel reads inputs via linear pointer offsets and does not consult
     # tensor strides, so non-contiguous inputs would silently compute on the
-    # wrong elements. Reject them explicitly to surface misuse rather than
-    # returning a numerically wrong result.
-    assert x.is_contiguous(), "x must be contiguous."
-    assert y.is_contiguous(), "y must be contiguous."
+    # wrong elements. Reject them explicitly (raise, not assert) so the guard
+    # survives `python -O` and surfaces misuse rather than returning a
+    # numerically wrong result.
+    if not x.is_contiguous():
+        raise ValueError("x must be contiguous.")
+    if not y.is_contiguous():
+        raise ValueError("y must be contiguous.")
     hidden_size = x.shape[-1]
 
     n_elements = x.numel()

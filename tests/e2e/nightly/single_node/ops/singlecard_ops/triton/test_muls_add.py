@@ -3,7 +3,6 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.mul_add import muls_add_triton as muls_add_triton_from_mul_add
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
@@ -170,7 +169,7 @@ def test_muls_add_triton_tail_mask(n, dtype):
 # Boundary: non-contiguous (sliced) input. The kernel reads inputs via linear
 # pointer offsets and ignores strides, so a non-contiguous tensor would
 # silently compute on the wrong elements. The entry point now guards this
-# with an explicit `is_contiguous()` assertion; verify it surfaces the misuse
+# with an explicit `is_contiguous()` raise; verify it surfaces the misuse
 # as an error rather than a wrong result.
 # ---------------------------------------------------------------------------
 @_REQUIRES_A2_A3
@@ -181,12 +180,12 @@ def test_muls_add_triton_non_contiguous_raises():
     x = x_base[:, ::2]  # non-contiguous
     y = y_base[:, ::2]
 
-    with pytest.raises(AssertionError, match="contiguous"):
+    with pytest.raises(ValueError, match="contiguous"):
         muls_add_triton(x, y, 1.0)
 
 
 # ---------------------------------------------------------------------------
-# Negative: mismatched shapes must hit the `assert x.shape == y.shape` guard.
+# Negative: mismatched shapes must hit the shape-equality `raise ValueError` guard.
 # ---------------------------------------------------------------------------
 @_REQUIRES_A2_A3
 @torch.inference_mode()
@@ -194,31 +193,5 @@ def test_muls_add_triton_shape_mismatch_raises():
     x = torch.randn(2, 2048, dtype=torch.float16, device=DEVICE)
     y = torch.randn(3, 2048, dtype=torch.float16, device=DEVICE)
 
-    with pytest.raises(AssertionError, match="same shape"):
+    with pytest.raises(ValueError, match="same shape"):
         muls_add_triton(x, y, 1.0)
-
-
-# ---------------------------------------------------------------------------
-# Parity: the two twin implementations (mul_add.py and muls_add.py) are
-# intentionally identical today; keep them in lockstep so a future divergence
-# is surfaced by CI rather than silently changing DeepSeek v4/v4.1 outputs.
-# ---------------------------------------------------------------------------
-@_REQUIRES_A2_A3
-@torch.inference_mode()
-def test_mul_add_and_muls_add_implementations_match():
-    torch.manual_seed(4)
-    shape = (2, 2048)
-    dtype = torch.bfloat16
-    x = torch.randn(*shape, dtype=dtype, device=DEVICE)
-    y = torch.randn(*shape, dtype=dtype, device=DEVICE)
-    scale = 1.25
-
-    out_mul_add = muls_add_triton_from_mul_add(x, y, scale)
-    out_muls_add = muls_add_triton(x, y, scale)
-
-    torch.testing.assert_close(
-        out_mul_add.float().cpu(),
-        out_muls_add.float().cpu(),
-        rtol=0.0,
-        atol=0.0,
-    )
