@@ -135,6 +135,9 @@ runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
+  # Operator files share one two-card runner, with one pytest process per card.
+  tests/e2e/pull_request/two_card/ops:
+    default: a3-2-ops
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
@@ -146,6 +149,9 @@ runner_mapping:
 # Maps logical test buckets to exact labels from runner_label.json and controls
 # how many load-balanced groups are created for each bucket.
 partition:
+  a3-2-ops:
+    runner_label: linux-aarch64-a3-800i-2
+    count: 1
   a5-4:
     runner_label: linux-aarch64-a5-4
     count: 1
