@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapesAndDtypes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
@@ -442,6 +443,33 @@ class AscendSFABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Describe the packed or split SFA main cache in storage elements."""
+        # SFA main cache stores one row per token. Packing changes the row width.
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("SFA kernel block size must divide the manager block size.")
+        runtime_blocks = num_blocks * (spec.block_size // block_size)
+        if spec.uses_packed_sfa_main_cache:
+            widths = (spec.head_size,)
+        else:
+            if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+                raise ValueError("SFA runtime views require component dimensions in the cache spec.")
+            widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        shapes = tuple((runtime_blocks, block_size, spec.num_kv_heads, width) for width in widths)
+        return shapes, (spec.dtype,) * len(widths)
+
+    @staticmethod
+    def format_runtime_views(_spec: AscendMLAAttentionSpec, components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     @staticmethod
     def prepare_layerwise_cache_view(

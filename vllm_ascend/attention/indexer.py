@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapesAndDtypes,
     has_requests_to_run_as_prefill,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
@@ -384,6 +385,35 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Describe indexer keys and optional scales for each kernel block replica."""
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("Indexer kernel block size must divide the manager block size.")
+        runtime_blocks = num_blocks * (spec.block_size // block_size) * spec.sfa_dcp_replicated_indexer_size
+        prefix = (runtime_blocks, block_size, spec.num_kv_heads)
+        key_shape = (*prefix, spec.head_size)
+        if not spec.scale_dim:
+            return (key_shape,), (spec.dtype,)
+
+        scale_shape = (*prefix, spec.scale_dim)
+        if spec.cache_sparse_li_c4:
+            scale_shape = (*scale_shape[:-1], spec.scale_dim // 2, 2)
+        return (key_shape, scale_shape), (spec.dtype, spec.scale_dtype)
+
+    @staticmethod
+    def format_runtime_views(
+        _spec: AscendSFAIndexerCacheSpec, components: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:

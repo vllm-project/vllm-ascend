@@ -39,7 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, KVQuantMode
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapesAndDtypes,
     _select_seq_lens,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -110,6 +111,38 @@ class AscendAttentionBackend(AttentionBackend):
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Return the final dense K and V view shapes and storage dtypes."""
+        if (
+            spec.tokens_per_state != 1
+            or spec.num_head_slots is not None
+            or spec.state_content_bytes is not None
+            or spec.kv_quant_mode not in (KVQuantMode.NONE, KVQuantMode.FP8_PER_TENSOR)
+        ):
+            raise ValueError("Dense attention runtime views require one unpacked K/V row per token.")
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("Attention kernel block size must divide the manager block size.")
+        runtime_blocks = num_blocks * (spec.block_size // block_size)
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            prefix = (runtime_blocks, spec.num_kv_heads, block_size)
+        else:
+            prefix = (runtime_blocks, block_size, spec.num_kv_heads)
+        key_shape = (*prefix, spec.head_size)
+        value_shape = (*key_shape[:-1], spec.head_size_v)
+        return (key_shape, value_shape), (spec.dtype, spec.dtype)
+
+    @staticmethod
+    def format_runtime_views(_spec: AttentionSpec, components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     @staticmethod
     def swap_blocks(

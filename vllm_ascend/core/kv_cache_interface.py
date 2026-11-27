@@ -4,7 +4,7 @@
 import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from typing_extensions import Self
@@ -166,7 +166,7 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     metadata distinguishing component-major from token-fused FlashMLA pages.
     This helper identifies connector support, not cross-endpoint agreement.
     """
-    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     if kv_transfer_config is None:
         return True
 
@@ -197,6 +197,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
+    # Legacy cache allocation contracts currently require these backend-only
+    # component dimensions, layout and RoPE dtype to be carried in the spec
+    # as a temporary compatibility measure. Remove them in a follow-up refactor
+    # that fixes runtime cache metadata ownership.
+    kv_lora_rank: int | None = None
+    qk_rope_head_dim: int | None = None
+    mla_cache_layout: Literal["plane_major", "component_major", "token_interleaved"] = "component_major"
+    # Split-cache RoPE storage dtype; None means spec.dtype. Fused caches use spec.dtype.
+    rope_dtype: torch.dtype | None = None
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -266,6 +275,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             (
                 spec.scale_dim,
                 spec.num_heads,
+                spec.kv_lora_rank,
+                spec.qk_rope_head_dim,
+                spec.mla_cache_layout,
+                spec.rope_dtype,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -291,6 +304,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             merged,
             scale_dim=first_spec.scale_dim,
             num_heads=first_spec.num_heads,
+            kv_lora_rank=first_spec.kv_lora_rank,
+            qk_rope_head_dim=first_spec.qk_rope_head_dim,
+            mla_cache_layout=first_spec.mla_cache_layout,
+            rope_dtype=first_spec.rope_dtype,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
