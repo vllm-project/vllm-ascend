@@ -140,7 +140,6 @@ def main():
             mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
             mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
             mxfp_use_bf16=True,
-            dynamic_eplb=False,
             activation=a.activation,
         )
         return comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)

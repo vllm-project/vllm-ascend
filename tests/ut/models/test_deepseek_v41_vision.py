@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 from torch import nn
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens, supports_multimodal
+from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.models.deepseek_v41.common.mm_preprocess import (
     IMAGE,
     IMAGE_END,
@@ -252,7 +253,12 @@ def test_mrv2_embedding_preparation_preserves_valid_rows_and_padded_buffer(monke
         assert lookup_batches[-1] == (num_tokens, max(1, padded_tokens) if publishes_length else None)
 
 
-def test_v41_text_only_load_skips_checkpoint_vision_weights():
+@pytest.mark.parametrize("image_enabled", [False, True])
+@pytest.mark.parametrize("first_pp_rank", [False, True])
+@pytest.mark.parametrize("prefix", ["", "model."])
+def test_v41_loads_only_local_vision_weights(monkeypatch, image_enabled, first_pp_rank, prefix):
+    monkeypatch.setattr("vllm.model_executor.models.utils._model_to_pp_missing_layer_names", {})
+
     class LanguageModel(nn.Module):
         def load_weights(self, weights):
             self.loaded = list(weights)
@@ -260,18 +266,60 @@ def test_v41_text_only_load_skips_checkpoint_vision_weights():
 
     wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
     nn.Module.__init__(wrapper)
-    wrapper.vision = None
+    monkeypatch.setattr("vllm.distributed.get_pp_group", lambda: SimpleNamespace(is_first_rank=first_pp_rank))
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.get_offloader", lambda: SimpleNamespace(supports_tower_offload=False)
+    )
+    mm_config = SimpleNamespace(get_limit_per_prompt=lambda modality: int(image_enabled))
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(get_multimodal_config=lambda: mm_config), use_v2_model_runner=True
+    )
+    with wrapper._mark_tower_model(config, {"image"}):
+        wrapper.vision = None
+        if image_enabled:
+            wrapper.vision = nn.Linear(2, 2, bias=False)
+            wrapper.aligner = nn.ModuleDict({"w1": nn.Linear(2, 2)})
+            wrapper.image_end = nn.Parameter(torch.empty(2))
     wrapper.language_model = LanguageModel()
     text_weight = torch.tensor([1.0])
+    vision_weights = {
+        "aligner.w1.bias": torch.tensor([2.0, 3.0]),
+        "vision.weight": torch.ones(2, 2),
+        "image_end": torch.tensor([4.0, 5.0]),
+    }
 
     loaded = wrapper.load_weights(
         iter(
             [
-                ("model.image_end", torch.tensor([2.0])),
+                *((prefix + name, tensor) for name, tensor in vision_weights.items()),
                 ("model.layers.0.weight", text_weight),
             ]
         )
     )
 
     assert wrapper.language_model.loaded == [("model.layers.0.weight", text_weight)]
-    assert loaded == {"language_model.model.layers.0.weight"}
+    expected = {"language_model.model.layers.0.weight"}
+    if image_enabled:
+        # Raw sentinel parameters remain local even when tower modules are skipped.
+        expected.add("image_end")
+        if first_pp_rank:
+            expected.update(vision_weights)
+            torch.testing.assert_close(wrapper.image_end, vision_weights["image_end"])
+            torch.testing.assert_close(wrapper.vision.weight, vision_weights["vision.weight"])
+            torch.testing.assert_close(wrapper.aligner["w1"].bias, vision_weights["aligner.w1.bias"])
+        else:
+            assert isinstance(wrapper.vision, StageMissingLayer)
+            assert isinstance(wrapper.aligner, StageMissingLayer)
+            assert wrapper.image_end.is_meta
+    assert loaded == expected
+
+
+def test_v41_enabled_vision_load_rejects_unknown_parameters(monkeypatch):
+    monkeypatch.setattr("vllm.model_executor.models.utils._model_to_pp_missing_layer_names", {})
+    wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
+    nn.Module.__init__(wrapper)
+    wrapper.vision = nn.Linear(2, 2)
+    wrapper.language_model = SimpleNamespace(load_weights=lambda weights: set(weights))
+
+    with pytest.raises(KeyError, match="vision.unknown"):
+        wrapper.load_weights([("model.vision.unknown", torch.ones(2))])

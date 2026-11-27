@@ -72,7 +72,7 @@ git commit -s
 
 ### Testing locally
 
-You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
+You can refer to [Testing](./testing.md) to set up a testing environment and running tests locally.
 
 ### Local native build cache
 
@@ -115,7 +115,7 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[ModelRunner]` for new features or optimization in model runner.
 - `[Platform]` for new features or optimization in platform.
 - `[Worker]` for new features or optimization in worker.
-- `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
+- `[Core]` for new features or optimization in the core vllm-ascend logic (such as platform, attention, communicators, model runner).
 - `[Kernel]` for changes affecting compute kernels and ops.
 - `[BugFix]` for bug fixes.
 - `[Doc]` for documentation fixes and improvements.

@@ -109,7 +109,7 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -282,7 +282,7 @@ jobs:
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install 'mooncake-transfer-engine-npu===0.3.14'
+          uv pip install 'mooncake-transfer-engine-npu===0.3.14.post1'
           # Reinstall triton-ascend last so its files win over upstream triton in the shared triton/ dir.
           uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
           # Preserve CI availability during the transition by compiling on the
@@ -434,19 +434,19 @@ jobs:
         # path, so the diff-cover trio is skipped in that case.
         # !cancelled(): run even when the tests failed, so the coverage
         # comment still describes a red run.
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           python -m slipcover --merge ./tests/coverage.json \
             --xml --out ./tests/coverage.xml
 
       - name: Generate diff coverage
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
             --markdown-report ./tests/diff_coverage.md
 
       - name: Generate PR coverage comment
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
            python3 .github/workflows/scripts/coverage_comment.py \
             --input-json ./tests/coverage.json \
@@ -455,7 +455,7 @@ jobs:
             --summary-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload diff coverage report
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -467,7 +467,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Generate coverage comment on summary
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           cat ./tests/coverage_comment.md >> "${GITHUB_STEP_SUMMARY}"
           cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"
@@ -500,6 +500,11 @@ jobs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: linux-amd64-cpu-2-hk
+      # Host python on linux-amd64-cpu-2-hk has no pip. Use the repo-built
+      # lint image (Dockerfile.lint) instead of get-pip.py on the shared
+      # runner (L2-ci#container-contract).
+      container:
+        image: quay.io/ascend-ci/vllm-ascend:lint
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -637,7 +642,9 @@ jobs:
             find "${TASK_DIR}" -type f | wc -l
 
             echo "=== building test_case_map.json ==="
-            pip install regex
+            if ! python3 -c "import regex" >/dev/null 2>&1; then
+              python3 -m pip install regex
+            fi
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
               --coverage-dir "${TASK_DIR}" \
@@ -686,7 +693,10 @@ jobs:
 
         - name: Upload coverage to OBS
           run: |
-            pip install esdk-obs-python --quiet
+            set -euo pipefail
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
@@ -723,9 +733,11 @@ jobs:
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
-            if ! pip install pyyaml --quiet; then
-              echo "::warning::Failed to install pyyaml; skip prune"
-              exit 0
+            if ! python3 -c "import yaml" >/dev/null 2>&1; then
+              if ! python3 -m pip install pyyaml --quiet; then
+                echo "::warning::Failed to install pyyaml; skip prune"
+                exit 0
+              fi
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
@@ -764,7 +776,9 @@ jobs:
               echo "No pruned extra_recommended_tests.yaml to upload"
               exit 0
             fi
-            pip install esdk-obs-python --quiet
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient

@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
+import vllm_ascend.patch.platform.patch_dp_supervisor  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
@@ -31,12 +31,9 @@ else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
+import vllm_ascend.patch.platform.patch_torch_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
-    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
-
-import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
 import vllm_ascend.patch.platform.patch_metrics_level  # noqa

@@ -315,6 +315,14 @@ class MooncakeTransferAddressMixin:
 class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
     """Worker implementation shared by Mooncake transfer modes."""
 
+    @staticmethod
+    def _get_transfer_max_workers(vllm_config: VllmConfig) -> int:
+        assert vllm_config.kv_transfer_config is not None
+        max_workers = vllm_config.kv_transfer_config.get_from_extra_config("transfer_max_workers", 32)
+        if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
+            raise ValueError(f"Mooncake transfer_max_workers must be a positive integer, got {max_workers!r}")
+        return max_workers
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -364,15 +372,19 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.handshake_port = self.side_channel_port + device_index
 
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host,
-            device_name=device_name,
-        )
+        self.engine = self._get_transfer_engine(device_name)
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None
         self.xfer_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake worker %s", engine_id)
+
+    def _get_transfer_engine(self, device_name: str | None):
+        return global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
+
+    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
+        """Register the memory ranges collected for KV transfer."""
+        global_te.register_buffer(ptrs, lengths)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
@@ -673,7 +685,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._register_transfer_buffers(register_regions.ptrs, register_regions.lengths)
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,

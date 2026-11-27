@@ -57,7 +57,7 @@ The API server sends a utility RPC to every EngineCore, the same path as `POST /
 
 > **Do not mix the two channels.** The endpoint sets the level **in memory only**; it does not write `metrics.level` back to `runtime_config.json`. The file and the endpoint are separate channels — pick one per deployment. If you use the endpoint and then edit `runtime_config.json` afterwards (even an unrelated key), the file edit changes the digest, the next poll re-applies the whole file, and `metrics.level` silently resets to the file's stale value with no trace in the changes log. To make a level survive a restart or a file edit, put it in `runtime_config.json` (or `additional_config.runtime_config`) instead of calling the endpoint.
 
-This level applies to handlers that record through `vllm_ascend.observability.ms_metrics.handlers.common`. Metrics emitted by `ms_service_metric.provider_handlers` (scheduler, model-runner phase, memory, and EPLB duration) follow the `ms-service-metric` on/off switch. Lowering the level stops new samples. Series already created in the Prometheus registry remain until the process exits.
+This level applies to handlers that record through `vllm_ascend.observability.ms_metrics.handlers.common`. Metrics emitted by `ms_service_metric.provider_handlers` (scheduler, model-runner phase, and memory) follow the `ms-service-metric` on/off switch. Lowering the level stops new samples. Series already created in the Prometheus registry remain until the process exits.
 
 Declare `level` on a new expensive metric. The default is `basic`:
 

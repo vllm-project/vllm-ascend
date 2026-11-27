@@ -126,7 +126,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=QuantType.NONE,
-                dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,

@@ -114,11 +114,10 @@ msgstr "## 使用约束"
 
 msgid ""
 "The AI QoS feature supports the Atlas 800T A3 server and Atlas 900 A3 "
-"SuperPoD cluster. It must be used in privileged containers and requires the "
-"following software versions:"
+"SuperPoD cluster and requires the following software versions:"
 msgstr ""
 "AI QoS 功能支持 Atlas 800T A3 服务器和 Atlas 900 A3 SuperPoD "
-"集群。必须在特权容器中使用，并需要以下软件版本："
+"集群，并需要以下软件版本："
 
 msgid ""
 "| Name              | Type | Default"
@@ -137,6 +136,9 @@ msgstr "| Ascend HDK   | 25.5.2 或更高版本                          |"
 
 msgid "| UB Switch    | LingQu Computing Network 1.5.1 or later  |"
 msgstr "| UB Switch    | 灵衢计算网络 1.5.1 或更高版本  |"
+
+msgid "When running the AI QoS tool in a container, mount the DSMI driver library and pass the required NPU devices with appropriate permissions. Verify that the host driver permits QoS configuration through the container before use."
+msgstr "在容器中运行 AI QoS 工具时，请挂载 DSMI 驱动库，并以适当的权限传入所需的 NPU 设备。使用前请确认宿主机驱动允许通过容器配置 QoS。"
 
 msgid ""
 "​In the inference scenario, there are different types of traffic, such as "

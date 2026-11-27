@@ -9,7 +9,7 @@ moving cache or scheduler knowledge back into the model.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -40,7 +40,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
@@ -57,6 +56,7 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
+    get_device_metadata_submission,
     wait_for_device_metadata,
 )
 
@@ -453,7 +453,12 @@ class AscendDSAV41Impl:
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
-                q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+                if self.role.is_index_source and attn.indexer.fused_prologue_qw is not None:
+                    projection = attn.dsa_attn.dsa_attn.impl.cv_wq_b
+                    qr = projection.quantize(qr)
+                    q = projection.matmul(*qr, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
+                else:
+                    q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
                 kv = self._project_kv(attn, hidden_states, cos, sin)
             else:
                 q = qr = None
@@ -490,6 +495,16 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        if getattr(indexer, "fused_prologue_qw", None) is not None:
+            query, query_scale, weights = indexer.project_fused(hidden_states, *qr, cos, sin)
+            # Packed Q itself carries token/head geometry; no BF16 placeholder
+            # or conversion is needed by the selection/cache-empty paths.
+            return DeepseekV41PreparedIndexer(
+                query=query,
+                weights=weights,
+                quantized_query=query,
+                query_scale=query_scale,
+            )
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -587,6 +602,8 @@ class AscendDSAV41Impl:
         main_stream.wait_stream(aux_stream)
         if write_cache_on_main:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        if self.role.is_index_source and attn.indexer.fused_prologue_qw is not None:
+            qr = (q_b_quant, q_b_scale)
         return q, qr
 
     def _compress_and_write_caches(
@@ -857,10 +874,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         ):
             logical_block_size = vllm_config.cache_config.block_size
             if kv_cache_spec.block_size != logical_block_size:
-                updates = {"block_size": logical_block_size}
-                if "storage_block_size" in kv_cache_spec.__dataclass_fields__:
-                    updates["storage_block_size"] = logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
-                kv_cache_spec = replace(kv_cache_spec, **updates)
+                kv_cache_spec = kv_cache_spec.copy_with_new_block_size(logical_block_size)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
@@ -1077,7 +1091,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             slot_mapping=(self._slot_mapping[:num_tokens] if is_state else self._slot_mapping_2d[:0]),
             flat_slot_mapping=None,
             compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
-            storage_block_size=get_storage_block_size(self.kv_cache_spec),
+            storage_block_size=self.kv_cache_spec.num_states,
             logical_block_size=self.kv_cache_spec.block_size,
             is_compressor_state=is_state,
             cache_kind=self._cache_kind,
@@ -1569,7 +1583,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 else 0
             )
             visible = None
-            needs_visible_lengths = True
+            visible_submission = None
             for plan_ratio in ratios:
                 plan_key = f"smla:a5:w{self._window_size}:mask{mask_key}:c{plan_ratio}"
                 shared_plan = self.common_v41_smla_metadata.get(plan_key)
@@ -1586,18 +1600,14 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     )
                 plan_buffer = self._a5_smla_plans[plan_ratio]
                 plan_ori, plan_cmp = self._a5_smla_plan_lengths[plan_ratio]
-                refresh_lengths = plan_ratio != 0 and needs_visible_lengths
-                if refresh_lengths:
-                    needs_visible_lengths = False
 
                 def build_a5_smla_metadata(
                     plan_ratio=plan_ratio,
                     plan_buffer=plan_buffer,
                     plan_ori=plan_ori,
                     plan_cmp=plan_cmp,
-                    refresh_lengths=refresh_lengths,
                 ) -> None:
-                    nonlocal visible
+                    nonlocal visible, visible_submission
                     if metadata_tokens == 0 or req.num_reqs == 0:
                         plan_buffer.zero_()
                         return
@@ -1616,15 +1626,17 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     if plan_ratio:
                         # Graph padding can carry position=0 with an empty KV
                         # sequence. Bound visibility by the request length too.
-                        # The first compressed task recomputes lengths on every
-                        # execution, including capture after eager warmup.
-                        if refresh_lengths:
+                        # The first task actually executed owns this submission's
+                        # visibility. A fresh scope forces warmup/capture rebuilds.
+                        submission = get_device_metadata_submission()
+                        if submission is None or visible_submission is not submission:
                             assert positions is not None
                             rows = torch.arange(metadata_tokens, device=positions.device)
                             ends = common.query_start_loc[1 : req.num_reqs + 1]
                             owners = (rows[:, None] >= ends[None, :]).sum(-1).clamp_max(req.num_reqs - 1)
                             visible = torch.minimum(positions[:metadata_tokens] + 1, req.seq_lens[owners]).clamp_min(0)
                             visible = torch.where(rows < ends[-1], visible, 0)
+                            visible_submission = submission
                         assert visible is not None
                         cmp.copy_(
                             torch.div(visible, plan_ratio, rounding_mode="floor").clamp(0, index_topk).reshape(-1, 1)

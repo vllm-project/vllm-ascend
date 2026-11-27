@@ -26,6 +26,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_hisparse_int8_prolog.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_integration.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py: 30
+  tests/e2e/pull_request/one_card/test_packed_clone_order.py: 30
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
@@ -79,6 +80,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
+  # Initial estimate for graph capture/replay with two input-ID dtypes.
+  tests/e2e/pull_request/one_card/test_routing_ids_graph_refresh.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 600
@@ -89,6 +92,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py: 600
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 240
+  tests/e2e/pull_request/one_card/test_p2p_offloading_cache_reset.py: 120
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_device_synchronize.py: 60
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 460
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
@@ -96,6 +100,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_level2_reload.py: 120
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 30
   tests/e2e/pull_request/one_card/test_vlm.py: 480
@@ -128,6 +133,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_ec_mooncake_encoder_output.py: 900
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 290
   tests/e2e/pull_request/two_card/test_hixl_eplb_registration.py: 300
+  tests/e2e/pull_request/two_card/test_group_coordinator_destroy_npu.py: 120
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 650
   tests/e2e/pull_request/two_card/test_pipeline_parallel.py: 280
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 470
@@ -212,6 +218,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/test_kda_gate_cumsum_vllm.py: 30
   tests/e2e/pull_request/two_card/ops/test_kda_layout_swap12.py: 30
   tests/e2e/pull_request/two_card/ops/test_moe_gating_top_k_hash.py: 30
+  tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_bad_words.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_batch_memcpy.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_bincount.py: 50

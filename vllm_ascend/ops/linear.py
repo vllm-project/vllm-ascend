@@ -283,7 +283,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         disable_tp: bool = False,
         padding_size: int = 0,
     ):
-        if vllm_version_is("0.33.0") and padding_size:
+        if vllm_version_is("0.34.0") and padding_size:
             raise ValueError("Merged-linear output padding requires the verified vLLM main revision")
         # #66784's inherited weight loaders read this even without padding.
         self.padding_size = padding_size
@@ -308,7 +308,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         )
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
+        # #66784's pad-fill helpers only exist on the verified main revision.
+        if not vllm_version_is("0.34.0"):
             for name in self.padding_fill_params():
                 param = getattr(self, name)
                 self._zero_output_padding(param)

@@ -364,7 +364,8 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     observed_states = []
 
     def record_ready_state(layer_name, kv_cache_layer, attn_metadata):
-        assert layer_name == ""
+        # PD push must identify the GDN state before a shared slot is reused.
+        assert layer_name == model.prefix
         assert kv_cache_layer == []
         assert attn_metadata is forward_context.attn_metadata
         observed_states.append(tuple(state.clone() for state in model.kv_cache))
