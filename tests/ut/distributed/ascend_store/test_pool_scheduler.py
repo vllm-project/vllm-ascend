@@ -2778,7 +2778,7 @@ def test_hybrid_lookup_loads_only_reachable_prefixes(
 
         def lookup_with_replay(token_len, block_hashes, group_ids, *, hbm_hit_tokens, replay_token_limit):
             assert group_ids == [0, 1]
-            hits = coordinator.find_reachable_hits_with_replay(
+            return coordinator.find_reachable_hits_with_replay(
                 block_hashes,
                 token_len,
                 lambda group_id, group_hashes, mask: [
@@ -2787,8 +2787,6 @@ def test_hybrid_lookup_loads_only_reachable_prefixes(
                 replay_token_limit=replay_token_limit,
                 hbm_hit_tokens=hbm_hit_tokens,
             )
-
-            return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
 
         client.lookup.side_effect = lookup
         client.lookup_with_replay.side_effect = lookup_with_replay

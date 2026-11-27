@@ -39,8 +39,18 @@ class TestReplayLookupProtocol(unittest.TestCase):
             server = LookupKeyServer(worker, _config())
             client = LookupKeyClient(_config())
             try:
-                self.assertEqual(client.lookup(64, [b"a"], [0, 1]), partial_hit)
-                self.assertEqual(client.lookup_with_replay(64, [b"a"], [0, 1], replay_token_limit=48), replay_hit)
+                hashes = [b"a", b"b"]
+                self.assertEqual(client.lookup(64, hashes, [0, 1], hbm_hit_tokens=16), partial_hit)
+                worker.lookup_scheduler.assert_called_once_with(
+                    64, ["61", "62"], [0, 1], use_layerwise=False, hbm_hit_tokens=16
+                )
+                self.assertEqual(
+                    client.lookup_with_replay(64, hashes, [0, 1], hbm_hit_tokens=16, replay_token_limit=48),
+                    replay_hit,
+                )
+                worker.lookup_scheduler_with_replay.assert_called_once_with(
+                    64, ["61", "62"], [0, 1], replay_token_limit=48, hbm_hit_tokens=16
+                )
                 self.assertEqual(client.lookup(64, [b"a"], [0, 1]), partial_hit)
                 self.assertFalse(client.closed)
             finally:

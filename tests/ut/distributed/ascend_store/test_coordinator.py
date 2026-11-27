@@ -26,7 +26,7 @@ from weakref import ref
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupResult, get_block_hashes
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
@@ -106,7 +106,9 @@ class TestReplayLookup(unittest.TestCase):
                     hbm_hit_tokens=local,
                 )
                 self.assertEqual(
-                    actual, LookupResult(raw, replay), (family, block_size, retention, full_mask, state_mask, local)
+                    actual,
+                    StoreLookupResult(raw, replay_hit_tokens=replay),
+                    (family, block_size, retention, full_mask, state_mask, local),
                 )
                 self.assertEqual(calls, [0, 1])
 
@@ -138,11 +140,13 @@ class TestReplayLookup(unittest.TestCase):
             return group_hashes if present else []
 
         self.assertEqual(
-            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0), LookupResult(16, 0)
+            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0),
+            StoreLookupResult(16, replay_hit_tokens=0),
         )
         present = False
         self.assertEqual(
-            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0), LookupResult(0, 0)
+            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0),
+            StoreLookupResult(0, replay_hit_tokens=0),
         )
 
 

@@ -1302,7 +1302,7 @@ class BaseKVPoolWorker(ABC):
         if coordinator.enable_partial_hash_hits:
             raise ValueError("Replay lookup requires whole-page cache matching")
         try:
-            hits = coordinator.find_reachable_hits_with_replay(
+            return coordinator.find_reachable_hits_with_replay(
                 block_hashes,
                 token_len,
                 partial(self._query_lookup_group_hits, token_len, block_hashes, True, hbm_hit_tokens),
@@ -1310,7 +1310,6 @@ class BaseKVPoolWorker(ABC):
                 log_context="KV pool coordinator lookup",
                 hbm_hit_tokens=hbm_hit_tokens,
             )
-            return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
         except Exception:
             logger.exception("KV pool replay lookup failed; reporting no external hit")
             return StoreLookupResult(0, replay_hit_tokens=0)

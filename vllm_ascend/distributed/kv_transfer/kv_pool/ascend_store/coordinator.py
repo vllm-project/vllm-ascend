@@ -23,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    LookupResult,
+    StoreLookupResult,
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
@@ -429,16 +429,16 @@ class AscendStoreCoordinator:
         replay_token_limit: int,
         log_context: str = "reachable_lookup",
         hbm_hit_tokens: int = 0,
-    ) -> LookupResult:
+    ) -> StoreLookupResult:
         """Whole-page lookup already probes every aligned boundary within token_len."""
         exists = self._query_reachable_blocks(block_hashes, token_len, query_group_hits)
         raw = self._resolve_hit(block_hashes, token_len, exists, hbm_hit_tokens, log_context)
         if raw <= replay_token_limit:
-            return LookupResult(raw, raw)
+            return StoreLookupResult(raw, replay_hit_tokens=raw)
         resume = 0
         if replay_token_limit > hbm_hit_tokens:
             resume = self._resolve_hit(block_hashes, replay_token_limit, exists, hbm_hit_tokens, log_context)
-        return LookupResult(raw, resume)
+        return StoreLookupResult(raw, replay_hit_tokens=resume)
 
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes

@@ -132,10 +132,10 @@ class LookupKeyClient:
             token_len.to_bytes(_LOOKUP_INT_BYTES_LEN, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(_LOOKUP_INT_BYTES_LEN, byteorder="big"),
-            *hash_frames,
         ]
         if replay_token_limit is not None:
-            all_frames.insert(4, replay_token_limit.to_bytes(_LOOKUP_INT_BYTES_LEN, "big"))
+            all_frames.append(replay_token_limit.to_bytes(_LOOKUP_INT_BYTES_LEN, byteorder="big"))
+        all_frames.extend(hash_frames)
         try:
             self.socket.send_multipart(all_frames, copy=False)
             return self.socket.recv_multipart()

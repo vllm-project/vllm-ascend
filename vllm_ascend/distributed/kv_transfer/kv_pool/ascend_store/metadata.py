@@ -31,14 +31,6 @@ def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
 
 
 @dataclass(frozen=True)
-class LookupResult:
-    """Keep the existing save boundary separate from the readable replay boundary."""
-
-    raw_hit_tokens: int
-    replay_hit_tokens: int
-
-
-@dataclass(frozen=True)
 class TPMismatchInfo:
     enabled: bool
     peer_tp_size: int

@@ -123,7 +123,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             local = 0 if self.use_block_key_layerwise or self.layerwise_offload else num_computed_tokens
             if self.use_layerwise_transfer:
                 self._get_or_create_request_tracker(request.request_id)
-            hits = coordinator.find_reachable_hits_with_replay(
+            return coordinator.find_reachable_hits_with_replay(
                 request.block_hashes,
                 token_len,
                 partial(self._query_layerwise_group_hits, local),
@@ -131,7 +131,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 hbm_hit_tokens=local,
                 log_context=f"hit_check: req={request.request_id}",
             )
-            return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
         if self.use_block_key_layerwise:
             if token_len < self.cache_transfer_granularity:
                 return None
