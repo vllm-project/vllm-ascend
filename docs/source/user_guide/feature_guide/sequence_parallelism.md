@@ -119,7 +119,7 @@ The current eligibility matrix is:
 
 | Gate | MiniMax-M3 | Kimi-K3 |
 | --- | --- | --- |
-| **Hardware platform** | A2, A3, A5 | A5 only |
+| **Hardware platform** | Atlas A2, Atlas A3, Atlas A5 | Atlas A5 only |
 | **Hardware capability gate** | `MM_REDUCE_SCATTER_BF16` | `MM_REDUCE_SCATTER_AI_CPU_INFERENCE` |
 | **SP switch** | `use_sequence_parallel=True` | `use_sequence_parallel=True` |
 | **Extra model condition** | None | `use_attn_residuals=True` |
