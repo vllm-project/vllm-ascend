@@ -10,6 +10,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -1896,8 +1897,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 gather_context = dcp_context.gather_context
                 dcp_context.gather_context = None
             assert gather_context is not None
-            # Splitting the packed KV buffer leaves non-contiguous inner strides.
-            gathered_kv_cache = tuple(t.contiguous() for t in self._finish_dcp_gather(gather_context))
+            # A mixed decode/prefill step gathers selected KV blocks. Its two
+            # split planes can be prepared together at the same SFA boundary.
+            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            fuse_layout = (
+                HAS_TRITON
+                and getattr(self, "is_kimi_k31", False) is True
+                and len(gathered_kv_cache) == 2
+                and gathered_kv_cache[0].dtype == torch.bfloat16
+                and not enable_sfa_dcp_force_tmajor_restore()
+            )
+            if not fuse_layout:
+                gathered_kv_cache = tuple(t.contiguous() for t in gathered_kv_cache)
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
             # The gathered KV cache is complete, so each rank can attend with
@@ -1916,6 +1927,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 block_table=block_table,
                 sparse_mode=3,
                 return_lse=False,
+                fuse_dcp_layout=fuse_layout,
             )
             return self._mask_nope_dcp_padding(attn_output, actual_seq_lengths_query)[0]
 
@@ -1934,26 +1946,17 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         if not self._local_topk:
             topk_indices = self._remap_sparse_indices(topk_indices)
-        # Keep the gathered query as a strided view of the head-major gather
-        # output. The split query fragments handed to npu_sparse_flash_
-        # attention have always been strided views (torch.split never copies),
-        # so the old permute+contiguous call only materialized the t-major
-        # [T, H, D] storage behind the views;
-        # additional-config sfa_dcp_force_tmajor_restore=true keeps the
-        # t-major materialization selectable for comparison runs.
-        packed_query_kwargs = {}
+        # Keep HCCL's storage until the adaptor prepares the final SFA inputs.
+        # Forced T-major restore keeps the original BF16 layout path for A/B.
+        keep_view = not enable_sfa_dcp_force_tmajor_restore()
+        query_kwargs = {}
         if kv_cache[0].dtype in (torch.int8, torch.float8_e4m3fn, torch.float8_e5m2):
             # Quantized SFA consumes the complete gathered query on A3/A5.
             # The adaptor materializes contiguous TND storage when needed.
-            packed_query_kwargs["packed_query"] = self._finish_dcp_packed_gather(
-                gather_context,
-                keep_view=not enable_sfa_dcp_force_tmajor_restore(),
-            )
+            query_kwargs["packed_query"] = self._finish_dcp_packed_gather(gather_context, keep_view=keep_view)
         else:
-            ql_nope, q_pe = self._finish_dcp_gather(
-                gather_context,
-                keep_view=not enable_sfa_dcp_force_tmajor_restore(),
-            )
+            ql_nope, q_pe = self._finish_dcp_gather(gather_context, keep_view=keep_view)
+            query_kwargs["fuse_dcp_layout"] = keep_view
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
@@ -1971,7 +1974,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # query length, so SFA must not apply its right-down causal crop.
             sparse_mode=0,
             return_lse=True,
-            **packed_query_kwargs,
+            **query_kwargs,
         )
         sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
             sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum

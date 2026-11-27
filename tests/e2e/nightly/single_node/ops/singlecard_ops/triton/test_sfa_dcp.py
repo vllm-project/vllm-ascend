@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-NPU precision and changing-input graph tests for SFA Triton helpers."""
 
+from statistics import median
+
 import pytest
 import torch
 
@@ -8,9 +10,14 @@ torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import _pack_token_peer_tiled  # noqa: E402
 from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge  # noqa: E402
-from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major  # noqa: E402
+from vllm_ascend.ops.triton.query_gather_prep import (  # noqa: E402
+    prep_query_head_major,
+    prepare_sfa_kv_pair,
+    prepare_sfa_query_pair,
+)
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale  # noqa: E402
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton  # noqa: E402
+from vllm_ascend.utils import enable_custom_op  # noqa: E402
 
 
 @pytest.mark.parametrize("tokens,local_heads,head_dim", [(513, 32, 512), (257, 64, 512), (1, 64, 1024)])
@@ -94,6 +101,176 @@ def test_query_bytes_and_changing_graph_inputs(widths, tokens, heads, dtype, col
         for actual, source in zip(fragments, (qn, qr)):
             assert torch.equal(actual.cpu().view(bit_dtype), source.cpu().view(bit_dtype))
     torch.npu.synchronize()
+
+
+@pytest.mark.parametrize("tokens,heads,output_heads", [(7, 32, 32), (17, 96, 128), (128, 96, 128)])
+def test_prepare_sfa_query_pair_gathered_views_and_graph_replay(tokens, heads, output_heads):
+    widths = (512, 64)
+    owner = torch.zeros(heads + 1, tokens, sum(widths), dtype=torch.bfloat16, device="npu")
+    query, rope = owner[1:].transpose(0, 1).split(widths, dim=-1)
+    assert not query.is_contiguous() and not rope.is_contiguous()
+    assert 0 < query.storage_offset() < rope.storage_offset()
+
+    for _ in range(3):
+        prepare_sfa_query_pair(query, rope, output_heads)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        outputs = prepare_sfa_query_pair(query, rope, output_heads)
+
+    bits = torch.arange(owner.numel(), dtype=torch.int32).reshape(owner.shape)
+    for step in (0, 1):
+        pattern = (bits * 17 + step * 4099).to(torch.int16)
+        # Include -0, infinity and a NaN payload in both real fragments.
+        special = torch.tensor([-32768, 32640, 32705], dtype=torch.int16)
+        pattern[1, 0, :3] = special
+        pattern[1, 0, widths[0] : widths[0] + 3] = special
+        owner.view(torch.int16).copy_(pattern)
+        for out in outputs:
+            out.fill_(3.0)  # Replay must also overwrite every padding lane.
+        graph.replay()
+        for out, original in zip(outputs, pattern[1:].transpose(0, 1).split(widths, -1), strict=True):
+            assert out.is_contiguous() and out.dtype == torch.bfloat16
+            expected = torch.nn.functional.pad(original, (0, 0, 0, output_heads - heads))
+            assert torch.equal(out.cpu().view(torch.int16), expected)
+    graph.reset()
+
+
+def _sfa_cache_planes(owner, block_size):
+    # Each physical page holds all latent rows, then all positional rows.
+    # Skip a prefix in the backing allocation and leave a gap between pages.
+    pages = owner[1:]
+    split = block_size * 512
+    kv = pages[:, :split].unflatten(1, (block_size, 1, 512))
+    key_rope = pages[:, split : split + block_size * 64].unflatten(1, (block_size, 1, 64))
+    return kv, key_rope
+
+
+@pytest.mark.parametrize("pages,block_size", [(5, 128), (9, 17)])
+def test_prepare_sfa_kv_pair_page_ids_and_graph_replay(pages, block_size):
+    owner = torch.zeros(pages + 1, block_size * 576 + 64, dtype=torch.bfloat16, device="npu")
+    kv, key_rope = _sfa_cache_planes(owner, block_size)
+    assert not kv.is_contiguous() and not key_rope.is_contiguous()
+    assert 0 < kv.storage_offset() < key_rope.storage_offset()
+
+    for _ in range(3):
+        prepare_sfa_kv_pair(kv, key_rope)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        outputs = prepare_sfa_kv_pair(kv, key_rope)
+
+    counters = torch.arange(owner.numel(), dtype=torch.int32).reshape(owner.shape)
+    for step in (0, 1):
+        bits = (counters * 13 + step * 8191).to(torch.int16)
+        expected_planes = _sfa_cache_planes(bits, block_size)
+        for expected in expected_planes:
+            expected[:, 0, 0, :3] = torch.tensor([-32768, 32640, 32705], dtype=torch.int16)
+        owner.view(torch.int16).copy_(bits)
+        graph.replay()
+        for out, expected in zip(outputs, expected_planes, strict=True):
+            assert out.ndim == 4 and out.shape == expected.shape and out.is_contiguous()
+            assert out.dtype == torch.bfloat16
+            assert torch.equal(out.cpu().view(torch.int16), expected)
+    graph.reset()
+
+
+@pytest.mark.skipif("950" not in torch.npu.get_device_name(0), reason="A5 BF16 sparse attention")
+def test_prepare_sfa_kv_pair_native_attention():
+    enable_custom_op()
+    generator = torch.Generator().manual_seed(928)
+    pages, block_size, heads = 4, 128, 64
+    owner = torch.randn(pages + 1, block_size * 576 + 64, dtype=torch.bfloat16, generator=generator).npu()
+    kv, key_rope = _sfa_cache_planes(owner, block_size)
+    gathered = torch.randn(heads, 1, 576, dtype=torch.bfloat16, generator=generator).npu()
+    query, query_rope = gathered.transpose(0, 1).split((512, 64), -1)
+    indices = torch.full((1, 1, 2048), -1, dtype=torch.int32)
+    indices[0, 0, :7] = torch.tensor([0, 127, 128, 255, 256, 384, 511])
+    kwargs = dict(
+        sparse_indices=indices.npu(),
+        scale_value=1 / 24,
+        sparse_block_size=1,
+        block_table=torch.tensor([[2, 0, 3, 1]], dtype=torch.int32).npu(),
+        actual_seq_lengths_query=torch.tensor([1], dtype=torch.int32).npu(),
+        actual_seq_lengths_kv=torch.tensor([pages * block_size], dtype=torch.int32).npu(),
+        layout_query="TND",
+        layout_kv="PA_BSND",
+        sparse_mode=0,
+        attention_mode=2,
+        return_softmax_lse=True,
+    )
+
+    def attend(q, qr, k, kr):
+        return torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=q, query_rope=qr, key=k, value=k, key_rope=kr, **kwargs
+        )
+
+    reference = attend(query.contiguous(), query_rope.contiguous(), kv.contiguous(), key_rope.contiguous())
+    actual = attend(*prepare_sfa_query_pair(query, query_rope, heads), *prepare_sfa_kv_pair(kv, key_rope))
+    for value, expected in zip(actual, reference, strict=True):
+        assert torch.isfinite(expected).all()
+        torch.testing.assert_close(value, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("stage", ["query", "kv"])
+def test_sfa_pair_layout_latency(stage, record_property):
+    tokens, heads, output_heads = 128, 96, 128
+    pages, block_size = 256, 128
+    if stage == "query":
+        owner = torch.randn(heads, tokens, 576, dtype=torch.bfloat16, device="npu")
+        q, qr = owner.transpose(0, 1).split((512, 64), -1)
+
+        def separate():
+            padding = (0, 0, 0, output_heads - heads)
+            return torch.nn.functional.pad(q, padding), torch.nn.functional.pad(qr, padding)
+
+        def fused():
+            return prepare_sfa_query_pair(q, qr, output_heads)
+    else:
+        owner = torch.randn(pages + 1, block_size * 576 + 64, dtype=torch.bfloat16, device="npu")
+        kv, kr = _sfa_cache_planes(owner, block_size)
+
+        def separate():
+            return kv.contiguous(), kr.contiguous()
+
+        def fused():
+            return prepare_sfa_kv_pair(kv, kr)
+
+    graphs = []
+    results = []
+    for prepare in (separate, fused):
+        for _ in range(3):
+            prepare()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            results.append(prepare())
+        graphs.append(graph)
+        for _ in range(3):
+            graph.replay()
+    torch.npu.synchronize()
+    for reference, actual in zip(*results, strict=True):
+        assert torch.equal(reference, actual)
+
+    # Alternate replay order to reduce frequency and cache-order bias.
+    # Timing events bracket only work submitted to the NPU stream.
+    samples = ([], [])
+    for sample in range(8):
+        order = (0, 1) if sample % 2 == 0 else (1, 0)
+        for index in order:
+            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+            start.record()
+            for _ in range(10):
+                graphs[index].replay()
+            end.record()
+            end.synchronize()
+            samples[index].append(start.elapsed_time(end) * 1000 / 10)
+    separate_us, fused_us = (median(values) for values in samples)
+    record_property("separate_us", separate_us)
+    record_property("fused_us", fused_us)
+    print(f"SFA layout stage={stage} separate_us={separate_us:.3f} fused_us={fused_us:.3f}")
+    for graph in graphs:
+        graph.reset()
 
 
 @pytest.mark.parametrize(

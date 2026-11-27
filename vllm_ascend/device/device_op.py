@@ -45,8 +45,10 @@ _SFA_PADDED_QUERY_GROUP_SIZE = 128
 
 
 if HAS_TRITON:
+    from vllm_ascend.ops.triton.query_gather_prep import prepare_sfa_kv_pair, prepare_sfa_query_pair
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
+    prepare_sfa_kv_pair = prepare_sfa_query_pair = None
     triton_q_rms = None  # type: ignore
 
 
@@ -662,6 +664,7 @@ class BaseDeviceAdaptor:
         sparse_mode: int = 3,
         return_lse: bool = False,
         packed_query: torch.Tensor | None = None,
+        fuse_dcp_layout: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if block_table is None:
             block_table = attn_metadata.block_table
@@ -699,7 +702,25 @@ class BaseDeviceAdaptor:
             num_kv_heads = kv.shape[2]
             query_group_size = ql_nope.shape[1] // num_kv_heads
             pad_query_groups = _SFA_MAX_GENERIC_QUERY_GROUP_SIZE < query_group_size < _SFA_PADDED_QUERY_GROUP_SIZE
-            if pad_query_groups:
+            is_kimi = getattr(sfa_impl, "is_kimi_k31", False) is True
+            fuse_pairs = (
+                fuse_dcp_layout
+                and is_kimi
+                and prepare_sfa_query_pair is not None
+                and num_kv_heads == 1
+                and not nope
+                and q_pe is not None
+                and key_rope is not None
+                and ql_nope.dtype == q_pe.dtype == kv.dtype == key_rope.dtype == torch.bfloat16
+            )
+            source_q, source_pe = ql_nope, q_pe
+            if fuse_pairs and (pad_query_groups or (not ql_nope.is_contiguous() and not q_pe.is_contiguous())):
+                # Read each view at its original stride and write the two final
+                # SFA inputs directly, including any heads needed by tiling.
+                query_layout = "fused_query_pair"
+                output_heads = _SFA_PADDED_QUERY_GROUP_SIZE if pad_query_groups else query_group_size
+                ql_nope, q_pe = prepare_sfa_query_pair(source_q, source_pe, output_heads)
+            elif pad_query_groups:
                 # Non-quantized MLA SFA accepts query groups 1..64 or 128.
                 # DCP can gather Kimi's 96 heads into one group. Heads attend
                 # independently, so zero-pad within each KV group and remove
@@ -708,9 +729,55 @@ class BaseDeviceAdaptor:
                 ql_nope = F.pad(ql_nope.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
                 if q_pe is not None:
                     q_pe = F.pad(q_pe.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
-            log_sfa = getattr(sfa_impl, "is_kimi_k31", False) is True and not getattr(
-                sfa_impl, "_logged_kimi_sfa", False
-            )
+                query_layout = "separate_pad"
+            else:
+                query_layout = "native"
+            source_kv, source_kr = kv, key_rope
+            kv_layout = "native"
+            if fuse_pairs and not kv.is_contiguous() and not key_rope.is_contiguous():
+                # Legacy PA_BSND + LSE expects two dense planes. Preserve the
+                # original physical page IDs and share the packed latent as K/V.
+                kv, key_rope = prepare_sfa_kv_pair(kv, key_rope)
+                kv_layout = "fused_kv_pair"
+            if (
+                is_kimi
+                and (return_lse or fuse_dcp_layout)
+                and getattr(sfa_impl, "_logged_dcp_layout", None) != (query_layout, kv_layout, return_lse)
+            ):
+                logger.info_once(
+                    "Kimi K3.1 DCP SFA stage=input_layout query_route=%s kv_route=%s return_lse=%s "
+                    "query_shape=%s query_rope_shape=%s sfa_heads=%d source_q_stride=%s source_pe_stride=%s "
+                    "kv_shape=%s key_rope_shape=%s source_kv_stride=%s source_kr_stride=%s strided_native_inputs=%s",
+                    query_layout,
+                    kv_layout,
+                    return_lse,
+                    tuple(source_q.shape),
+                    tuple(source_pe.shape) if source_pe is not None else None,
+                    ql_nope.shape[1],
+                    source_q.stride(),
+                    source_pe.stride() if source_pe is not None else None,
+                    tuple(kv.shape),
+                    tuple(key_rope.shape) if key_rope is not None else None,
+                    source_kv.stride(),
+                    source_kr.stride() if source_kr is not None else None,
+                    tuple(
+                        name
+                        for name, tensor in (
+                            ("query", ql_nope),
+                            ("query_rope", None if nope else q_pe),
+                            ("key/value", kv),
+                            ("key_rope", key_rope),
+                            ("sparse_indices", topk_indices),
+                            ("block_table", block_table),
+                            ("actual_seq_lengths_query", actual_seq_lengths_query),
+                            ("actual_seq_lengths_kv", actual_seq_lengths_key),
+                        )
+                        if tensor is not None and not tensor.is_contiguous()
+                    ),
+                    scope="process",
+                )
+                sfa_impl._logged_dcp_layout = (query_layout, kv_layout, return_lse)
+            log_sfa = is_kimi and not getattr(sfa_impl, "_logged_kimi_sfa", False)
             if log_sfa:
                 logger.info_once("Kimi K3.1 DSA first entering _C_ascend.npu_sparse_flash_attention", scope="process")
             result = torch.ops._C_ascend.npu_sparse_flash_attention(

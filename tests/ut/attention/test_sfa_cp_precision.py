@@ -69,6 +69,116 @@ def test_quantized_dcp_passes_packed_query_without_split(restore_perm, force_tma
     assert execute.call_args.kwargs["return_lse"] is True
 
 
+@pytest.mark.parametrize(
+    "heads,force_tmajor,strided_cache",
+    [(32, False, True), (96, False, True), (96, True, True), (96, False, False)],
+)
+def test_kimi_bf16_dcp_layout_at_native_sfa(heads, force_tmajor, strided_cache):
+    from vllm_ascend.attention.context_parallel import sfa_cp
+    from vllm_ascend.device import device_op
+
+    impl = _make_impl(0)
+    impl.is_kimi_k31 = impl._local_topk = True
+    impl.enable_sparse_sfa_turboquant = False
+    impl.qk_rope_head_dim, impl.scale, impl.dcp_group = 2, 1.0, object()
+    packed = torch.randn(heads, 3, 10, dtype=torch.bfloat16)
+    q, qr = packed.transpose(0, 1).split((8, 2), dim=-1)
+    handle = Mock()
+    lengths = torch.tensor([3], dtype=torch.int32)
+    table = torch.tensor([[1, 0]], dtype=torch.int32)
+    indices = torch.zeros(3, 1, 8, dtype=torch.int32)
+    gather = DCPGatherContext(packed, handle, (1, 0, 2), (8, 2))
+    metadata = SimpleNamespace(dcp_context=SimpleNamespace(gather_context=gather, seq_lens=lengths, block_table=table))
+    pages = torch.randn(2, 4 * 10, dtype=torch.bfloat16)
+    k, kr = (plane.view(2, 4, 1, -1) for plane in pages.split((32, 8), dim=-1))
+    if not strided_cache:
+        k, kr = k.contiguous(), kr.contiguous()
+
+    def reference_q(a, b, output_heads):
+        padding = (0, 0, 0, output_heads - heads)
+        return tuple(torch.nn.functional.pad(x, padding).contiguous() for x in (a, b))
+
+    with (
+        patch.object(impl, "_has_prefill", return_value=False),
+        patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=force_tmajor),
+        patch.object(device_op, "prepare_sfa_query_pair", side_effect=reference_q) as prep_q,
+        patch.object(
+            device_op, "prepare_sfa_kv_pair", side_effect=lambda a, b: (a.contiguous(), b.contiguous())
+        ) as prep_kv,
+        patch.object(device_op.logger, "info_once") as log,
+        patch.object(torch.ops._C_ascend, "npu_sparse_flash_attention", create=True) as sfa,
+        patch.object(impl, "_merge_dcp_outputs", side_effect=lambda output, *args, **kwargs: output) as merge,
+    ):
+        native_heads = 128 if heads == 96 else heads
+        expected_q, expected_qr = reference_q(q, qr, native_heads)
+        maximum = torch.randn(1, 3, native_heads)
+        total = torch.ones_like(maximum)
+        sfa.return_value = (expected_q, maximum, total)
+        result = impl._execute_sparse_flash_attention_process(None, None, (k, kr), indices, metadata, lengths, lengths)
+    handle.wait.assert_called_once()
+    assert prep_q.call_count == int(not force_tmajor)
+    assert prep_kv.call_count == int(not force_tmajor and strided_cache)
+    native = sfa.call_args.kwargs
+    assert native["sparse_indices"] is indices and native["block_table"] is table
+    assert native["return_softmax_lse"] and native["sparse_mode"] == 0
+    assert native["value"] is native["key"]
+    for name, expected in (("query", expected_q), ("query_rope", expected_qr), ("key", k), ("key_rope", kr)):
+        torch.testing.assert_close(native[name], expected)
+        if not force_tmajor:
+            assert native[name].is_contiguous()
+    torch.testing.assert_close(result, q)
+    torch.testing.assert_close(merge.call_args.args[1], maximum[..., :heads].transpose(0, 1).reshape(3, heads, 1))
+    torch.testing.assert_close(
+        merge.call_args.kwargs["softmax_sum"], total[..., :heads].transpose(0, 1).reshape(3, heads, 1)
+    )
+    route = "separate_pad" if force_tmajor else "fused_query_pair"
+    cache_route = "fused_kv_pair" if not force_tmajor and strided_cache else "native"
+    assert any(c.args[1:3] == (route, cache_route) for c in log.call_args_list)
+
+
+@pytest.mark.parametrize("force_restore", [True, False])
+def test_kimi_mixed_dcp_compacts_gathered_kv_once(force_restore):
+    from vllm_ascend.attention.context_parallel import sfa_cp
+    from vllm_ascend.device import device_op
+
+    impl = _make_impl(0)
+    impl.is_kimi_k31 = True
+    impl.scale, impl.dcp_group, impl.enable_sparse_sfa_turboquant = 0.5, object(), False
+    query = torch.ones(2, 4, 8, dtype=torch.bfloat16)
+    qr = torch.zeros(2, 4, 1, dtype=query.dtype)
+    packed = torch.randn(4, 2, 1, 9, dtype=query.dtype)
+    handle = Mock()
+    gather = DCPGatherContext(packed, handle, None, (8, 1))
+    table = torch.tensor([[2, 0, 3, 1]], dtype=torch.int32)
+    lengths = torch.tensor([2], dtype=torch.int32)
+    indices = torch.zeros(2, 1, 2, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_prefills=1, dcp_context=SimpleNamespace(gather_context=gather, kv_gather_block_table=table)
+    )
+    with (
+        patch.object(sfa_cp, "HAS_TRITON", True),
+        patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=force_restore),
+        patch.object(device_op, "prepare_sfa_query_pair") as prep_q,
+        patch.object(
+            device_op, "prepare_sfa_kv_pair", side_effect=lambda k, r: (k.contiguous(), r.contiguous())
+        ) as prep_kv,
+        patch.object(
+            torch.ops._C_ascend, "npu_sparse_flash_attention", create=True, return_value=(query, None, None)
+        ) as sfa,
+    ):
+        result = impl._execute_sparse_flash_attention_process(query, qr, (packed,), indices, metadata, lengths, lengths)
+    assert result is query
+    handle.wait.assert_called_once()
+    prep_q.assert_not_called()
+    assert prep_kv.call_count == int(not force_restore)
+    native = sfa.call_args.kwargs
+    assert native["key"] is native["value"] and native["block_table"] is table
+    assert native["sparse_mode"] == 3 and not native["return_softmax_lse"]
+    for plane, original in zip((native["key"], native["key_rope"]), packed.split((8, 1), -1)):
+        assert plane.is_contiguous()
+        torch.testing.assert_close(plane, original)
+
+
 @pytest.fixture(autouse=True)
 def sparse_remap(monkeypatch):
     def reference(indices, world, rank, interleave):
