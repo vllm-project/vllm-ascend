@@ -345,7 +345,7 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch.setattr(
         sfa_hisparse,
         "build_hisparse_prefill_staging_plan",
-        lambda table, *args: NS(block_table=table, block_size=128),
+        lambda table, *args, **kwargs: NS(block_table=table, block_size=128),
     )
     built = builder._build(common, pcp_context=context)
     assert calls == [(padded, padded)]
@@ -423,11 +423,13 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     import vllm_ascend.attention.sfa_hisparse as module
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
+    from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = not prefill
     impl.c8_cache_dtype = dtype
+    impl.sfa_qsfa_packed_kv_head_dim = C8_ROW_BYTES
     impl._kv_staging_capacity = 256
     impl.index_group = NS(logical_topk_indices=torch.empty(1))
     impl.hisparse_cache = handle()
@@ -460,7 +462,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl.hisparse_cache.view.cache = torch.zeros(num_write_rows, 656, dtype=torch.uint8)
 
     def fused(self, hidden, caches, cos, sin, mapping, **kwargs):
-        assert caches[0].shape == (2, 128, 1, module.C8_ROW_BYTES)
+        assert caches[0].shape == (2, 128, 1, C8_ROW_BYTES)
         assert caches[0].dtype == dtype
         assert mapping.tolist() == [0, 1, 2]
         assert torch.count_nonzero(impl.hisparse_cache.view.cache) == 0

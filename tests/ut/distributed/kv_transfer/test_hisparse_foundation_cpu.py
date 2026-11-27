@@ -51,6 +51,40 @@ from vllm_ascend.hisparse.c8 import (
 from vllm_ascend.ops.triton import sfa_indexer_store
 
 
+@pytest.mark.parametrize(
+    ("model_type", "pool_size", "hisparse_enabled", "indexer_dtype", "pcp", "a5", "expected"),
+    [
+        ("glm5_next_text", 4, True, "fp8", 1, True, True),
+        ("other_pooled_model", 4, True, "fp8", 1, True, True),
+        ("glm5_next_text", None, True, "fp8", 1, True, False),
+        ("kimi_k31", None, True, "fp8", 1, True, False),
+        ("glm5_next_text", 4, False, "fp8", 1, True, False),
+        ("glm5_next_text", 8, True, "fp8", 1, True, False),
+        ("glm5_next_text", 4, True, "int8", 1, True, False),
+        ("glm5_next_text", 4, True, "fp8", 2, True, False),
+        ("glm5_next_text", 4, True, "fp8", 1, False, False),
+    ],
+)
+def test_pooled_hisparse_scope(monkeypatch, model_type, pool_size, hisparse_enabled, indexer_dtype, pcp, a5, expected):
+    from vllm_ascend import hisparse
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+
+    family = DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None
+    monkeypatch.setattr(hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=family))
+    config = NS(
+        model_config=NS(hf_text_config=NS(model_type=model_type, index_kpool=pool_size, qk_rope_head_dim=0)),
+        attention_config=NS(hisparse_config=NS() if hisparse_enabled else None, indexer_kv_dtype=indexer_dtype),
+        cache_config=NS(cache_dtype="fp8"),
+        parallel_config=NS(
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=pcp,
+            decode_context_parallel_size=1,
+        ),
+    )
+    assert hisparse.supports_pooled_hisparse(config) is expected
+
+
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
 def prepare_workspaces(request):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
@@ -783,6 +817,34 @@ def test_prefill_mask_is_reused_without_mutating_layer_topk(
         assert metadata.prefill_valid_token_mask is mask
     torch.testing.assert_close(logical, original)
     torch.testing.assert_close(mask, expected_mask)
+
+
+def test_cold_mixed_prefill_uses_valid_table_for_padded_rows(prefill_mask_builder):
+    metadata = prefill_mask_builder([0, 1, 2, 4], 5, num_decodes=2)
+    metadata.prefill.host_staging_plan = NS(block_size=128)
+    staged = torch.empty((1, 128, 1))
+    staged_table = torch.tensor([[1]], dtype=torch.int32)
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = False
+    impl.index_group_index = 0
+    impl.index_group = NS(
+        set_logical_topk_ready=lambda _: None,
+        physical_kv_cache=lambda _: staged,
+        stage_prefill_rows=lambda *_: (staged, staged_table, torch.tensor([0, 0, -2])),
+    )
+    impl.hisparse_cache = NS(
+        source_block_table=metadata.block_table,
+        swap_in=lambda *args, **kwargs: torch.tensor([[5], [6]], dtype=torch.int32),
+        runtime=NS(host_cache=staged, request_state_indices=None, cache_ops=NS(attention_capacity=0)),
+    )
+    impl._try_c8_resident_prefill = lambda *_: None
+    impl._attention_physical = lambda query, _rope, _cache, indices, **kwargs: indices.view_as(query)
+    query = torch.empty((5, 1, 1), dtype=torch.int32)
+    logical = torch.tensor([[5], [6], [1], [2], [127]], dtype=torch.int32)
+
+    result = impl._execute_sparse_flash_attention_process(query, None, None, logical, metadata, None, None)
+
+    assert result.flatten().tolist() == [5, 6, 129, 130, -1]
 
 
 def test_prefill_mask_refreshes_for_new_batches_and_draft_owners(prefill_mask_builder):
