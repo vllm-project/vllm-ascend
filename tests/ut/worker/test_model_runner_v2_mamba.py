@@ -1115,7 +1115,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
 @pytest.mark.parametrize("include_mamba", [False, True])
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
+def test_get_kv_cache_spec_pads_nondivisible_hybrid_attention_pages(
     mock_get_layers,
     include_mamba,
 ):
@@ -1163,13 +1163,16 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
         "large_attn": FakeAttention(large_attention_spec),
     }
 
-    if include_mamba:
-        with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages for small_attn"):
-            get_kv_cache_spec(_mock_vllm_config())
-    else:
+    if not include_mamba:
         del mock_get_layers.return_value["linear_attn"]
-        # Non-hybrid allocation does not use the shared Attention/Mamba layout.
-        specs = get_kv_cache_spec(_mock_vllm_config())
+
+    specs = get_kv_cache_spec(_mock_vllm_config())
+
+    if include_mamba:
+        assert specs["small_attn"] == replace(small_attention_spec, page_size_padded=80)
+        assert specs["large_attn"] == large_attention_spec
+        assert specs["linear_attn"] == replace(mamba_spec, page_size_padded=80)
+    else:
         assert specs == {"small_attn": small_attention_spec, "large_attn": large_attention_spec}
 
 
@@ -1276,13 +1279,17 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     assert sliding.block_size == 128
 
 
-def test_hybrid_attention_alignment_rejects_different_k_v_proportions():
+@pytest.mark.parametrize("draft_block_size", [128, 96])
+def test_hybrid_attention_alignment_rejects_different_k_v_proportions(draft_block_size):
     full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, dtype=torch.float16)
-    # Equal total page sizes still do not make the K and V segments compatible.
     sliding = SlidingWindowSpec(
-        block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16, sliding_window=4096
+        block_size=draft_block_size,
+        num_kv_heads=1,
+        head_size=1,
+        head_size_v=3,
+        dtype=torch.float16,
+        sliding_window=4096,
     )
-    assert full.real_page_size_bytes == sliding.real_page_size_bytes
     with pytest.raises(ValueError, match="matching K/V size ratios"):
         _align_hybrid_attention_page_sizes({"full": full, "sliding": sliding})
 

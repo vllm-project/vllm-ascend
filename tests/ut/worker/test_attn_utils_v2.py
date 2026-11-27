@@ -3354,10 +3354,10 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.1.self_attn": _step5_sw_spec(),
-        # 3840-byte fp8 page: indivisible against the 96 KiB main page and a
-        # different K/V size ratio, so alignment would refuse this layer.
+        # This auxiliary page divides the main page evenly, but its K/V
+        # widths differ from the main page's ratio.
         STEP5_SUMMARY: FullAttentionSpec(
-            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
+            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, head_size_v=17, dtype=torch.float8_e4m3fn
         ),
     }
     summary_before = specs[STEP5_SUMMARY]
@@ -3372,19 +3372,18 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
     # The auxiliary summary page is left exactly as the planner wrote it.
     assert specs[STEP5_SUMMARY] is summary_before
     assert specs[STEP5_SUMMARY].block_size == STEP5_BLOCK
-    assert specs[STEP5_SUMMARY].real_page_size_bytes == 3840
+    assert specs[STEP5_SUMMARY].real_page_size_bytes == 4096
 
 
-def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page() -> None:
-    """Without the aux-name exclusion the same geometry must fail, pinning
-    that the suffix filter (not the geometry) spares the summary layers."""
+def test_step5_align_hybrid_attention_page_sizes_rejects_incompatible_dense_kv_ratio() -> None:
+    """The same K/V ratio mismatch is rejected for a regular attention layer."""
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.3.self_attn": FullAttentionSpec(
-            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
+            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, head_size_v=17, dtype=torch.float8_e4m3fn
         ),
     }
-    with pytest.raises(ValueError, match="Cannot align"):
+    with pytest.raises(ValueError, match="matching K/V size ratios"):
         attn_utils._align_hybrid_attention_page_sizes(specs)
 
 
