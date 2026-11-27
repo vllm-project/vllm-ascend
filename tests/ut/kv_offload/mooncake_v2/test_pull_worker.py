@@ -387,7 +387,7 @@ def test_build_remote_layout_rejects_missing_local_layer() -> None:
 
 def test_expand_block_ids_and_round_robin_candidate_selection() -> None:
     assert MooncakePullRecvingThread._expand_block_ids([3, 5], 2) == [6, 7, 10, 11]
-    assert MooncakePullRecvingThread._select_remote_tp_rank([2, 3, 4], 4) == 3
+    assert make_thread()._select_remote_tp_rank([2, 3, 4], 4) == 3
 
 
 def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica() -> None:
@@ -1210,23 +1210,27 @@ def test_recoverssm_pcp8_producer_reassembles_all_cache_contents_on_tp1_consumer
 
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     thread = make_thread(engine=MagicMock())
-    thread._append_spec_transfer_addresses = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda **kwargs: (
-            kwargs["src_list"].append(1000),
-            kwargs["dst_list"].append(2000),
-            kwargs["length_list"].append(128),
-        )
-    )
+    post_read = MagicMock()
+
+    def append_addresses(**kwargs):
+        kwargs["src_list"].append(1000)
+        kwargs["dst_list"].append(2000)
+        kwargs["length_list"].append(128)
+        return post_read
+
+    thread._append_spec_transfer_addresses = MagicMock(side_effect=append_addresses)  # type: ignore[method-assign]
     remote = make_pp_metadata()
     entries = {0: {(0, 0): [("request", [1], [2])]}}
 
     thread.engine.batch_transfer_sync_read.return_value = 0
     thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
     thread.engine.batch_transfer_sync_read.assert_called_once_with("10.0.0.1:9000", [1000], [2000], [128])
+    post_read.assert_called_once_with()
 
     thread.engine.batch_transfer_sync_read.return_value = -1
     with pytest.raises(RuntimeError, match="transfer failed"):
         thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    post_read.assert_called_once_with()
 
 
 def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:
@@ -1842,9 +1846,9 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         fake_register,
     )
     monkeypatch.setattr(
-        pull_worker,
-        "MooncakePullRecvingThread",
-        fake_thread,
+        pull_worker.MooncakePullConnectorWorker,
+        "receiving_thread_cls",
+        staticmethod(fake_thread),
     )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))
 

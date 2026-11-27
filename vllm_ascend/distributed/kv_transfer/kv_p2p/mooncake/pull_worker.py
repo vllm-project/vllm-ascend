@@ -5,9 +5,10 @@
 import queue
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from typing import Any
+from typing import Any, TypeVar
 
 import msgspec
 import torch
@@ -48,6 +49,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     worker_rank_to_dcp_rank,
     zmq_ctx,
+)
+from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (
+    MEMFABRIC_ROLE_DECODE,
+    MEMFABRIC_ROLE_PREFILL,
+    global_memfabric_te,
 )
 
 
@@ -837,8 +843,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             return block_ids
         return [block_id * scale + offset for block_id in block_ids for offset in range(scale)]
 
-    @staticmethod
-    def _select_remote_tp_rank(candidate_tp_ranks: list[int], selection_index: int) -> int:
+    def _select_remote_tp_rank(self, candidate_tp_ranks: list[int], selection_index: int) -> int:
         """Select a replicated producer TP rank using round-robin."""
         return candidate_tp_ranks[selection_index % len(candidate_tp_ranks)]
 
@@ -1055,7 +1060,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         src_list: list[int],
         dst_list: list[int],
         length_list: list[int],
-    ) -> None:
+    ) -> Callable[[], None] | None:
         """Append all layers and requests belonging to one local spec."""
         spec = self.kv_cache_specs[spec_index]
         if isinstance(spec, MambaSpec):
@@ -1070,7 +1075,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 dst_list,
                 length_list,
             )
-            return
+            return None
 
         block_ids_by_request: dict[str, tuple[list[int], list[int]]] = {}
         for (local_layer_index, _), transfer_entries in transfer_entries_by_layer.items():
@@ -1087,7 +1092,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     raise ValueError(f"Mooncake block IDs differ within spec {spec_index} for request {request_id!r}")
 
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
-            return
+            return None
 
         single_block_ids_by_request = {
             request_id: (
@@ -1155,7 +1160,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                             dst_list=dst_list,
                             length_list=length_list,
                         )
-            return
+            return None
 
         if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
             raise NotImplementedError(f"Mooncake transfer address calculation does not support {type(spec).__name__}")
@@ -1275,6 +1280,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         length_list=length_list,
                     )
 
+        return None
+
     def _execute_tp_transfer_bucket(
         self,
         remote_pp_rank: int,
@@ -1294,11 +1301,12 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         ``transfer_entries_by_spec`` maps local spec index to layer-index pairs,
         then to ``(request_id, local_block_ids, remote_block_ids)`` records.
         """
+        post_read_actions: list[Callable[[], None]] = []
         src_list: list[int] = []
         dst_list: list[int] = []
         length_list: list[int] = []
         for spec_index, transfer_entries_by_layer in transfer_entries_by_spec.items():
-            self._append_spec_transfer_addresses(
+            post_read_action = self._append_spec_transfer_addresses(
                 spec_index=spec_index,
                 remote_pcp_rank=remote_pcp_rank,
                 remote_tp_rank=remote_tp_rank,
@@ -1311,6 +1319,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 dst_list=dst_list,
                 length_list=length_list,
             )
+            if post_read_action is not None:
+                post_read_actions.append(post_read_action)
 
         if not src_list:
             return
@@ -1331,6 +1341,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 "Mooncake KV transfer failed for remote "
                 f"PP/PCP/TP rank {remote_pp_rank}/{remote_pcp_rank}/{remote_tp_rank}, ret={ret}"
             )
+        for action in post_read_actions:
+            action()
         transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
         logger.info(
             "KV cache transfer for requests %s took %.2f ms (%d ranges, %d bytes). "
@@ -1449,8 +1461,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         return transfer_metadata
 
 
+_ReceivingThreadT = TypeVar("_ReceivingThreadT", bound=MooncakePullRecvingThread)
+
+
 class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     """Worker-side framework for Mooncake pull transfers."""
+
+    receiving_thread_cls: type[MooncakePullRecvingThread] | None = None
 
     def __init__(
         self,
@@ -1461,6 +1478,39 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
 
+    def _build_recving_thread(
+        self, thread_cls: type[_ReceivingThreadT], ready_event: threading.Event, **kwargs: Any
+    ) -> _ReceivingThreadT:
+        metadata = self.xfer_handshake_metadata
+        if not isinstance(metadata, MooncakeTransferMetadata):
+            raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
+        return thread_cls(
+            engine=self.engine,
+            vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
+            kv_cache_specs=self.kv_cache_specs,
+            layer_name_to_group_index=self.layer_name_to_group_index,
+            layer_name_to_spec_index=self.layer_name_to_spec_index,
+            local_metadata=metadata,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
+            dp_rank=self.dp_rank,
+            dp_size=self.dp_size,
+            pcp_rank=self.pcp_rank,
+            pcp_size=self.pcp_size,
+            dcp_rank=self.dcp_rank,
+            dcp_size=self.dcp_size,
+            device=torch.npu.current_device(),
+            ready_event=ready_event,
+            **kwargs,
+        )
+
+    def _create_recving_thread(self, ready_event: threading.Event) -> MooncakePullRecvingThread:
+        thread_cls = self.receiving_thread_cls or MooncakePullRecvingThread
+        return self._build_recving_thread(thread_cls, ready_event)
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -1468,30 +1518,8 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         """Register caches and start the D-side pull execution thread."""
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_consumer:
-            if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
-                raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
             ready_event = threading.Event()
-            self._recving_thread = MooncakePullRecvingThread(
-                engine=self.engine,
-                vllm_config=self.vllm_config,
-                kv_cache_config=self.kv_cache_config,
-                kv_cache_specs=self.kv_cache_specs,
-                layer_name_to_group_index=self.layer_name_to_group_index,
-                layer_name_to_spec_index=self.layer_name_to_spec_index,
-                local_metadata=self.xfer_handshake_metadata,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-                pp_rank=self.pp_rank,
-                pp_size=self.pp_size,
-                dp_rank=self.dp_rank,
-                dp_size=self.dp_size,
-                pcp_rank=self.pcp_rank,
-                pcp_size=self.pcp_size,
-                dcp_rank=self.dcp_rank,
-                dcp_size=self.dcp_size,
-                device=torch.npu.current_device(),
-                ready_event=ready_event,
-            )
+            self._recving_thread = self._create_recving_thread(ready_event)
             self._recving_thread.start()
             if not ready_event.wait(timeout=10):
                 raise RuntimeError("Timed out starting Mooncake pull receiving thread")
@@ -1535,3 +1563,18 @@ __all__ = [
     "MooncakePullConnectorWorker",
     "MooncakePullRecvingThread",
 ]
+
+
+class _MemFabricPullWorker(MooncakePullConnectorWorker):
+    def _get_transfer_engine(self, device_name: str | None):
+        extra = self.kv_transfer_config.kv_connector_extra_config or {}
+        protocol = extra.get("memfabric_transfer_protocol", "device_urma")
+        global_memfabric_te.configure(
+            role=MEMFABRIC_ROLE_DECODE if self.kv_transfer_config.is_kv_consumer else MEMFABRIC_ROLE_PREFILL,
+            device_id=torch.npu.current_device(),
+            transfer_protocol=protocol,
+        )
+        return global_memfabric_te.get_transfer_engine(self.side_channel_host)
+
+    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
+        global_memfabric_te.register_buffer(ptrs, lengths)
