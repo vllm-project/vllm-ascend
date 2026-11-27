@@ -89,7 +89,8 @@ def test_worker_wraps_nested_pull_consumer_after_cache_initialization(is_consume
 
 
 @pytest.mark.parametrize("ratio", [3, 5])
-def test_pull_restores_only_admitted_nonzeroed_group_page(ratio):
+@pytest.mark.parametrize("sync", [False, True])
+def test_pull_restores_only_admitted_nonzeroed_group_page(ratio, sync):
     raw, _, scale, runner, pitch = _packet(ratio)
     raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
     poisoned = raw.clone()
@@ -100,10 +101,9 @@ def test_pull_restores_only_admitted_nonzeroed_group_page(ratio):
     connector = runner.kv_connector
     connector._restore(_output(([], [1])))
     connector._restore(_output(([1],), zeroed=[1]))
-    connector._restore(_output(([1],), sync=True))
     assert torch.equal(raw, poisoned)
 
-    connector._restore(_output(([1],)))
+    connector._restore(_output(([1],), ([0],), zeroed=[0], sync=sync))
     assert torch.equal(raw, expected)
 
 

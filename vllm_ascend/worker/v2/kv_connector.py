@@ -118,7 +118,9 @@ class C8VScaleKVConnector(KVConnector):
 
     def _restore(self, scheduler_output: "SchedulerOutput") -> None:
         """Restore untransferred V-scale tails on newly admitted Pull pages."""
-        if scheduler_output.has_sync_kv_loads or not self._entries:
+        # A synchronous load on one request must not suppress restoration
+        # for another request admitted after an asynchronous Pull.
+        if not self._entries:
             return
         blocks_by_group: dict[int, set[int]] = {}
         for request in scheduler_output.scheduled_new_reqs:
@@ -129,9 +131,13 @@ class C8VScaleKVConnector(KVConnector):
         if not blocks_by_group:
             return
         zeroed = set(scheduler_output.new_block_ids_to_zero or ())
+        restore_blocks_by_group = {
+            group_id: sorted(block_id for block_id in blocks - zeroed if block_id > 0)
+            for group_id, blocks in blocks_by_group.items()
+        }
         page_indices_by_layout: dict[tuple[int, int, torch.device], torch.Tensor] = {}
         for value_scale, cache, ratio, group_id in self._entries:
-            block_ids = sorted(block_id for block_id in blocks_by_group.get(group_id, set()) - zeroed if block_id > 0)
+            block_ids = restore_blocks_by_group.get(group_id)
             if not block_ids:
                 continue
             if (block_ids[-1] + 1) * ratio > cache.shape[0]:
