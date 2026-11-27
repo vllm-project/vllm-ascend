@@ -948,7 +948,11 @@ disconnects before the first streamed chunk. Stop in this order:
   failing the proxy falls back to the full list (best effort). 4xx responses
   and other client-side errors do not mark an encoder unhealthy. With a single
   encoder the selection is unchanged.
-- **Exhaustion**: when all attempts fail, the client receives HTTP 500.
+- **Exhaustion**: a non-streaming request whose attempts all fail returns the
+  mapped 5xx status (HTTP 500 when no stage status applies). A streaming
+  request is handed back as a 200 response before the encoder and prefill
+  stages run, so an exhausted stage cannot change the status code: the stream
+  is aborted and the failure is logged instead.
 - **P stage failure**: a prefill failure returns its mapped status (4xx
   preserved, otherwise 502/504) and D is not started, so no partial output is
   produced.

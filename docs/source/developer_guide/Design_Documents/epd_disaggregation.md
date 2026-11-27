@@ -234,7 +234,10 @@ accepts these opt-in options; the defaults keep the previous behavior:
 - Streaming requests are not retried after the first chunk is forwarded;
   non-streaming requests are retried normally. Encoder and prefill stages are
   never streamed, so they are always retried as non-streaming requests.
-- When the attempts are exhausted the client receives HTTP 500.
+- When the attempts are exhausted, a non-streaming request receives HTTP 500
+  (or the mapped stage status). A streaming request has already been handed to
+  Starlette as a 200 response before the encoder and prefill stages run, so an
+  exhausted stage can only abort the stream, not change the status code.
 
 ### Timeouts
 
@@ -328,6 +331,28 @@ disconnects before the first streamed chunk cannot leak it. With the default
 The proxy logs a request ID for every client request and each stage transition,
 retry, and failure. Each vLLM instance keeps its own log; the E+PD example
 script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
+
+### Benchmark harness
+
+`tools/epd_bench.py` turns one benchmark run into a repeatable markdown + JSON
+report. It imports the standard library only, so `--help` works on a CPU-only
+machine without vLLM installed.
+
+- **Inputs**: run `vllm bench serve` and parse its stdout, or parse a saved
+  stdout file with `--bench-output` without running anything. Stage metrics
+  come from the reference proxy `/metrics` (`--proxy-metrics-url`) or from a
+  JSON list of `{stage, seconds}` rows (`--stage-metrics-json`).
+- **Reporting rules**: a value that was not measured renders as `未采集`. A
+  missing histogram, a missing `+Inf` bucket or an unparsable field is never
+  replaced by a mean, and a parsed report states whether its benchmark command
+  was executed. P50/P99 read from `/metrics` are Prometheus histogram bucket
+  upper bounds because the endpoint does not expose individual durations; the
+  report says so. `ec_transfer_bytes` from `--ec-shared-storage-path` is the
+  sum of `*.safetensors` file sizes at report time (the ExampleConnector does
+  not clean up), not the bytes moved by this run.
+- **Exit codes**: `0` report written; `1` a regression exceeded `--tolerance`
+  with `--fail-on-regression`; `2` the harness could not produce a trustworthy
+  report (unusable input path, benchmark failure or timeout).
 
 ## Limitations
 
