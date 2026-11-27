@@ -103,7 +103,7 @@ static bool IsPaBlockSizeSupport(NpuArch npuArch, int32_t blockSize)
 static const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {QUERY_NAME, {ge::DT_FLOAT16, ge::DT_BF16}},
     {ORI_KV_NAME, {ge::DT_FLOAT16, ge::DT_BF16}},
-    {CMP_KV_NAME, {ge::DT_FLOAT16, ge::DT_BF16}},
+    {CMP_KV_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_INT8}},
     {CU_SEQLENS_ORI_KV_NAME, {ge::DT_INT32}},
     {CU_SEQLENS_CMP_KV_NAME, {ge::DT_INT32}},
     {ORI_SPARSE_INDICES, {ge::DT_INT32}},
@@ -1169,6 +1169,9 @@ ge::graphStatus SMLAInfoParser::Parse(SMLATilingInfo &smlaInfo)
     OP_CHECK_IF(qType_ != ge::DT_BF16,
                 OP_LOGE(opName_, "Aurora SparseFlashMla only compiles BF16 Q/KV."), return ge::GRAPH_FAILED);
 
+    OP_CHECK_IF(cmpKvType_ == ge::DT_INT8 &&
+                    (npuArch_ != NpuArch::DAV_2201 || perfMode_ != SMLATemplateMode::CSA_TEMPLATE_MODE),
+                OP_LOGE(opName_, "INT8 compressed KV requires the A2/A3 CSA template."), return ge::GRAPH_FAILED);
     SetSMLAShape();
     if (ge::GRAPH_SUCCESS != GetN1Size() || ge::GRAPH_SUCCESS != GetN2Size() || ge::GRAPH_SUCCESS != GetGSize() ||
         ge::GRAPH_SUCCESS != GetBatchSize() || ge::GRAPH_SUCCESS != GetQTSize() || ge::GRAPH_SUCCESS != GetS1Size() ||
@@ -1637,10 +1640,20 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaMetadata() const
     if (ge::GRAPH_SUCCESS != CheckDimNumSupport(&opParamInfo_.metadata.tensor->GetShape(), dimNumList, METADATA_NAME)) {
         return ge::GRAPH_FAILED;
     }
-    OP_CHECK_IF((opParamInfo_.metadata.tensor->GetShapeSize() != METADATA_LIMIT),
+    // Private experiment: two pinned metadata headers precede one shared INT8 payload.
+    int64_t expectedWords = METADATA_LIMIT;
+    if (topkValueMode_ == 71 || topkValueMode_ == 72) {
+        OP_CHECK_IF(IsA5Arch(npuArch_) || qLayout_ != SMLALayout::TND || kvLayout_ != SMLALayout::PA_BBND ||
+                    cmpKvType_ != ge::DT_INT8 || n2Size_ != 1 || n1Size_ != 8 ||
+                    smlaInfo_.sparseBlockCount != 512 || smlaInfo_.sparseBlockSize != 1 ||
+                    (cmpRatio_ != 1 && cmpRatio_ != 2) || smlaInfo_.perfMode != SMLATemplateMode::CSA_TEMPLATE_MODE,
+                    OP_LOGE(opName_, "Unsupported grouped INT8 experiment shape"), return ge::GRAPH_FAILED);
+        expectedWords = METADATA_LIMIT * cmpRatio_ + static_cast<int64_t>(qTSize_) * 512 * 544 / sizeof(int32_t);
+    }
+    OP_CHECK_IF((opParamInfo_.metadata.tensor->GetShapeSize() != expectedWords),
                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, "metadata",
                                                       ToStringRaw(opParamInfo_.metadata.tensor->GetStorageShape()),
-                                                      "metadata dim 0 must be" + std::to_string(METADATA_LIMIT)),
+                                                      "metadata dim 0 must be" + std::to_string(expectedWords)),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(opParamInfo_.metadata.desc->GetDataType() != ge::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
@@ -2074,10 +2087,11 @@ ge::graphStatus SMLATilingCheck::CheckFeatureShape() const
     if (!(smlaInfo_.perfMode == SMLATemplateMode::SWA_TEMPLATE_MODE ||
           smlaInfo_.perfMode == SMLATemplateMode::ORI_SPARSE_TEMPLATE_MODE) &&
         (opParamInfo_.cmpKv.tensor != nullptr)) {
-        OP_CHECK_IF(cmpKvHeadDim_ != DIM_LIMIT,
+        const uint32_t rowWidth = cmpKvType_ == ge::DT_INT8 ? DIM_LIMIT + (DIM_LIMIT / 64) * sizeof(float) : DIM_LIMIT;
+        OP_CHECK_IF(cmpKvHeadDim_ != rowWidth,
                     OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
                         opName_, "cmp_kv", ToStringRaw(opParamInfo_.cmpKv.tensor->GetStorageShape()).c_str(),
-                        "The head num of cmp_kv only support " + std::to_string(DIM_LIMIT) + ", but got " +
+                        "Expected cmp_kv row width " + std::to_string(rowWidth) + ", but got " +
                             std::to_string(cmpKvHeadDim_)),
                     return ge::GRAPH_FAILED);
     }
@@ -2205,7 +2219,7 @@ ge::graphStatus SMLATilingCheck::CheckOriAndCmpKv() const
     if (smlaInfo_.perfMode == SMLATemplateMode::HCA_TEMPLATE_MODE ||
         smlaInfo_.perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE ||
         smlaInfo_.perfMode == SMLATemplateMode::ORI_CMP_SPARSE_TEMPLATE_MODE) {
-        if (ge::GRAPH_SUCCESS != CheckDTypeConsistency(cmpKvType_, oriKvType_, CMP_KV_NAME)) {
+        if (cmpKvType_ != ge::DT_INT8 && ge::GRAPH_SUCCESS != CheckDTypeConsistency(cmpKvType_, oriKvType_, CMP_KV_NAME)) {
             return ge::GRAPH_FAILED;
         }
     }
@@ -2494,6 +2508,7 @@ ge::graphStatus SparseFlashMlaTiling::DoOpTiling(SMLATilingInfo *tilingInfo)
     tilingData_.cmpParams.set_cmpRatio(tilingInfo->cmpRatio);
     tilingData_.cmpParams.set_cmpMaskMode(tilingInfo->cmpMaskMode);
     tilingData_.cmpParams.set_cmpKvStride0(tilingInfo->cmpKvStride0);
+    tilingData_.cmpParams.set_cmpPackedInt8(tilingInfo->cmpKvType == ge::DT_INT8);
     tilingData_.cmpParams.set_cmpKvSeqSize(tilingInfo->cmpS2Size);
     tilingData_.baseParams.set_actualLenDimsOriKV(tilingInfo->actualLenDimsOriKV);
     tilingData_.baseParams.set_actualLenDimsCmpKV(tilingInfo->actualLenDimsCmpKV);
@@ -2508,6 +2523,7 @@ ge::graphStatus SparseFlashMlaTiling::DoOpTiling(SMLATilingInfo *tilingInfo)
         tilingData_.baseParams.set_topkValueMode(tilingInfo->topkValueMode);
         tilingData_.cmpParams.set_cmpSparseBlockCount(tilingInfo->cmpSparseBlockCount);
     } else {
+        tilingData_.baseParams.set_topkValueMode(tilingInfo->topkValueMode);
         tilingData_.cmpParams.set_sparseBlockCount(tilingInfo->sparseBlockCount);
     }
 
@@ -2531,8 +2547,9 @@ ge::graphStatus SparseFlashMlaTiling::DoOpTiling(SMLATilingInfo *tilingInfo)
         constexpr uint32_t V0_CACHE_MAX_TOPK_NUM = 512U;
         constexpr uint32_t V0_CACHE_MAX_BLOCK_NUM = 1024U;
         const int32_t cmpBlockSize = tilingInfo->cmpBlockSize;
+        // Packed rows use the byte-addressed gather and dequantization path.
         vectorizeFlag = static_cast<uint32_t>(
-            tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE &&
+            tilingInfo->cmpKvType != ge::DT_INT8 && tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE &&
             tilingInfo->qLayout == SMLALayout::TND && tilingInfo->kvLayout == SMLALayout::PA_BBND &&
             tilingInfo->n1Size <= 64U && tilingInfo->n2Size == 1U && tilingInfo->sparseBlockSize == 1 &&
             sInnerSize_ == V0_CACHE_MAX_TOPK_NUM && cmpBlockSize > 0 &&

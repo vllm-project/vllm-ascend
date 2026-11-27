@@ -574,6 +574,9 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::Init(
     if ASCEND_IS_AIV {
         vectorBlock.InitParams(constInfo, tilingData);
         vectorBlock.InitVec0GlobalTensor(kvMergeGm_, oriKvGm, cmpKvGm, oriBlockTableGm, cmpBlockTableGm);
+        if (tilingData->baseParams.topkValueMode == 71 || tilingData->baseParams.topkValueMode == 72) {
+            vectorBlock.InitSharedPackedRows((__gm__ int8_t *)metadata + constInfo.cmpRatio * 4096);
+        }
         vectorBlock.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, actualSeqLengthsQGm, actualSeqLengthsKVGm, topKGm,
                                          sinksGm, softmaxLseGm);
         vectorBlock.InitVec2GlobalTensor(accumOutGm, vec2ResGm, mm2ResGm, attentionOutGm);
@@ -706,6 +709,9 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::CalcParams(uint32_t loop, uint3
 
     info.actualSingleProcessSInnerSizeAlign =
         SMLAAlign(info.actualSingleProcessSInnerSize, SMLAVectorBlock<SMLAT>::BYTE_BLOCK);
+    // On a full long-KV tile, subblock 0 owns the entire first QK panel.
+    info.streamPackedQk = tilingData->cmpParams.cmpPackedInt8 && !info.isOriOnly &&
+                          info.v0S2DealSize == 512 && info.actualSingleProcessSInnerSize == 512;
     if (info.isOriOnly) {
         info.v0S2Start = 0;
         info.v0S2DealSize = 0;
@@ -928,7 +934,7 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::PreloadPipeline(uint32_t loop, 
         if (extraInfo0.isValid) {
             if ASCEND_IS_AIC {
                 if (!extraInfo0.isOriOnly) {
-                    CrossCoreWaitFlag(constInfo.syncV0C1);
+                    CrossCoreWaitFlag(extraInfo0.streamPackedQk ? PACKED_QK_PREFIX_READY : constInfo.syncV0C1);
                 }
                 ComputeMm1(extraInfo0);
             } else {
@@ -990,7 +996,8 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::PreloadPipeline(uint32_t loop, 
         if (extraInfo0.isValid) {
             if ASCEND_IS_AIC {
                 if (!extraInfo0.isOriOnly) {
-                    CrossCoreWaitFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
+                    CrossCoreWaitFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(
+                        extraInfo0.streamPackedQk ? PACKED_QK_PREFIX_READY : constInfo.syncV0C1);
                 }
                 ComputeMm1(extraInfo0);
             }

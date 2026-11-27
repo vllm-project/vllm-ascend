@@ -93,14 +93,17 @@ def _projected_reference(kv, scores, state, metadata, prev_rows, prev_indices):
     # Pair each predecessor with both widths and execution modes.
     [(128, "ring", True), (512, "ring", False), (128, "gather", False), (512, "gather", True)],
 )
+@pytest.mark.parametrize("page_padding", [0, STATE_RING_ROWS])
 @torch.inference_mode()
-def test_projected_chunks_and_replay(width, predecessor, use_graph):
+def test_projected_chunks_and_replay(width, predecessor, use_graph, page_padding):
     """Odd starts, long chunks, rejection-corrected starts, empty ranks and resume."""
     generator = torch.Generator().manual_seed(307)
     requests, capacity = 6, 96
     tokens = requests * capacity + 3
     state = torch.randn(7, STATE_RING_ROWS, 2 * width, generator=generator)
-    ring = state.npu()
+    backing = torch.full((len(state), STATE_RING_ROWS + page_padding, 2 * width), -37.0, device="npu")
+    ring = backing[:, :STATE_RING_ROWS]
+    ring.copy_(state)
     kv = torch.randn(tokens, width, generator=generator).npu()
     scores = torch.randn(tokens, width, generator=generator).npu()
     out = torch.full((tokens, width), 17, dtype=torch.bfloat16, device="npu")
@@ -170,6 +173,7 @@ def test_projected_chunks_and_replay(width, predecessor, use_graph):
                 torch.tensor(offsets, dtype=torch.int64, device="npu"),
             )
             torch.testing.assert_close(ring.cpu(), updated, rtol=0, atol=0)
+        assert torch.all(backing[:, STATE_RING_ROWS:] == -37)
         state = updated
         # Simulate rejection after verification; the next launch reads device starts.
         starts = [start + length - (min(2, length) if step == 1 else 0) for start, length in zip(starts, lengths)]

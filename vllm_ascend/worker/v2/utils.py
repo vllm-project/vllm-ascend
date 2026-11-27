@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -17,7 +18,12 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    LayerPackedKVCacheConfig,
+    dummy_ring_pages_per_group,
+)
 from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 
 
@@ -110,6 +116,32 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
     def warmup(self, num_kv_blocks: int) -> None:
         for zeroer in self._zeroers:
             zeroer.warmup(num_kv_blocks)
+
+
+class LayerPackedKVBlockOps(KVBlockZeroer):
+    """Clear and copy both physical slots for each shared block ID."""
+
+    def __init__(
+        self, config: LayerPackedKVCacheConfig, attn_groups_iter, kernel_block_sizes, static_forward_context, device
+    ):
+        self.num_blocks = config.num_blocks
+        self.pages: list[torch.Tensor] = []
+        groups = []
+        context = {}
+        group_by_name = {name: group for group in attn_groups_iter for name in group.layer_names}
+        placements = {desc.layers[0]: desc for desc in config.kv_cache_tensors}
+        for name in config.page_owners:
+            # The owner starts at byte zero of its slot, including all aliased components.
+            owner = static_forward_context[name].kv_cache
+            width = placements[name].block_stride // owner.element_size()
+            page = owner.as_strided((config.num_blocks, width), (width, 1)).view(torch.uint8)
+            self.pages.append(page)
+            context[name] = SimpleNamespace(kv_cache=page)
+            groups.append(replace(group_by_name[name], layer_names=[name], kernel_block_stride=0))
+        super().__init__(device, groups, kernel_block_sizes, context, config.num_blocks)
+
+    def copy_blocks(self, copies: list[KVCacheBlockCopy]) -> None:
+        copy_kv_cache_blocks_inplace(self.pages, self.num_blocks, copies)
 
 
 class C8KVBlockZeroer:
@@ -242,18 +274,27 @@ def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> Non
     """Assign live ring pages to dummy requests for V4.1 graph runs."""
     if ring_state_update_skipped():
         return
-    for gid, group in enumerate(runner.kv_cache_config.kv_cache_groups):
+    config = runner.kv_cache_config
+    shared_groups = getattr(runner.block_tables, "v41_shared_ring_groups", ())
+    for gid, group in enumerate(config.kv_cache_groups):
         if not is_circular_kv_cache_spec(group.kv_cache_spec):
             continue
-        if num_reqs >= runner.kv_cache_config.num_blocks:
-            raise ValueError("Insufficient ring pages for dummy graph requests")
-        forward_context = runner.compilation_config.static_forward_context
-        block_table = runner.block_tables.input_block_tables[gid]
-        block_table[:num_reqs, 0] = torch.arange(
-            1,
-            num_reqs + 1,
-            dtype=block_table.dtype,
-            device=block_table.device,
-        )
+        if shared_groups:
+            live = dummy_ring_pages_per_group(config.num_blocks, num_reqs, len(shared_groups))
+            stop = config.num_blocks - shared_groups.index(gid) * live
+            start = stop - live
+        else:
+            live = num_reqs
+            start, stop = 1, 1 + live
+            if stop > config.num_blocks:
+                raise ValueError("Insufficient ring pages for dummy graph requests")
+        table = runner.block_tables.input_block_tables[gid]
+        table[:live, 0] = torch.arange(start, stop, dtype=table.dtype, device=table.device)
+        # C2 masks reads and writes to block zero. Clear stale IDs for excess rows.
+        if live < num_reqs:
+            table[live:num_reqs, 0].zero_()
         for name in group.layer_names:
-            forward_context[name].kv_cache[0][1 : num_reqs + 1].zero_()
+            cache = runner.compilation_config.static_forward_context[name].kv_cache
+            # V4.1 binds the ring tensor directly; GLM-Next KPool binds a list.
+            ring = cache if isinstance(cache, torch.Tensor) else cache[0]
+            ring[start:stop].zero_()

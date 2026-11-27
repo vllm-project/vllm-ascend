@@ -203,7 +203,11 @@ __aicore__ inline void DataCopyPABySlots(LocalTensor<T> &dstTensor, GlobalTensor
     }
 }
 
+constexpr uint32_t PACKED_QK_PREFIX_ROWS = 128;
+constexpr uint32_t PACKED_QK_PREFIX_READY = 10;
+
 struct RunInfo {
+    bool streamPackedQk = false;
     uint32_t loop = 0;
     uint32_t cmpLoop = 0; // 用于判断取 用于merge的4块GM 中的哪一块
     uint32_t bIdx = 0;

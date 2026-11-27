@@ -90,10 +90,9 @@ def _pooled_blocked(
     group_idx,
     start_pos,
     seg_row_base,
-    cache_row,
     kv_ptr,
     score_ptr,
-    cache_ptr,
+    history_ptr,
     prev_rows_ptr,
     prev_row_idx,
     offs_h,
@@ -116,7 +115,6 @@ def _pooled_blocked(
     # Keep masked history lanes inside the projection allocation. Ascend may
     # form a DMA address for a masked lane before applying the load mask.
     # The original masks and ring selection still supply all history values.
-    history_ptr = cache_ptr + cache_row * CACHE_SIZE * 2 * HEAD_DIM
     history_slot_stride = 2 * HEAD_DIM
     if HAS_PREV_ROWS:
         if prev_row_idx >= 0:
@@ -229,6 +227,7 @@ def _pool_kernel(
     group_slots_per_batch,  # Group slots per batch: ceil(max_used_len / RATIO)
     num_batch,
     num_cache_blocks,
+    PAGE_STRIDE: tl.constexpr,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     RATIO: tl.constexpr,
@@ -264,7 +263,7 @@ def _pool_kernel(
             seg_off = token_pos - start_pos
             # Leading residual count; nonzero only when local_group == 0.
             residual = start_pos - group_idx * RATIO
-            cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
+            history_ptr = cache_ptr + cache_row * PAGE_STRIDE
             if residual > 0:
                 prev_row_idx = -1
                 if HAS_PREV_ROWS:
@@ -273,10 +272,9 @@ def _pool_kernel(
                     group_idx,
                     start_pos,
                     seg_row_base,
-                    cache_row,
                     kv_ptr,
                     score_ptr,
-                    cache_ptr,
+                    history_ptr,
                     prev_rows_ptr,
                     prev_row_idx,
                     offs_h,
@@ -322,10 +320,9 @@ def _pool_kernel(
                         group_idx,
                         start_pos,
                         seg_row_base,
-                        cache_row,
                         kv_ptr,
                         score_ptr,
-                        cache_ptr,
+                        history_ptr,
                         prev_rows_ptr,
                         -1,
                         offs_h,
@@ -366,6 +363,7 @@ def _cache_update_kernel(
     write_slots_per_batch,  # Write slots per batch: min(max_used_len, CACHE_SIZE)
     num_batch,
     num_cache_blocks,
+    PAGE_STRIDE: tl.constexpr,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PROTECT_NULL: tl.constexpr = False,
@@ -390,8 +388,9 @@ def _cache_update_kernel(
             cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
             kv_vals = tl.load(kv_ptr + proj_row * HEAD_DIM + offs_h)
             score_vals = tl.load(score_ptr + proj_row * HEAD_DIM + offs_h)
-            tl.store(cache_ptr + (cache_row * CACHE_SIZE + slot) * 2 * HEAD_DIM + offs_h, kv_vals)
-            tl.store(cache_ptr + (cache_row * CACHE_SIZE + slot) * 2 * HEAD_DIM + HEAD_DIM + offs_h, score_vals)
+            slot_ptr = cache_ptr + cache_row * PAGE_STRIDE + slot * 2 * HEAD_DIM
+            tl.store(slot_ptr + offs_h, kv_vals)
+            tl.store(slot_ptr + HEAD_DIM + offs_h, score_vals)
 
 
 # ============================================================================
@@ -574,6 +573,7 @@ def compressor(
             group_slots_per_batch,
             num_batch,
             num_cache_blocks=0,
+            PAGE_STRIDE=state_cache.stride(0),
             CACHE_SIZE=cache_size,
             HEAD_DIM=head_dim,
             RATIO=ratio,
@@ -596,6 +596,7 @@ def compressor(
             write_slots_per_batch,
             num_batch,
             num_cache_blocks=0,
+            PAGE_STRIDE=state_cache.stride(0),
             CACHE_SIZE=cache_size,
             HEAD_DIM=head_dim,
         )
@@ -697,6 +698,7 @@ def _write_pcp_ring_rows_kernel(
     num_requests,
     NUM_BLOCKS: tl.constexpr,
     ROW_WIDTH: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
     RING_ROWS: tl.constexpr,
 ):
     write_idx = tl.program_id(0)
@@ -711,7 +713,7 @@ def _write_pcp_ring_rows_kernel(
             token_offset = tl.load(token_offsets_ptr + write_idx)
             ring_slot = (start_pos + token_offset) % RING_ROWS
             kv_score_row = tl.load(kv_score_rows_ptr + source_row_idx * ROW_WIDTH + columns)
-            tl.store(ring_state_ptr + (block_idx * RING_ROWS + ring_slot) * ROW_WIDTH + columns, kv_score_row)
+            tl.store(ring_state_ptr + block_idx * PAGE_STRIDE + ring_slot * ROW_WIDTH + columns, kv_score_row)
 
 
 def write_pcp_ring_rows(
@@ -730,6 +732,7 @@ def write_pcp_ring_rows(
             num_requests=ring_metadata.shape[1],
             NUM_BLOCKS=ring_state.shape[0],
             ROW_WIDTH=ring_state.shape[-1],
+            PAGE_STRIDE=ring_state.stride(0),
             RING_ROWS=STATE_RING_ROWS,
         )
 
@@ -759,7 +762,7 @@ def compressor_from_projected(
         raise ValueError("Expected token-aligned BF16 pooled output")
     if metadata.dtype != torch.int32 or metadata.ndim != 2 or metadata.shape[0] != 5:
         raise ValueError("Expected INT32 [5, requests] device metadata")
-    tensors = [kv, scores, state_cache, metadata, out]
+    tensors = [kv, scores, metadata, out]
     if (prev_rows is None) != (prev_row_indices is None):
         raise ValueError("Expected both gathered rows and predecessor indices, or neither")
     if prev_rows is not None:
@@ -768,9 +771,9 @@ def compressor_from_projected(
         if prev_row_indices.dtype != torch.int64 or prev_row_indices.shape != (metadata.shape[1],):
             raise ValueError("Expected one INT64 predecessor index per local chunk")
         tensors.extend((prev_rows, prev_row_indices))
-    if not all(t.is_contiguous() for t in tensors):
-        raise ValueError("Compressor requires contiguous projections, ring pages and controls")
-    if not all(t.device == kv.device for t in tensors):
+    if not all(t.is_contiguous() for t in tensors) or state_cache.stride()[1:] != (2 * width, 1):
+        raise ValueError("Compressor requires contiguous projections, ring rows and controls")
+    if state_cache.device != kv.device or not all(t.device == kv.device for t in tensors):
         raise ValueError("Compressor tensors must share one device")
     if num_cores <= 0 or not 0 <= max_query_len <= tokens:
         raise ValueError("Invalid compressor launch bounds")
@@ -797,6 +800,7 @@ def compressor_from_projected(
         groups,
         batches,
         num_cache_blocks=state_cache.shape[0],
+        PAGE_STRIDE=state_cache.stride(0),
         CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         RATIO=2,
@@ -820,6 +824,7 @@ def compressor_from_projected(
         writes,
         batches,
         num_cache_blocks=state_cache.shape[0],
+        PAGE_STRIDE=state_cache.stride(0),
         CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         PROTECT_NULL=True,

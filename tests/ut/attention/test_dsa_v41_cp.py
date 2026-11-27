@@ -1039,7 +1039,7 @@ class TestPCPBatchLifecycle:
             compressor=torch.nn.Identity(),
             rotary_emb=SimpleNamespace(layername=LAYER),
             indexer=SimpleNamespace(update_keys=lambda value, slots, cos, sin: check_rope(value, cos, sin)),
-            long_kv_cache=SimpleNamespace(kv_cache=object()),
+            long_kv_cache=SimpleNamespace(kv_cache=torch.empty(1, 4, 1, 8, dtype=torch.bfloat16)),
             head_dim=8,
         )
         monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", lambda attn, *args: check_rope(*args))

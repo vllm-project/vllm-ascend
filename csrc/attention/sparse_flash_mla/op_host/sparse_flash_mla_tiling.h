@@ -169,6 +169,7 @@ TILING_DATA_FIELD_DEF(int64_t, cmpKvStride0)         // A2/A3
 TILING_DATA_FIELD_DEF(uint32_t, cmpSparseBlockCount) // A5
 TILING_DATA_FIELD_DEF(uint32_t, cmpKvSeqSize)        // A5
 TILING_DATA_FIELD_DEF(uint32_t, cmpKeyStride0)       // A5
+TILING_DATA_FIELD_DEF(uint32_t, cmpPackedInt8)       // A2/A3 CSA
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseFlashMlaCmpParamsOp, SparseFlashMlaCmpParams)
 
