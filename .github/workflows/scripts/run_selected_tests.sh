@@ -187,8 +187,11 @@ print_summary() {
 
 all_tests_skipped() {
   local log_file="$1"
-  grep -Eq '[0-9]+ skipped' "${log_file}" &&
-    ! grep -Eq '[0-9]+ (passed|failed|errors?)' "${log_file}"
+  local summary
+  summary=$(grep -E '=+ .*(passed|skipped|error|failed).* in [0-9.]+s' "${log_file}" | tail -1)
+  [ -n "${summary}" ] &&
+    echo "${summary}" | grep -Eq '[0-9]+ skipped' &&
+    ! echo "${summary}" | grep -Eq '[0-9]+ (passed|failed|errors?)'
 }
 
 run_pytest_target() {
