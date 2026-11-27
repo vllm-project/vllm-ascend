@@ -180,7 +180,10 @@ To fall back to local computation after an external load fails, set
 For SFA, Prefill can combine the AscendStore Memcache backend with the
 Mooncake V2 layerwise proxy. Start Memcache and configure its store as in
 [Layerwise Prefill offload](layerwise_and_sparse_kv_cache_offloading.md).
-Use eager Prefill, matching TP sizes and PP=PCP=DCP=1 on both endpoints.
+Use eager Prefill and matching TP sizes with DCP=1 on both endpoints.
+Decode uses PP=PCP=1. Prefill can use pipeline parallelism, and can use
+PCP with TP=1. Each Prefill PP stage sends its own layers and only one
+PCP replica sends each replicated page.
 
 Prefill `--kv-transfer-config` for a 950 deployment:
 

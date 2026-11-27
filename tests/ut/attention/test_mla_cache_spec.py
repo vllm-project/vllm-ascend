@@ -94,7 +94,7 @@ def _make_owner(impl, backend, rope_dim=64):
     return layer
 
 
-def _get_owner_spec(monkeypatch, layer):
+def _get_owner_spec(monkeypatch, layer, pcp_size=1):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -104,6 +104,7 @@ def _get_owner_spec(monkeypatch, layer):
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
     )
     return layer.get_kv_cache_spec(config)
 
@@ -128,6 +129,19 @@ def test_sfa_spec_uses_owner_decisions_and_backend_packing(monkeypatch, format_n
     assert spec.cache_sparse_sfa_c8 is (format_name in ("c8", "c8_nope"))
     assert spec.cache_sparse_sfa_turboquant is (format_name in ("tq", "tq_both"))
     assert spec.page_size_bytes == 128 * (1152 if format_name == "bf16" else width)
+
+
+def test_glm_pcp_c8_cache_uses_one_latent_head(monkeypatch):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.sfa_qsfa_packed_kv_head_dim = 656
+    impl.c8_cache_dtype = torch.uint8
+    impl.kv_cache_dtype = "fp8"
+    layer = _make_owner(impl, AscendSFABackend)
+
+    spec = _get_owner_spec(monkeypatch, layer, pcp_size=8)
+    assert spec.num_kv_heads == 1
+    assert spec.page_size_bytes == 128 * 656
 
 
 @pytest.mark.parametrize("quantized", [False, True])

@@ -311,17 +311,20 @@ class _MemFabricPushWorker(_MemFabricTransport, MooncakePushConnectorWorker):
         if any(pp.hisparse_host_layers for pp in remote.metadata_by_pp_rank.values()):
             if (
                 self.tp_size != remote.tp_size
-                or self.pcp_size != 1
                 or remote.pcp_size != 1
                 or self.dcp_size != 1
                 or remote.dcp_size != 1
-                or self.pp_size != 1
                 or remote.pp_size != 1
             ):
-                raise ValueError("Layerwise HiSparse Push requires equal TP and PP=PCP=DCP=1 on both endpoints")
+                raise ValueError("Layerwise HiSparse Push requires equal TP, DCP=1, and PP=PCP=1 on Decode")
+            if self.pcp_size > 1 and self.tp_size != 1:
+                raise ValueError("Layerwise HiSparse Push with Prefill PCP requires TP=1")
             layers = set(remote.metadata_by_pp_rank[0].layer_names)
-            if layers != set(self._layer_indices):
-                raise ValueError("P and D layerwise HiSparse transfer layers differ")
+            local_layers = set(self._layer_indices)
+            # Each Prefill PP stage registers its own layers. Decode waits
+            # for DONE from every producer rank before using the pages.
+            if not local_layers or not local_layers <= layers or (self.pp_size == 1 and local_layers != layers):
+                raise ValueError("Prefill stage layers do not match the HiSparse Decode transfer layout")
         return remote
 
     def _get_write_addresses(self, batch, pp, worker):
