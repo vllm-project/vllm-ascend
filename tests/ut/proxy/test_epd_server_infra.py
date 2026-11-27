@@ -303,6 +303,17 @@ def test_poll_reports_a_crashed_instance(monkeypatch):
     assert clean._poll() is None, "a clean exit is not a startup failure"
 
 
+def test_instance_helpers_expose_pids_and_teardown(monkeypatch):
+    server, _ = _make_server(monkeypatch, exit_codes=[0, 0])
+
+    assert server.instance_pids() == [proc.pid for proc in server._proc_list]
+    assert server.terminate_instance(0) == 0
+    assert server.stop() == [0, 0]
+
+    stuck, _ = _make_server(monkeypatch, exit_codes=[0], timeout_indexes={0})
+    assert stuck.terminate_instance(0) is None, "a process that ignores SIGTERM reports no exit code"
+
+
 def test_readiness_loop_fails_fast_when_an_instance_died(monkeypatch):
     """A crashed instance must abort the startup wait instead of timing out."""
     terminated: list[bool] = []

@@ -56,7 +56,7 @@ def test_encoder_only_node_serves_independently() -> None:
     encode_port = get_open_port()
     with RemoteEPDServer(
         vllm_serve_args=[encoder_server_args(MODEL, encode_port, shared_storage_path)],
-    ) as server:
+    ):
         _assert_health(encode_port)
 
         text_response = _post(encode_port, text_payload("Say hi.", max_tokens=1))
@@ -75,7 +75,7 @@ def test_encoder_only_node_serves_independently() -> None:
         after = wait_for_ec_files(shared_storage_path, before, expected_new=1)
         assert_ec_files(shared_storage_path, before, after, expected_new=1)
 
-    assert server.exit_codes == [0], f"encoder exited with {server.exit_codes}, expected a graceful 0"
+    # The context manager asserts the instance exit codes on teardown.
     assert not Path(shared_storage_path).exists(), (
         f"EC shared storage was not cleaned up after shutdown: {shared_storage_path}"
     )

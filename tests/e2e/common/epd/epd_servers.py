@@ -201,6 +201,23 @@ class RemoteEPDServer(RemoteOpenAIServer):
             self.exit_codes.append(code)
         return self.exit_codes
 
+    def instance_pids(self) -> list[int]:
+        """Return the pid of every started instance, in launch order."""
+        return [proc.pid for proc in self._proc_list]
+
+    def terminate_instance(self, index: int) -> int | None:
+        """Stop one instance with the same tree reaping the teardown uses."""
+        proc = self._proc_list[index]
+        self._terminate_process_tree(proc)
+        try:
+            return proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def stop(self) -> list[int | None]:
+        """Stop every instance and return their exit codes."""
+        return self._terminate_server()
+
     def _assert_clean_shutdown(self) -> None:
         """Assert that every server process exited with an expected code."""
         still_alive = [(index, proc.pid) for index, proc in enumerate(self._proc_list) if proc.poll() is None]

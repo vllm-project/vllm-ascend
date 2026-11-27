@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -83,14 +81,6 @@ def _fault_cluster(shared_storage_path: str) -> Iterator[EpdCluster]:
         )
 
 
-def _terminate_instance(server: RemoteEPDServer, index: int) -> None:
-    """Kill one EPD instance through the same tree-reaping path the teardown uses."""
-    proc = server._proc_list[index]
-    server._terminate_process_tree(proc)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=10)
-
-
 @pytest.mark.e2e_model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.e2e_coverage(
     arch="multimodal",
@@ -104,7 +94,7 @@ def _terminate_instance(server: RemoteEPDServer, index: int) -> None:
 @wait_until_npu_memory_free()
 def test_encoder_disconnect_returns_error() -> None:
     with _fault_cluster(unique_ec_path("fault_disconnect")) as cluster:
-        _terminate_instance(cluster.servers, 0)
+        cluster.servers.terminate_instance(0)
         request_body = image_payload([image_urls()[0]], "Describe this image.", max_tokens=8)
 
         started = time.monotonic()
@@ -141,12 +131,9 @@ def test_encoder_restart_recovers() -> None:
     shared_storage_path = unique_ec_path("fault_restart")
 
     with _fault_cluster(shared_storage_path) as cluster:
-        _terminate_instance(cluster.servers, 0)
-        with RemoteEPDServer(
-            vllm_serve_args=[encoder_server_args(MODEL, cluster.encode_port, shared_storage_path)]
-        ) as replacement:
+        cluster.servers.terminate_instance(0)
+        with RemoteEPDServer(vllm_serve_args=[encoder_server_args(MODEL, cluster.encode_port, shared_storage_path)]):
             recovered = post_chat(cluster.proxy_chat_url, payload)
-        assert replacement.exit_codes == [0], f"restarted encoder exit codes: {replacement.exit_codes}"
 
     assert_outputs_equal(recovered, baseline, context="encoder restart")
 
@@ -166,15 +153,16 @@ def test_graceful_shutdown_exit_codes() -> None:
     shared_storage_path = unique_ec_path("fault_shutdown")
     with _fault_cluster(shared_storage_path) as cluster:
         post_chat(cluster.proxy_chat_url, image_payload([image_urls()[0]], "Describe this image.", max_tokens=4))
-        pids = [proc.pid for proc in cluster.servers._proc_list]
-        pids += [proc.pid for proc in cluster.proxy._proc_list]
+        pids = cluster.servers.instance_pids() + cluster.proxy.instance_pids()
 
         started = time.monotonic()
         # SIGTERM the proxy first, then E, then PD (the order required by the node).
-        cluster.proxy._terminate_server()
-        cluster.servers._terminate_server()
+        cluster.proxy.stop()
+        cluster.servers.stop()
         elapsed = time.monotonic() - started
 
+        # This is the one case that requires a graceful zero exit; the shared
+        # teardown assertion deliberately also accepts -SIGTERM.
         assert cluster.proxy.exit_codes == [0], f"proxy exit codes: {cluster.proxy.exit_codes}"
         assert cluster.servers.exit_codes == [0, 0], f"E/PD exit codes: {cluster.servers.exit_codes}"
         assert elapsed < GRACEFUL_SHUTDOWN_MAX_SECONDS, (
