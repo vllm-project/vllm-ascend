@@ -481,6 +481,10 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
     valid_compressor_state_block = (compressor_state_block >= 0) & (
         compressor_state_block < num_compressor_state_blocks
     )
+    safe_compressor_state_block = tl.minimum(
+        tl.maximum(compressor_state_block, 0),
+        num_compressor_state_blocks - 1,
+    )
     valid_row = (
         row_mask
         & valid_request
@@ -488,6 +492,7 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         & (rows < query_row_end)
         & (end_position >= COMPRESS_RATIO - 1)
         & (compressed_slot >= 0)
+        & (compressed_slot < compressed_num_slots)
     )
     half_rope: tl.constexpr = rotary_dim // 2
     partner_dims = tl.where(
@@ -503,8 +508,11 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         safe_position = tl.maximum(position, 0)
         use_raw = position >= chunk_start_position
         raw_row = query_row_start + position - chunk_start_position
+        safe_raw_row = tl.minimum(tl.maximum(raw_row, 0), num_rows - 1)
         raw_values = tl.load(
-            raw_keys_ptr + raw_row[:, None] * stride_raw_row + dims[None, :] * stride_raw_dim,
+            raw_keys_ptr
+            + safe_raw_row[:, None] * stride_raw_row
+            + dims[None, :] * stride_raw_dim,
             mask=(
                 valid_row & use_raw & (raw_row >= query_row_start) & (raw_row < query_row_end) & (raw_row < num_rows)
             )[:, None]
@@ -513,7 +521,8 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         ).to(tl.float32)
         compressor_state_values = tl.load(
             compressor_state_cache_ptr
-            + tl.maximum(compressor_state_block, 0).to(tl.int64)[:, None] * stride_compressor_state_block
+            + safe_compressor_state_block.to(tl.int64)[:, None]
+            * stride_compressor_state_block
             + (safe_position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
             + dims[None, :] * stride_compressor_state_dim,
             mask=(valid_row & ~use_raw & valid_compressor_state_block)[:, None] & (dims < HEAD_DIM)[None, :],
@@ -522,7 +531,7 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         accumulator += tl.where(use_raw[:, None], raw_values, compressor_state_values)
         partner_raw_values = tl.load(
             raw_keys_ptr
-            + raw_row[:, None] * stride_raw_row
+            + safe_raw_row[:, None] * stride_raw_row
             + partner_dims[None, :] * stride_raw_dim,
             mask=(
                 valid_row
@@ -536,7 +545,7 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
         ).to(tl.float32)
         partner_state_values = tl.load(
             compressor_state_cache_ptr
-            + tl.maximum(compressor_state_block, 0).to(tl.int64)[:, None]
+            + safe_compressor_state_block.to(tl.int64)[:, None]
             * stride_compressor_state_block
             + (safe_position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
             + partner_dims[None, :] * stride_compressor_state_dim,
@@ -555,6 +564,10 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
     if LOAD_ROPE_POSITIONS:
         first_from_raw = first_position >= chunk_start_position
         raw_first_row = query_row_start + first_position - chunk_start_position
+        safe_raw_first_row = tl.minimum(
+            tl.maximum(raw_first_row, 0),
+            num_rows - 1,
+        )
 
     # Keep the original materialization boundaries: pooling, normalization,
     # both rotary products and the final add/sub all round to BF16.
@@ -599,11 +612,13 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
             & (raw_first_row < query_row_end)
             & (raw_first_row < num_rows)
         )
-        raw_position_base = raw_positions_ptr + raw_first_row * stride_raw_positions_row
+        raw_position_base = (
+            raw_positions_ptr + safe_raw_first_row * stride_raw_positions_row
+        )
         valid_state_position = valid_row & ~first_from_raw & valid_compressor_state_block
         state_position_base = (
             rope_cache_ptr
-            + tl.maximum(compressor_state_block, 0).to(tl.int64) * stride_rope_block
+            + safe_compressor_state_block.to(tl.int64) * stride_rope_block
             + (safe_first_position % COMPRESSOR_STATE_SIZE) * stride_rope_token
         )
         position_0 = tl.where(
@@ -669,7 +684,10 @@ def _compress_qsa_groups_norm_mrope_store_kernel(
     values = tl.where((dims < rotary_dim)[None, :], rotated, normalized)
     # Match the old store mask, including zero results for invalid owners.
     valid_slot = (compressed_slot >= 0) & (compressed_slot < compressed_num_slots)
-    slot = tl.maximum(compressed_slot, 0).to(tl.int64)
+    slot = tl.minimum(
+        tl.maximum(compressed_slot, 0),
+        compressed_num_slots - 1,
+    ).to(tl.int64)
     destination = (
         compressed_cache_ptr
         + slot[:, None] // compressed_page_size * compressed_stride_block
