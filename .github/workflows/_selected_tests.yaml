@@ -666,6 +666,18 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
+        - name: Upload coverage package artifact
+          if: ${{ !cancelled() }}
+          uses: actions/upload-artifact@v7
+          with:
+            name: coverage-package${{ inputs.coverage-file-suffix && format('-{0}', inputs.coverage-file-suffix) || '' }}
+            path: |
+              coverage.tar
+              coverage_version.txt
+              test_case_map.json
+            if-no-files-found: error
+            retention-days: 14
+
         - name: Record current release coverage branch
           run: |
             python3 - <<'PY'
