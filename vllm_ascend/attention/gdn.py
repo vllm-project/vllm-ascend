@@ -16,6 +16,7 @@
 #
 
 from functools import lru_cache, wraps
+from inspect import signature
 
 import torch
 import torch_npu
@@ -104,6 +105,28 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
     )
 
 
+@torch.no_grad()
+def _refresh_recurrent_gate_bias(layer: nn.Module) -> None:
+    """Refresh the FP32 gate constant after loading, never during decode."""
+    bias = getattr(layer, "_recurrent_dt_bias_fp32", None)
+    if bias is not None and not layer.dt_bias.is_meta:
+        if bias.device != layer.dt_bias.device:
+            # Materialize deferred buffers; same-device reloads keep graph addresses.
+            bias = torch.empty_like(layer.dt_bias, dtype=torch.float32)
+            layer._recurrent_dt_bias_fp32 = bias
+        bias.copy_(layer.dt_bias)
+
+
+def refresh_recurrent_gate_biases(model: nn.Module) -> None:
+    """Refresh derived gate constants after a completed weight update.
+
+    Copy into the existing buffers to preserve addresses captured by NPU graphs.
+    Kernel-format reloads bypass the per-layer postprocessing hook.
+    """
+    for layer in model.modules():
+        _refresh_recurrent_gate_bias(layer)
+
+
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
     """Register the packed weight and repack it after every source load."""
     conv1d = _get_base_conv1d(layer)
@@ -122,6 +145,19 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
             ),
         )
 
+    if (
+        isinstance(layer, nn.Module)
+        and getattr(layer, "head_k_dim", None) == 128
+        and getattr(layer, "head_v_dim", None) == 128
+        and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_RECURRENT_FUSION)
+        and not hasattr(layer, "_recurrent_dt_bias_fp32")
+    ):
+        layer.register_buffer(
+            "_recurrent_dt_bias_fp32",
+            torch.empty_like(layer.dt_bias, dtype=torch.float32),
+            persistent=False,
+        )
+
     quant_method = getattr(conv1d, "quant_method", None)
     if quant_method is None:
         return
@@ -133,6 +169,7 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
     def process_weights_and_pack(*args, **kwargs):
         result = process_weights_after_loading(*args, **kwargs)
         _pack_conv_weights(conv1d)
+        _refresh_recurrent_gate_bias(layer)
         return result
 
     quant_method.process_weights_after_loading = process_weights_and_pack
@@ -207,6 +244,25 @@ def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor
     raise ValueError(f"GDN causal cache_indices must be 1D or 2D, got shape={tuple(cache_indices.shape)}")
 
 
+@lru_cache(maxsize=1)
+def _supports_fused_recurrent_gdn() -> bool:
+    """Probe the installed FLA API once, without reading NPU tensor values."""
+    if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_RECURRENT_FUSION):
+        return False
+    required = {"use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel", "A_log", "dt_bias"}
+    # Hybrid wheels retain the old public wrapper signature while dispatching
+    # to the new stable backend. Inspect that selected backend once.
+    try:
+        from fla_npu.ops import ascendc
+
+        resolver = getattr(ascendc, "_get_direct_op", None)
+        op = resolver("npu_recurrent_gated_delta_rule") if resolver is not None else recurrent_gated_delta_rule
+        return callable(op) and required.issubset(signature(op).parameters)
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        # An unavailable or uninspectable optional API must not enable fusion.
+        return False
+
+
 def _flatten_recurrent_state_indices(
     state_indices: torch.Tensor,
     total_tokens: int,
@@ -247,6 +303,9 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
+_MAX_RECURRENT_GDN_DMA_GAP_BYTES = (1 << 32) - 1
+
+
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -265,14 +324,35 @@ def _rearrange_decode_qkv(
     value_dim: int,
     head_k_dim: int,
     head_v_dim: int,
+    *,
+    allow_strided: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Expose contiguous token-major Q/K/V without an intermediate concat.
+    """Split decode QKV, preserving views for the native fused recurrent API.
 
-    Multi-token split views can have gaps between rows, so each component
-    still needs its own contiguous buffer. Single-token views need no copy.
+    Packed rows may have padding and a storage offset. The native API accepts
+    those views when each head is contiguous and the DMA row gap fits uint32.
+    Other backends and unsupported layouts retain the contiguous contract.
     """
     num_tokens = mixed_qkv.shape[0]
     query, key, value = mixed_qkv.split((key_dim, key_dim, value_dim), dim=-1)
+    if (
+        allow_strided
+        and num_tokens > 0
+        and mixed_qkv.dtype == torch.bfloat16
+        and head_k_dim == head_v_dim == 128
+        and key_dim > 0
+        and key_dim % head_k_dim == 0
+        and value_dim % key_dim == 0
+        and 1 <= value_dim // key_dim <= 16
+        and mixed_qkv.stride(-1) == 1
+        and mixed_qkv.stride(0) >= 2 * key_dim + value_dim
+        and (mixed_qkv.stride(0) - head_k_dim) * mixed_qkv.element_size() <= _MAX_RECURRENT_GDN_DMA_GAP_BYTES
+    ):
+        return (
+            query.view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
+            key.view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
+            value.view(1, num_tokens, value_dim // head_v_dim, head_v_dim),
+        )
     return (
         query.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
         key.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
@@ -285,6 +365,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _pack_conv_weights(self) -> None:
         """Refresh the kernel-layout convolution parameter in place."""
         _pack_conv_weights(_get_base_conv1d(self))
+        _refresh_recurrent_gate_bias(self)
 
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -579,6 +660,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
 
+        # Select the recurrent backend before splitting QKV so only the native
+        # fused API receives strided views; fallback inputs remain contiguous.
+        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
+        use_upstream_recurrent = has_spec_decode and attn_metadata.spec_decode_metadata.use_upstream_recurrent
+        recurrent_dt_bias = getattr(self, "_recurrent_dt_bias_fp32", self.dt_bias)
+        fuse_recurrent = (
+            # The upstream fallback consumes preprocessed gate/beta and Q/K.
+            not use_upstream_recurrent
+            and not use_recoverssm
+            and mixed_qkv.dtype == torch.bfloat16
+            and self.head_k_dim == 128
+            and self.head_v_dim == 128
+            and self.A_log.dtype == torch.float32
+            and recurrent_dt_bias is not None
+            and recurrent_dt_bias.dtype == torch.float32
+            and _supports_fused_recurrent_gdn()
+        )
+
         # 1. Convolution sequence transformation
         conv_weights_T = _get_packed_conv_weights(self)
         if has_spec_decode:
@@ -710,6 +809,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             self.value_dim // self.tp_size,
                             self.head_k_dim,
                             self.head_v_dim,
+                            allow_strided=fuse_recurrent,
                         )
                         mixed_qkv_non_spec = mixed_qkv_non_spec[num_decode_tokens:]
                         prefill_starts = attn_metadata.prefill_query_start_loc
@@ -762,6 +862,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.value_dim // self.tp_size,
                 self.head_k_dim,
                 self.head_v_dim,
+                allow_strided=fuse_recurrent,
             )
         else:
             query_spec, key_spec, value_spec = None, None, None
@@ -778,12 +879,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.value_dim // self.tp_size,
                 self.head_k_dim,
                 self.head_v_dim,
+                allow_strided=fuse_recurrent,
             )
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        # 2. Recurrent attention
-        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
+        # 2. Recurrent attention. RecoverSSM keeps its own preprocessing;
+        # native recurrent fusion consumes raw projections for decode.
+        recurrent_fusion_kwargs = {}
+        if fuse_recurrent:
+            recurrent_fusion_kwargs = {
+                "use_qk_l2norm_in_kernel": True,
+                "use_gate_in_kernel": True,
+                "use_beta_sigmoid_in_kernel": True,
+                "A_log": self.A_log,
+                "dt_bias": recurrent_dt_bias,
+            }
         has_non_spec_tokens = attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
         is_mixed_batch = has_spec_decode and has_non_spec_tokens
 
@@ -804,7 +915,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.dt_bias,
                 )
         else:
-            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            if fuse_recurrent:
+                g, beta = a.unsqueeze(0), b.unsqueeze(0)
+            else:
+                g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if is_mixed_batch:
                 g_spec = g.index_select(1, spec_token_indx)
                 beta_spec = beta.index_select(1, spec_token_indx)
@@ -820,7 +934,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if has_spec_decode:
-            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent
             if use_recoverssm:
                 assert a_spec is not None
                 assert b_spec is not None
@@ -841,8 +954,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             else:
                 assert g_spec is not None
                 assert beta_spec is not None
-                query_spec = l2norm_fwd(query_spec)
-                key_spec = l2norm_fwd(key_spec)
+                if not fuse_recurrent:
+                    query_spec = l2norm_fwd(query_spec)
+                    key_spec = l2norm_fwd(key_spec)
                 if use_upstream_recurrent:
                     # The native packed-index API bounds accepted_prev by the
                     # current query length. Reuse vLLM's strided state-table API
@@ -877,6 +991,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             spec_causal_conv1d_meta.query_start_loc,
                         ),
                         num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                        **recurrent_fusion_kwargs,
                     ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
@@ -893,8 +1008,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_decode = key_non_spec[:, :num_decode_tokens]
                 value_decode = value_non_spec[:, :num_decode_tokens]
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode.contiguous())
-            key_decode = l2norm_fwd(key_decode.contiguous())
+            if not fuse_recurrent:
+                query_decode = l2norm_fwd(query_decode.contiguous())
+                key_decode = l2norm_fwd(key_decode.contiguous())
             core_attn_out_decode = recurrent_gated_delta_rule(
                 query_decode.squeeze(0),
                 key_decode.squeeze(0),
@@ -908,6 +1024,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     num_decode_tokens,
                 ),
+                **recurrent_fusion_kwargs,
             ).unsqueeze(0)
         else:
             core_attn_out_decode = None
@@ -929,6 +1046,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     value_non_spec = value_non_spec[:, num_decode_tokens:]
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+
+            if fuse_recurrent:
+                g_non_spec, beta_non_spec = DeviceOperator.fused_gdn_gating(
+                    self.A_log,
+                    g_non_spec.squeeze(0).contiguous(),
+                    beta_non_spec.squeeze(0).contiguous(),
+                    self.dt_bias,
+                )
 
             # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
@@ -1071,8 +1196,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            if not fuse_recurrent:
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
             core_attn_out_non_spec = recurrent_gated_delta_rule(
                 query_non_spec.squeeze(0),
                 key_non_spec.squeeze(0),
@@ -1086,6 +1212,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     num_decode_tokens,
                 ),
+                **recurrent_fusion_kwargs,
             ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
