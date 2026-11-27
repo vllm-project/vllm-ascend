@@ -889,13 +889,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     stochastic rounding. With prefix caching, use Mamba cache mode `align`
     and a block size of at least `K + 1`. Without prefix caching, use `none`.
 
-    Set `PP=DCP=1` and `PCP=1` for GLM and Qwen. GLM prefill KV producers
-    can use `PCP>1`. The GLM KDA head count must be divisible by `TP × PCP`,
-    and both Qwen key- and value-head counts must be divisible by `TP`.
-
     For direct prefill/decode (P/D) transfer, use `MooncakePullConnector` or
     the default pull mode of `MooncakeConnectorV2`. Enable RecoverSSM on both
     roles and match the model weights, speculative method and window, draft
     checkpoint if used, prefix-caching settings, state dtypes, and convolution
-    layout. Match TP sizes for Kimi and Qwen. Use the default `SD` layout for
-    Kimi and for GLM when KDA head-shard counts differ across roles.
+    layout.
