@@ -26,6 +26,8 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
+- [2026/11] 我们发布了新的候选版本 [v0.34.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.34.0rc1)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.34.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
+- [2026/11] 我们发布了新的候选版本 [v0.32.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.32.0rc1)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.32.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/10] 我们发布了新的正式版本 [v0.30.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/08] 我们发布了新的正式版本 [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.23.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.18.0/)开始在 Ascend 上部署vLLM Ascend Plugin。
@@ -86,6 +88,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
+| v0.34.0rc1 | 最新候选版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/zh-cn/v0.34.0rc1/getting_started/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.34.0rc1/getting_started/installation.html)了解更多 |
+| v0.32.0rc1 | 候选版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/getting_started/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/getting_started/installation.html)了解更多 |
 | v0.30.0 | 最新正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0/installation.html)了解更多 |
 | v0.23.0 | 正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/zh-cn/v0.23.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.23.0/installation.html)了解更多 |
 
@@ -101,10 +105,12 @@ vllm-ascend有主干分支和开发分支。
 | 分支              | 状态         | 备注                  |
 |------------------|--------------|----------------------|
 | main             | Maintained   | 基于vLLM main分支和vLLM最新版本（v0.34.0）CI看护   |
-| releases/v0.13.0 | Maintained   | 只允许Bug修复，不会再发布新版本 |
-| releases/v0.18.0 | Maintained   | 基于vLLM v0.18.0版本CI看护 |
-| releases/v0.23.0 | Maintained   | 基于vLLM v0.23.0版本CI看护 |
+| releases/v0.34.0rc | Maintained | 基于 vLLM v0.34.0 的候选版本分支。 |
+| releases/v0.32.0rc | Maintained | 基于 vLLM v0.32.0 的候选版本分支。 |
 | releases/v0.30.0 | Maintained   | 基于vLLM v0.30.0版本CI看护 |
+| releases/v0.23.0 | Maintained   | 基于vLLM v0.23.0版本CI看护 |
+| releases/v0.18.0 | Maintained   | 基于vLLM v0.18.0版本CI看护 |
+| releases/v0.13.0 | Maintained   | 只允许Bug修复，不会再发布新版本 |
 | rfc/<feature-name> | Maintained   | 为协作创建的[特性分支](https://docs.vllm.ai/projects/ascend/zh-cn/latest/community/versioning_policy.html#_7) |
 
 请参阅[版本策略](https://docs.vllm.ai/projects/ascend/zh-cn/latest/community/versioning_policy.html)了解更多详细信息。
