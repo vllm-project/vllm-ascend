@@ -241,7 +241,8 @@ def test_moe_routing_keeps_the_common_router_entry_and_postprocessing(load_hook_
             "get_moe_num_logical_experts": lambda *args, **kwargs: 8,
         },
     )
-    weights, ids = torch.full((1, 6), 0.5), torch.tensor([[0, 1, 2, 3, 4, 5]])
+    # The common router has already mapped logical IDs to physical experts.
+    weights, ids = torch.full((1, 6), 0.5), torch.tensor([[10, 11, 12, 13, 14, 15]])
     router = SimpleNamespace(_select_experts=Mock(return_value=(weights, ids)))
     binding = SimpleNamespace(select_experts=Mock(side_effect=AssertionError("dispatch belongs inside the router")))
     layer = SimpleNamespace(
@@ -254,7 +255,14 @@ def test_moe_routing_keeps_the_common_router_entry_and_postprocessing(load_hook_
     )
     if force_balance:
         monkeypatch.setattr(torch, "rand", lambda *a, **k: torch.tensor([[7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]]))
-    actual_weights, actual_ids = moe._select_experts(layer, torch.zeros(1, 16), torch.zeros(1, 8), force_balance)
+    hidden_states, router_logits = torch.zeros(1, 16), torch.zeros(1, 8)
+    input_ids = torch.tensor([123])
+    actual_weights, actual_ids = moe._select_experts(
+        layer, hidden_states, router_logits, force_balance, input_ids=input_ids
+    )
+    router._select_experts.assert_called_once_with(
+        hidden_states=hidden_states, router_logits=router_logits, input_ids=input_ids
+    )
     assert actual_weights is weights
     assert actual_ids.tolist() == ([[7, 6, 5, 4, 3, 2]] if force_balance else [[10, 11, 12, 13, 14, 15]])
 
