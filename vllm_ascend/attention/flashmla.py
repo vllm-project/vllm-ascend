@@ -111,6 +111,13 @@ def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     return first_prefill, request_count - first_prefill, decode_tokens, common.num_actual_tokens - decode_tokens
 
 
+def split_flashmla_cache(cache: torch.Tensor, latent_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expose NoPE and RoPE slices without changing physical page strides."""
+    if cache.ndim == 5 and cache.dtype == torch.float8_e4m3fn and cache.shape[1:] == (1, 18, 128, 32):
+        return cache[:, :, : latent_dim // 32], cache[:, :, latent_dim // 32 :]
+    return cache[..., :latent_dim], cache[..., latent_dim:]
+
+
 def _check_mask_and_kv_layout(mask_mode: int, layout_kv: str) -> None:
     if mask_mode not in (FLASHMLA_NON_CAUSAL_MASK_MODE, FLASHMLA_CAUSAL_MASK_MODE):
         raise ValueError("FlashMLA mask_mode must be 0 or 3")
@@ -195,7 +202,9 @@ def _check_attention_inputs(
     batch_size = _check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
     if q.ndim != 3 or q.shape[0] == 0 or q.shape[1:] != (config.num_heads, FLASHMLA_QK_DIM):
         raise ValueError(f"FlashMLA q must be nonempty TND with configured heads and head dimension {FLASHMLA_QK_DIM}")
-    cache_tail = (FLASHMLA_BLOCK_SIZE, FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM)
+    cache_tail: tuple[int, ...] = (FLASHMLA_BLOCK_SIZE, FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM)
+    if isinstance(config, QuantFlashMLAConfig) and k_cache.ndim == 5:
+        cache_tail = (FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM // 32, FLASHMLA_BLOCK_SIZE, 32)
     if k_cache.ndim != len(cache_tail) + 1 or k_cache.shape[1:] != cache_tail or k_cache.shape[0] == 0:
         raise ValueError(f"FlashMLA {config.layout_kv} cache must have shape (pages, {cache_tail})")
     if k_cache.dtype != q.dtype:
@@ -392,6 +401,23 @@ class QuantFlashMLAImpl:
         _check_tensor("k_descale", k_descale, (1,), torch.float32)
         if q_descale.device != q.device or k_descale.device != q.device:
             raise ValueError("QuantFlashMLA descales must be on the same device as q")
+        if k_cache.ndim == 5:
+            if seqused_q is None or self.config.return_softmax_lse:
+                raise ValueError("native C8 PA_NZ decode requires used Q lengths and a local attention group")
+            output = torch.ops._C_ascend.quant_flash_mla_nz(
+                q,
+                k_cache,
+                q_descale,
+                k_descale,
+                block_table,
+                cache_seqlens,
+                cu_seqlens_q,
+                seqused_q,
+                attn_mask,
+                metadata,
+                self.config.softmax_scale,
+            )
+            return output, q.new_empty((0,), dtype=torch.float32)
         output, lse = self.attention_op(
             q,
             k_cache,

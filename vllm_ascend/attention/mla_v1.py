@@ -45,6 +45,7 @@ from vllm_ascend.attention.flashmla import (
     QuantFlashMLAConfig,
     QuantFlashMLAImpl,
     get_flashmla_ops,
+    split_flashmla_cache,
     split_flashmla_requests,
 )
 from vllm_ascend.attention.utils import (
@@ -986,6 +987,7 @@ class DecodeMLAPreprocessResult(NamedTuple):
     dequant_scale_q_nope: torch.Tensor | None = None
     current_k_nope: torch.Tensor | None = None
     current_k_pe: torch.Tensor | None = None
+    packed_c8_query: torch.Tensor | None = None
 
 
 class PrefillMLAPreprocessResult(NamedTuple):
@@ -1567,8 +1569,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        nz_cache = self.use_quant_flashmla and cache_kv_c.ndim == 5
+        num_heads = self.num_kv_heads if nz_cache else cache_k_pe.size(2)
+        latent_kv_dim = self.kv_lora_rank if nz_cache else cache_kv_c.size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1823,13 +1826,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 kv_cache[0].dtype
             )
             cache_k_pe = k_pe.to(kv_cache[1].dtype)
-        DeviceOperator.reshape_and_cache(
-            key=cache_k_nope,
-            value=cache_k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        if kv_cache[0].ndim == 5 and self.use_quant_flashmla:
+            torch.ops._C_ascend.quant_flash_mla_nz_write(cache_k_nope, cache_k_pe, *kv_cache, slots)
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=cache_k_nope, value=cache_k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slots
+            )
         if return_quantized_current:
             return cache_k_pe, cache_k_nope
         return k_pe, kv_c_normed
@@ -1892,7 +1894,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
-        if self.use_quant_flashmla and any(not cache.is_contiguous() for cache in kv_cache):
+        if self.use_quant_flashmla and (kv_cache[0].ndim == 5 or any(not cache.is_contiguous() for cache in kv_cache)):
             current_k_pe, current_k_nope = self._exec_quant_flashmla_kv_writer(
                 kv_no_split, cos, sin, kv_cache, slots, return_quantized_current=return_current_kv
             )
@@ -2096,7 +2098,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             if return_bf16_kv:
                 return current_rope.to(kv_no_split.dtype), current_nope.to(kv_no_split.dtype)
             return current_rope, current_nope
-        self._validate_mla_cache_layout(kv_cache)
+        if kv_cache[0].ndim != 5:
+            self._validate_mla_cache_layout(kv_cache)
         scales = self._quant_flashmla_writer_scales
         if scales is None:
             raise RuntimeError("QuantFlashMLA writer scales were not prepared during weight loading")
@@ -2119,13 +2122,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         # is_output_kv returns unquantized BF16 tensors for prefill. Only
         # the dense staging caches contain the scaled FP8 values to persist.
-        DeviceOperator.reshape_and_cache(
-            key=nope.flatten(0, 1)[:num_tokens],
-            value=rope.flatten(0, 1)[:num_tokens],
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        latent_rows = nope.flatten(0, 1)[:num_tokens]
+        rope_rows = rope.flatten(0, 1)[:num_tokens]
+        if kv_cache[0].ndim == 5:
+            torch.ops._C_ascend.quant_flash_mla_nz_write(latent_rows, rope_rows, *kv_cache, slots)
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=latent_rows, value=rope_rows, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slots
+            )
         if return_quantized_current:
             # DCP's replicated current cache must consume the same FP8 rows
             # as the persistent history cache, including rank-unowned slots.
@@ -2775,7 +2779,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-        elif self.use_quant_flashmla and any(not cache.is_contiguous() for cache in kv_cache):
+        elif self.use_quant_flashmla and (
+            kv_cache[0].ndim == 5 or any(not cache.is_contiguous() for cache in kv_cache)
+        ):
             k_pe, k_nope = self._exec_quant_flashmla_kv_writer(
                 kv_no_split, cos, sin, kv_cache, slots, return_bf16_kv=return_bf16_kv
             )
@@ -3071,13 +3077,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert flash is not None
         if not isinstance(fused_cache, torch.Tensor):
             raise RuntimeError(
-                "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
+                "External FlashMLA requires the original fused cache; component-major tuples are invalid"
             )
-        # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
-        # TND(576) query. The backend retains this buffer for captured capacities
-        # so replay reuses its address.
-        flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-        flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+        query = preprocessed.packed_c8_query if fused_cache.ndim == 5 and self.use_quant_flashmla else None
+        if query is None or query.shape != flash.query.shape:
+            query = flash.query
+            query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+            query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
         quant_kwargs = {}
         if self.use_quant_flashmla:
@@ -3089,7 +3095,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "k_descale": self.fak_descale_float.view(1),
             }
         latent, _ = flash.adapter.attention(
-            flash.query,
+            query,
             fused_cache,
             block_table=flash.block_table,
             cache_seqlens=flash.cache_lens,
@@ -3296,6 +3302,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
+        packed_c8_query = None
         if self.fa_quant_layer and self.support_fp8_attention:
             if self.use_quant_flashmla:
                 # QuantFlashMLA applies one descale to all 576 query channels.
@@ -3306,6 +3313,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     joint_query, dst_type=torch.float8_e4m3fn
                 )
                 decode_ql_nope, decode_q_pe = joint_query.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
+                if kv_cache[0].ndim == 5:
+                    # Local C8 decode can consume the quantizer's TND output directly.
+                    packed_c8_query = joint_query
             else:
                 decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
                     decode_ql_nope, dst_type=torch.float8_e4m3fn
@@ -3339,6 +3349,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             dequant_scale_q_nope=dequant_scale_q_nope,
             current_k_nope=current_k_nope,
             current_k_pe=current_k_pe,
+            packed_c8_query=packed_c8_query,
         )
 
     @property
@@ -3481,10 +3492,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
         external_flash_cache = kv_cache if fused_mla_cache else None
         if isinstance(kv_cache, torch.Tensor):
-            kv_cache = (
-                kv_cache[..., : self.kv_lora_rank],
-                kv_cache[..., self.kv_lora_rank :],
-            )
+            kv_cache = split_flashmla_cache(kv_cache, self.kv_lora_rank)
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output

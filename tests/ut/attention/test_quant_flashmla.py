@@ -129,7 +129,8 @@ def test_quant_flashmla_rejects_invalid_scale_or_metadata_contract(field, replac
         adapter.attention(q, cache, **kwargs)
 
 
-def test_quant_flashmla_external_forward_passes_descales(monkeypatch):
+@pytest.mark.parametrize("packed", [False, True])
+def test_quant_flashmla_external_forward_passes_descales(monkeypatch, packed):
     q_nope = torch.zeros((2, 8, 512), dtype=torch.float8_e4m3fn)
     q_pe = torch.zeros((2, 8, 64), dtype=torch.bfloat16)
     q_descale = torch.arange(16, dtype=torch.float32).view(2, 8)
@@ -157,10 +158,16 @@ def test_quant_flashmla_external_forward_passes_descales(monkeypatch):
     )
     cache = torch.empty((2, 128, 1, 576), dtype=torch.float8_e4m3fn)
     metadata = SimpleNamespace(external_flashmla=flash)
-    preprocessed = SimpleNamespace(ql_nope=q_nope, q_pe=q_pe, dequant_scale_q_nope=q_descale)
+    packed_query = torch.empty_like(query) if packed else None
+    if packed:
+        cache = cache.view(2, 1, 18, 128, 32)
+    preprocessed = SimpleNamespace(
+        ql_nope=q_nope, q_pe=q_pe, dequant_scale_q_nope=q_descale, packed_c8_query=packed_query
+    )
     monkeypatch.setattr(mla_v1, "record_attention_compute_start", lambda: None)
 
     assert AscendMLAImpl._forward_external_flashmla(impl, preprocessed, cache, metadata) is latent
+    assert adapter.attention.call_args.args[0] is (packed_query if packed else query)
     passed_q_descale = adapter.attention.call_args.kwargs["q_descale"]
     assert passed_q_descale.shape == q_descale.shape
     assert passed_q_descale.dtype == q_descale.dtype
