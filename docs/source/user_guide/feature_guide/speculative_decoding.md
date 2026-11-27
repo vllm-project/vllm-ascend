@@ -899,15 +899,14 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     - **GLM-5.3-Flash (KDA)** runs on A3 and A5. Set `PP=1` and `DCP=1`.
       `PCP>1` is supported only on prefill KV producers, where the KDA head
       count must be divisible by `TP × PCP`. Use the `SD` convolution layout
-      on both roles if their KDA head-shard counts differ. FP16 KV cache has
-      not been validated. For external prefix caching, use AscendStore with
-      Memcache or Mooncake, and use `MultiConnector` to combine it with
-      direct P/D transfer.
+      on both roles if their KDA head-shard counts differ. For external prefix
+      caching, use AscendStore with Memcache or Mooncake. Use `MultiConnector`
+      to combine it with direct P/D transfer.
     - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
       disabled. For P/D, use the same integration version and TP size on both
       roles and set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both.
-    - **Qwen3.x (GDN)** is validated on A3 and A5. Ascend 310P is unsupported.
-      For Qwen3.8, use the Qwen3.5-compatible `Qwen/Qwen3.8-27B` checkpoint.
+    - **Qwen3.x (GDN)** runs on A3 and A5. Ascend 310P is unsupported.
+      Qwen3.8 checkpoints must use a Qwen3.5-compatible GDN architecture.
       Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`, BF16 activations and
       convolution state, and BF16 or FP32 SSM state. The TP size must divide
       both the key- and value-head counts, and the value-head count must be
