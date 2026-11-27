@@ -4330,7 +4330,7 @@ Select the tab that matches your deployment hardware.
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
-    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/e=es/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D1_IP" \
@@ -4370,7 +4370,7 @@ Select the tab that matches your deployment hardware.
     ##### Topology and Prerequisites
 
     | Role | Nodes | Global DP | TP | PP | DCP | Local DP ranks | Devices per role |
-    | --- | --- | --- | --- | --- | --- | --- | --- |
+    | --- | --- | --- | --- | --- | --- |
     | Prefill | P0, P1 | 1 | 16 | 2 | 16 | One per node | 32 |
     | Decode | D0, D1 | 4 | 8 | 1 | 8 | Two per node | 32 |
 

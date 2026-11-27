@@ -38,7 +38,7 @@ at the selected vLLM Ascend commit.
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
 for the complete support matrix and the
-[Feature Guide](../../user_guide/feature_guide/index.md) for feature
+[Featurerer Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
 Deployment examples include DSpark speculative decoding and
@@ -2724,7 +2724,7 @@ Key pooling parameters:
 
 For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
 
-### 5.5 Multi-Node Colocated Deployment
+#### 5.5 Multi-Node Colocated Deployment
 
 === "A2 series"
 
@@ -2837,7 +2837,7 @@ reasoning effort to an integer from 1 to 100, pass it through
 `chat_template_kwargs.reasoning_effort`. The following example uses `50`.
 
 ```shell
-curl -sS -w '\nHTTP %{http_code}\n' "$SERVICE_URL/v1/chat/completions" \
+curl -sS -w '\nHTTP {http_code}\n' "$SERVICE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "dsv41",
@@ -2872,7 +2872,7 @@ curl -sS -w '\nHTTP %{http_code}\n' "$SERVICE_URL/v1/chat/completions" \
       ]
     }],
     \"temperature\": 0,
-    \"max_completion_tokens\": 1024
+    \"max_completion_tokens\": 102
   }"
 ```
 
