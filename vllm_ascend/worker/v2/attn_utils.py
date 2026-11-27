@@ -1499,7 +1499,7 @@ def create_kv_cache_runtime_views(
             block_stride = descriptor.block_stride
             # Migrate allocation callers from get_kv_cache_shape to this interface gradually.
             # Keep the legacy hook for other models and allocation paths until they migrate.
-            # The backend describes the cache views bound to the layer.
+            # Backend shapes already use the final runtime axis order; do not transpose between HND and NHD here.
             # For token-compressed caches, the token axis counts stored rows after compression.
             # The last axis counts elements of each component's storage dtype.
             cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
