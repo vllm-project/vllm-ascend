@@ -35,7 +35,8 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 # Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
 import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.lora.fused_moe import prepare_lora_indices
+from vllm_ascend.lora.fused_moe import get_lora_indices, has_moe_lora, prepare_lora_indices
+from vllm_ascend.lora.moe_dp import lora_ids_to_slots, lora_slots_to_ids
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
@@ -155,6 +156,16 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self.replace_allreduce = replace_allreduce
 
         padded_hidden_states_shape = hidden_states.shape
+        if self.replace_allreduce and self.lora_context is not None:
+            # Hidden states have already been sequence-parallel sharded. The
+            # Punica token mapping still describes the unsplit local DP batch.
+            prepare_lora_indices(
+                self.lora_context,
+                num_tokens=hidden_states.shape[0] * self.tp_size,
+                pad_size=0,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
@@ -453,16 +464,37 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        if self.lora_context is not None:
+            if self._use_ep_sequence_parallel():
+                # Punica describes the local DP batch before the TP token split.
+                # Include padded rows before slicing so their adapter stays -1.
+                tp_size = get_tensor_model_parallel_world_size()
+                local_indices = sequence_parallel_chunk(
+                    get_lora_indices(self.lora_context, hidden_states.shape[0] * tp_size)
+                )
+            else:
+                local_indices = get_lora_indices(self.lora_context, hidden_states.shape[0])
         if self._use_ep_sequence_parallel():
-            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+            output = self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+        else:
+            output = self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        if self.lora_context is not None:
+            slot_ids = getattr(self.lora_context.punica_wrapper, "moe_lora_slot_ids", None)
+            adapter_ids = lora_slots_to_ids(local_indices, slot_ids)
+            gathered_ids = self._all_gather_token_metadata(adapter_ids, padding_value=-1)
+            self.lora_context.gathered_lora_indices = lora_ids_to_slots(gathered_ids, slot_ids)
+        return output
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
         pertoken_scale = None
-        if quant_type == QuantType.W8A8:
+        if has_moe_lora(self.lora_context):
+            # The LoRA MLP needs the original floating-point activations.
+            # Dispatch validates the supported quantization scheme afterward.
+            pass
+        elif quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
@@ -556,6 +588,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         as hidden states and router logits. Other inputs follow the DP-then-PCP
         communication layout.
         """
+        return self._all_gather_token_metadata(input_ids, padding_value=0)
+
+    def _all_gather_token_metadata(self, input_ids: torch.Tensor, *, padding_value: int) -> torch.Tensor:
         if self._use_ep_sequence_parallel():
             return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_ids)
 
@@ -563,7 +598,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
             pad_size = max_tokens_across_dp - self.num_tokens
             if pad_size > 0:
-                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+                input_ids = nn.functional.pad(input_ids, (0, pad_size), value=padding_value)
 
             input_ids = self.moe_config.dp_group.all_gather(input_ids, 0)
 
@@ -571,7 +606,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
-                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+                input_ids = nn.functional.pad(input_ids, (0, pad_size), value=padding_value)
 
             input_ids = get_pcp_group().all_gather(input_ids, 0)
 

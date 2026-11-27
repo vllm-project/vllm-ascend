@@ -123,6 +123,33 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
+    def dispatch(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        num_ubatches: int = 1,
+    ) -> BatchExecutionDescriptor:
+        coordinator = getattr(self.model_runner, "_moe_lora_coordinator", None)
+        if coordinator is not None and coordinator.step_active:
+            # A locally base-only rank can receive expert LoRA tokens from a
+            # peer; only a globally inactive group may omit adapter operations.
+            # Preserve upstream's local graph key, including its base bucket
+            # and dummy sentinel, while covering remote expert adapters.
+            num_active_loras = (
+                max(num_active_loras, coordinator.num_active_loras) if coordinator.num_active_loras else 0
+            )
+        return super().dispatch(
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras,
+            max_query_len=max_query_len,
+            num_ubatches=num_ubatches,
+        )
+
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens

@@ -34,6 +34,8 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.lora.layers import LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
@@ -107,6 +109,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.lora.moe_dp import MoELoRACoordinator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
@@ -336,6 +339,31 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
+
+    def load_lora_model(self, model: torch.nn.Module, vllm_config: VllmConfig, device: torch.device):
+        model = super().load_lora_model(model, vllm_config, device)
+        self._moe_lora_coordinator = MoELoRACoordinator.from_model(
+            model, self.lora_manager, dp_size=vllm_config.parallel_config.data_parallel_size
+        )
+        return model
+
+    def _set_active_loras(
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+    ) -> None:
+        coordinator = getattr(self, "_moe_lora_coordinator", None)
+        # The step hook already activated the global union. The upstream LRU
+        # manager accepts an empty set to update only the local token mapping;
+        # avoid reloading load_inplace adapters twice in the same forward.
+        requests = set() if coordinator is not None and coordinator.step_active else lora_requests
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping, requests, mapping_type)
+        if coordinator is not None:
+            # Also covers dummy/capture hooks outside execute_model.
+            num_local_loras = len({lora_id for lora_id in token_lora_mapping if lora_id > 0})
+            coordinator.refresh_slot_ids(num_local_loras=num_local_loras)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         expert_offload.validate_loading(self, load_dummy_weights)
@@ -808,6 +836,9 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
+                coordinator = getattr(self, "_moe_lora_coordinator", None)
+                if coordinator is not None:
+                    coordinator.step_active = False
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
@@ -904,6 +935,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        coordinator = getattr(self, "_moe_lora_coordinator", None)
+        if coordinator is not None:
+            # Unlike _set_active_loras, this hook runs once on both real and
+            # idle DP forwards. No collective belongs in cached metadata updates.
+            requests = (
+                set() if dummy_run else self.lora_state.get_activate_loras(list(scheduler_output.num_scheduled_tokens))
+            )
+            coordinator.synchronize(requests, dummy_run=dummy_run)
         if self.pcp_manager is not None:
             batch_state = self.pcp_manager.prepare_pcp_batch_req_state(batch_state)
 
