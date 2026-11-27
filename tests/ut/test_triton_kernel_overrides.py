@@ -180,9 +180,6 @@ def test_fla_ops_reexport_is_identity_sweepable():
 # silently), and common parameters must keep their relative order so
 # a keyword-only [grid] relaunch binds them to the right slots.
 _KNOWN_SIGNATURE_DEVIATIONS = {
-    # bailing passes lower_bound; the Ascend impl lacks it (known-broken
-    # entry, follow-up).
-    "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": ("missing lower_bound (known-broken, follow-up)"),
     # upstream's mask_value has no Ascend parameter; no caller passes it.
     "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": ("mask_value not implemented (latent, follow-up)"),
 }

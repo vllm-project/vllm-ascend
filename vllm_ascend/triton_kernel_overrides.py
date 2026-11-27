@@ -217,17 +217,24 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate": (  # noqa: E501
         chunk_kda_with_fused_gate
     ),
-    # Known-broken at its only launch site: bailing_moe_v3 passes
-    # ``lower_bound=``, which the Ascend impl does not accept yet, so
-    # the verbatim forward raises TypeError; upstream feeds
-    # ``lower_bound or 0.0`` plus a ``USE_LOWER_BOUND`` constexpr. No
-    # bailing e2e exists, so CI cannot catch it; the impl fix is a
-    # separate follow-up. The other two bailing calls are safe:
-    # ``safe_gate``/``lower_bound`` vanish into upstream's own
-    # ``**kwargs`` on GPU (upstream never reads them) and the NPU
-    # impls swallow them the same way; fused_recurrent_kda goes
-    # further and implements ``lower_bound`` (an NPU extension with
-    # its own default), a superset there, not a gap.
+    # The impl accepts ``lower_bound`` and mirrors upstream's
+    # ``USE_LOWER_BOUND`` branch (``lower_bound * sigmoid(a*g)``), so
+    # bailing_moe_v3's ``lower_bound=`` call works instead of raising
+    # TypeError. Both branches checked numerically against upstream's
+    # formulas on NPU (with and without bias); no bailing e2e exists
+    # yet, so the coverage is unit-level, not model-level. The
+    # unbounded softplus branch keeps a pre-existing limit: at
+    # D=384 (BD=512) it exceeds NPU UB and fails to compile on A3,
+    # before and after this change. No caller takes that branch at
+    # that width -- bailing always passes ``lower_bound``, and the
+    # bounded branch compiles at every autotune config measured. The
+    # other
+    # two bailing calls are safe: ``safe_gate``/``lower_bound`` vanish
+    # into upstream's own ``**kwargs`` on GPU (upstream never reads
+    # them) and the NPU impls swallow them the same way;
+    # fused_recurrent_kda goes further and implements ``lower_bound``
+    # (an NPU extension with its own default), a superset there, not
+    # a gap.
     "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": fused_kda_gate,
     "vllm.third_party.flash_linear_attention.ops.kda.fused_recurrent_kda": (  # noqa: E501
         fused_recurrent_kda
