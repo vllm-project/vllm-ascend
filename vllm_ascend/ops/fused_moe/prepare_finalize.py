@@ -456,7 +456,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -509,6 +509,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        # Select the wire protocol from model-wide configuration, never from a
+        # rank-local token count (an idle rank must issue matching collectives).
+        prequant_mxfp4 = quant_type == QuantType.W4A4MXFP
+        activation_dtype = hidden_states.dtype
+        pertoken_scale = None
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -518,9 +523,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
-            # All-gather across DP group
+            if prequant_mxfp4:
+                hidden_states, pertoken_scale = self._quantize_mxfp4_for_allgather(hidden_states)
+
+            # Gather packed activations and scales in exactly the same rank order.
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+            if pertoken_scale is not None:
+                pertoken_scale = self.moe_config.dp_group.all_gather(pertoken_scale, 0)
+        elif prequant_mxfp4 and (hidden_states.shape[0] > 0 or self.moe_config.pcp_size > 1):
+            # DP=1 still avoids quantizing top-k-expanded activations.
+            hidden_states, pertoken_scale = self._quantize_mxfp4_for_allgather(hidden_states)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -528,7 +541,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             self.num_tokens_pcp = hidden_states.shape[0]
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                if pertoken_scale is not None:
+                    hidden_states, pertoken_scale = self._pad_mxfp4_rows_for_allgather(
+                        hidden_states, pertoken_scale, pad_size, activation_dtype
+                    )
+                else:
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             hidden_states = get_pcp_group().all_gather(
@@ -539,14 +557,53 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if pertoken_scale is not None:
+                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
+
+    @staticmethod
+    def _quantize_mxfp4_for_allgather(hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Padding is performed in floating point before quantization, so an
+        # empty local rank emits the same number of FP4/scale rows as its peers.
+        # Do not silently choose a different collective dtype on a single rank.
+        if hidden_states.ndim != 2 or hidden_states.dtype not in (torch.bfloat16, torch.float16):
+            raise ValueError("MXFP4 AllGather requires two-dimensional BF16/FP16 activations")
+        # An empty local shard still has to speak the same FP4/scale protocol as
+        # its PCP peers. Quantize one zero row and take empty views rather than
+        # invoking the NPU quantizer with an unsupported zero-row input.
+        empty = hidden_states.shape[0] == 0
+        quant_input = hidden_states.new_zeros((1, hidden_states.shape[1])) if empty else hidden_states.contiguous()
+        quantized, scale = torch_npu.npu_dynamic_mx_quant(
+            # Match the default rounding used by the original non-SP MLP
+            # quantizer. The SP path has its own existing rounding setting.
+            quant_input,
+            dst_type=torch_npu.float4_e2m1fn_x2,
+        )
+        return (quantized[:0], scale[:0]) if empty else (quantized, scale)
+
+    @staticmethod
+    def _pad_mxfp4_rows_for_allgather(
+        hidden_states: torch.Tensor,
+        pertoken_scale: torch.Tensor,
+        pad_size: int,
+        activation_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # E8M0 scales are encoded bytes, not ordinary floating-point zeros.
+        # Obtain the exact padding pattern from the same quantizer as real rows.
+        # FP4 packs two logical values in each storage byte. Scale rows retain
+        # their native trailing layout (e.g. [hidden/64, 2]) without reshaping.
+        zero_row = torch.zeros((1, hidden_states.shape[1] * 2), dtype=activation_dtype, device=hidden_states.device)
+        zero_x, zero_scale = PrepareAndFinalizeWithAllGather._quantize_mxfp4_for_allgather(zero_row)
+        pad_x = zero_x.expand((pad_size, *zero_x.shape[1:]))
+        pad_scale = zero_scale.expand((pad_size, *zero_scale.shape[1:]))
+        return torch.cat((hidden_states, pad_x), dim=0), torch.cat((pertoken_scale, pad_scale), dim=0)
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Align token ids with the rows produced by :meth:`prepare`.

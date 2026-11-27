@@ -1,0 +1,5 @@
+pr: 23517
+entries:
+  - category: performance
+    text: Reduced activation communication volume for non-SP MXFP4 MoE on Ascend A5 by transferring packed FP4 activations and block scales across DP and PCP ranks. FP16 and BF16 inputs preserve their output dtype.
+    hardware: [A5]

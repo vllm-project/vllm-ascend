@@ -264,6 +264,11 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        activation_dtype = getattr(layer, "ascend_activation_dtype", None)
+        if activation_dtype is None:
+            if x.dtype in (torch.uint8, getattr(torch, "float4_e2m1fn_x2", None)):
+                raise ValueError("MXFP4 MoE requires the original activation dtype before prequantization")
+            activation_dtype = x.dtype
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -282,7 +287,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-                mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
+                mxfp_use_bf16=(activation_dtype == torch.bfloat16),
             ),
             quant_method=self,
         )
@@ -455,7 +460,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         layer = mlp_compute_input.layer
         assert layer is not None
         input_dtype = mlp_compute_input.hidden_states.dtype
-        use_bf16 = input_dtype in [torch.bfloat16, torch.uint8, torch.float4_e2m1fn_x2]
+        assert mlp_compute_input.quant.mxfp is not None
+        use_bf16 = mlp_compute_input.quant.mxfp.use_bf16
         output_dtype = (
             input_dtype
             if input_dtype in [torch.bfloat16, torch.float16]

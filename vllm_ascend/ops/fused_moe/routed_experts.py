@@ -44,6 +44,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz
@@ -419,6 +421,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
+        self.ascend_activation_dtype: torch.dtype | None = None
+        # A rank-local adapter or row count must not change collective dtypes.
+        self._allow_mxfp4_prequant = vllm_config.lora_config is None and not self.apply_router_weight_on_input
         self.return_with_event = False
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
@@ -544,6 +549,21 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _get_prepare_quant_type(self, moe_comm_method) -> QuantType:
+        if (
+            self.quant_type == QuantType.W4A4MXFP
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and not self.moe_config.is_sequence_parallel
+            and (
+                not self._allow_mxfp4_prequant
+                # Custom routers may consume the original floating activations.
+                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter)
+                or getattr(self.router, "custom_routing_function", None) is not None
+            )
+        ):
+            return QuantType.NONE
+        return self.quant_type
+
     def forward_impl(
         self,
         *,
@@ -569,12 +589,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        activation_dtype = hidden_states.dtype
+        prepare_quant_type = self._get_prepare_quant_type(moe_comm_method)
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -591,6 +613,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
+        self.ascend_activation_dtype = activation_dtype
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -603,6 +626,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+            self.ascend_activation_dtype = None
 
         eplb_state = self.router.eplb_state
         if eplb_state is not None:

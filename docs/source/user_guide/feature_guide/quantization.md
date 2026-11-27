@@ -10,6 +10,21 @@ vLLM Ascend supports multiple quantization methods. This guide provides instruct
 > See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
 > Before you quantize a model, ensure sufficient RAM is available.
 
+## MXFP4 MoE activation communication
+
+On Ascend A5, the non-sequence-parallel AllGather MoE path quantizes local
+activations to MXFP4 before DP and PCP AllGather. Packed activations and their
+block scales follow the same token order through padding and communication.
+The expert dispatcher reuses these scales, avoiding quantization of the
+top-k-expanded activations. FP16 and BF16 inputs retain their output dtype.
+
+This path applies to W4A4 MXFP4 with the built-in routers. LoRA-configured
+models, custom routing functions or router subclasses, and input-side router
+weighting retain floating-point preparation. The existing sequence-parallel
+path keeps its own quantization policy; MC2, fused MC2, and AlltoAll are not
+changed. No additional configuration is required. The benefit depends on the
+selected communication backend and token batch size.
+
 ## Quantization Tools
 
 vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Compressor`.
