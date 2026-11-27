@@ -554,6 +554,8 @@ def _validate_inputs(args: argparse.Namespace) -> str | None:
     """Return a user-facing message when the requested report cannot be trusted."""
     if not 0 < args.tolerance <= 1:
         return f"--tolerance must be in (0, 1], got {args.tolerance}"
+    if args.bench_timeout_seconds <= 0:
+        return f"--bench-timeout-seconds must be positive, got {args.bench_timeout_seconds:g}"
     if args.fail_on_regression and not args.baseline_json:
         return "--fail-on-regression needs --baseline-json to compare against"
     if args.bench_output and args.dry_run:

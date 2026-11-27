@@ -389,6 +389,7 @@ def test_invalid_inputs_are_user_errors(tmp_path, capsys) -> None:
         (["--dry-run", "--fail-on-regression"], "needs --baseline-json"),
         (["--dry-run", "--tolerance", "0"], "tolerance"),
         (["--dry-run", "--tolerance", "1.5"], "tolerance"),
+        (["--dry-run", "--bench-timeout-seconds", "0"], "bench-timeout-seconds"),
         (["--dry-run", "--bench-output", str(baseline)], "cannot be combined"),
         (["--dry-run", "--report-md", str(tmp_path / "missing" / "r.md")], "parent directory"),
     ]
