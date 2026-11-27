@@ -187,7 +187,16 @@ jobs:
           esac
 
           read_cann_version() {
-            sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]'
+            local cann_version
+            # Standard Dockerfiles start with FROM .../cann:<version>-<soc>-<os>-py3.12.
+            cann_version=$(sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]')
+            if [ -n "$cann_version" ]; then
+              echo "$cann_version"
+              return 0
+            fi
+            # Images that ship CANN inside the base OS image (no FROM .../cann:...)
+            # declare the version explicitly as ARG CANN_VERSION=<version>.
+            sed -n 's|^ARG CANN_VERSION=\([^ ]*\).*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]'
           }
 
           DATE=$(date -u +%Y%m%d)
