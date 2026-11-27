@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 class BulkSaveParticipant(Protocol):
     def has_pending_bulk_save(self) -> bool: ...
 
+    def set_host_load_ready_event(self, event: torch.Event) -> None: ...
+
 
 class HiSparseDraftHostMirrorSaveHook:
     def __init__(self, source: HiSparseConnectorWorker, stores: Sequence[BulkSaveParticipant]) -> None:
@@ -28,6 +30,13 @@ class HiSparseDraftHostMirrorSaveHook:
             # Queue the mirror once, then let each child record its save event.
             # Sender threads wait for those events before reading Host bytes.
             finish_draft_host_mirror_for_save(self._source)
+
+    def publish_host_load_ready_event(self) -> None:
+        """Fence Host loads after start_step's draft copies, including TP0's copy for a shared Host pool."""
+        event = torch.Event()
+        event.record(torch.accelerator.current_stream())
+        for store in self._stores:
+            store.set_host_load_ready_event(event)
 
 
 def finish_draft_host_mirror_for_save(worker: HiSparseConnectorWorker) -> None:

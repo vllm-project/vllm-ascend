@@ -201,8 +201,28 @@ def test_hisparse_store_validation_preserves_supported_topologies(with_hisparse)
         patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])),
         patch("vllm.distributed.parallel_state.get_node_count", return_value=1) as count_nodes,
     ):
-        AscendMultiConnector(config, KVConnectorRole.WORKER, None)
+        connector = AscendMultiConnector(config, KVConnectorRole.WORKER, None)
     assert count_nodes.call_count == int(with_hisparse)
+    with patch.object(MultiConnector, "start_load_kv") as start_load:
+        connector.start_load_kv(None, num_tokens=0)
+    start_load.assert_called_once_with(None, num_tokens=0)
+
+
+@pytest.mark.parametrize("source_first", [True, False])
+def test_hisparse_start_load_publishes_event_before_store(source_first):
+    calls = MagicMock()
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [calls.source, calls.store] if source_first else [calls.store, calls.source]
+    connector._draft_host_mirror_source = calls.source
+    connector._draft_host_mirror_save_hook = calls.hook
+
+    connector.start_load_kv(None, num_tokens=0)
+
+    assert calls.method_calls == [
+        call.source.start_load_kv(None, num_tokens=0),
+        call.hook.publish_host_load_ready_event(),
+        call.store.start_load_kv(None, num_tokens=0),
+    ]
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():

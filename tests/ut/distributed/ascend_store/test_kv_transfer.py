@@ -1394,9 +1394,37 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
-    def test_prepare_value_exception_drains_pending_receives_and_rejects_new_loads(self):
-        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, group) for group in (0, 1)], [16, 16], None)
+    @staticmethod
+    def _make_hybrid_database(rank=0):
+        db = ChunkedTokenDatabase([KeyMetadata("m", rank, 0, 0, group) for group in (0, 1)], [16, 16], None)
         db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+        return db
+
+    def test_get_waits_for_draft_copy_only_when_writing_host(self):
+        db = self._make_hybrid_database()
+        for host_groups, groups, expected in (
+            ({0}, [0], ["event.synchronize", "get"]),
+            ({0}, [0, 1], ["event.synchronize", "get", "get"]),
+            ({0}, [1], ["get"]),
+            (set(), [1], ["get"]),
+        ):
+            with self.subTest(host_groups=host_groups, groups=groups):
+                calls = MagicMock()
+                store = MagicMock(spec=MemcacheBackend)
+                calls.attach_mock(store.get, "get")
+                store.get.return_value = [0]
+                thread = KVCacheStoreRecvingThread(
+                    store, db, 16, tp_rank=0, host_memory_group_ids=frozenset(host_groups)
+                )
+                request = make_projected_request(1, for_load=True)
+                request.kv_cache_group_ids = groups
+                request.host_load_ready_event = calls.event
+                thread.add_request(request)
+                thread._handle_request(thread.request_queue.get_nowait())
+                self.assertEqual([name for name, *_ in calls.method_calls], expected)
+
+    def test_prepare_value_exception_drains_pending_receives_and_rejects_new_loads(self):
+        db = self._make_hybrid_database()
         store = MagicMock(spec=MemcacheBackend)
         thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
         entered = threading.Event()
@@ -1576,8 +1604,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         scheduler.kv_cache_manager = cache_manager
 
         def make_receiver(rank: int, result: list[int]):
-            db = ChunkedTokenDatabase([KeyMetadata("m", rank, 0, 0, group) for group in (0, 1)], [16, 16], None)
-            db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+            db = self._make_hybrid_database(rank)
             store = MagicMock(spec=MemcacheBackend)
 
             def get(keys, addrs, sizes, *, memory_location):

@@ -1038,6 +1038,8 @@ class ReqMeta:
     is_last_chunk: bool | None = None
 
     current_event: torch.npu.Event | None = None
+    # Async loads into HiSparse Host pages wait on this before their GET.
+    host_load_ready_event: torch.Event | None = None
     kv_cache_group_ids: list[int] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
     num_prompt_tokens: int | None = None

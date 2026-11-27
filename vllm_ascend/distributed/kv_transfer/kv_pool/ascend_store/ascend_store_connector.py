@@ -511,6 +511,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 
+    def set_host_load_ready_event(self, event: torch.Event) -> None:
+        cast(KVPoolWorker, self.connector_worker).set_host_load_ready_event(event)
+
     def has_pending_bulk_save(self) -> bool:
         """Let the parent order Host mirroring before this connector's save hook."""
         return (

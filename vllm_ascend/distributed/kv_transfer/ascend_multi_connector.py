@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         PromMetric,
         PromMetricT,
     )
+    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -188,6 +189,20 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         if source is not None and stores:
             assert source.connector_worker is not None
             self._draft_host_mirror_save_hook = HiSparseDraftHostMirrorSaveHook(source.connector_worker, stores)
+            self._draft_host_mirror_source = source
+
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        hook = self._draft_host_mirror_save_hook
+        if hook is None:
+            super().start_load_kv(forward_context, **kwargs)
+            return
+        # HiSparse start_step queues the previous step's draft-row copy.
+        source = self._draft_host_mirror_source
+        source.start_load_kv(forward_context, **kwargs)
+        hook.publish_host_load_ready_event()
+        for connector in self._connectors:
+            if connector is not source:
+                connector.start_load_kv(forward_context, **kwargs)
 
     def wait_for_save(self):
         if self._draft_host_mirror_save_hook is not None:

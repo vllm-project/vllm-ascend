@@ -1332,6 +1332,10 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                 len(key_list),
                 key_list[:3],
             )
+            ready_event = req_meta.host_load_ready_event
+            if ready_event is not None and memory_locations is not None and MemoryLocation.HOST in memory_locations:
+                # A Host page reused from a finished request may still receive its deferred draft-row copy.
+                ready_event.synchronize()
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
             if memory_locations is None:
                 ret = self.m_store.get(key_list, addr_list, size_list)

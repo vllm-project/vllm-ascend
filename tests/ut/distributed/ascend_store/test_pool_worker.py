@@ -2409,27 +2409,31 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
 
     def test_start_load_kv_async(self):
         worker = self._make_worker()
-        recv_thread = MagicMock()
-        worker.kv_recv_thread = recv_thread
-
-        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=16,
-            block_ids=[0],
-            block_hashes=["h0"],
-            load_spec=load_spec,
+        submitted = []
+        worker.kv_recv_thread = SimpleNamespace(
+            add_request=lambda req: submitted.append((req, req.host_load_ready_event))
         )
-        meta = AscendConnectorMetadata(set())
-        meta.add_request(req)
-        worker.start_load_kv(meta)
-        recv_thread.add_request.assert_called_once_with(req)
 
-        recv_thread.reset_mock()
-        worker = self._make_worker()
-        worker.kv_recv_thread = recv_thread
-        worker.start_load_kv(AscendConnectorMetadata(set()))
-        recv_thread.add_request.assert_not_called()
+        store = AscendStoreConnector.__new__(AscendStoreConnector)
+        store.connector_worker = worker
+        other_store = MagicMock(spec=AscendStoreConnector)
+        hook = HiSparseDraftHostMirrorSaveHook(MagicMock(), [store, other_store])
+        with patch.object(torch, "Event") as event, patch.object(torch.accelerator, "current_stream") as stream:
+            hook.publish_host_load_ready_event()
+        event.assert_called_once_with()
+        event.return_value.record.assert_called_once_with(stream.return_value)
+        other_store.set_host_load_ready_event.assert_called_once_with(event.return_value)
+
+        for req_ids, expected_event in ((("r1", "r2"), event.return_value), (("r3",), None), ((), None)):
+            meta = AscendConnectorMetadata(set())
+            for req_id in req_ids:
+                load_spec = LoadSpec(0, 16, can_load=True, token_len=16)
+                meta.add_request(
+                    ReqMeta(req_id, token_len_chunk=16, block_ids=[0], block_hashes=["h0"], load_spec=load_spec)
+                )
+            worker.start_load_kv(meta)
+            self.assertEqual(submitted, [(req, expected_event) for req in meta.requests])
+            submitted.clear()
 
 
 class TestKVPoolWorkerProcessLayerData(unittest.TestCase):

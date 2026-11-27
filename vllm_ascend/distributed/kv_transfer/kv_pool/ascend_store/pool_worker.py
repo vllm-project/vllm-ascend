@@ -1461,9 +1461,13 @@ class KVPoolWorker(BaseKVPoolWorker):
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._init_cache_layout()
+        self._host_load_ready_event: torch.Event | None = None
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
+
+    def set_host_load_ready_event(self, event: torch.Event) -> None:
+        self._host_load_ready_event = event
 
     def _init_cache_layout(self) -> None:
         if self.kv_cache_config is None:
@@ -1543,6 +1547,8 @@ class KVPoolWorker(BaseKVPoolWorker):
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
+        # Set for this step by AscendMultiConnector; never reuse it in a later step.
+        host_load_ready_event, self._host_load_ready_event = self._host_load_ready_event, None
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
@@ -1577,6 +1583,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.load_async,
             )
             if self.load_async:
+                request.host_load_ready_event = host_load_ready_event
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
                 )
