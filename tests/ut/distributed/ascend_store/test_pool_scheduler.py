@@ -59,6 +59,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     BoundaryPut,
     LoadSpec,
@@ -2673,3 +2674,95 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
     assert load_spec.vllm_cached_tokens == aligned_local_tokens
     assert load_spec.kvpool_cached_tokens == pool_hit_tokens
     assert load_spec.can_load
+
+
+def _bare_bulk_stride_scheduler(stride: int = 0) -> KVPoolScheduler:
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.boundary_state_offload_stride = stride
+    scheduler.use_layerwise = False
+    scheduler._store_hit_tokens = {}
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {}
+    scheduler.can_put = True
+    scheduler.cache_coordinator = SimpleNamespace(mamba_group_ids={1, 2})
+    scheduler._finished_partial_tail_metas = {}
+    return scheduler
+
+
+@pytest.mark.parametrize("bad_value", [True, False, None, -1, "4096", 4096.0])
+def test_boundary_state_offload_stride_rejects_invalid_config(bad_value):
+    config = make_config(extra_config={"boundary_state_offload_stride": bad_value})
+    with pytest.raises(ValueError, match="boundary_state_offload_stride"):
+        KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
+
+
+def test_boundary_state_offload_stride_defaults_to_zero():
+    config = make_config()
+    scheduler = KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
+    assert scheduler.boundary_state_offload_stride == 0
+
+
+def test_boundary_state_offload_stride_bucket_crossing():
+    scheduler = _bare_bulk_stride_scheduler(stride=64)
+    assert scheduler._should_offload_boundary_state(0, 64)
+    assert not scheduler._should_offload_boundary_state(64, 65)
+    assert scheduler._should_offload_boundary_state(64, 128)
+    assert not scheduler._should_offload_boundary_state(128, 128)
+
+    scheduler.boundary_state_offload_stride = 0
+    assert scheduler._should_offload_boundary_state(999, 1)
+
+
+def test_boundary_state_offload_stride_is_atomic_across_groups():
+    scheduler = _bare_bulk_stride_scheduler(stride=64)
+    tracker = RequestTracker(
+        req_id="r1",
+        token_len=256,
+        num_prompt_tokens=256,
+        prefill_end_tokens=256,
+        last_boundary_state_tokens=64,
+    )
+    scheduler._request_trackers["r1"] = tracker
+    scheduler._unfinished_requests["r1"] = (SimpleNamespace(block_hashes=[]), [])
+    metadata = AscendConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads(
+        {"r1": [(1, 5, 64), (2, 6, 64), (1, 7, 128), (2, 8, 128)]},
+        metadata,
+    )
+
+    assert tracker.last_boundary_state_tokens == 128
+    assert len(metadata.requests) == 1
+    assert {(put.group_id, put.block_id, put.num_tokens) for put in metadata.requests[0].boundary_puts} == {
+        (1, 7, 128),
+        (2, 8, 128),
+    }
+
+
+def test_boundary_state_offload_stride_suppresses_partial_tail_save():
+    scheduler = _bare_bulk_stride_scheduler(stride=64)
+    scheduler.enable_partial_hash_hits = True
+    assert not scheduler._save_partial_tail()
+
+    scheduler.boundary_state_offload_stride = 0
+    assert scheduler._save_partial_tail()
+
+
+def test_boundary_state_offload_stride_skips_same_bucket_finished_tail():
+    scheduler = _bare_bulk_stride_scheduler(stride=64)
+    tracker = SimpleNamespace(
+        prefill_end_tokens=128,
+        last_boundary_state_tokens=64,
+        num_prompt_tokens=128,
+        token_len=128,
+    )
+    scheduler._request_trackers["r1"] = tracker
+    request = SimpleNamespace(
+        request_id="r1",
+        block_hashes=[],
+        num_prompt_tokens=128,
+        num_computed_tokens=128,
+    )
+
+    assert scheduler.register_finished_partial_tail(request, ([1], [2]), [(1, 2, 64)]) is False
+    assert "r1" not in scheduler._finished_partial_tail_metas

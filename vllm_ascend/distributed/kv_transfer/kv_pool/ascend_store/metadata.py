@@ -921,6 +921,11 @@ class RequestTracker:
     block_sizes: list[int] | None = None
     partial_tail_sent: bool = False
 
+    # Token position of the last known complete Store boundary-state checkpoint
+    # for this request (seeded from the Store lookup hit when available, else
+    # the local/external resume offset, and advanced on each accepted offload).
+    last_boundary_state_tokens: int = 0
+
     def __init__(
         self,
         req_id: str,
@@ -938,6 +943,7 @@ class RequestTracker:
         num_mamba_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
         partial_tail_sent: bool = False,
+        last_boundary_state_tokens: int = 0,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -956,6 +962,7 @@ class RequestTracker:
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
         self.partial_tail_sent = partial_tail_sent
+        self.last_boundary_state_tokens = last_boundary_state_tokens
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1209,6 +1216,7 @@ class ReqMeta:
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
         enable_partial_hash_hits: bool = False,
+        save_partial_tail: bool | None = None,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1258,8 +1266,10 @@ class ReqMeta:
             target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
         prefill_end = tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len
+        if save_partial_tail is None:
+            save_partial_tail = enable_partial_hash_hits
         publish_partial_tail = (
-            enable_partial_hash_hits
+            save_partial_tail
             and not skip_save
             and not tracker.partial_tail_sent
             and target_token_len >= prefill_end
