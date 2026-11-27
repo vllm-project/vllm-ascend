@@ -109,9 +109,7 @@ class _V2RunnerAdapter:
 
 
 def install_trace(runner: Any) -> KVTraceRuntime | None:
-    """Install the MRV2 observer; MRV1 is left unchanged."""
-    if not getattr(runner.vllm_config, "use_v2_model_runner", False):
-        return None
+    """Install the Model Runner V2 observer."""
     runtime = get_trace(runner.vllm_config)
     if runtime is None:
         return None

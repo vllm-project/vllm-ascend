@@ -32,7 +32,11 @@ from vllm_ascend.attention.utils import (
     is_pcp_enabled,
     uses_pcp_sharded_layout,
 )
+<<<<<<< HEAD
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, is_prefix_cacheable
+=======
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
+>>>>>>> 97af565d51137c5db6f9d4c70cebad9fabafaff0
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata

@@ -39,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -98,6 +98,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        from vllm_ascend.ops.fused_moe.mega_moe_context import try_share_dspark_mega_moe_buffer
+
+        try_share_dspark_mega_moe_buffer(
+            target_model,
+            model,
+            self.vllm_config,
+            getattr(self, "draft_model_config", None),
+            context_kv_only=getattr(self, "context_kv_only", False),
+        )
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -451,6 +460,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
                 input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
             )
+        if sync_state is not None and not is_profile and (lmhead_tp_enable() or embedding_tp_enable()):
+            # Fine-grained vocabulary collectives need the same query pass on
+            # active and idle DP peers. The runner discards local K=0 drafts.
+            if getattr(sync_state, "skip_drafts", False):
+                num_speculative_tokens = 0
+            elif num_speculative_tokens == 0:
+                num_speculative_tokens = None
         self.input_batch = input_batch
         assert self.input_batch is not None
         # Upstream trims DP dummy draft requests before selecting its graph,

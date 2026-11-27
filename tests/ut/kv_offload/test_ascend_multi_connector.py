@@ -1,5 +1,6 @@
 """Tests for Ascend-specific MultiConnector allocation fan-out."""
 
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -8,10 +9,200 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.config import KVTransferConfig  # noqa: E402
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole  # noqa: E402
+
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
     AscendMultiConnector,
     MultiConnector,
 )
+
+
+def _hisparse_store_multi_config(*, with_hisparse=True, nnodes=1):
+    children = [
+        {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"},
+    ]
+    if with_hisparse:
+        children.insert(0, {"kv_connector": "HiSparseConnector", "kv_role": "kv_both"})
+    return SimpleNamespace(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": children},
+        ),
+        parallel_config=SimpleNamespace(nnodes=nnodes, prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+        speculative_config=None,
+    )
+
+
+@pytest.mark.parametrize("child", ["HiSparseConnector", "AscendStoreConnector", "MooncakeConnectorStoreV1"])
+def test_hisparse_rejects_duplicate_children_and_legacy_store_alias(child):
+    config = _hisparse_store_multi_config()
+    children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+    if child == "MooncakeConnectorStoreV1":
+        children.pop()
+    children.append({"kv_connector": child, "kv_role": "kv_both"})
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="AscendStoreConnector"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
+
+
+@pytest.mark.parametrize("store_name", ["AscendStoreConnector", "MooncakeConnectorStoreV1"])
+def test_ordinary_store_connector_creation(store_name):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector
+
+    config = _hisparse_store_multi_config(with_hisparse=False)
+    config.kv_transfer_config.kv_connector_extra_config["connectors"][0]["kv_connector"] = store_name
+    with (
+        patch.object(KVConnectorFactory, "_registry", {}),
+        patch.dict(OffloadingSpecFactory._registry),
+        patch.object(ascend_store_connector, "create_kv_pool_scheduler") as create_scheduler,
+    ):
+        register_connector()
+        connector = AscendMultiConnector(config, KVConnectorRole.SCHEDULER, SimpleNamespace(kv_cache_groups=[]))
+
+    (store,) = connector._connectors
+    assert isinstance(store, ascend_store_connector.AscendStoreConnector)
+    assert store.connector_scheduler is create_scheduler.return_value
+
+
+@pytest.mark.parametrize("source_first", [True, False])
+def test_hisparse_source_outlives_store_receive(source_first):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+    config = _hisparse_store_multi_config()
+    if not source_first:
+        config.kv_transfer_config.kv_connector_extra_config["connectors"].reverse()
+    get_entered = Event()
+    release_get = Event()
+    host_released = Event()
+    host_live_when_get_resumes = []
+
+    class Receiver(Thread):
+        def run(self):
+            get_entered.set()
+            if release_get.wait(timeout=5):
+                host_live_when_get_resumes.append(not host_released.is_set())
+
+        def stop(self):
+            release_get.set()
+
+    receiver = Receiver()
+    store = KVPoolWorker.__new__(KVPoolWorker)
+    store.kv_recv_thread = receiver
+    store.kv_send_thread = None
+    store.m_store = SimpleNamespace(close=MagicMock())
+    store._closed = False
+    source = SimpleNamespace(shutdown=host_released.set)
+    children = [source, store] if source_first else [store, source]
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", children)):
+        connector = AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+
+    receiver.start()
+    try:
+        assert get_entered.wait(timeout=5)
+        connector.shutdown()
+        assert host_live_when_get_resumes == [True]
+        assert host_released.is_set()
+        assert not receiver.is_alive()
+        store.m_store.close.assert_called_once_with()
+    finally:
+        release_get.set()
+        receiver.join(timeout=5)
+
+
+def test_hisparse_source_stays_live_if_store_shutdown_fails():
+    source = SimpleNamespace(shutdown=MagicMock())
+    store = SimpleNamespace(shutdown=MagicMock(side_effect=RuntimeError("Store could not stop")))
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [source, store])):
+        connector = AscendMultiConnector(_hisparse_store_multi_config(), KVConnectorRole.SCHEDULER, None)
+    with pytest.raises(RuntimeError, match="Store could not stop"):
+        connector.shutdown()
+    source.shutdown.assert_not_called()
+
+
+def test_hisparse_rejects_prefill_context_parallelism_before_constructing_children():
+    config = _hisparse_store_multi_config()
+    config.parallel_config.prefill_context_parallel_size = 2
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="prefill_context_parallel_size=1"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
+
+
+@pytest.mark.parametrize("target", ["outer", "hisparse", "store"])
+@pytest.mark.parametrize("pd_role", ["kv_producer", "kv_consumer"])
+def test_hisparse_store_rejects_pd_roles_before_constructing_children(target, pd_role):
+    config = _hisparse_store_multi_config()
+    transfer = config.kv_transfer_config
+    if target == "outer":
+        transfer.kv_role = pd_role
+    else:
+        child = transfer.kv_connector_extra_config["connectors"][0 if target == "hisparse" else 1]
+        child["kv_role"] = pd_role
+
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="PD disaggregation is unsupported"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["MooncakeConnector", "SfaRemoteD2HConnector", "MultiConnector"])
+def test_hisparse_store_rejects_extra_connectors_even_with_both_role(name):
+    config = _hisparse_store_multi_config()
+    config.kv_transfer_config.kv_connector_extra_config["connectors"].append(
+        {"kv_connector": name, "kv_role": "kv_both"}
+    )
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="supports only HiSparseConnector and AscendStoreConnector children"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("role", "configured_nodes", "actual_nodes"),
+    [(KVConnectorRole.SCHEDULER, 2, 1), (KVConnectorRole.WORKER, 1, 2)],
+    ids=["configured-multi-node", "runtime-multi-node"],
+)
+def test_hisparse_store_requires_single_node(role, configured_nodes, actual_nodes):
+    config = _hisparse_store_multi_config(nnodes=configured_nodes)
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        patch("vllm.distributed.parallel_state.get_node_count", return_value=actual_nodes) as count_nodes,
+        pytest.raises(ValueError, match="requires single-node colocated Prefill and Decode, got 2 nodes"),
+    ):
+        AscendMultiConnector(config, role, None)
+    initialize_children.assert_not_called()
+    assert count_nodes.call_count == int(role == KVConnectorRole.WORKER)
+
+
+@pytest.mark.parametrize("with_hisparse", [True, False], ids=["single-node-colocated", "ordinary-pd-store"])
+def test_hisparse_store_validation_preserves_supported_topologies(with_hisparse):
+    config = _hisparse_store_multi_config(with_hisparse=with_hisparse, nnodes=1 if with_hisparse else 2)
+    if not with_hisparse:
+        transfer = config.kv_transfer_config
+        transfer.kv_role = "kv_producer"
+        transfer.kv_connector_extra_config["connectors"][0]["kv_role"] = "kv_producer"
+    with (
+        patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])),
+        patch("vllm.distributed.parallel_state.get_node_count", return_value=1) as count_nodes,
+    ):
+        AscendMultiConnector(config, KVConnectorRole.WORKER, None)
+    assert count_nodes.call_count == int(with_hisparse)
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():
@@ -51,7 +242,7 @@ def test_dspark_full_prompt_policy_is_sfa_producer_only(producer, consumer, meth
     with patch.object(MultiConnector, "__init__", return_value=None):
         connector = AscendMultiConnector.__new__(AscendMultiConnector)
         connector._connectors = []
-        connector.__init__(config, object(), None)
+        AscendMultiConnector.__init__(connector, config, object(), None)
     assert connector._requires_full_dspark_prompt is (full_prompt and pd_connector == "SfaRemoteD2HConnector")
 
 
@@ -97,7 +288,7 @@ def test_dspark_complete_prefix_provider_enables_only_its_lookup():
         connector = AscendMultiConnector.__new__(AscendMultiConnector)
         connector._connectors = [target_only, joint_store]
         connector._requests_to_connector = {}
-        connector.__init__(config, object(), None)
+        AscendMultiConnector.__init__(connector, config, object(), None)
 
     assert connector._requires_full_dspark_prompt is False
     assert connector._dspark_prefix_provider_index == 1

@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -191,7 +192,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         "AscendUnquantizedFusedMoEMethod",
         ascend_method_factory,
     )
-    monkeypatch.setattr(AscendRoutedExperts, "init_eplb", lambda self, n_shared_experts: None)
     monkeypatch.setattr(
         routed_experts_module,
         "get_ascend_config",
@@ -204,7 +204,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         routed_experts_module,
         "get_current_vllm_config",
         lambda: SimpleNamespace(
-            use_v2_model_runner=False,
             model_config=SimpleNamespace(is_deepseek_mla=False),
         ),
     )
@@ -218,44 +217,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
     else:
         assert routed_experts.quant_method is parent_method
         ascend_method_factory.assert_not_called()
-
-
-@pytest.mark.parametrize(("use_v2_model_runner", "legacy_init_calls"), [(True, 0), (False, 1)])
-def test_ascend_routed_experts_initializes_only_matching_eplb_path(
-    monkeypatch,
-    use_v2_model_runner,
-    legacy_init_calls,
-):
-    def parent_init(instance, *args, **kwargs):
-        nn.Module.__init__(instance)
-        instance.quant_config = object()
-        instance.custom_routing_function = None
-        instance.e_score_correction_bias = None
-
-    init_eplb = MagicMock()
-    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
-    monkeypatch.setattr(AscendRoutedExperts, "init_eplb", init_eplb)
-    monkeypatch.setattr(
-        routed_experts_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(
-            ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
-            enable_shared_expert_dp=False,
-        ),
-    )
-    monkeypatch.setattr(
-        routed_experts_module,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            use_v2_model_runner=use_v2_model_runner,
-            model_config=SimpleNamespace(is_deepseek_mla=False),
-        ),
-    )
-
-    routed_experts = AscendRoutedExperts(n_shared_experts=2)
-
-    assert routed_experts._use_v2_model_runner is use_v2_model_runner
-    assert init_eplb.call_count == legacy_init_calls
 
 
 def test_process_weights_after_loading_uses_version_specific_layout(
@@ -324,6 +285,36 @@ def test_process_weights_after_loading_keeps_nd_storage_for_captured_graphs(
     assert layer.w2_weight.data_ptr() == w2_ptr
 
 
+def test_process_weights_after_loading_uses_new_storage_before_non_fused_nz_cast(monkeypatch):
+    method = _build_unquantized_method()
+    layer = _build_weight_layer()
+    layer.w13_weight.data = layer.w13_weight.data.to(torch.bfloat16)
+    layer.w2_weight.data = layer.w2_weight.data.to(torch.bfloat16)
+    checkpoint_weights = (layer.w13_weight.data, layer.w2_weight.data)
+    ascend_config = SimpleNamespace(enable_fused_mc2=0, weight_nz_mode=2)
+
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(ascend_utils, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(ascend_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    format_cast = MagicMock(side_effect=lambda weight, _: weight)
+    monkeypatch.setattr(ascend_utils.torch_npu, "npu_format_cast", format_cast)
+    monkeypatch.setattr(
+        AscendUnquantizedFusedMoEMethod.__mro__[2],
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert format_cast.call_count == len(checkpoint_weights)
+    for checkpoint_weight, cast_call in zip(checkpoint_weights, format_cast.call_args_list):
+        weight, target_format = cast_call.args
+        assert target_format == ascend_utils.ACL_FORMAT_FRACTAL_NZ
+        assert weight.data_ptr() != checkpoint_weight.data_ptr()
+        torch.testing.assert_close(weight, checkpoint_weight.transpose(1, 2))
+
+
 def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
     method = _build_unquantized_method(dynamic_eplb=True)
     layer = _build_weight_layer()
@@ -349,20 +340,6 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
     assert not hasattr(layer, "w2_weight")
     assert len(layer.w13_weight_list) == num_experts
     assert len(layer.w2_weight_list) == num_experts
-
-
-def test_update_expert_map_updates_routed_experts_and_manager():
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    nn.Module.__init__(routed_experts)
-    manager = SimpleNamespace(_expert_map=torch.tensor([0, 1, 2, -1], dtype=torch.int32))
-    routed_experts.expert_map_manager = manager
-    routed_experts.ascend_expert_map = torch.tensor([0, -1, 1], dtype=torch.int32)
-
-    new_map = torch.tensor([0, 1, -1], dtype=torch.int32)
-    routed_experts.update_expert_map(new_map)
-
-    assert routed_experts.ascend_expert_map is new_map
-    assert manager._expert_map is new_map
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
@@ -944,11 +921,9 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("v2_eplb", [False, True])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(
-    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
-):
+def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -996,7 +971,6 @@ def test_routed_experts_forward_impl_runs_current_flow(
         ep_size=2,
         is_sequence_parallel=is_sequence_parallel,
     )
-    routed_experts.ascend_expert_map = None
     routed_experts.topk_group = None
     routed_experts.num_expert_group = None
     routed_experts.custom_routing_function = None
@@ -1008,7 +982,6 @@ def test_routed_experts_forward_impl_runs_current_flow(
     routed_experts.log2phy = None
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts._use_v2_model_runner = use_v2
     routed_experts.dynamic_eplb = False
     routed_experts.return_with_event = return_with_event
     moe_comm_method = MagicMock()
@@ -1124,7 +1097,7 @@ def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
     )
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = quant_type
-    with set_current_vllm_config(VllmConfig()):
+    with patch("vllm_ascend.logger.configure_ascend_file_logging"), set_current_vllm_config(VllmConfig()):
         shared_experts.situ_activation = SituAndMul(beta=4.0, linear_beta=25.0)
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(
@@ -1755,7 +1728,12 @@ def test_linear_wrapper_preserves_prequantized_activation_for_down_proj(monkeypa
         AscendDeviceType.A5,
     ],
 )
-def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, device_type):
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
+def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, parallel_mode, device_type):
+    """Verify shared quantization and matmuls follow routed milestones on A3/A5."""
     quantized_input = torch.ones(4, 4, dtype=torch.float8_e4m3fn)
     input_scale = torch.ones(4, 1)
     gate_up_out = torch.randn(4, 4, dtype=torch.bfloat16)
@@ -1779,7 +1757,7 @@ def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, device_type
     down_proj.weight_scale = torch.ones(1)
     shared_experts = _make_quantized_situ_shared_experts(QuantType.W4A8MXFP, gate_up_proj, down_proj)
     shared_experts.multistream_overlap = True
-    shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY)
+    shared_experts.parallel_mode = MagicMock(return_value=parallel_mode)
 
     milestones = RoutedMoEMilestones(
         shared_input_ready=MagicMock(),
@@ -2181,7 +2159,11 @@ def test_runner_selects_sp_multistream_custom_op(
         assert runner._forward_entry is upstream_forward_entry
 
 
-def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypatch):
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
+def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypatch, parallel_mode):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     hidden_states = torch.randn(4, 4)
     gathered_states = torch.randn(8, 4)
@@ -2203,7 +2185,7 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
 
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=True,
-        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        parallel_mode=MagicMock(return_value=parallel_mode),
         prepare_input_async=MagicMock(side_effect=prepare_input),
     )
     runner.routed_input_transform = MagicMock(side_effect=latent_down)
@@ -2217,14 +2199,20 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
     current_stream.wait_event.assert_called_once_with(all_gather_done)
 
 
-def test_runner_without_routed_input_transform_keeps_original_shared_input_path():
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
+def test_runner_without_routed_input_transform_keeps_original_shared_input_path(
+    parallel_mode,
+):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     hidden_states = torch.randn(4, 4)
     runner._shared_experts = object()
     runner.routed_input_transform = None
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=True,
-        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        parallel_mode=MagicMock(return_value=parallel_mode),
         prepare_input_async=MagicMock(),
     )
 
@@ -2235,7 +2223,13 @@ def test_runner_without_routed_input_transform_keeps_original_shared_input_path(
     runner.ascend_shared_experts.prepare_input_async.assert_not_called()
 
 
-def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
+def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform(
+    parallel_mode,
+):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     latent_states = torch.randn(4, 2)
     full_states = torch.randn(4, 4)
@@ -2249,7 +2243,7 @@ def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
     runner.routed_output_transform = MagicMock(side_effect=latent_up)
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=True,
-        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        parallel_mode=MagicMock(return_value=parallel_mode),
         wait_for_output=MagicMock(side_effect=lambda: operation_order.append("join_shared_output")),
     )
 
@@ -2259,13 +2253,19 @@ def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
     assert operation_order == ["latent_up", "join_shared_output"]
 
 
-def test_runner_without_routed_output_transform_does_not_defer_shared_output_join():
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
+def test_runner_without_routed_output_transform_does_not_defer_shared_output_join(
+    parallel_mode,
+):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     fused_output = torch.randn(4, 4)
     runner.routed_output_transform = None
     runner.ascend_shared_experts = SimpleNamespace(
         multistream_overlap=True,
-        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        parallel_mode=MagicMock(return_value=parallel_mode),
         wait_for_output=MagicMock(),
     )
 
@@ -2275,8 +2275,13 @@ def test_runner_without_routed_output_transform_does_not_defer_shared_output_joi
     runner.ascend_shared_experts.wait_for_output.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "parallel_mode",
+    [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
+)
 def test_sp_multistream_down_projection_overlaps_combine_and_reduce_scatter_waits_for_finalize(
     monkeypatch,
+    parallel_mode,
 ):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
@@ -2286,7 +2291,7 @@ def test_sp_multistream_down_projection_overlaps_combine_and_reduce_scatter_wait
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = QuantType.NONE
     shared_experts.lora_context = None
-    shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY)
+    shared_experts.parallel_mode = MagicMock(return_value=parallel_mode)
     hidden_states = torch.randn(4, 4)
     part1_out = torch.randn(4, 8)
     shared_out = torch.randn(4, 4)

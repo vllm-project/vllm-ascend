@@ -32,7 +32,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `Kimi-K3-w4a8` (W4A8) | • Mixed deployment: 4 × 950DT products (8 devices per node), 4 × Atlas 800I A3 (64GB × 16 per node), or 8 × Atlas 800I A2 (64GB × 8 per node).<br>• PD deployment: 8 × 950DT products or 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
+| `Kimi-K3-w4a8` (W4A8) | • Mixed deployment: 4 × Atlas 800I A3 (64GB × 16 per node) or 8 × Atlas 800I A2 (64GB × 8 per node).<br>• PD deployment: 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
+| `Kimi-K3-w4a8-mxfp-QuaRot` (W4A8 MXFP) | 950DT products (A5 only, 8 devices per node).<br>• Mixed deployment: 4 nodes.<br>• PD deployment: 8 nodes. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-QuaRot) | Target model with W4A8 MXFP quantization and QuaRot rotation. |
 | `Kimi-K3-DSpark-MLA-NPU` | Atlas 800I A3 | [ModelScope](https://modelscope.cn/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU) | Draft model for DSpark speculative decoding; further trained by Ant Group. Download in addition to the target model. |
 | `Kimi-K3-DSpark-Block5` | 950DT products | [ModelScope](https://modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) | Draft model for DSpark speculative decoding. Download in addition to the target model. |
 
@@ -65,7 +66,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -80,7 +80,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -101,7 +100,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -116,7 +114,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -137,7 +134,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -152,7 +148,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash

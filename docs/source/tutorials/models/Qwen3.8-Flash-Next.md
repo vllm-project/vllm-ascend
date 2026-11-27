@@ -199,7 +199,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -228,7 +227,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-15 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -251,7 +249,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=500g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -297,6 +294,17 @@ Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO m
     ```
 
     Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.5.
+
+### 4.4 Verify the GBSA interface
+
+Qwen3.8-Flash-Next uses the `cann_ops_transformer` Python interface for standard GBSA Decode
+and Union GBSA Prefill. After installing the CANN ops package for your device and initializing
+the CANN and ATB environments, run this check in the same shell you will use to start
+`vllm serve`. For Docker installations, run it inside the serving container.
+
+```bash
+python -c "from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention"
+```
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -799,7 +807,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1
@@ -865,7 +873,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1

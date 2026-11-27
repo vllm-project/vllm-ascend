@@ -117,7 +117,6 @@ separate images.
       --name deepseek-v41 \
       --net=host \
       --ipc=host \
-      --privileged=true \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
@@ -140,7 +139,6 @@ separate images.
       --net=host \
       --ipc=host \
       --shm-size=512g \
-      --privileged=true \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
@@ -167,7 +165,6 @@ separate images.
       --name deepseek-v41-950dt \
       --net=host \
       --shm-size=512g \
-      --privileged=true \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
@@ -198,6 +195,16 @@ vLLM Ascend revision.
 
 ## 5 Online Service Deployment
 
+!!! warning
+
+    On a low-memory server, for example a 1 TB machine, free the host from
+    long-lived large memory consumers before deploying, so that enough
+    contiguous 2 MB host pages are available. Otherwise a pinned host
+    allocation can fail with `207001` or `EL0018 ... Insufficient_Host_Memory`
+    during startup or serving, even though the host has free memory. See
+    [FAQ 26](../../faqs.md#faq-host-pinned-memory-207001) for checks and
+    recovery commands.
+
 ### 5.1 Single-Node Colocated Deployment
 
 === "950DT products"
@@ -215,7 +222,7 @@ vLLM Ascend revision.
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1600
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -489,7 +496,7 @@ vLLM Ascend revision.
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1600
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -602,7 +609,7 @@ vLLM Ascend revision.
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -1643,7 +1650,7 @@ Select the tab for the target hardware.
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1600
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -1780,7 +1787,7 @@ Select the tab for the target hardware.
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -2377,7 +2384,7 @@ export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1024
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
+export HCCL_EXEC_TIMEOUT=3600
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -2487,7 +2494,7 @@ export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1800
 export HCCL_INTRA_ROCE_ENABLE=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
+export HCCL_EXEC_TIMEOUT=3600
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ASCEND_RT_VISIBLE_DEVICES=$1
 

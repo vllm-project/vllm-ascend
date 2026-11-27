@@ -343,6 +343,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)

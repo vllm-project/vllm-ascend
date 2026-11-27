@@ -1296,7 +1296,7 @@ def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     class FakeAttentionSpec:
         block_size = 128
-        storage_block_size = 128
+        num_states = 128
         page_size_bytes = 4096
         num_kv_heads = 2
         head_size = 128
@@ -1349,7 +1349,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128
-        storage_block_size = 128
+        num_states = 128
         page_size_bytes = 128 * 2 * (128 + 128) * 2
         num_kv_heads = 2
         head_size = 128

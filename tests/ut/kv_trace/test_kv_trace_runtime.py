@@ -41,7 +41,6 @@ def runtime_fixture(monkeypatch):
     monkeypatch.setattr(logger, "logger", logging.Logger("kv-trace-test"), raising=False)
     monkeypatch.setitem(sys.modules, "vllm.logger", logger)
     config = NS(
-        use_v2_model_runner=True,
         additional_config={"kv_trace": {"enabled": True}},
         parallel_config=NS(tensor_parallel_size=1, pipeline_parallel_size=1),
         scheduler_config=NS(async_scheduling=False),

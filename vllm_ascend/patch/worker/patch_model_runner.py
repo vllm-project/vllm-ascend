@@ -3,10 +3,13 @@
 
 from contextlib import AbstractContextManager
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import pad_num_tokens
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -14,10 +17,21 @@ from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 # rank-local request counts.
 def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
-    if uniform_token_count and vllm_config is not None and vllm_config.parallel_config.pcp_shard_decode_requests:
+    parallel_config = vllm_config.parallel_config if vllm_config is not None else None
+    if uniform_token_count and parallel_config is not None and parallel_config.pcp_shard_decode_requests:
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
+    if (
+        vllm_config is not None
+        and parallel_config.prefill_context_parallel_size == 1
+        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    ):
+        num_tokens = pad_num_tokens(
+            num_tokens,
+            vllm_config,
+            get_ascend_config().enable_shared_expert_dp,
+        )
     return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
 
 

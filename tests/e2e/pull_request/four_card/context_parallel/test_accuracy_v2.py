@@ -266,7 +266,7 @@ DCP_Q_REPLICATE_MLA_CASE = InferenceCase(
 )
 @patch.dict(
     os.environ,
-    {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+    {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dcp_q_replication(graph_mode: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,7 +399,6 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -424,7 +423,6 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -449,7 +447,6 @@ def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -474,7 +471,6 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_BATCH_INVARIANT": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
@@ -554,7 +550,6 @@ EAGLE3_PCP_CASE = AccuracyCase(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },
@@ -578,7 +573,6 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },
@@ -616,6 +610,5 @@ def test_gqa_pcp_pd_model_runner_v2_graph() -> None:
         prefill_pcp_size=2,
         decode_tp_size=1,
         async_scheduling=True,
-        use_model_runner_v2=True,
     )
     assert output == " Alex, and I am"

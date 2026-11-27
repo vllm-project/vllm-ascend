@@ -77,12 +77,6 @@ msgstr ""
 "[ModelScope](https://www.modelscope.cn/models/Eco-"
 "Tech/Step-5-Preview-w8a8-mxfp8) |"
 
-msgid ""
-">**Path description**: Download the model weights to a directory of your "
-"choice and record it. Ensure the model path in the subsequent deployment "
-"command matches this directory."
-msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。请确保后续部署命令中的模型路径与该目录一致。"
-
 msgid "### 3.2 Hardware and Software Preparation"
 msgstr "### 3.2 软硬件准备"
 
@@ -535,3 +529,14 @@ msgid ""
 "| `multistream_overlap_shared_expert: true` |"
 msgstr ""
 "| 共享专家重叠 | 将共享专家的执行与其他工作重叠。 | `multistream_overlap_shared_expert: true` |"
+
+msgid ""
+"> **Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr "> **路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
+msgstr ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"

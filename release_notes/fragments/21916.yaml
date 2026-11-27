@@ -1,0 +1,4 @@
+pr: 21916
+entries:
+  - category: performance
+    text: Reused hash-to-string conversions across KV pool save groups and requests sharing a prefix, reducing repeated conversions during save preparation.

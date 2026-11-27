@@ -69,7 +69,6 @@ def test_guard_preserves_sequential_and_concurrent_generation(graph_mode):
     results = []
     for enabled in (False, True):
         port = get_open_port()
-        environment = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
         with (
             RemoteOpenAIServer(
                 model,
@@ -80,7 +79,6 @@ def test_guard_preserves_sequential_and_concurrent_generation(graph_mode):
                     "--port",
                     str(port),
                 ],
-                env_dict=environment,
                 seed=1234,
                 server_host="127.0.0.1",
                 server_port=port,

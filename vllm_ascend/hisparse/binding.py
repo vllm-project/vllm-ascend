@@ -3,6 +3,7 @@
 """Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -15,7 +16,64 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor, AscendSFAIndexerCacheSpec
+
+
+def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> list[AlignedKVCacheTensor]:
+    """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
+    device_tensors = [t for t in kv_cache_config.kv_cache_tensors if not t.host_resident]
+    reserved = [t for t in device_tensors if isinstance(t, AlignedKVCacheTensor)]
+    if not reserved:
+        if any(
+            getattr(g.kv_cache_spec, "requires_aligned_device_slab", False) for g in kv_cache_config.kv_cache_groups
+        ):
+            raise RuntimeError("HiSparse AscendStore device views require a slab alignment reservation.")
+        return []
+    logical_size_bytes, alignment = reserved[0].logical_size, reserved[0].alignment
+    if len(reserved) != len(device_tensors) or any(
+        (t.logical_size, t.alignment) != (logical_size_bytes, alignment) for t in reserved
+    ):
+        raise ValueError("HiSparse device views require a consistent slab alignment reservation.")
+    first_view = kv_caches[reserved[0].layers[0]]
+    backing_storage = first_view.untyped_storage()
+    reserved_bytes = logical_size_bytes + alignment - 1
+    if backing_storage.nbytes() < reserved_bytes:
+        raise ValueError("HiSparse device slab is missing its reserved alignment padding.")
+
+    # Skip the fewest bytes needed to reach the next aligned address (zero if aligned).
+    align_offset_bytes = -backing_storage.data_ptr() % alignment
+    aligned_storage = backing_storage[align_offset_bytes : align_offset_bytes + logical_size_bytes]
+    for tensor in reserved:
+        for name in tensor.layers:
+            view = kv_caches[name]
+            if view.untyped_storage().data_ptr() != backing_storage.data_ptr():
+                raise ValueError("HiSparse device cache views must share one backing allocation.")
+            if view.ndim == 1 and view.element_size() == 1:
+                # Core gives Resident and Hot the flat byte buffer. Drop all allocator padding.
+                if view.storage_offset() != 0 or view.stride(0) != 1 or view.numel() < reserved_bytes:
+                    raise ValueError("HiSparse raw device view must cover the reserved slab from its base.")
+                kv_caches[name] = view.new_empty(0).set_(aligned_storage, 0, (logical_size_bytes,), (1,))
+            else:
+                # Typed offsets are in elements and remain relative to the shared slab base.
+                kv_caches[name] = view.new_empty(0).set_(
+                    aligned_storage, view.storage_offset(), view.size(), view.stride()
+                )
+    return reserved
+
+
+def prepare_hisparse_cache_views(
+    kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any], forward_context: dict[str, Any]
+) -> None:
+    """Replace the view objects before Core binds them to layers or registers them with connectors.
+
+    Callers that retain individual tensors before this hook would keep the original views.
+    """
+    prepared_caches = kv_caches.copy()
+    reserved = _align_hisparse_slab_views(kv_cache_config, prepared_caches)
+    _bind_indexer_views(prepared_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+    kv_caches.update(prepared_caches)
+    for tensor in reserved:
+        tensor.size = tensor.logical_size
 
 
 def align_hisparse_indexer_specs(
@@ -67,6 +125,15 @@ def get_hisparse_indexer_specs(
                 indexer_specs[name] = spec
 
     return indexer_specs
+
+
+def hisparse_indexer_transfer_views(caches: Sequence[torch.Tensor], layer: Any) -> tuple[torch.Tensor, ...]:
+    """Recover logical pages from the dense Indexer alias used by attention."""
+    stride = getattr(layer, "hisparse_block_stride", 1)
+    if stride > 1:
+        (dense_cache,) = caches
+        return (dense_cache[::stride],)
+    return tuple(caches)
 
 
 def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
@@ -157,6 +224,7 @@ def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
 def _bind_indexer_views(
     kv_caches: dict[str, Any], indexer_specs: dict[str, AscendSFAIndexerCacheSpec], forward_context: dict[str, Any]
 ) -> None:
+    block_strides = []
     for name, spec in indexer_specs.items():
         cache = kv_caches[name]
         # The indexer kernels address dense pages. Expand the view over the
@@ -165,7 +233,7 @@ def _bind_indexer_views(
             raise ValueError(f"Unexpected HiSparse indexer cache shape for {name}: {tuple(cache.shape)}")
         if spec.cache_sparse_li_c8:
             kv_caches[name] = _quantized_indexer_views(cache, spec)
-            forward_context[name].hisparse_block_stride = 1
+            block_strides.append((forward_context[name], 1))
             continue
         block_size = cache.shape[2]
         page_elements = block_size * spec.num_kv_heads * spec.head_size
@@ -178,5 +246,7 @@ def _bind_indexer_views(
             size=(physical_blocks, block_size, spec.num_kv_heads, spec.head_size),
             stride=(page_elements, spec.num_kv_heads * spec.head_size, spec.head_size, 1),
         )
-        forward_context[name].hisparse_block_stride = block_stride
+        block_strides.append((forward_context[name], block_stride))
         kv_caches[name] = (indexer_cache,)
+    for layer, block_stride in block_strides:
+        layer.hisparse_block_stride = block_stride
