@@ -30,13 +30,12 @@ class CheckpointWorker(NPUWorker):
         self._read_bytes = sum(chunk.pack_bytes for chunk in plan.chunks)
 
     def start_weight_update(self) -> None:
-        if self._verified_round == 0:
-            # Generation is paused. Make a skipped transfer observable even
-            # though this worker and the trainer started from the same weights.
-            with torch.no_grad():
-                for param in self.model_runner.get_model().parameters():
-                    param.zero_()
-            torch.npu.synchronize()
+        # Generation is paused. Clear each round so an omitted write cannot
+        # pass by inheriting the previous round's checkpoint values.
+        with torch.no_grad():
+            for param in self.model_runner.get_model().parameters():
+                param.zero_()
+        torch.npu.synchronize()
         super().start_weight_update()
 
     def finish_weight_update(self) -> None:

@@ -46,11 +46,7 @@ def test_sharded_rdt_hixl(tmp_path):
     tokenizer.pre_tokenizer = Whitespace()
     PreTrainedTokenizerFast(
         tokenizer_object=tokenizer, pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]"
-    )
-    torch.manual_seed(7)
-    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
-    model.save_pretrained(model_path)
-    del model
+    ).save_pretrained(model_path)
     example = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_sharded_rdt_hixl_small_ep.py"
     env = dict(
         os.environ,
