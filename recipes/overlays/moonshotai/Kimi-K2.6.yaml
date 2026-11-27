@@ -323,6 +323,207 @@ presets:
                 dp_size: '{decode_dp_size}'
                 tp_size: 4
 
+  ascend_a3_w4a8_pd_dflash:
+    label: W4A8 PD (2P1D, DFlash decode)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    remove_args:
+      # The tutorial PD lane runs no async scheduling anywhere, so the
+      # variant's flag is dropped globally here. Everything else the variant
+      # pins is handled per role: values the tutorial changes travel in the
+      # roles' args (applied after the variant layer, so the last-wins
+      # dedupe keeps them), flags a role omits are dropped in that role's
+      # own remove_args, and --data-parallel-size is never listed anywhere —
+      # the pd_cluster pool emits it from the role topology, and a preset-
+      # level drop would strip the pool's own flag and fail the check.
+      - '--async-scheduling'
+      # Guard: drop --data-parallel-hybrid-lb; the builder emits it on
+      # multi-node DEP pools, and the tutorial lane does not use it.
+      - '--data-parallel-hybrid-lb'
+    workload: 'Prefill/decode separation (2P1D), 4 nodes x 16-die Atlas 800 A3, Mooncake'
+    source:
+      label: "Kimi-K2.6 tutorial, section 5.2"
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html
+      key: k26-a3-w4a8-pd-2p1d-dflash
+      revision: "2026-11-27"
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      model_revision: master
+    runbook: |
+      ## Evidence and versions
+
+      - Source: tutorial §5.2 (Multi-Node PD Separation Deployment),
+        transcribed value-by-value
+      - Image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      - Checkpoint: Eco-Tech/Kimi-K2.6-W4A8 (ModelScope, master)
+      - Validation status: not validated end-to-end; rendering verified
+        against the official builder (DP8 prefill pool / DP8 decode pool)
+      - Decode-side speculative decoding: DFlash (`z-lab/Kimi-K2.5-DFlash`,
+        15 tokens), taken from the co-located single-node configuration
+        (tutorial §5.1 / vllm-ascend-recipes#100). This PD combination is
+        not in the tutorial and is not validated end-to-end; every other
+        value is identical to the `ascend_a3_w4a8_pd` preset so the two
+        decode methods can be compared fairly. Whether DFlash composes
+        with `FULL_DECODE_ONLY` cudagraphs at this pool width is untested —
+        the single-node lane runs it under `--enforce-eager`.
+
+      ## Transcription notes
+
+      Transcribed from tutorial §5.2 (Multi-Node PD Separation Deployment):
+      2P1D on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill nodes and one
+      decode instance spanning 2 nodes. 2P1D is recommended over 1P1D (2
+      nodes) because 1P1D lacks the NPU memory to serve high concurrency.
+      The tutorial orchestrates per-node DP ranks with launch_online_dp.py /
+      run_dp_template.sh and forwards requests through proxy.sh on the
+      prefill master node; Mooncake is a prerequisite. Host-side tuning
+      (cpufreq governor, sysctl) is applied outside the container. Two
+      simplifications against the tutorial scripts: the builder renders one
+      prefill pool and one decode pool where the tutorial runs the prefill
+      nodes as independent replica groups (each starting at DP rank 0), and
+      per-node KV ports are folded to their first values (prefill 30000,
+      decode 30200; the tutorial also uses 30100/30300).
+    roles:
+      prefill:
+        nodes: 2
+        # DEP renders one merged prefill pool: DP8 total at TP4 (four TP4
+        # replicas per node, pool starting at DP rank 0, no --nnodes),
+        # matching the tutorial lane (2 nodes x DP4, 8 prefiller hosts). The
+        # TP emitter instead keeps the variant's static --data-parallel-size
+        # 4 as a bare flag while the pool bookkeeping (kv dp_size, router
+        # prefiller hosts) computes DP as 1, contradicting both.
+        parallelism: dep
+        tp: 4
+        args:
+          - '--max-model-len'
+          - '133120'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--max-num-seqs'
+          - '1'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - kimi_k2
+          - '--reasoning-parser'
+          - kimi_k2
+          - '--enforce-eager'
+          - '--seed'
+          - '1024'
+          - '--additional-config'
+          - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+        remove_args:
+          # The tutorial prefill lane runs neither speculative decoding nor
+          # a compilation config; the variant's two flags are dropped in
+          # this role only (the decode role overrides/keeps its own via its
+          # args).
+          - '--speculative-config'
+          - '--compilation-config'
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '1536'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              # The builder renders one prefill pool, so the KV metadata
+              # describes the whole pool (the tutorial's two prefill nodes
+              # are independent replica groups, each declaring its own
+              # dp_size 4); placeholders resolve to the rendered pool sizes.
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+          - '--max-model-len'
+          - '133120'
+          - '--max-num-batched-tokens'
+          - '32'
+          - '--max-num-seqs'
+          - '8'
+          - '--gpu-memory-utilization'
+          - '0.91'
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - kimi_k2
+          - '--reasoning-parser'
+          - kimi_k2
+          - '--seed'
+          - '1024'
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+          # DFlash decode, replacing the tutorial's eagle3 config with the
+          # co-located DFlash configuration (tutorial §5.1 / merged
+          # recipe vllm-ascend-recipes#100) so decode speculative methods can be
+          # compared head-to-head
+          # with an identical pool topology. Every other value matches the
+          # `ascend_a3_w4a8_pd` preset above on purpose.
+          - '--speculative-config'
+          - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+        remove_args:
+          # The tutorial decode lane runs without the multimodal encoder TP
+          # mode (prefill-only in the tutorial), and the base recipe's
+          # pd_cluster decode override carries --all2all-backend
+          # flashinfer_nvlink_one_sided, which has no NPU backend. Both are
+          # dropped in this role only.
+          - '--mm-encoder-tp-mode'
+          - '--all2all-backend'
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '800'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_consumer
+            kv_port: '30200'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+
 notes:
   - title: "Ascend 910C: use the W4A8 (ASCEND) variant"
     when: { hardware: [ascend_910c] }
@@ -338,17 +539,24 @@ notes:
       PD separation is offered as the opt-in **W4A8 PD (2P1D)** preset:
       four Atlas 800 A3 nodes (2 prefill + 1 decode instance spanning 2
       nodes) with Mooncake, per tutorial §5.2 — 2P1D is recommended over
-      1P1D there. **Select the preset when deploying PD**: without it, the
-      plain `pd_cluster` pool renders the base recipe's generic topology
-      (NixlConnector KV transfer, the flashinfer all-to-all backend, and
-      DFlash speculative decoding on a DP16 pool), which is not the
-      validated Ascend route. The preset is a transcription of the tutorial
-      lane, which additionally uses per-node launcher scripts
-      (launch_online_dp.py / run_dp_template.sh) and a request proxy on the
-      prefill master.
+      1P1D there. The preset decodes with eagle3 (3 tokens), matching the
+      tutorial's decode lane. **Select a preset when deploying PD**:
+      without one, the plain `pd_cluster` pool renders the base recipe's
+      generic topology — NixlConnector KV transfer, the flashinfer
+      all-to-all backend, and DFlash speculative decoding on a DP16 pool.
+      (That DFlash mention describes what the builder emits **without a
+      preset**; it is not the tutorial's decode lane, and neither preset
+      uses the plain pool.) A second preset, **W4A8 PD (2P1D, DFlash
+      decode)**, swaps the decode speculative config for the co-located
+      DFlash setup (tutorial §5.1 / vllm-ascend-recipes#100) with an
+      identical pool topology for a head-to-head decode comparison; that
+      combination is not validated end-to-end. Both
+      presets transcribe the tutorial lane, which additionally uses
+      per-node launcher scripts (launch_online_dp.py / run_dp_template.sh)
+      and a request proxy on the prefill master.
 
 meta:
-  date_updated: "2026-11-26"
+  date_updated: "2026-11-27"
   hardware:
     # First-party verification 2026-10-28 plus official runner-CI end-to-end
     # verification passed (companion Ascend recipe merged as
