@@ -27,6 +27,7 @@ from tests.e2e.pull_request.two_card.epd.epd_utils import (
     chat_completions_url,
     clean_shared_storage,
     collect_baseline,
+    ec_transfer_config,
     encoder_server_args,
     image_payload,
     image_urls,
@@ -41,16 +42,6 @@ MOONCAKE_SEGMENT_SIZE = "1GB"
 LAYERWISE_PROXY_SCRIPT = (
     Path(__file__).parents[5] / "examples" / "epd_disaggregated" / "epd_load_balance_proxy_layerwise_server_example.py"
 )
-
-
-def _ec_transfer_config(role: str, shared_storage_path: str) -> str:
-    return json.dumps(
-        {
-            "ec_connector": "ECExampleConnector",
-            "ec_role": role,
-            "ec_connector_extra_config": {"shared_storage_path": shared_storage_path},
-        }
-    )
 
 
 def _kv_transfer_config(role: str, kv_port: int) -> str:
@@ -95,7 +86,7 @@ def _prefill_args(prefill_port: int, shared_storage_path: str, kv_port: int) -> 
         "--limit-mm-per-prompt",
         json.dumps({"image": 2, "video": 0}),
         "--ec-transfer-config",
-        _ec_transfer_config("ec_consumer", shared_storage_path),
+        ec_transfer_config("ec_consumer", shared_storage_path),
         "--kv-transfer-config",
         _kv_transfer_config("kv_producer", kv_port),
     ]

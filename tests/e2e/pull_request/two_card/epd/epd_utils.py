@@ -188,7 +188,8 @@ def baseline_server_args(port: int, mm_limit: int = 2) -> list[str]:
     ]
 
 
-def _ec_transfer_config(ec_role: str, shared_storage_path: str) -> str:
+def ec_transfer_config(ec_role: str, shared_storage_path: str) -> str:
+    """Return the --ec-transfer-config JSON for an ExampleConnector instance."""
     return json.dumps(
         {
             "ec_connector": "ECExampleConnector",
@@ -223,7 +224,7 @@ def encoder_server_args(
         "--limit-mm-per-prompt",
         json.dumps({"image": mm_limit, "video": 0}),
         "--ec-transfer-config",
-        _ec_transfer_config("ec_producer", shared_storage_path),
+        ec_transfer_config("ec_producer", shared_storage_path),
     ]
 
 
@@ -251,7 +252,7 @@ def pd_server_args(
         "--limit-mm-per-prompt",
         json.dumps({"image": mm_limit, "video": 0}),
         "--ec-transfer-config",
-        _ec_transfer_config("ec_consumer", shared_storage_path),
+        ec_transfer_config("ec_consumer", shared_storage_path),
     ]
 
 
