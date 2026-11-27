@@ -29,6 +29,29 @@ _RANK_BLOCK_SIZE = 8192
 _MIN_RANKED_ONLINE_VOCAB_SIZE = 65536
 _MIN_TOKEN_ONLINE_VOCAB_SIZE = 128256
 _ONLINE_BLOCK_SIZE = 12288
+_MAX_GATHER_BLOCK = 1024
+
+
+@triton.jit
+def _write_logprobs(
+    output_row,
+    logits_row,
+    token_ids_row,
+    topk,
+    lse,
+    row_max,
+    PADDED_TOPK: tl.constexpr,
+    CHUNKED_GATHER: tl.constexpr,
+):
+    lanes = tl.arange(0, PADDED_TOPK)
+    # Keep the common narrow gather a single iteration with a static trip count.
+    stop = topk if CHUNKED_GATHER else 1
+    for start in range(0, stop, PADDED_TOPK):
+        columns = start + lanes
+        valid = columns < topk
+        token_ids = tl.load(token_ids_row + columns, valid, other=0)
+        selected_logits = tl.load(logits_row + token_ids, valid, other=0).to(tl.float32)
+        tl.store(output_row + columns, selected_logits - lse - row_max, valid)
 
 
 @triton.jit
@@ -42,6 +65,7 @@ def _topk_log_softmax_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     PADDED_TOPK: tl.constexpr,
+    CHUNKED_GATHER: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     row_ptr = logits_ptr + req_idx * logits_stride
@@ -60,16 +84,16 @@ def _topk_log_softmax_kernel(
         logits = logits.to(tl.float32)
         e = tl.exp(logits - max_val)
         se += tl.sum(e)
-    lse = tl.log(se)
-
-    k_offset = tl.arange(0, PADDED_TOPK)
-    k_mask = k_offset < topk
-    topk_ids = tl.load(topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0)
-
-    logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-    logits = logits.to(tl.float32)
-    o = logits - lse - max_val
-    tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+    _write_logprobs(
+        output_ptr + req_idx * topk,
+        row_ptr,
+        topk_ids_ptr + req_idx * topk_ids_stride,
+        topk,
+        tl.log(se),
+        max_val,
+        PADDED_TOPK,
+        CHUNKED_GATHER,
+    )
 
 
 @triton.jit
@@ -87,6 +111,7 @@ def _online_logprobs_kernel(
     PADDED_TOPK: tl.constexpr,
     WITH_RANK: tl.constexpr,
     RANK_BLOCK_SIZE: tl.constexpr,
+    CHUNKED_GATHER: tl.constexpr,
 ):
     row = tl.program_id(0)
     logits_row = logits_ptr + row * logits_stride
@@ -119,11 +144,16 @@ def _online_logprobs_kernel(
         padded_rank = tl.where(sampled_logit == float("-inf"), rank_tail, 0)
         tl.store(rank_ptr + row, tl.sum(rank_lanes) + padded_rank)
 
-    slots = tl.arange(0, PADDED_TOPK)
-    valid_slots = slots < topk
-    token_ids = tl.load(token_ids_ptr + row * token_ids_stride + slots, valid_slots, other=0)
-    selected_logits = tl.load(logits_row + token_ids, valid_slots, other=0).to(tl.float32)
-    tl.store(output_ptr + row * topk + slots, selected_logits - tl.log(denominator) - row_max, valid_slots)
+    _write_logprobs(
+        output_ptr + row * topk,
+        logits_row,
+        token_ids_ptr + row * token_ids_stride,
+        topk,
+        tl.log(denominator),
+        row_max,
+        PADDED_TOPK,
+        CHUNKED_GATHER,
+    )
 
 
 def _compute_logprobs(
@@ -139,7 +169,8 @@ def _compute_logprobs(
         return logprobs
 
     token_ids = token_ids.to(torch.int64)
-    padded_topk = max(triton.next_power_of_2(num_logprobs), 2)
+    padded_topk = max(triton.next_power_of_2(min(num_logprobs, _MAX_GATHER_BLOCK)), 2)
+    chunked_gather = num_logprobs > _MAX_GATHER_BLOCK
     with_rank = token_ranks is not None
     min_online_vocab_size = _MIN_RANKED_ONLINE_VOCAB_SIZE if with_rank else _MIN_TOKEN_ONLINE_VOCAB_SIZE
     if vocab_size >= min_online_vocab_size:
@@ -157,6 +188,7 @@ def _compute_logprobs(
             PADDED_TOPK=padded_topk,
             WITH_RANK=with_rank,
             RANK_BLOCK_SIZE=_RANK_BLOCK_SIZE,
+            CHUNKED_GATHER=chunked_gather,
             multibuffer=False,
         )
         return logprobs
@@ -171,6 +203,7 @@ def _compute_logprobs(
         vocab_size,
         BLOCK_SIZE=12944,
         PADDED_TOPK=padded_topk,
+        CHUNKED_GATHER=chunked_gather,
         multibuffer=False,
     )
     if token_ranks is not None:

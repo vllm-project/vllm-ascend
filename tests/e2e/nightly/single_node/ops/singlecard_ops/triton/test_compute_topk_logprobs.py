@@ -135,6 +135,22 @@ def test_online_rank_matches_upstream_padding():
     assert result.selected_token_ranks.tolist() == [((vocab_size + 8191) // 8192) * 8192]
 
 
+@pytest.mark.parametrize("vocab_size,num_logprobs", [(2049, 1024), (151937, 1023), (151937, 1024), (151937, 151937)])
+def test_compute_topk_scores_wide_output(vocab_size, num_logprobs):
+    init_device_properties_triton()
+    logits = torch.linspace(-2, 2, vocab_size, device="npu", dtype=torch.float32).unsqueeze(0)
+    sampled_ids = torch.tensor([vocab_size // 2], device="npu", dtype=torch.int64)
+
+    result = compute_topk_scores(logits, num_logprobs, sampled_ids)
+
+    expected_ids = torch.cat((sampled_ids[:, None], logits.topk(num_logprobs, dim=-1).indices), dim=1)
+    expected_logprobs = logits.log_softmax(dim=-1).gather(1, expected_ids)
+    expected_ranks = (logits >= logits.gather(1, sampled_ids[:, None])).sum(dim=1)
+    torch.testing.assert_close(result.logprob_token_ids, expected_ids, atol=0, rtol=0)
+    torch.testing.assert_close(result.logprobs, expected_logprobs, atol=1e-5, rtol=0)
+    torch.testing.assert_close(result.selected_token_ranks, expected_ranks, atol=0, rtol=0)
+
+
 def test_empty_logprob_requests():
     logits = torch.empty((0, 151936), device="npu")
     sampled_ids = torch.empty(0, dtype=torch.int64, device="npu")

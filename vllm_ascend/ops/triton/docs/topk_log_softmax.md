@@ -15,7 +15,7 @@ See `vllm_ascend/worker/v2/sample/logprob.py` for `compute_token_logprobs` and `
   1. Grid is `(num_reqs,)`: one program per request, each owning one full logits row (`row_ptr = logits_ptr + req_idx * logits_stride`).
   2. Pass 1 — running max: loop over the vocabulary in `BLOCK_SIZE` tiles, load each tile masked with `other=-inf`, and fold it into the running maximum with `tl.maximum(..., propagate_nan=tl.PropagateNan.ALL)` followed by `tl.max`. The result is cast to fp32.
   3. Pass 2 — sum of exponentials: loop over the same tiles again, cast to fp32, accumulate `sum(exp(logits - m_i))`, then take `lse_i = log(se)`.
-  4. Gather: load `PADDED_TOPK` token ids for the request under the mask `k_offset < topk`, gather `logits[i, t]` at those ids, compute `logits - lse_i - m_i` in fp32 and store the `topk` valid lanes.
+  4. Gather and normalize the requested logits in fp32, writing up to 1,024 columns per tile.
 
   The row is read twice from global memory rather than staged in UB, which keeps UB usage bounded by `BLOCK_SIZE` instead of by `vocab_size`. `multibuffer=False` is passed at launch for the same reason.
 - **Online reduction** from 65,536 entries when ranks are requested and from 128,256 entries for token logprobs alone. The token-only path uses a higher threshold because it already avoids the separate rank launch.
@@ -36,14 +36,14 @@ See `vllm_ascend/worker/v2/sample/logprob.py` for `compute_token_logprobs` and `
 | `topk` | Input (attribute) | Number of token ids per request (`token_ids.shape[1]`) | int32 | scalar |
 | `vocab_size` | Input (attribute) | Vocabulary size, i.e. `logits.shape[1]` | int32 | scalar |
 | `BLOCK_SIZE` | Attribute (`tl.constexpr`) | Vocabulary tile length, 12944 for the row-wise fallback and 12288 for the online reduction | int32 | scalar |
-| `PADDED_TOPK` | Attribute (`tl.constexpr`) | Lane count of the gather, `max(next_power_of_2(topk), 2)` | int32 | scalar |
+| `PADDED_TOPK` | Attribute (`tl.constexpr`) | Power-of-two gather tile width between 2 and 1,024 lanes | int32 | scalar |
 | `logprobs` (`output_ptr`) | Output | Log probabilities of the requested tokens, `[num_reqs, topk]` | fp32 | ND |
 
 ## Constraints
 
 - `logits` has shape `[num_reqs, vocab_size]` and dtype fp32, fp16, or bf16. The vocabulary dimension has unit stride and needs no alignment. The kernel masks the tail and uses `logits_stride` to locate each row.
 - `token_ids` has shape `[num_reqs, topk]` and values in `[0, vocab_size)`. Rows may be padded or broadcast. Columns use unit stride. The kernels rely on callers to provide in-range IDs.
-- Empty batches and empty token selections return empty outputs. Each power-of-two gather width can create a separate `PADDED_TOPK` specialization. With the online path, requests for ranks compile a separate variant.
+- Empty batches and empty token selections return empty outputs. Each power-of-two gather tile width can create a separate `PADDED_TOPK` specialization. Requests above 1,024 scores reuse a bounded gather loop, including full-vocabulary requests. With the online path, requests for ranks compile a separate variant.
 - `logprobs` is always fp32, independent of the `logits` dtype; the reduction is accumulated in fp32 as well.
 - `BLOCK_SIZE = 12944` is tuned against the UB budget rather than being a free tuning knob. Raising it, or reintroducing multi-buffering, risks a UB overflow; the `propagate_nan=tl.PropagateNan.ALL` form of `tl.maximum` in the first loop is likewise a compatibility workaround for the NaN handling introduced by the NPU-IR upgrade (see [#9193](https://github.com/vllm-project/vllm-ascend/pull/9193)) and must not be simplified back to a plain `tl.maximum`.
 - Sampling and logprob computation run eagerly after the captured model forward. Batch size can vary across calls.
