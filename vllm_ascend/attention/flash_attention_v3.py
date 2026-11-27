@@ -50,6 +50,9 @@ def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
 
 
 class AscendFlashAttentionBackend(AttentionBackend):
+    # Replay reads device metadata; FIA host task updates are unnecessary.
+    requires_graph_task_update = False
+
     accept_output_buffer = True
     # Both model runners use the attention layer's cache-update contract.
     # FA3 writes K/V inside forward, before reading the paged cache.

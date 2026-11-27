@@ -15,7 +15,6 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -102,16 +101,8 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
         num_tokens = desc.num_tokens
         backends = list(self.speculator.attn_backends.values())
         attn_backend = backends[0]
-        if all(backend is AscendFlashAttentionBackend for backend in backends):
-            # Length preparation and FlashAttn tiling run inside the graph,
-            # reading the draft's persistent device buffers on every replay.
-            return super().run_fullgraph(desc)
-        if all(
-            backend.full_cls_name() == ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
-            for backend in backends
-        ):
-            # The proposer already refreshed FA3's graph-stable device tiling
-            # during metadata build. FIA's host-list task updates do not apply.
+        # DSpark shares this manager. Device-metadata backends need no FIA task update.
+        if all(not getattr(backend, "requires_graph_task_update", True) for backend in backends):
             return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,

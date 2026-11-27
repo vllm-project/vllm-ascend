@@ -1456,6 +1456,16 @@ class NPUModelRunner(GPUModelRunner):
             for backend in draft_backends
         )
 
+        if self._skip_fa3_cpu_length_sync and self.model_config.hf_text_config.model_type == "minimax_m3_text":
+            # Sparse offload and mixed FIA targets consume exact CPU counts.
+            self._skip_fa3_cpu_length_sync = not self.ascend_config.sparse_kv_offload_config.enabled and all(
+                group.backend in draft_backends
+                or group.backend is AscendFlashAttentionBackend
+                or group.backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for groups in self.attn_groups
+                for group in groups
+            )
+
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
@@ -1479,36 +1489,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
-        if (
-            spec is not None
-            and self.speculator is not None
-            and spec.method == "dspark"
-            and spec.draft_model_config is not None
-            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
-                spec.draft_model_config.architectures or ()
-            )
-            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
-        ):
-            # Flash's sparse target uses device lengths, but a mixed target
-            # GQA backend still consumes the shared CPU length mirror.
-            backends = [group.backend for groups in self.attn_groups for group in groups]
-            fa3_backend = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
-            has_fa3_draft = getattr(self, "_skip_fa3_cpu_length_sync", False)
-            if has_fa3_draft and (
-                self.parallel_config.pipeline_parallel_size != 1
-                or self.parallel_config.prefill_context_parallel_size != 1
-                or self.parallel_config.decode_context_parallel_size != 1
-                or self.ascend_config.sparse_kv_offload_config.enabled
-                or spec.enable_adaptive_verification
-            ):
-                return False
-            return (AscendFlashAttentionBackend in backends or has_fa3_draft) and all(
-                backend is AscendFlashAttentionBackend
-                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
-                or (has_fa3_draft and backend.full_cls_name() == fa3_backend)
-                for backend in backends
-            )
-
         if getattr(self, "_skip_fa3_cpu_length_sync", False):
             architecture = getattr(self.model_config, "architecture", None)
             if architecture in QWEN_FA3_TARGETS:
@@ -1523,6 +1503,25 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.kv_transfer_config is None
                 )
             return True
+
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False

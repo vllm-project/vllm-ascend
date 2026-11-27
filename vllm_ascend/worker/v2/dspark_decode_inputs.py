@@ -46,7 +46,9 @@ class DSparkTargetAttention:
 
 
 class DSparkDecodeIndexCache:
-    """One immutable allocation per input; replace rather than overwrite on miss.
+    """Reuse runner input indices, not attention metadata.
+
+    Keep one immutable allocation per input; replace rather than overwrite on miss.
 
     Only request indices, logits boundaries and their expansion are retained.
     Consumers must treat the returned tensors as read-only. Dynamic query

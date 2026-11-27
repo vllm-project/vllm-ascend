@@ -277,7 +277,10 @@ def fa3_runner(runner_cls):
     )
     runner = runner_cls.__new__(runner_cls)
     runner.sync_spec_pp_cpu_counts = False
-    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=["OtherModel"]))
+    runner.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["OtherModel"]),
+        hf_text_config=SimpleNamespace(model_type="other"),
+    )
     runner.speculative_config = SimpleNamespace(method="mtp")
     runner.model_state = SimpleNamespace(initialize_spec_cpu_length_sync=Mock())
     # set_attn initializes nested draft groups, not an attn_backends mapping.
@@ -351,10 +354,9 @@ def test_fa3_skips_cpu_snapshot_and_wait(fa3_runner):
     backend.full_cls_name.assert_not_called()
 
 
-@pytest.mark.parametrize("blocked", [None, "cpu_target", "pp", "pcp", "dcp", "offload", "adaptive", "sync_pp"])
+@pytest.mark.parametrize("blocked", [None, "cpu_target", "offload", "sync_pp"])
 def test_minimax_flash_fa3_cpu_length_policy(fa3_runner, monkeypatch, blocked):
     runner = fa3_runner
-    runner.initialize_spec_cpu_length_sync()
     monkeypatch.setitem(
         runner._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", type("CANNFlash", (), {})
     )
@@ -364,13 +366,7 @@ def test_minimax_flash_fa3_cpu_length_policy(fa3_runner, monkeypatch, blocked):
     )
     runner.speculative_config = SimpleNamespace(
         method="dspark",
-        enable_adaptive_verification=blocked == "adaptive",
         draft_model_config=SimpleNamespace(architectures=["DSparkMiniMaxDraftModel"]),
-    )
-    runner.parallel_config = SimpleNamespace(
-        pipeline_parallel_size=2 if blocked == "pp" else 1,
-        prefill_context_parallel_size=2 if blocked == "pcp" else 1,
-        decode_context_parallel_size=2 if blocked == "dcp" else 1,
     )
     runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=blocked == "offload"))
     sparse = SimpleNamespace(get_name=lambda: "ASCEND_MINIMAX_M3_SPARSE")
@@ -379,4 +375,5 @@ def test_minimax_flash_fa3_cpu_length_policy(fa3_runner, monkeypatch, blocked):
         dense = SimpleNamespace(get_name=lambda: "ASCEND", full_cls_name=lambda: ("fia", "Attention"))
         runner.attn_groups[0].append(SimpleNamespace(backend=dense))
     runner.sync_spec_pp_cpu_counts = blocked == "sync_pp"
+    runner.initialize_spec_cpu_length_sync()
     assert runner._can_skip_spec_cpu_length_sync() is (blocked is None)
