@@ -54,7 +54,7 @@ Select the image for your target hardware.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -192,7 +192,7 @@ Verify that all host device and file paths exist before running Docker.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend-qwen38-pool
 
     docker run --rm \
@@ -2804,7 +2804,7 @@ Qwen3.8-Flash-Next uses a large set of Ascend Triton kernels (QSA, hyper-connect
 The startup log reports this explicitly:
 
 ```text
-WARNING [kernel_warmup.py:182] JIT kernel warmup found no registered kernels;
+WARNING [kernel_warmup.py:222] JIT kernel warmup found no registered kernels;
 Triton kernels will compile lazily at runtime.
 ```
 
@@ -2823,7 +2823,7 @@ To keep this one-off cost out of production traffic:
 
 2. **Warm up the service after startup.** Send a few representative requests (short and long prompts, thinking on and off, and multimodal if used) before exposing the endpoint to clients.
 
-With a warm cache the spike does not recur. The `--warmups` server argument also accepts a warmup specification if you prefer to drive this from the launch command.
+With a warm cache the spike does not recur; keeping the cache persistent is enough to remove it from steady-state operation.
 
 ## 10 FAQ
 
