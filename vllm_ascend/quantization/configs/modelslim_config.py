@@ -893,7 +893,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
-            scheme = create_scheme_for_layer(quant_type, prefix, "linear")
+            layer_type = (
+                "ds_linear"
+                if model_type in ("deepseek_v4", "deepseek_v41") and quant_type == "W8A8_MXFP8"
+                else "linear"
+            )
+            scheme = create_scheme_for_layer(quant_type, prefix, layer_type)
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 

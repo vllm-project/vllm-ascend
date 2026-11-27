@@ -2592,6 +2592,81 @@ def test_pp_exact_counts_override_device_length_exemption(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _kimi_dflash_device_length_runner(draft_backend=AscendMLABackend):
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+    from vllm_ascend.models.kimi_k3.model_state import AscendKimiModelState
+    from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend
+    from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
+
+    runner, _, _ = _device_length_runner("kimi_linear")
+    runner.model_config.architecture = "KimiK31ForConditionalGeneration"
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.speculative_config.enable_adaptive_verification = False
+    runner.model_state = AscendKimiModelState.__new__(AscendKimiModelState)
+    runner.speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    runner.speculator.attn_backends = {"draft": draft_backend}
+    runner.speculator.attn_groups = [[SimpleNamespace(backend=draft_backend, layer_names=["draft"])]]
+    runner.attn_groups = [
+        [SimpleNamespace(backend=KimiKDAHostMetadataBackend, layer_names=["kda"])],
+        [SimpleNamespace(backend=AscendSFABackend, layer_names=["sfa"])],
+        [SimpleNamespace(backend=AscendSFAIndexerBackend, layer_names=["indexer"])],
+        *runner.speculator.attn_groups,
+    ]
+    return runner
+
+
+@pytest.mark.parametrize("draft_backend", [AscendMLABackend, AscendFlashAttentionBackend])
+def test_kimi_dflash2_device_lengths_skip_cpu_sync(draft_backend):
+    runner = _kimi_dflash_device_length_runner(draft_backend)
+    assert runner._can_skip_spec_cpu_length_sync() is False
+    runner.initialize_spec_cpu_length_sync()
+    assert runner._can_skip_spec_cpu_length_sync() is True
+    runner.speculator.attn_backends = {}
+    runner.initialize_spec_cpu_length_sync()
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "target_arch",
+        "drafter_type",
+        "target_backend",
+        "draft_backend",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+    ],
+)
+def test_kimi_dflash2_device_length_policy_falls_back(unsupported):
+    runner = _kimi_dflash_device_length_runner()
+    if unsupported == "target_arch":
+        runner.model_config.architecture = "OtherModel"
+    elif unsupported == "drafter_type":
+        runner.speculator = SimpleNamespace(attn_groups=runner.speculator.attn_groups)
+    elif unsupported == "target_backend":
+        runner.attn_groups.append([SimpleNamespace(backend=AscendMLABackend, layer_names=["other_target"])])
+    elif unsupported == "draft_backend":
+        runner.speculator.attn_backends["draft"] = AscendAttentionBackend
+        runner.speculator.attn_groups[0][0].backend = AscendAttentionBackend
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    runner.initialize_spec_cpu_length_sync()
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 def _m3_device_length_runner():
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
     runner.speculator = SimpleNamespace(
