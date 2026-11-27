@@ -1,21 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend-local deferred RecoverSSM orchestration.
-
-The Triton kernels live in ``vllm_ascend.ops.triton.kda.recoverssm``.  This
-module vendors the Python orchestration that upstream keeps in
-``vllm.models.kimi_k3.nvidia.specialized_decode.recoverssm`` (PR #66030), so
-vllm-ascend does not depend on a vllm version that ships it.  Only the pieces
-Ascend needs are kept: the per-request ``pending`` buffer, record-slot staging,
-the ``eager`` mask, and the metadata wiring.  Ascend's KDA layer forward does
-its own verify and record pass, so the upstream ``install_layers`` /
-``deferred_recoverssm_verify`` / ``allocate_records`` are not ported.
-"""
+"""Model-side orchestration for the deferred KDA RecoverSSM commit path."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -29,7 +19,14 @@ from vllm_ascend.ops.triton.kda.recoverssm import (
     KDARecoverSSMCommitContext as AscendCommitContext,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
 FP32_DEFERRED = "fp32_deferred"
+
+# The fused replay plan handed to ``kda_recoverssm_verify``:
+# (commit_lens, final_state_indices, boundary_state_indices, boundary_recovery_lens).
+ReplayPlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 @dataclass
@@ -47,7 +44,7 @@ class KDARecoverSSMDeferred:
     record_rows: torch.Tensor  # [>= spec rows] int32: record slot per row, -1: none
     pending: torch.Tensor  # [max_num_reqs] int32, per record slot
     eager: torch.Tensor | None  # [spec rows] mask, None: no row
-    context: "KDADeferredCommitContext" = field(repr=False, compare=False)
+    context: KDADeferredCommitContext = field(repr=False, compare=False)
     state_indices: torch.Tensor = field(repr=False, compare=False)
     layer_names: list[str] = field(default_factory=list, repr=False, compare=False)
     started: bool = False
@@ -86,9 +83,11 @@ class KDARecoverSSMDeferred:
         if rows == 0:
             return
         self.started = True
-        self.context.compact_conv(self.state_indices, self.record_rows[:rows], self.pending)
+        self.context.compact_conv(
+            self.state_indices, self.record_rows[:rows], self.pending
+        )
 
-    def replay_plan(self):
+    def replay_plan(self) -> ReplayPlan | None:
         """The prepared plan for ``kda_recoverssm_verify``'s fused replay."""
         if not self.started:
             return None
@@ -101,30 +100,13 @@ class KDARecoverSSMDeferred:
 
 
 class KDADeferredCommitContext(AscendCommitContext):
-    """Ascend ``KDARecoverSSMCommitContext`` tagged as the deferred backend.
+    """The deferred RecoverSSM commit context.
 
-    ``create`` skips the upstream CuTe probe and always builds the Ascend
-    Triton context; ``commit`` / ``flush`` / ``_fold`` are inherited.
+    ``create`` / ``commit`` / ``flush`` / ``_fold`` are inherited: the base
+    factory constructs this subclass directly, and the subclass identity
+    itself marks the deferred path (the stock context stays the immediate
+    one).
     """
-
-    @classmethod
-    def create(
-        cls,
-        layers,
-        *,
-        spec_query_len: int,
-        max_num_reqs: int,
-        backend: str = FP32_DEFERRED,
-    ) -> "KDADeferredCommitContext":
-        context = AscendCommitContext.create(
-            layers,
-            spec_query_len=spec_query_len,
-            max_num_reqs=max_num_reqs,
-            backend="triton",
-        )
-        context.__class__ = cls
-        context.backend = FP32_DEFERRED  # type: ignore[attr-defined]
-        return context
 
 
 class DeferredRecoverSSMState(RecoverSSMState):
@@ -225,13 +207,11 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
     builder.recoverssm_pending = pending
     builder.recoverssm_request_slots = None
     if getattr(builder, "recoverssm_record_rows", None) is not None:
-        return  # rebound to new pending counts
+        return  # already installed; only the pending tensor needed rebinding
     stale = builder.recoverssm_context
-    if (
-        stale is not None
-        and not isinstance(stale, KDADeferredCommitContext)
-        and getattr(stale, "backend", "triton") == "triton"
-    ):
+    # A stock Triton context built before the first bind would pin the stock
+    # commit; rebuild it as the deferred one (no runner path does, today).
+    if stale is not None and not isinstance(stale, KDADeferredCommitContext):
         builder.recoverssm_context = None
     max_num_reqs = builder.vllm_config.scheduler_config.max_num_seqs
     # Each speculative row's record slot (-1 past the real rows).
@@ -279,8 +259,7 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
         if commit is not None and builder.recoverssm_pending is not None:
             context = metadata.recoverssm_context
             assert context is not None
-            if getattr(context, "backend", "triton") == FP32_DEFERRED:
-                assert isinstance(context, KDADeferredCommitContext)
+            if isinstance(context, KDADeferredCommitContext):
                 deferred = _build_deferred(
                     builder,
                     common_attn_metadata,
@@ -299,7 +278,9 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
 
 
 def _spec_sequence_masks_cpu(
-    builder: KimiK3KDAMetadataBuilder, m, num_decode_draft_tokens_cpu: torch.Tensor
+    builder: KimiK3KDAMetadataBuilder,
+    m: CommonAttentionMetadata,
+    num_decode_draft_tokens_cpu: torch.Tensor,
 ) -> torch.Tensor:
     """The speculative rows of a RecoverSSM build."""
     query_lens_cpu = m.query_start_loc_cpu.diff()
@@ -311,7 +292,7 @@ def _spec_sequence_masks_cpu(
 
 def _build_deferred(
     builder: KimiK3KDAMetadataBuilder,
-    m,
+    m: CommonAttentionMetadata,
     context: KDADeferredCommitContext,
     num_spec_decodes: int,
     spec_request_indices: torch.Tensor | None,
