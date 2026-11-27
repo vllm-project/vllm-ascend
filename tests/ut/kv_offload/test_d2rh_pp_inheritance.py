@@ -9,6 +9,9 @@ import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_connector as v1
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.base import worker as base_worker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import connector as pull_connector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import worker as pull_worker
 
 
 @pytest.mark.parametrize("module", [v1, d2rh])
@@ -16,9 +19,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector a
 def test_facade_inherits_dispatch_and_selects_correct_implementation(module, role):
     config = SimpleNamespace(kv_transfer_config=SimpleNamespace(engine_id="engine"))
     cache = object()
+    # The V1 facade lives in mooncake_v1/pull/connector.py and constructs from
+    # that module's globals, so the shared module must be patched for V1.
+    facade_module = d2rh if module is d2rh else pull_connector
     with (
-        patch.object(module, "MooncakeConnectorScheduler") as scheduler,
-        patch.object(module, "MooncakeConnectorWorker") as worker,
+        patch.object(facade_module, "MooncakeConnectorScheduler") as scheduler,
+        patch.object(facade_module, "MooncakeConnectorWorker") as worker,
     ):
         connector = module.MooncakeConnector(config, role, cache)
         if role == v1.KVConnectorRole.SCHEDULER:
@@ -73,7 +79,11 @@ def make_worker(worker_cls, role):
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 def test_registration_preserves_layout_and_d2rh_owns_host_regions(worker_cls, role):
     worker = make_worker(worker_cls, role)
-    runtime_module = d2rh if worker_cls is d2rh.MooncakeConnectorWorker else v1
+    is_d2rh_worker = worker_cls is d2rh.MooncakeConnectorWorker
+    # The V1 worker lives in mooncake_v1/pull/worker.py; registration claim
+    # calls base/worker.py while thread construction stays in the pull worker.
+    runtime_module = d2rh if is_d2rh_worker else pull_worker
+    te_module = d2rh if is_d2rh_worker else base_worker
     tensor = torch.empty((8, 2, 3))
     caches = {"layer22.indexer": (tensor, tensor[:, :, :1]), "layer22.swa": tensor}
     real_empty = torch.empty
@@ -90,7 +100,7 @@ def test_registration_preserves_layout_and_d2rh_owns_host_regions(worker_cls, ro
 
     with (
         patch.object(runtime_module, "enable_sfa_dcp_replicated_indexer", return_value=False),
-        patch.object(runtime_module.global_te, "register_buffer") as register,
+        patch.object(te_module.global_te, "register_buffer") as register,
         patch.object(runtime_module, "KVCacheSendingThread", side_effect=ready_thread) as sender,
         patch.object(runtime_module, "KVCacheRecvingThread", side_effect=ready_thread) as receiver,
         patch.object(d2rh, "D2RHThread") as hop1,

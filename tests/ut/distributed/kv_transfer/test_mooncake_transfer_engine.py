@@ -168,6 +168,56 @@ class TestGlobalTE(unittest.TestCase):
             global_te.register_buffer([100], [64])
         engine.register_memory.assert_called_once_with(100, 64)
 
+    def test_register_buffer_reports_whether_it_registered(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.return_value = 0
+
+        self.assertIs(global_te.register_buffer([0x1000, 0x2000], [128, 256]), True)
+        self.assertEqual(global_te._unregistered_ptrs, set())
+        self.assertEqual(
+            global_te.transfer_engine.register_memory.call_args_list,
+            [call(0x1000, 128), call(0x2000, 256)],
+        )
+
+        self.assertIs(global_te.register_buffer([0x3000], [64]), False)
+        self.assertEqual(global_te.transfer_engine.register_memory.call_count, 2)
+        self.assertEqual(global_te.registered_buffers, [(0x1000, 128), (0x2000, 256)])
+
+    def test_partial_registration_failure_rolls_back_registered_buffers(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.side_effect = [0, -1]
+        global_te.transfer_engine.unregister_memory.return_value = 0
+
+        with self.assertRaisesRegex(RuntimeError, "memory registration failed"):
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+
+        # The buffer registered before the failure must be released again.
+        global_te.transfer_engine.unregister_memory.assert_called_once_with(0x1000)
+        # A partially registered call must not claim the process-wide buffers.
+        self.assertEqual(global_te.registered_buffers, [])
+        self.assertEqual(global_te._unregistered_ptrs, set())
+
+        # Nothing is tracked, so the next call starts from scratch.
+        global_te.transfer_engine.register_memory.side_effect = None
+        global_te.transfer_engine.register_memory.return_value = 0
+        self.assertIs(global_te.register_buffer([0x1000, 0x2000], [128, 256]), True)
+        self.assertEqual(global_te.registered_buffers, [(0x1000, 128), (0x2000, 256)])
+
+    def test_partial_registration_rollback_tolerates_unregister_failure(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.side_effect = [0, 1]
+        global_te.transfer_engine.unregister_memory.side_effect = RuntimeError("unregister broke")
+
+        # Best effort: the rollback error is logged, the registration error wins.
+        with self.assertRaisesRegex(RuntimeError, "memory registration failed"):
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+
+        global_te.transfer_engine.unregister_memory.assert_called_once_with(0x1000)
+        self.assertEqual(global_te.registered_buffers, [])
+
     def test_unregister_and_reregister_registered_buffers(self):
         global_te = self.global_te_cls()
         global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
