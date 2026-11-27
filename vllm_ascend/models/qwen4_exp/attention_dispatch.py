@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Request dispatch for Qwen4Exp: bounded FIA prefill and GBSA fallback."""
+"""Request dispatch for Qwen4Exp: Union GBSA prefill and standard GBSA decode."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
-from .fia import prepare_qsa_fia_paged_kv, qsa_fia_attention
 from .gbsa import qsa_gbsa_attention
-
-QSA_FIA_MAX_LOGICAL_KV_LENGTH = 24 * 1024
+from .gbsa_union import qsa_union_gbsa_attention, qsa_union_gbsa_attention_batch
 
 
 @dataclass(frozen=True)
@@ -16,39 +14,27 @@ class QSARequest:
     request_index: int
     query_start: int
     query_end: int
-    kv_length: int
     is_prefill: bool
 
-    @property
-    def use_paged_kv(self) -> bool:
-        return self.kv_length != self.query_end - self.query_start
 
-    @property
-    def use_fia(self) -> bool:
-        """Whether this Prefill chunk starts below the FIA KV limit."""
-        return self.fia_query_end > self.query_start
+@dataclass(frozen=True)
+class QSAUnionBatch:
+    query_start: int
+    query_end: int
+    query_starts: tuple[int, ...]
+    request_indices: tuple[int, ...]
 
-    @property
-    def fia_query_end(self) -> int:
-        """Keep a chunk crossing 24K on FIA; switch subsequent chunks."""
-        if not self.is_prefill:
-            return self.query_start
-        query_length = self.query_end - self.query_start
-        # Scheduler seq_lens already includes the current query chunk.
-        total_logical_kv_length = self.kv_length
-        fits_fia_limit = total_logical_kv_length <= QSA_FIA_MAX_LOGICAL_KV_LENGTH
-        crosses_fia_limit = (
-            total_logical_kv_length > QSA_FIA_MAX_LOGICAL_KV_LENGTH
-            and total_logical_kv_length - query_length < QSA_FIA_MAX_LOGICAL_KV_LENGTH
-        )
-        if fits_fia_limit or crosses_fia_limit:
-            return self.query_end
-        return self.query_start
 
-    @property
-    def gbsa_query_start(self) -> int:
-        """First row routed to GBSA; Decode starts at the request boundary."""
-        return self.fia_query_end
+@dataclass(frozen=True)
+class QSAUnionPreparedBatch:
+    """Device metadata prepared once and shared by every QSA layer."""
+
+    visible_lengths: torch.Tensor
+    cu_q: torch.Tensor
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    group_row_map: torch.Tensor
+    max_query_length: int
 
 
 @dataclass(frozen=True)
@@ -56,8 +42,9 @@ class QSARequestPlan:
     """Precomputed operator routing shared by every QSA layer in one step."""
 
     requests: tuple[QSARequest, ...]
-    fia_requests: tuple[QSARequest, ...]
-    gbsa_spans: tuple[tuple[int, int], ...]
+    union_batches: tuple[QSAUnionBatch, ...]
+    decode_spans: tuple[tuple[int, int], ...]
+    prepared_union_batches: tuple[QSAUnionPreparedBatch, ...] = ()
 
     def __getitem__(self, index: int) -> QSARequest:
         return self.requests[index]
@@ -71,44 +58,112 @@ class QSARequestPlan:
 
 def build_qsa_request_plan(
     query_start_loc_cpu: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
     num_actual_tokens: int,
     is_prefilling_cpu: torch.Tensor,
 ) -> QSARequestPlan:
     """Classify mixed-batch rows once for reuse by every QSA layer."""
-    if any(t.device.type != "cpu" for t in (query_start_loc_cpu, seq_lens_cpu, is_prefilling_cpu)):
+    if any(t.device.type != "cpu" for t in (query_start_loc_cpu, is_prefilling_cpu)):
         raise ValueError("QSA dispatch requires scheduler CPU metadata")
     starts = query_start_loc_cpu.tolist()
-    lengths = seq_lens_cpu.tolist()
     phases = is_prefilling_cpu.tolist()
-    if len(lengths) < len(starts) - 1 or len(phases) < len(starts) - 1:
-        raise ValueError("QSA phase and KV metadata must cover every request")
+    if len(phases) < len(starts) - 1:
+        raise ValueError("QSA phase metadata must cover every request")
     requests: list[QSARequest] = []
     for request_index, (start, end) in enumerate(zip(starts, starts[1:])):
         start = min(max(start, 0), num_actual_tokens)
         end = min(max(end, start), num_actual_tokens)
         if end > start:
-            requests.append(
-                QSARequest(request_index, start, end, int(lengths[request_index]), bool(phases[request_index]))
-            )
+            requests.append(QSARequest(request_index, start, end, bool(phases[request_index])))
     requests_tuple = tuple(requests)
-    fia_requests = tuple(request for request in requests_tuple if request.use_fia)
-    gbsa_spans: list[tuple[int, int]] = []
+    union_requests: list[list[QSARequest]] = []
+    decode_spans: list[tuple[int, int]] = []
     for request in requests_tuple:
-        start = request.gbsa_query_start
-        if start >= request.query_end:
-            continue
-        if gbsa_spans and gbsa_spans[-1][1] == start:
-            gbsa_spans[-1] = (gbsa_spans[-1][0], request.query_end)
+        start = request.query_start
+        if request.is_prefill:
+            if union_requests and union_requests[-1][-1].query_end == start:
+                union_requests[-1].append(request)
+            else:
+                union_requests.append([request])
+        elif decode_spans and decode_spans[-1][1] == start:
+            decode_spans[-1] = (decode_spans[-1][0], request.query_end)
         else:
-            gbsa_spans.append((start, request.query_end))
-    return QSARequestPlan(requests_tuple, fia_requests, tuple(gbsa_spans))
+            decode_spans.append((start, request.query_end))
+    union_batches = tuple(
+        QSAUnionBatch(
+            batch[0].query_start,
+            batch[-1].query_end,
+            (0,) + tuple(request.query_end - batch[0].query_start for request in batch),
+            tuple(request.request_index for request in batch),
+        )
+        for batch in union_requests
+    )
+    return QSARequestPlan(requests_tuple, union_batches, tuple(decode_spans))
+
+
+def build_qsa_union_group_row_map(query_starts: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    """Map padded Union lanes to batch-local rows without crossing requests."""
+    if len(query_starts) < 2 or query_starts[0] != 0:
+        raise ValueError("Packed query starts must begin at zero")
+    groups: list[tuple[int, ...]] = []
+    for start, end in zip(query_starts, query_starts[1:]):
+        if end <= start:
+            raise ValueError("Packed query starts must describe nonempty requests")
+        for group_start in range(start, end, 8):
+            groups.append(tuple(row if row < end else -1 for row in range(group_start, group_start + 8)))
+    return tuple(groups)
+
+
+def _union_metadata_tensor(
+    values: tuple[int, ...] | tuple[tuple[int, ...], ...], *, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    if device.type == "npu":
+        host = torch.tensor(values, dtype=dtype, device="cpu", pin_memory=True)
+        return host.to(device=device, non_blocking=True)
+    return torch.tensor(values, dtype=dtype, device=device)
+
+
+def prepare_qsa_union_batches(
+    request_plan: QSARequestPlan,
+    visible_lengths: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+) -> QSARequestPlan:
+    """Materialize request-invariant Union metadata once per model step."""
+    prepared: list[QSAUnionPreparedBatch] = []
+    for batch in request_plan.union_batches:
+        rows = batch.query_end - batch.query_start
+        group_row_map = _union_metadata_tensor(
+            build_qsa_union_group_row_map(batch.query_starts),
+            dtype=torch.int32,
+            device=visible_lengths.device,
+        )
+        cu_q = _union_metadata_tensor(batch.query_starts, dtype=torch.int64, device=visible_lengths.device)
+        request_indices = batch.request_indices
+        first = request_indices[0]
+        if request_indices == tuple(range(first, first + len(request_indices))):
+            selected_lengths = seq_lens[first : first + len(request_indices)]
+            selected_table = block_table[first : first + len(request_indices)]
+        else:
+            selected = _union_metadata_tensor(request_indices, dtype=torch.int64, device=seq_lens.device)
+            selected_lengths = seq_lens.index_select(0, selected)
+            selected_table = block_table.index_select(0, selected)
+        prepared.append(
+            QSAUnionPreparedBatch(
+                visible_lengths=visible_lengths[batch.query_start : batch.query_end],
+                cu_q=cu_q,
+                seq_lens=selected_lengths,
+                block_table=selected_table,
+                group_row_map=group_row_map,
+                max_query_length=max(b - a for a, b in zip(batch.query_starts, batch.query_starts[1:])),
+            )
+        )
+        if int(group_row_map.shape[0]) * 8 < rows:
+            raise RuntimeError("Union group map does not cover every query row")
+    return replace(request_plan, prepared_union_batches=tuple(prepared))
 
 
 def dispatch_qsa_attention(
     query: torch.Tensor,
-    key: torch.Tensor | None,
-    value: torch.Tensor | None,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     compact_indices: torch.Tensor,
@@ -120,7 +175,7 @@ def dispatch_qsa_attention(
     request_plan: QSARequestPlan | None,
 ) -> torch.Tensor:
     # None is the decode-only metadata sentinel, including graph capture.
-    # This branch contains no host length decisions or FIA launches; device KV
+    # Device KV
     # lengths, positions and page tables may change between graph replays.
     if request_plan is None:
         return qsa_gbsa_attention(
@@ -135,39 +190,39 @@ def dispatch_qsa_attention(
             output,
         )
 
-    for request in request_plan.fia_requests:
-        rows = slice(request.query_start, request.fia_query_end)
-        fia_kv_length = request.kv_length
-        visible_lens = torch.minimum(
-            logical_positions[rows].add(1).clamp_min(0),
-            seq_lens[request.request_index].clamp_max(fia_kv_length),
-        )
-        # Callers whose ABI does not carry the freshly projected K/V pass None;
-        # the rows were already stored, so gather them from the paged cache.
-        if request.use_paged_kv or key is None or value is None:
-            keys, values, table, _ = prepare_qsa_fia_paged_kv(
+    for batch_index, batch in enumerate(request_plan.union_batches):
+        rows = slice(batch.query_start, batch.query_end)
+        prepared = request_plan.prepared_union_batches[batch_index]
+        if len(batch.request_indices) == 1:
+            qsa_union_gbsa_attention(
+                query[rows],
                 key_cache,
                 value_cache,
-                block_table[request.request_index : request.request_index + 1],
-                fia_kv_length,
+                compact_indices[rows],
+                block_table,
+                token_to_req[rows],
+                logical_positions[rows],
+                seq_lens,
+                output[rows],
+                request_index=batch.request_indices[0],
+                prepared=prepared,
             )
         else:
-            keys, values, table = key[rows], value[rows], None
-        qsa_fia_attention(
-            query[rows],
-            keys,
-            values,
-            compact_indices[rows],
-            visible_lens,
-            fia_kv_length,
-            output[rows],
-            block_table=table,
-        )
-
-    # Every Decode row and each Prefill chunk starting at/above the logical-KV
-    # limit uses GBSA. Coalesce consecutive rows without gathering/copying K/V or
-    # changing the original request IDs used to address block tables and lengths.
-    for start, end in request_plan.gbsa_spans:
+            qsa_union_gbsa_attention_batch(
+                query[rows],
+                key_cache,
+                value_cache,
+                compact_indices[rows],
+                block_table,
+                token_to_req[rows],
+                logical_positions[rows],
+                seq_lens,
+                output[rows],
+                query_starts=batch.query_starts,
+                request_indices=batch.request_indices,
+                prepared=prepared,
+            )
+    for start, end in request_plan.decode_spans:
         rows = slice(start, end)
         qsa_gbsa_attention(
             query[rows],

@@ -119,7 +119,8 @@ def test_eagle3_sp_acceptance(
         "enforce_eager": True,
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        # Main removed this MRv1 option; the parameter now only drives the
+        # async-combination skip below.
         "model": spec_model_name,
     }
 
@@ -165,7 +166,6 @@ def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -227,7 +227,6 @@ def test_dflash2_v2_acceptance(
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
-        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
 
         # Reuse this engine for two sequential single-request generations,

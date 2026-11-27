@@ -25,7 +25,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"OMP_NUM_THREADS": "1", "VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
 def test_moe_routing_replay(model):
     """Every token row carries its own routing decision (regression for #15451).
 

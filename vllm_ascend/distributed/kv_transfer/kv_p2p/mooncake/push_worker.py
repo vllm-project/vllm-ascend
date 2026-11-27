@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -28,7 +29,7 @@ from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -39,7 +40,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
+    worker_rank_to_dcp_rank,
     zmq_ctx,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
 )
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
@@ -200,10 +205,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     """Coordinate P layer batches and D completion accounting."""
 
     def __init__(self, vllm_config, engine_id, kv_cache_config) -> None:
-        # TODO: add DCP rank/sequence mapping and completion accounting before
-        # accepting DCP > 1; current worker identities contain only PP/PCP/TP.
-        if vllm_config.parallel_config.decode_context_parallel_size != 1:
-            raise ValueError("Mooncake Push worker currently requires DCP=1")
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._stop_event = threading.Event()
         self._result_queue: queue.SimpleQueue = queue.SimpleQueue()
@@ -215,16 +216,25 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._prefilling_request_ids: tuple[str, ...] = ()
         self._pending_sends: list[tuple[LayerTransferBatch, Future]] = []
         self._sending_futures: dict[str, list[Future]] = {}
+        # Rotating cache entry name -> stage-local layer index.
+        self._shared_layer_indices: dict[str, int] = {}
+        layout = get_layerwise_reuse_layout(kv_cache_config) if self.kv_transfer_config.is_kv_producer else None
+        if layout is not None:
+            stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
+            self._shared_layer_indices = {
+                name: stage_indices[layout.cache_layer_indices[name]] for name in layout.reused_cache_names
+            }
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
         self._zmq_context: Context | None = None
 
+    @property
+    def supports_layerwise_buffer_reuse(self) -> bool:
+        return bool(self._shared_layer_indices)
+
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
-            # KVPP is outside the Push support plan.
-            if self.ascend_config.kvpp_config.size > 1:
-                raise ValueError("Mooncake Push does not support KVPP yet")
             self._device = torch.npu.current_device()
             self._layer_indices = {name: i for i, name in enumerate(self.transfer_metadata.layer_names)}
             model_type = self.vllm_config.model_config.hf_text_config.model_type
@@ -239,6 +249,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
+            self._register_composite_layer_aliases()
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -248,7 +259,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 setattr(self, name, getattr(self.transfer_metadata, name))
             self._zmq_context = Context()
             self._sender_executor = ThreadPoolExecutor(
-                max_workers=32,
+                max_workers=self._get_transfer_max_workers(self.vllm_config),
                 initializer=torch.npu.set_device,
                 initargs=(self._device,),
                 thread_name_prefix="MooncakePushSending",
@@ -261,16 +272,28 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self.shutdown()
             raise
 
+    def _register_composite_layer_aliases(self) -> None:
+        """Map model-ready boundaries to this worker's registered cache owners."""
+        context = self.vllm_config.compilation_config.static_forward_context
+        for alias, layer in context.items():
+            cache_names = getattr(layer, "kv_transfer_cache_names", None)
+            if cache_names is not None:
+                self._layer_index_by_name[alias] = self._layer_index_by_name[cache_names[0]]
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
-            # The previous step's wait_for_save has joined its WRITE tasks.
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # External hits and offloaded prefixes become ready during forward.
+                if (
+                    not self._shared_layer_indices
+                    and not request.num_external_tokens
+                    and not state.available_layers
+                    and request.num_computed_tokens
+                ):
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
@@ -313,6 +336,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 ):
                     continue
                 self._reqs_recv_state[recv_request.request_id] = _ReceiveState(request_id, time.monotonic())
+                if recv_request.do_virtual:
+                    self._pending_completions.pop(recv_request.request_id, None)
+                    self._result_queue.put(("virtual", recv_request.request_id, None))
+                    continue
                 for completion in self._pending_completions.pop(recv_request.request_id, {}).values():
                     self._result_queue.put(("done", recv_request.request_id, completion))
             for request_id, not_dispatched in metadata.push_failed_requests.items():
@@ -337,10 +364,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             metadata = msgspec.msgpack.decode(ensure_zmq_recv(sock, path), type=MooncakeTransferMetadataGroups)
         finally:
             sock.close(linger=0)
-        if metadata.engine_id != params["consumer_engine_id"] or metadata.dcp_size != 1:
-            raise ValueError("Push requires matching D engine metadata with DCP=1")
+        if metadata.engine_id != params["consumer_engine_id"]:
+            raise ValueError("Push requires matching D engine metadata")
         if metadata.use_kv_pp:
-            raise ValueError("Push does not support KVPP yet")
+            raise ValueError("Push requires KVPP to be disabled on the decode node")
         return metadata
 
     def _send_done(self, params: dict[str, Any], error: str | None) -> bool:
@@ -411,6 +438,27 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if not state.destinations:
             raise ValueError("Missing D worker completion endpoints")
 
+    def _get_layer_dcp_sizes(
+        self, layer_name: str, remote: MooncakeTransferMetadataGroups, rank: WorkerRank
+    ) -> tuple[int, int]:
+        """Resolve each peer's sequence sharding independently for this cache."""
+        if self.dcp_size == remote.dcp_size == 1:
+            return 1, 1
+        spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
+        pp = remote.metadata_by_pp_rank[rank[0]]
+        index = pp.layer_names.index(layer_name)
+        local_size = self.dcp_size if spec.dcp_sharded else 1
+        remote_size = remote.dcp_size if pp.dcp_sharded[index] else 1
+        if is_circular_kv_cache_spec(spec):
+            return 1, 1
+        if isinstance(spec, AscendSFAIndexerCacheSpec):
+            # Packed indexer pages already contain all DCP sequence pieces.
+            if spec.sfa_dcp_replicated_indexer_size > 1:
+                local_size = 1
+            if pp.indexer_replication_sizes[index] > 1:
+                remote_size = 1
+        return local_size, remote_size
+
     def _get_transfer_partition(
         self, layer_name: str, remote: MooncakeTransferMetadataGroups, rank: WorkerRank
     ) -> tuple[int, int, int] | None:
@@ -423,6 +471,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         worker = pp.metadata_by_pcp_rank[rank[1]].metadata_by_tp_rank[rank[2]]
         if remote_index not in worker.layer_indices:
             return None
+        local_dcp_size, remote_dcp_size = self._get_layer_dcp_sizes(layer_name, remote, rank)
         spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
         local_rank = self.tp_rank
         remote_rank = rank[2]
@@ -445,11 +494,20 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return (0, 0, 1) if matched else None
         whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
         if whole:
-            # Replicated pages: exactly one P worker writes each D replica.
-            owner = (rank[2] * remote.pcp_size + rank[1]) % (self.tp_size * self.pcp_size)
-            return (0, 0, 1) if self.tp_rank * self.pcp_size + self.pcp_rank == owner else None
+            # Registration exposes each KVPP target layer only on its persistent owner.
+            # That owner supplies the full page to every destination holding the layer.
+            if layer_name in self.kvpp_layer_owners:
+                return (0, 0, 1)
+            # Choose one complete P DCP group per D worker. Every source shard
+            # in that group may contribute; other groups are redundant copies.
+            replicas = self.tp_size * self.pcp_size // local_dcp_size
+            owner = (rank[2] * remote.pcp_size + rank[1]) % replicas
+            local_group = (self.tp_rank * self.pcp_size + self.pcp_rank) // local_dcp_size
+            return (0, 0, 1) if local_group == owner else None
         if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
             raise ValueError(f"Unsupported Push cache spec: {type(spec).__name__}")
+        if local_dcp_size > 1 or remote_dcp_size > 1:
+            raise ValueError(f"Push DCP does not support cache spec {type(spec).__name__}")
         if self.pcp_rank != rank[1] % self.pcp_size:
             return None
         local_heads = self.transfer_metadata.block_shapes[local_index][0][0]
@@ -520,6 +578,21 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             block_size = self.transfer_metadata.layer_block_sizes[local_index] // local_scale
             if block_size != pp.layer_block_sizes[remote_index] // remote_scale:
                 raise ValueError("Push requires equal P/D kernel block sizes")
+            local_dcp_size, remote_dcp_size = self._get_layer_dcp_sizes(
+                layer_name, remote, tuple(params["consumer_rank"])
+            )
+            local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
+            _, remote_pcp_rank, remote_tp_rank = params["consumer_rank"]
+            remote_worker_rank = remote_tp_rank * remote.pcp_size + remote_pcp_rank
+            remote_dcp_rank = worker_rank_to_dcp_rank(remote_worker_rank, remote.pcp_size, remote_dcp_size)
+            local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
+            remote_interleave = pp.cp_kv_cache_interleave_size
+            for side, size, interleave, page_size in (
+                ("P", local_dcp_size, local_interleave, self.transfer_metadata.layer_block_sizes[local_index]),
+                ("D", remote_dcp_size, remote_interleave, pp.layer_block_sizes[remote_index]),
+            ):
+                if size > 1 and (interleave <= 0 or interleave % block_size or page_size % interleave):
+                    raise ValueError(f"Push DCP interleave must align to kernel blocks and divide the {side} page size")
             if not final:
                 end = end // block_size * block_size
             if end <= start:
@@ -530,14 +603,33 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             first, last = start // block_size, (end + block_size - 1) // block_size
             local_ids, remote_ids = [], []
             for index in range(first, last):
-                local_block = local_blocks[index // local_scale]
-                remote_block = remote_blocks[index // remote_scale]
+                local_kernel_index = remote_kernel_index = index
+                # Intersect both peers' ownership within this layer's ready
+                # range. Their interleaves and logical page sizes may differ.
+                if local_dcp_size > 1:
+                    stripe, offset = divmod(index * block_size, local_interleave)
+                    if stripe % local_dcp_size != local_dcp_rank:
+                        continue
+                    local_kernel_index = (stripe // local_dcp_size * local_interleave + offset) // block_size
+                if remote_dcp_size > 1:
+                    stripe, offset = divmod(index * block_size, remote_interleave)
+                    if stripe % remote_dcp_size != remote_dcp_rank:
+                        continue
+                    remote_kernel_index = (stripe // remote_dcp_size * remote_interleave + offset) // block_size
+                if local_kernel_index // local_scale >= len(local_blocks) or remote_kernel_index // remote_scale >= len(
+                    remote_blocks
+                ):
+                    raise ValueError("Push block tables do not cover the ready token range")
+                local_block = local_blocks[local_kernel_index // local_scale]
+                remote_block = remote_blocks[remote_kernel_index // remote_scale]
                 if final_only and remote_block == 0:
                     continue
                 if local_block == 0 or remote_block == 0:
                     raise ValueError("Required Push block is not resident")
-                local_ids.append(local_block * local_scale + index % local_scale)
-                remote_ids.append(remote_block * remote_scale + index % remote_scale)
+                local_ids.append(local_block * local_scale + local_kernel_index % local_scale)
+                remote_ids.append(remote_block * remote_scale + remote_kernel_index % remote_scale)
+        # An empty DCP stripe still advances this destination's processed range.
+        # Keep its event/future so completion follows the same WRITE ordering.
         return LayerTransferRequest(request_id, tuple(local_ids), tuple(remote_ids), start, end), event
 
     def _execute_layer_transfer(self, batch: LayerTransferBatch) -> str | None:
@@ -577,6 +669,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 local_offset, remote_offset, heads = partition
                 whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
                 local = self.transfer_metadata
+                for req in batch.requests:
+                    if len(req.local_block_ids) != len(req.remote_block_ids):
+                        raise ValueError("P/D block counts differ")
+                # Reuse the request-ordered block arrays across cache components.
+                local_blocks = np.fromiter(
+                    (block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64
+                )
+                remote_blocks = np.fromiter(
+                    (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
+                )
                 for cache_index, (local_addr, remote_addr) in enumerate(
                     zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
                 ):
@@ -587,19 +689,19 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         remote_len //= pp.block_shapes[remote_index][cache_index][0]
                     if local_len != remote_len:
                         raise ValueError("P/D cache slice lengths differ")
-                    for req in batch.requests:
-                        for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
-                            src_list.append(
-                                local_addr
-                                + local_block * local.block_strides[local_index][cache_index]
-                                + local_offset * local_len
-                            )
-                            dst_list.append(
-                                remote_addr
-                                + remote_block * pp.block_strides[remote_index][cache_index]
-                                + remote_offset * remote_len
-                            )
-                            length_list.append(local_len * heads)
+                    src_list.extend(
+                        (
+                            local_blocks * np.uint64(local.block_strides[local_index][cache_index])
+                            + np.uint64(local_addr + local_offset * local_len)
+                        ).tolist()
+                    )
+                    dst_list.extend(
+                        (
+                            remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
+                            + np.uint64(remote_addr + remote_offset * remote_len)
+                        ).tolist()
+                    )
+                    length_list.extend([local_len * heads] * len(local_blocks))
             batch.event.synchronize()
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"
@@ -610,7 +712,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return str(exc) or type(exc).__name__
         return None
 
-    def _process_sending_requests(self, wait: bool = False, *, layer_hook: bool = False, force: bool = False) -> None:
+    def _process_sending_requests(
+        self,
+        wait: bool = False,
+        *,
+        layer_hook: bool = False,
+        force: bool = False,
+        wait_for_metadata: bool = False,
+    ) -> None:
         """Collect WRITE results and submit ready layers; never send DONE here."""
         pending = []
         for batch, future in self._pending_sends:
@@ -661,7 +770,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 if state.error or destination.completion is not None:
                     continue
                 assert destination.metadata_future is not None
-                if not destination.metadata_future.done():
+                # Shared sources wait for discovery while their slot is valid.
+                if not wait_for_metadata and not destination.metadata_future.done():
                     continue
                 try:
                     remote = destination.metadata_future.result()
@@ -751,6 +861,24 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
+    def _submit_shared_layer_writes(self, shared_names: list[str]) -> None:
+        # Wait for D metadata and submit WRITEs while this layer still owns the slot.
+        self._process_sending_requests(layer_hook=True, force=True, wait_for_metadata=True)
+        # Remove shared entries so later hooks cannot send from a reused slot.
+        for request_id in self._prefilling_request_ids:
+            available_layers = self._reqs_send_state[request_id].available_layers
+            for name in shared_names:
+                available_layers.pop(name, None)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        # The source layer submits its WRITEs before the store's save completion.
+        # Push removes them from the pending list only after they finish.
+        wait_futures(
+            future
+            for batch, future in self._pending_sends
+            if self._shared_layer_indices.get(batch.layer_name) == layer_idx
+        )
+
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
@@ -758,8 +886,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if layer_index is None:
             return
         # Share one fence across the physical layer's caches and requests.
-        # Duplicate hooks with no new tokens do not record another device event.
         layer_names = self._layer_names_by_index[layer_index]
+        shared_names = [name for name in layer_names if name in self._shared_layer_indices]
         event = None
         for request_id in self._prefilling_request_ids:
             state = self._reqs_send_state[request_id]
@@ -774,7 +902,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if event is not None or last_layer:
+        if shared_names and event is not None:
+            self._submit_shared_layer_writes(shared_names)
+        elif last_layer or event is not None:
             self._process_sending_requests(layer_hook=True, force=last_layer)
         if last_layer:
             self._send_completions()
@@ -797,6 +927,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             assert state.metadata is not None
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
+                if layer_name in self._shared_layer_indices:
+                    continue
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
                     if event is None:
                         event = torch.npu.Event()
@@ -864,9 +996,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     )
                     pending[source_key] = payload
                     continue
-                if kind == "failed":
+                if kind in ("failed", "virtual"):
                     results.finished_recving.add(state.request_id)
-                    results.failed_recving.add(state.request_id)
+                    if kind == "failed":
+                        results.failed_recving.add(state.request_id)
                     self._finished_requests[request_id] = True
                     del self._reqs_recv_state[request_id]
                     continue

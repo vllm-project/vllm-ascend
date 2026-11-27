@@ -260,8 +260,6 @@ def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatc
     """The no-alias decision for the stats-silent PreemptOffloadConnector is
     comment-only in the source; pin the negative case so a class-name key
     cannot appear in the registry without someone updating the comments.
-    (AscendSimpleCPUOffloadConnector now carries a class-name alias: from
-    upstream v0.31.0 the upstream SimpleCPUOffloadConnector emits stats.)
     """
     from vllm_ascend.distributed.kv_transfer import register_connector
 
@@ -271,35 +269,10 @@ def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatc
     assert "PreemptOffloadConnectorV1" not in KVConnectorFactory._registry
 
 
-def test_simple_cpu_offload_connector_carries_class_name_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """From upstream v0.31.0 the upstream SimpleCPUOffloadConnector overrides
-    ``get_kv_connector_stats``, so AscendSimpleCPUOffloadConnector emits stats
-    and must carry a class-name alias or the #16932 crash returns. Pin the
-    positive case: both the config name and the class name resolve to the
-    Ascend class.
-    """
-    from vllm_ascend.distributed.kv_transfer import register_connector
-    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
-        AscendSimpleCPUOffloadConnector,
-    )
-
-    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
-    register_connector()
-
-    assert KVConnectorFactory._registry["SimpleCPUOffloadConnector"]() is AscendSimpleCPUOffloadConnector
-    assert KVConnectorFactory._registry["AscendSimpleCPUOffloadConnector"]() is AscendSimpleCPUOffloadConnector
-
-
 def test_no_alias_connectors_inherit_base_stats_default() -> None:
     """The no-alias decision rests on the connector never emitting stats;
     pin the premise so a future get_kv_connector_stats override is caught here
     instead of reviving the #16932 crash.
-
-    AscendSimpleCPUOffloadConnector is no longer checked: from upstream
-    v0.31.0 the upstream SimpleCPUOffloadConnector emits stats, so it carries
-    a class-name alias (see register_connector).
     """
     from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (
         PreemptOffloadConnectorV1,
@@ -329,11 +302,10 @@ def _loader_target(loader) -> tuple[str, str]:
 def test_alias_helper_override_replaces_config_name_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """``override=True`` is the explicit "take over this config name" switch.
 
-    vllm-ascend re-registers upstream names (``OffloadingConnector``,
-    ``SimpleCPUOffloadConnector``); ``register_connector`` rejects duplicates,
-    so the helper must pop the config-name entry before registering. Keeping
-    this behind a keyword makes the takeover explicit at the call site instead
-    of hiding a stray pop() above it.
+    vllm-ascend re-registers the upstream ``OffloadingConnector`` name.
+    ``register_connector`` rejects duplicates, so the helper must pop the
+    config-name entry before registering. The keyword makes the takeover
+    explicit at the call site.
     """
     from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
 

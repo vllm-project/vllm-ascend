@@ -103,8 +103,8 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         assert kwargs["cu_seqlens"] is metadata.cu_seqlens_host
         assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         assert kwargs["initial_state"].dtype == torch.float32
-        assert kwargs["use_qk_l2norm_in_kernel"] is False
-        assert l2norm.call_count == 2
+        assert kwargs["use_qk_l2norm_in_kernel"] is True
+        assert l2norm.call_count == 0
         torch.testing.assert_close(kwargs["initial_state"][0], saved[3].float())
         if not compact:
             assert torch.count_nonzero(kwargs["initial_state"][1]) == 0

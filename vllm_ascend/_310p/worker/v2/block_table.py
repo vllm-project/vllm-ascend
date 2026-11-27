@@ -94,6 +94,11 @@ class Ascend310PBlockTables(BlockTables):
             dtype=torch.int32,
             device=device,
         )
+        # Decode steps only allocate a KV block every ``block_size`` tokens.
+        # Reuse the last gather while the tables and request order are unchanged.
+        self._table_version = 0
+        self._gather_cache_key: tuple[int, int, bytes] | None = None
+        self._gather_cache_result: tuple[torch.Tensor, ...] | None = None
 
     def init_block_table_layout_tensors(self) -> None:
         """310P does not use Triton pointer tables."""
@@ -118,6 +123,8 @@ class Ascend310PBlockTables(BlockTables):
                 raise ValueError(f"Too many block IDs for request {req_index} in KV cache group {group_id}.")
             self.block_tables_cpu[group_id][req_index, start:end] = block_ids
             self.num_blocks_np[group_id, req_index] = end
+        # Any append changes the gathered rows; invalidate the reuse cache.
+        self._table_version += 1
 
     def apply_staged_writes(self) -> None:
         """Block IDs are written to their CPU owner immediately."""
@@ -140,6 +147,13 @@ class Ascend310PBlockTables(BlockTables):
         if num_reqs_padded < num_reqs:
             raise ValueError(f"num_reqs_padded ({num_reqs_padded}) is smaller than num_reqs ({num_reqs}).")
 
+        # Decode keeps the same request order and blocks for many steps; skip the
+        # host gather and H2D copies until a block allocation or reorder occurs.
+        cache_key = (num_reqs_padded, self._table_version, idx_mapping_np.tobytes())
+        if cache_key == self._gather_cache_key:
+            assert self._gather_cache_result is not None
+            return self._gather_cache_result
+
         for group_id, (source, host_output, host_tensor, device_output) in enumerate(
             zip(
                 self.block_tables_cpu,
@@ -154,7 +168,10 @@ class Ascend310PBlockTables(BlockTables):
                 host_output[batch_idx, :num_blocks] = source[req_idx, :num_blocks]
             device_output[:num_reqs_padded].copy_(host_tensor[:num_reqs_padded], non_blocking=True)
 
-        return tuple(table[:num_reqs_padded] for table in self.input_block_tables)
+        result = tuple(table[:num_reqs_padded] for table in self.input_block_tables)
+        self._gather_cache_key = cache_key
+        self._gather_cache_result = result
+        return result
 
     def compute_slot_mappings(
         self,
@@ -175,24 +192,34 @@ class Ascend310PBlockTables(BlockTables):
                 f"num_tokens_padded ({num_tokens_padded}) exceeds slot-mapping capacity "
                 f"({self.max_num_batched_tokens})."
             )
-        # Initialize and
-        # transfer only active columns.
-        self.slot_mappings_cpu[:, :num_tokens_padded].fill(PAD_SLOT_ID)
-        for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.kernel_block_sizes)):
-            if not self._slot_mapping_enabled[group_id]:
-                continue
-            for batch_idx, req_idx in enumerate(idx_mapping_np):
-                # vLLM #56734: dummy draft decode runs use idx_mapping == -1.
-                # Leave the pre-filled PAD for rows that own no blocks.
-                if req_idx < 0:
+        num_reqs = idx_mapping_np.shape[0]
+        # Token -> request ownership for the token-aligned positions. One vectorized
+        # scatter keeps the per-step host cost flat as the batch grows.
+        token_start = int(query_start_loc_np[0])
+        token_lens = np.maximum(np.diff(query_start_loc_np[: num_reqs + 1]), 0)
+        num_positions = int(token_lens.sum())
+        token_end = token_start + num_positions
+        rows = idx_mapping_np[np.repeat(np.arange(num_reqs), token_lens)]
+        active = rows >= 0
+        all_active = bool(active.all())
+        # Rows that own no blocks keep PAD; only clear when such rows exist or
+        # this batch does not cover every padded token column.
+        if not all_active or token_start > 0 or token_end < num_tokens_padded or not all(self._slot_mapping_enabled):
+            self.slot_mappings_cpu[:, :num_tokens_padded].fill(PAD_SLOT_ID)
+        if num_positions:
+            token_positions = positions_np[token_start:token_end]
+            if not all_active:
+                rows = np.where(active, rows, 0)
+            for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.kernel_block_sizes)):
+                if not self._slot_mapping_enabled[group_id]:
                     continue
-                start = int(query_start_loc_np[batch_idx])
-                end = int(query_start_loc_np[batch_idx + 1])
-                token_positions = positions_np[start:end]
-                logical_block_indices = token_positions // block_size
-                block_numbers = block_table[req_idx, logical_block_indices]
-                block_offsets = token_positions % block_size
-                self.slot_mappings_cpu[group_id, start:end] = block_numbers * block_size + block_offsets
+                block_numbers = block_table[rows, token_positions // block_size]
+                slots = block_numbers * block_size + token_positions % block_size
+                column = self.slot_mappings_cpu[group_id]
+                if all_active:
+                    column[token_start:token_end] = slots
+                else:
+                    column[token_start:token_end][active] = slots[active]
 
         device_slots = self.slot_mappings if out is None else out
         for group_id in range(self.num_kv_cache_groups):
@@ -205,6 +232,8 @@ class Ascend310PBlockTables(BlockTables):
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         for block_table in self.input_block_tables:
             block_table[:num_reqs].zero_()
+        # Dummy runs overwrite the gathered device rows used by the cache.
+        self._table_version += 1
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:

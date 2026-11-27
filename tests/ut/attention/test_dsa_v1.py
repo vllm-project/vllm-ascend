@@ -30,7 +30,9 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
 from vllm_ascend.attention.dsa_v1 import (
-    DSA_METADATA_BUFFER_SIZE,
+    _WO_A_SMALL_M_LIMIT,
+    QLI_METADATA_BUFFER_SIZE,
+    SAS_METADATA_BUFFER_SIZE,
     AscendDSABackend,
     AscendDSAImpl,
     AscendDSALayerMetadata,
@@ -39,8 +41,14 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAReqMetadata,
     OProjBufferPool,
     build_compressor_metadata_out,
+    build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
+from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+)
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -119,6 +127,43 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
         )
 
 
+@pytest.mark.parametrize("output_arg", ["buffer", "indices_output"])
+@pytest.mark.parametrize(
+    ("query_start_loc", "num_decode_tokens"),
+    [([0, 2, 3], 3), ([0, 2, 3], 8), ([0, 0, 0], 8)],
+    ids=["full", "padded", "all-padding"],
+)
+def test_build_dspark_swa_indices_preserves_graph_padding(output_arg, query_start_loc, num_decode_tokens):
+    output_rows = num_decode_tokens + 2 if output_arg == "buffer" else num_decode_tokens
+    output = torch.full((output_rows, 1, 5), 99, dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[3, 5], [7, 8]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=2,
+        block_size=4,
+        query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32),
+        seq_lens=torch.tensor([6, 3], dtype=torch.int32),
+        num_decode_tokens=num_decode_tokens,
+        index_width=5,
+        **{output_arg: output},
+    )
+
+    active_rows = query_start_loc[-1]
+    expected_indices = torch.full((num_decode_tokens, 1, 5), -1, dtype=torch.int32)
+    expected_lengths = torch.zeros(num_decode_tokens, dtype=torch.int32)
+    if active_rows:
+        expected_indices[:3, 0] = torch.tensor(
+            [[14, 15, 20, 21, -1], [14, 15, 20, 21, -1], [28, 29, 30, -1, -1]], dtype=torch.int32
+        )
+        expected_lengths[:3] = torch.tensor([4, 4, 3], dtype=torch.int32)
+
+    torch.testing.assert_close(indices, expected_indices)
+    torch.testing.assert_close(lengths, expected_lengths)
+    assert indices.data_ptr() == output.data_ptr()
+    if output_arg == "buffer":
+        assert torch.all(output[num_decode_tokens:] == 99)
+
+
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
     plan = MagicMock()
     plan.layout_kv = "PA_ND"
@@ -155,34 +200,23 @@ def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamesp
     )
 
 
-def _make_kv_cache_spec(
-    compressor_ratio: int,
-    *,
-    use_tokens_per_state: bool = False,
-) -> SimpleNamespace:
+def _make_kv_cache_spec(compressor_ratio: int) -> SimpleNamespace:
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
-    # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-    ratio_kwargs = (
-        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
-    )
-    kv_cache_spec = SimpleNamespace(
+    return SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
-        storage_block_size=physical_block_size,
-        **ratio_kwargs,
+        num_states=physical_block_size,
+        tokens_per_state=compressor_ratio,
     )
-    return kv_cache_spec
 
 
 def _make_builder(
     compressor_ratio: int = 4,
     num_speculative_tokens: int | None = None,
-    *,
-    use_tokens_per_state: bool = False,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
     builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio, use_tokens_per_state=use_tokens_per_state),
+        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
         layer_names=["model.layers.0.self_attn.attn"],
         vllm_config=vllm_config,
         device=torch.device("cpu"),
@@ -193,6 +227,32 @@ def _make_builder(
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+@pytest.mark.parametrize(
+    ("metadata_op", "expected_sas_size"),
+    [
+        (None, 1024),
+        (sparse_flash_mla_metadata, 2048),
+        (mixed_quant_sparse_flash_mla_metadata_fp8, 2048),
+        (mixed_quant_sparse_flash_mla_metadata_turboquant, 2048),
+    ],
+)
+def test_sas_metadata_buffers_match_selected_operator(
+    metadata_op,
+    expected_sas_size: int,
+):
+    plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_metadata_op=metadata_op)
+    plan.requires_block_offset_slots = False
+    plan.uses_sparse_flash_mla = False
+    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
+        builder = _make_builder(4, num_speculative_tokens=3)
+
+    assert builder.compressor_ratio == 4
+    assert builder.sas_metadata_buffer.numel() == expected_sas_size
+    assert len(builder.spec_sas_metadata) == 3
+    assert all(buffer.numel() == expected_sas_size for buffer in builder.spec_sas_metadata)
+    assert builder.qli_metadata_buffer.numel() == QLI_METADATA_BUFFER_SIZE
 
 
 def _build_draft_req_metadata(
@@ -222,13 +282,11 @@ def _build_draft_req_metadata(
     )
 
 
-@pytest.mark.parametrize("use_tokens_per_state", [False, True])
-def test_metadata_builder_accepts_compression_ratio_aliases(
-    use_tokens_per_state: bool,
-):
-    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+def test_metadata_builder_reads_tokens_per_state_and_num_states():
+    builder = _make_builder(4)
 
     assert builder.compressor_ratio == 4
+    assert builder.storage_block_size == 128
 
 
 @pytest.mark.parametrize(
@@ -255,7 +313,7 @@ def test_draft_swa_and_sas_share_attention_task():
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
     assert builder.dspark_swa_indices_buffer is not None
-    sas_result = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    sas_result = torch.arange(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=sas_result)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_kwargs={},
@@ -445,7 +503,7 @@ def test_qli_lengths_refresh_for_each_builder_when_metadata_is_reused():
     """Packed cache groups share tiling metadata, but own their length buffers."""
     builders = [_make_builder(), _make_builder()]
     addresses = [(b.qli_seqused_k.data_ptr(), b.qli_cmp_residual_k.data_ptr()) for b in builders]
-    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    generated_metadata = torch.arange(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
     with patch.object(
         torch.ops._C_ascend,
@@ -667,7 +725,7 @@ def test_build_req_metadata_uses_execution_window_for_sas(deferred: bool, causal
         query_start_loc_cpu=query_start_loc,
         causal=causal,
     )
-    metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    metadata_op = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
@@ -708,7 +766,7 @@ def test_build_draft_req_metadata_plans_shared_visible_kv(deferred: bool, seq_le
         builder = _make_builder(compressor_ratio=1, num_speculative_tokens=5)
     if deferred:
         builder.enable_dspark_device_metadata(max_num_tokens=16)
-    metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    metadata_op = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
@@ -784,8 +842,8 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
@@ -822,8 +880,8 @@ def test_build_req_metadata_clears_graph_padding_rows():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
     )
-    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_sas_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
@@ -843,16 +901,22 @@ def test_build_req_metadata_clears_graph_padding_rows():
     assert torch.count_nonzero(metadata.block_table[1:]).item() == 0
 
 
-def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
-    builder = _make_builder(compressor_ratio=1)
+@pytest.mark.parametrize("use_sparse_flash_mla", [False, True])
+def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths(use_sparse_flash_mla):
+    initial_plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=sparse_flash_mla_metadata if use_sparse_flash_mla else None,
+    )
+    initial_plan.requires_block_offset_slots = False
+    initial_plan.uses_sparse_flash_mla = use_sparse_flash_mla
+    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=initial_plan):
+        builder = _make_builder(compressor_ratio=1, num_speculative_tokens=1)
     builder.num_actual_tokens = 3
     builder.num_prefills = 0
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
     spec_slot_mapping = [torch.arange(16, dtype=torch.int32).reshape(8, 2)]
-    spec_sas_metadata = [torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)]
+    spec_sas_metadata = builder.spec_sas_metadata
     builder.spec_slot_mapping = spec_slot_mapping
-    builder.spec_sas_metadata = spec_sas_metadata
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     common_attn_metadata = SimpleNamespace(
         num_reqs=2,
@@ -865,7 +929,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     )
     decode_cu_seqlens_ori_kv = torch.tensor([0, 9, 16], dtype=torch.int32)
     decode_cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
-    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    generated_metadata = torch.arange(builder.sas_metadata_buffer_size, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_op=metadata_op,
@@ -915,20 +979,21 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     assert metadata.sin is sin
 
 
-def _make_req_metadata() -> AscendDSAReqMetadata:
+def _make_req_metadata(layer_name: str = "layer") -> AscendDSAReqMetadata:
     return AscendDSAReqMetadata(
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         seq_lens=torch.ones(2, dtype=torch.int32),
         slot_mapping=None,
         storage_block_size=128,
         query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
-        sin=cast(Any, {"layer": torch.zeros(1)}),
-        cos=cast(Any, {"layer": torch.ones(1)}),
+        sin=cast(Any, {layer_name: torch.zeros(1)}),
+        cos=cast(Any, {layer_name: torch.ones(1)}),
     )
 
 
 def _make_impl(
     impl_cls: type[AscendDSAImpl] = AscendDSAImpl,
+    overlap_enabled: bool = False,
     **extra_kwargs,
 ) -> AscendDSAImpl:
     linear = MagicMock()
@@ -939,7 +1004,7 @@ def _make_impl(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
-            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap_enabled),
         ),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.enable_pcp_o_proj_weight_sharding",
@@ -969,7 +1034,11 @@ def _make_impl(
             compress_ratio=1,
             vllm_config=SimpleNamespace(
                 cache_config=SimpleNamespace(cache_dtype="auto"),
-                parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+                parallel_config=SimpleNamespace(
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=1,
+                    pcp_shard_decode_requests=True,
+                ),
             ),
             wq_a=linear,
             wq_b=linear,
@@ -990,6 +1059,9 @@ def _make_impl(
 
 def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     impl = _make_impl()
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     hidden_states = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     unified_output = torch.arange(10, dtype=torch.float32).reshape(5, 1, 2)
     output = torch.empty((5, 2), dtype=torch.float32)
@@ -998,7 +1070,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         num_decodes=1,
         num_decode_tokens=2,
         num_prefills=1,
-        req_metadata=_make_req_metadata(),
+        req_metadata=_make_req_metadata(layer_name),
     )
     captured_o_proj_input: list[torch.Tensor] = []
 
@@ -1013,10 +1085,11 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     with (
         patch(
             "vllm_ascend.ascend_forward_context.get_forward_context",
-            return_value=SimpleNamespace(num_tokens=5),
+            return_value=SimpleNamespace(num_tokens=5, additional_kwargs={"num_tokens": 5}),
         ),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch.object(
             torch.ops.vllm,
             "maybe_all_gather_and_maybe_unpad",
@@ -1036,14 +1109,17 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
     ):
         actual = impl.forward(
-            layer_name="layer",
+            layer_name=layer_name,
             hidden_states=hidden_states,
             kv_cache=(torch.empty(0),),
-            attn_metadata={"swa_cache": metadata},
+            attn_metadata={swa_name: metadata},
             output=output,
         )
 
     assert actual is output
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once()
+    assert save.call_args.args[0] == swa_name
     assert len(captured_o_proj_input) == 1
     assert torch.equal(captured_o_proj_input[0], unified_output)
     forward_attention.assert_called_once()
@@ -1052,7 +1128,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     assert call.args[3].attention is None
     assert call.args[3].swa is metadata
     assert call.args[4] is False
-    assert not call.kwargs
+    assert call.kwargs == {"prepared_query": None}
 
 
 @pytest.mark.parametrize(
@@ -1077,7 +1153,7 @@ def test_forward_attention_routes_unified_req_metadata(
     cos = torch.ones((5, 1, 1, 2))
     sin = torch.zeros((5, 1, 1, 2))
     slot_mapping = torch.arange(6, dtype=torch.int32).reshape(3, 2)
-    sas_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    sas_metadata = torch.arange(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
     req_metadata = AscendDSAReqMetadata(
         block_table=torch.tensor([[1], [2]], dtype=torch.int32),
         seq_lens=torch.tensor([8, 6], dtype=torch.int32),
@@ -1355,7 +1431,7 @@ def test_forward_attention_sets_compressed_kv_args(
         query_start_loc=query_start_loc,
         sin=cast(Any, {"layer": sin}),
         cos=cast(Any, {"layer": cos}),
-        sas_metadata=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32),
+        sas_metadata=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32),
         cu_cmp_seqlen_list=torch.tensor([0, 1], dtype=torch.int32),
     )
     swa_req = AscendDSAReqMetadata(
@@ -1492,14 +1568,17 @@ def test_a5_o_proj_without_otp_preserves_group_order(use_fp8):
     reduce_scatter.assert_not_called()
 
 
-def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
+def test_grouped_bf16_o_proj_uses_transpose_batchmatmul():
+    """With several local groups the bf16 o_proj keeps the transpose kernel;
+    the single-group small-batch case is covered by the plain-matmul tests."""
     impl = _make_impl()
+    impl.n_local_groups = 2
     impl.support_fp8_attention = True
-    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 2, 2), weight_scale=None)
+    impl.wo_a = SimpleNamespace(weight=torch.randn(2, 2, 2), weight_scale=None)
     impl.wo_b = lambda x: x
-    o_proj_input = torch.randn(4, 1, 2)
-    output = torch.empty(4, 2)
-    projected = torch.randn(4, 1, 2)
+    o_proj_input = torch.randn(4, 2, 2)
+    output = torch.empty(4, 4)
+    projected = torch.randn(4, 2, 2)
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
@@ -1511,6 +1590,85 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     batched.assert_called_once()
     quant.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(4, -1))
+
+
+def test_single_group_small_batch_wo_a_uses_plain_matmul():
+    """TP >= o_groups with an unquantized bf16 wo_a and a decode-sized batch:
+    the o_proj low-rank projection runs the plain 2D matmul on the same 3D ND
+    weight instead of npu_transpose_batchmatmul."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    weight = torch.randn(1, 4, 2)  # [1, group_hidden, o_lora_local], ND
+    impl.wo_a = SimpleNamespace(weight=weight, weight_scale=None)
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(5, 1, 4)
+    output = torch.empty(5, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul") as batched,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_not_called()
+    expected = torch.matmul(o_proj_input.view(5, 4), weight.view(4, 2))
+    torch.testing.assert_close(output, expected)
+
+
+def test_single_group_wo_a_matmul_at_small_m_limit_boundary():
+    """num_tokens == _WO_A_SMALL_M_LIMIT still dispatches to the plain matmul;
+    one token above it falls back to npu_transpose_batchmatmul."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    weight = torch.randn(1, 4, 2)
+    impl.wo_a = SimpleNamespace(weight=weight, weight_scale=None)
+    impl.wo_b = lambda x: x
+    projected = torch.randn(_WO_A_SMALL_M_LIMIT + 1, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul",
+            return_value=projected,
+        ) as batched,
+    ):
+        o_proj_input = torch.randn(_WO_A_SMALL_M_LIMIT, 1, 4)
+        output = torch.empty(_WO_A_SMALL_M_LIMIT, 2)
+        impl._forward_o_proj(o_proj_input, output)
+        batched.assert_not_called()
+
+        o_proj_input = torch.randn(_WO_A_SMALL_M_LIMIT + 1, 1, 4)
+        output = torch.empty(_WO_A_SMALL_M_LIMIT + 1, 2)
+        impl._forward_o_proj(o_proj_input, output)
+        batched.assert_called_once()
+
+    expected = projected.reshape(_WO_A_SMALL_M_LIMIT + 1, -1)
+    torch.testing.assert_close(output, expected)
+
+
+def test_quantized_wo_a_single_group_keeps_transpose_batchmatmul():
+    """Quantized wo_a (weight_scale present) with a single local group and fp8
+    attention disabled must stay on the transpose path — never run the plain
+    matmul on the 3D quantized weight."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 4, 2), weight_scale=torch.zeros(1))
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(5, 1, 4)
+    output = torch.empty(5, 2)
+    projected = torch.randn(5, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_called_once()
+    torch.testing.assert_close(output, projected.reshape(5, -1))
 
 
 def test_a5_bf16_keeps_multistream_overlap_enabled():
@@ -1743,10 +1901,13 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     )
     gather_block_tables = MagicMock(return_value=global_block_tables)
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
+    pcp_manager._kernel_block_table_groups = {}
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
     pcp_manager._local_batch = SimpleNamespace(
-        num_tokens=local_common.num_actual_tokens, num_tokens_after_padding=local_common.num_input_tokens
+        num_tokens=local_common.num_actual_tokens,
+        num_tokens_after_padding=local_common.num_input_tokens,
+        idx_mapping=global_batch.idx_mapping,
     )
     pcp_manager._local_gather_idx = torch.tensor([0, 4, -1], dtype=torch.int64)
     pcp_manager._block_tables = SimpleNamespace(
@@ -2007,14 +2168,16 @@ def _attach_parallel_o_proj(impl, pcp_group, *, tp_group=None, decode_sharded=Fa
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
 @pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("overlap_enabled", [False, True])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
     shard_o_proj: bool,
     global_prefill: bool,
     decode_sharded: bool,
+    overlap_enabled: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
-    impl = _make_impl(AscendDSAPCPImpl)
+    impl = _make_impl(AscendDSAPCPImpl, overlap_enabled=overlap_enabled)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
     impl._parallel_o_proj.enabled = shard_o_proj
     impl._parallel_o_proj._weight_switch_enabled = shard_o_proj
@@ -2123,6 +2286,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         )
         return output_tensor
 
+    prepared_query = (object(), object(), object())
     caches = tuple(torch.empty(0) for _ in range(6))
     with (
         patch.object(
@@ -2150,6 +2314,10 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             "_forward_attention",
             return_value=attention_output,
         ) as forward_attention,
+        patch.object(impl, "_mla_prolog_single_stream", return_value=prepared_query) as query_prolog,
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream"),
+        patch("torch.npu.current_stream"),
+        patch("torch.npu.stream"),
         patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
@@ -2172,6 +2340,8 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             if "projection" in events:
                 assert events.index("cache") < events.index("projection")
 
+    overlap = overlap_enabled and global_prefill and local_num_actual_tokens > 0
+    assert query_prolog.call_count == (num_calls if overlap else 0)
     assert actual is output
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
     assert pcp_group.all_gather.call_args.kwargs == {"dim": 0}
@@ -2202,7 +2372,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             hidden_states[:local_num_actual_tokens],
         )
         assert forward_attention.call_args.args[4] is True
-        assert not forward_attention.call_args.kwargs
+        assert forward_attention.call_args.kwargs == {"prepared_query": prepared_query if overlap else None}
         assert len(captured_o_proj_inputs) == num_calls
         assert torch.count_nonzero(captured_o_proj_inputs[0][local_num_actual_tokens:]) == 0
         assert torch.equal(
@@ -2230,19 +2400,20 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
     with (
         patch.object(
             AscendDSAImpl,
-            "_prepare_caches_before_attention",
+            "_prepare_caches_and_query",
             autospec=True,
-            return_value=False,
+            return_value=(False, None),
         ) as prepare_standard_caches,
         impl._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False),
     ):
         assert not impl._parallel_o_proj.uses_full_weight
-        assert not impl._prepare_caches_before_attention(
+        assert impl._prepare_caches_and_query(
             "layer",
             torch.empty((4, 4)),
             (torch.empty(0),),
             attn_metadata,
-        )
+            SimpleNamespace(attention=metadata, swa=metadata),
+        ) == (False, None)
 
     prepare_standard_caches.assert_called_once()
     impl._parallel_o_proj.enable.assert_called_once()
@@ -2597,11 +2768,14 @@ def test_o_proj_capacity_tracks_decode_graph_not_profile_budget(tp_size, decode_
 
 def test_forward_empty_rank_still_participates_in_otp_collectives():
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     impl.turboquant = None
     impl._get_o_proj_input_shape = lambda metadata: (4, 1, 2)
-    layer_metadata = SimpleNamespace(attention=SimpleNamespace(num_actual_tokens=0), swa=None)
+    layer_metadata = SimpleNamespace(attention=None, swa=SimpleNamespace(num_actual_tokens=0))
     impl._get_layer_metadata = lambda layer_name, metadata: layer_metadata
-    impl._prepare_caches_before_attention = lambda *args: False
+    impl._prepare_caches_and_query = lambda *args: (False, None)
     impl._forward_o_proj = MagicMock()
     output = torch.ones((4, 2))
 
@@ -2609,14 +2783,17 @@ def test_forward_empty_rank_still_participates_in_otp_collectives():
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch("vllm_ascend.attention.dsa_v1.attention_transfer_window", return_value=MagicMock()),
     ):
-        result = impl.forward("layer", torch.zeros((4, 2)), (), {"layer": object()}, output)
+        result = impl.forward(layer_name, torch.zeros((4, 2)), (), {swa_name: layer_metadata.swa}, output)
 
     assert result is output
     assert torch.count_nonzero(output) == 0
     impl._forward_o_proj.assert_called_once()
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once_with(swa_name, [])
 
 
 def test_reserve_oproj_buffers_initializes_missing_pool():
@@ -2877,7 +3054,8 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
         query_start_loc_cpu=query_start_loc,
         causal=False,
     )
-    metadata_op = MagicMock(return_value=torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    generated_metadata = torch.arange(builder.sas_metadata_buffer_size, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
@@ -2903,6 +3081,7 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
     assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [261 if compressed_tq else 133]
     assert (metadata.dspark_swa_indices is None) == compressed_tq
     assert metadata.ori_win_left == (127 if compressed_tq else 132)
+    torch.testing.assert_close(metadata.sas_metadata, generated_metadata)
 
 
 @pytest.mark.parametrize("otp_size", [0, 1])

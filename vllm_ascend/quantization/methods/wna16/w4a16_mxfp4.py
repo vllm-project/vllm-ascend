@@ -22,8 +22,8 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
@@ -31,7 +31,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa
 from vllm_ascend.quantization.nz import bf16_nz
 from vllm_ascend.utils import dispose_tensor
 
-from ..base import AscendMoEScheme, QuantType
+from ..base import AscendMoEScheme, QuantType, require_mx_weight_format
 from ..registry import register_scheme
 
 
@@ -62,10 +62,9 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     fused_activations = frozenset()
 
     def __init__(self) -> None:
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
 
     def get_weight(
         self,
@@ -123,7 +122,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,

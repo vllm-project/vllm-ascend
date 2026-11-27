@@ -25,9 +25,9 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 | Weight version | Description | Recommended hardware | Download |
 | -------------- | ----------- | -------------------- | -------- |
 | `google/gemma-4-31B-it` | BF16 dense model. | Atlas A2, Atlas A3, or 950PR&950DT Products. Adjust the number of visible NPUs according to the available memory. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-31B-it) |
-| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | MXFP4 quantized dense model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
+| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | MXFP4 quantized dense model. | one 950DT Products node (96GB × 8). | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
 | `google/gemma-4-26B-A4B-it` | BF16 MoE model with approximately 26 billion total and 4 billion active parameters. | Atlas A2, Atlas A3, or 950PR&950DT Products. Use tensor parallelism or expert parallelism according to the deployment plan. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-26B-A4B-it) |
-| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | MXFP4 quantized MoE model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
+| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | MXFP4 quantized MoE model. | one 950DT Products node (96GB × 8). | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
 
 Both MXFP4 checkpoints contain a `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing quantized weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
 
@@ -35,7 +35,7 @@ Both MXFP4 checkpoints contain a `quant_model_description.json` file and require
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one vLLM Ascend Docker image. For 950DT Products, pull the A5 image that matches the current vLLM Ascend version:
+You can use the official all-in-one vLLM Ascend Docker image. For 950DT Products, pull the A5(950PR&950DT Products) image that matches the current vLLM Ascend version:
 
 ```shell
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5

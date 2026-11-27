@@ -44,7 +44,6 @@ def test_dense_w8a8_eagle3_full_graph():
         async_scheduling=False,
         quantization="ascend",
         speculative_config={
-            "disable_padded_drafter_batch": False,
             "method": "eagle3",
             "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
             "num_speculative_tokens": 2,
