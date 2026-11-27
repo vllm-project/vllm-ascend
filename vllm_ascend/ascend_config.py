@@ -99,12 +99,12 @@ class EngramSSDConfig:
     rebuild_threshold: int = 0
     # One total budget for post-warmup rendezvous, worker RPC and global ack.
     protocol_activation_timeout_s: int = 1800
-    layerwise_overlap: bool = False
-    prefill_lookahead: bool = False
+    layerwise_overlap: bool | None = None
+    prefill_lookahead: bool | None = None
 
     @model_validator(mode="after")
     def _validate_engram_ssd(self):
-        if self.prefill_lookahead and not (self.enabled and self.layerwise_overlap):
+        if self.prefill_lookahead and (not self.enabled or self.layerwise_overlap is False):
             raise ValueError("Engram SSD prefill_lookahead requires enabled layerwise_overlap")
         if self.protocol_activation_timeout_s <= 0:
             raise ValueError("protocol_activation_timeout_s must be positive")
@@ -134,6 +134,25 @@ class EngramSSDConfig:
         if len(self.table_paths) == 2 and not self.io_cpu_list:
             raise ValueError("dual-disk mode requires an explicit io_cpu_list")
         return self
+
+    def resolve_overlap(
+        self, *, layerwise_supported: bool, lookahead_supported: bool
+    ) -> EngramSSDConfig:
+        """Resolve omitted options after the model establishes its parallel topology."""
+        if self.layerwise_overlap and not layerwise_supported:
+            raise ValueError(
+                "layerwise Engram SSD requires eager or FULL_DECODE_ONLY in MRV2, "
+                "TP1/PP1, ordered layers, and shared slots for a full DP/PCP batch"
+            )
+        layerwise = layerwise_supported and self.layerwise_overlap is not False
+        lookahead_supported = layerwise and lookahead_supported
+        if self.prefill_lookahead and not lookahead_supported:
+            raise ValueError("Engram SSD prefill_lookahead requires layerwise overlap, eager execution, DP1 and DCP1")
+        return dataclasses.replace(
+            self,
+            layerwise_overlap=layerwise,
+            prefill_lookahead=lookahead_supported and self.prefill_lookahead is not False,
+        )
 
     def capacity(self) -> int:
         """两层共享的载荷槽位数。"""

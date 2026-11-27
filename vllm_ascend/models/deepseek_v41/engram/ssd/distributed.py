@@ -49,8 +49,6 @@ import torch.distributed as dist
 LAYERED_DECODE_INLINE_ROWS = 768
 _HEADER_LEN = 5  # [epoch, round, valid_count, first_layer_count, tag]
 _MERGED_SLOT_MAX_BYTES = 64 * 1024
-_CACHE_LOG_MIN_TOKENS = 512
-_CACHE_LOG_INTERVAL = 200
 
 STATUS_OK = 0
 STATUS_FAIL = 1
@@ -129,7 +127,6 @@ class EngramSSDProtocol:
         self._buffers: dict[str, torch.Tensor] = {}
         self._leader_slots: torch.Tensor | None = None
         self._leader_lease = None
-        self._group_max_tokens = 0
         self._layered_poisoned = False
         # Only the owner observes the shared cache. None on clients is not 0%.
         self.last_cache_stats: dict[str, Any] | None = None
@@ -173,7 +170,9 @@ class EngramSSDProtocol:
         buffer = self._buffers.get(name)
         if buffer is None or buffer.numel() < count:
             capacity = 1 << max(count - 1, 0).bit_length()
-            buffer = torch.from_numpy(np.empty(capacity, dtype=dtype))
+            # Warmup and the layered producer reuse these buffers across threads.
+            with torch.inference_mode(False):
+                buffer = torch.from_numpy(np.empty(capacity, dtype=dtype))
             self._buffers[name] = buffer
         return buffer[:count]
 
@@ -223,7 +222,6 @@ class EngramSSDProtocol:
         slots = np.full(n, -1, np.int32)
         self.last_cache_stats = None
 
-        t0 = time.monotonic()
         self._deadline = time.monotonic() + self.timeout_s
         try:
             if self.merge_p23:
@@ -242,7 +240,7 @@ class EngramSSDProtocol:
                 self._p4(STATUS_OK)
         finally:
             self._deadline = float("inf")
-        self._finish_round(n, num_tokens, t0)
+        self._finish_round(n)
         return slots
 
     def step_layered(self, rows: np.ndarray, first_count: int, split_row_id: int,
@@ -277,7 +275,6 @@ class EngramSSDProtocol:
                     epoch, rows, first_count, num_tokens)
                 failure = self._deliver_layers(
                     gathered, counts, first, pad, split_row_id, ready, submit_layer)
-            ready_ms = (time.monotonic() - t0) * 1e3
             self._last_phase = "retire_uva"
             safe = retired.result() if synchronize_gathers is None else synchronize_gathers()
             status_code = STATUS_FAIL if failure is not None else STATUS_OK
@@ -286,7 +283,7 @@ class EngramSSDProtocol:
                 self._discard_leader_lease()
                 self.round += 1
             else:
-                self._finish_round(len(rows), num_tokens, t0, lookup_ms=ready_ms)
+                self._finish_round(len(rows))
         except BaseException as exc:
             # A broken collective or unsafe UVA retirement leaves ownership unknown.
             # No later round may reuse its slots.
@@ -346,7 +343,6 @@ class EngramSSDProtocol:
             return _STATUS_INVALID_REQUEST, None, [], [], pad
         if any(max(split, total - split) > capacity for total, split in zip(counts, first)):
             return _STATUS_FALLBACK, None, [], [], pad
-        self._group_max_tokens = int(headers[:, 4].max())
         return STATUS_OK, gathered[:, _HEADER_LEN:], counts, first, pad
 
     def _scatter_layer_result(self, status: int, packed, starts: list[int],
@@ -442,28 +438,9 @@ class EngramSSDProtocol:
             starts, ends = first, counts
         return None
 
-    def _finish_round(self, n: int, num_tokens: int, t0: float, *, lookup_ms: float | None = None) -> None:
+    def _finish_round(self, n: int) -> None:
         self.stats.steps += 1
         self.stats.rows_total += n
-        cache = self.last_cache_stats
-        if cache is not None and (self._group_max_tokens >= _CACHE_LOG_MIN_TOKENS or self.stats.steps <= 3
-                                  or self.stats.steps % _CACHE_LOG_INTERVAL == 0):
-            hit_rate = cache['hit_rate']
-            logging.getLogger(__name__).info(
-                "engram-ssd-cache scope=owner_group round=%d rows=%d hits=%d "
-                "miss_queries=%d unique_misses=%d hit_rate=%s evictions=%d "
-                "cache_ms=%.3f fill_ms=%.3f protocol_ms=%.3f",
-                self.round, cache['rows'], cache['hit_rows'], cache['miss_rows'],
-                cache['unique_misses'], 'n/a' if hit_rate is None else f'{hit_rate:.6f}',
-                cache.get('evictions', 0), cache.get('wall_ms', 0),
-                cache['fill_wall_ms'], lookup_ms if lookup_ms is not None else (time.monotonic() - t0) * 1e3)
-            if lookup_ms is not None:
-                logging.getLogger(__name__).info(
-                    "engram-ssd-layered round=%d first_fill_ms=%.3f second_fill_ms=%.3f "
-                    "ready_ms=%.3f retire_ms=%.3f",
-                    self.round, *cache["layer_fill_ms"], lookup_ms,
-                    (time.monotonic() - t0) * 1e3 - lookup_ms)
-        self._log("step-done", tokens=num_tokens, rows=n, ms=(time.monotonic() - t0) * 1e3)
         self.round += 1
 
     def _step_merged(self, epoch: int, rows: np.ndarray, slots: np.ndarray,
@@ -527,7 +504,6 @@ class EngramSSDProtocol:
                 raise SSDProtocolError(
                     f"P0 order mismatch: headers={[t[0:2].tolist() for t in out]}")
         pad = max(max(int(t[2]) for t in out), 1)
-        self._group_max_tokens = max(int(t[4]) for t in out)
         return out, pad
 
     def _p1(self, rows: np.ndarray, pad: int) -> torch.Tensor | None:
@@ -735,19 +711,15 @@ class ProtocolEpoch:
 class LeaderCacheHooks:
     """Bridge the group protocol to the leader-owned cache and IO engine.
 
-    ``acquire``/``publish``/``release`` map straight onto SSDRowCache; ``fill``
-    routes large miss batches through extent-merged reads and small ones
-    through per-row reads.
+    The cache supplies unique misses. Use native row reads directly to avoid
+    Python's per-row extent planning on the lookup critical path.
     """
 
-    def __init__(self, cache, engine, codes_np, scales_np, *, base1: int = 0,
-                 extents_threshold: int = 64):
+    def __init__(self, cache, engine, codes_np, scales_np):
         self.cache = cache
         self.engine = engine
         self.codes_np = codes_np
         self.scales_np = scales_np
-        self.base1 = base1
-        self.extents_threshold = extents_threshold
 
     def acquire(self, rows: np.ndarray):
         return self.cache.acquire(rows)
@@ -755,15 +727,7 @@ class LeaderCacheHooks:
     def fill(self, miss_rows: np.ndarray, miss_slots: np.ndarray) -> None:
         if len(miss_rows) == 0:
             return
-        if len(miss_rows) >= self.extents_threshold:
-            from vllm_ascend.models.deepseek_v41.engram.ssd.engine import plan_row_extents
-
-            ext, sct, _ = plan_row_extents(miss_rows, miss_slots,
-                                           base1=self.base1,
-                                           dual=getattr(self.engine, "dual", False))
-            self.engine.read_extents(ext, sct, self.codes_np, self.scales_np)
-        else:
-            self.engine.fill(miss_rows, miss_slots, self.codes_np, self.scales_np)
+        self.engine.fill(miss_rows, miss_slots, self.codes_np, self.scales_np)
 
     def publish(self, lease) -> None:
         self.cache.publish(lease)

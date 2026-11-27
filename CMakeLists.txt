@@ -286,4 +286,5 @@ set_target_properties(engram_ssd_c PROPERTIES OUTPUT_NAME "engram_ssd" PREFIX "l
 target_compile_options(engram_ssd_c PRIVATE -O2 -g -Wall -Wextra -fPIC)
 set_target_properties(engram_ssd_c PROPERTIES LINKER_LANGUAGE CXX)
 target_link_libraries(engram_ssd_c PRIVATE pthread)
+add_dependencies(vllm_ascend_C engram_ssd_c)
 install(TARGETS engram_ssd_c DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

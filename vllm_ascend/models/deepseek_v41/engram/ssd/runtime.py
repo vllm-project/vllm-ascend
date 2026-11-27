@@ -88,7 +88,6 @@ class _LayeredLookup:
     retired: Future | None
     producer: Future
     step: int
-    wait_ms: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -143,6 +142,7 @@ class EngramSSDRuntime:
         self.prefill_lookahead = getattr(cfg, "prefill_lookahead", False)
         self._layered_lookup: _LayeredLookup | None = None
         self._prefetched_chunk: _PrefetchedChunk | None = None
+        self._prefill_staging: Future | None = None
         self._layered_executor: ThreadPoolExecutor | None = None
         self.is_leader = engine is not None or cache is not None
         if planes is not None:
@@ -195,8 +195,6 @@ class EngramSSDRuntime:
                                       device="cpu", pin_memory=self.layerwise_overlap)
         self._output = torch.empty((num_layers, max_tokens, col_count, 256),
                                    dtype=torch.bfloat16, device=device)
-        # 超过该 miss 数走 extent 合并读(decode 逐行阈值以下)
-        self.extents_threshold = 64
         self._lease: CacheLease | None = None
         # DP 协议(可选): epoch>=1 时行→槽位走组协议
         self.protocol = protocol
@@ -241,9 +239,7 @@ class EngramSSDRuntime:
         local = hashes[:, :, self.col_start:self.col_start + self.col_count]
         local_c = local.contiguous()
         d2h = self._d2h[:T]
-        ta = time.perf_counter()
         d2h.copy_(local_c, non_blocking=True)
-        tb = time.perf_counter()
         d2h_event = torch.npu.Event()
         if not skip_layerwise and self.layerwise_active:
             stream = torch.npu.current_stream()
@@ -265,8 +261,6 @@ class EngramSSDRuntime:
         d2h_event.record()
         d2h_event.synchronize()
         t1 = time.perf_counter()
-        self._d2h_enqueue_ms = (tb - ta) * 1e3
-        self._d2h_wait_ms = (t1 - tb) * 1e3
         host = d2h.numpy()
 
         mask_np = (np.ones(T, bool) if token_mask is None
@@ -293,22 +287,9 @@ class EngramSSDRuntime:
                 "activation (should not happen; check the epoch-file watcher)")
         lease = self.cache.acquire(ids) if protocol_slots is None else None
         fill_stats: dict[str, Any] = {}
-        if lease is not None and len(lease.miss_rows) >= self.extents_threshold:
-            # prefill 大批: 排序去重后贪心合并为 4K 对齐 extent(≤16K)
-            from vllm_ascend.models.deepseek_v41.engram.ssd.engine import plan_row_extents
-
+        if lease is not None and len(lease.miss_rows):
             tf0 = time.perf_counter()
-            ext, sct, _ = plan_row_extents(
-                lease.miss_rows, lease.miss_slots,
-                base1=self.layer_bases[1] if self.num_layers > 1 else 0,
-                dual=self.engine.dual)
-            st = self.engine.read_extents(ext, sct, self._codes_np, self._scales_np)
-            fill_stats = dict(st)
-            fill_stats["fill_wall_ms"] = (time.perf_counter() - tf0) * 1e3
-        elif lease is not None and len(lease.miss_rows):
-            tf0 = time.perf_counter()
-            self.engine.fill(lease.miss_rows, lease.miss_slots,
-                             self._codes_np, self._scales_np)
+            self._fill_misses(lease)
             fill_stats = self.engine.stats()
             fill_stats["fill_wall_ms"] = (time.perf_counter() - tf0) * 1e3
         if lease is not None:
@@ -349,29 +330,7 @@ class EngramSSDRuntime:
         t5 = time.perf_counter()
 
         observation = self._cache_observation(lease)
-        cache_fill_ms = (observation['cache'].get('fill_wall_ms') if protocol_slots is not None
-                         else fill_stats.get('fill_wall_ms', 0.0))
-
         self._step += 1
-        if self._step % 200 == 0:
-            proto = ""
-            if self.protocol is not None:
-                ph = self.protocol.stats.phase_ms
-                n = max(self.protocol.stats.steps, 1)
-                proto = (f" proto[p0={ph.get('p0_header',0)/n:.2f} p1={ph.get('p1_gather',0)/n:.2f}"
-                         f" p3={ph.get('p3_scatter',0)/n:.2f} p4={ph.get('p4_ack',0)/n:.2f}ms]"
-                         f" rounds={self.protocol.stats.steps} failed={self.protocol.stats.rounds_failed}")
-            logging.getLogger(__name__).info(
-                "engram-ssd step=%d T=%d rows=%d cache_scope=%s miss=%s d2h=%.2f(enq=%.2f,wait=%.2f) "
-                "plan=%.2f protocol=%.2f fill=%s h2d=%.2f uva=%.2f total=%.2fms%s",
-                self._step, T, len(ids),
-                observation['cache_scope'], observation['misses'],
-                (t1-t0)*1e3, getattr(self, "_d2h_enqueue_ms", 0),
-                getattr(self, "_d2h_wait_ms", 0),
-                (t2-t1)*1e3, (t3-t2)*1e3 if protocol_slots is not None else 0,
-                'n/a' if cache_fill_ms is None else f'{cache_fill_ms:.2f}',
-                (t4-t3)*1e3, (t5-t4)*1e3,
-                (t5-t0)*1e3, proto)
         stats = dict(
             step=self._step, step_id=step_id, tokens=T,
             rows=len(ids),
@@ -410,7 +369,13 @@ class EngramSSDRuntime:
         if self._closed:
             raise RuntimeError("EngramSSDRuntime closed")
         if self._layered_executor is None:
-            self._layered_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="engram-ssd")
+            # Device guards restore the thread's previous device (0 on a fresh
+            # thread). Bind once so nonzero ranks never switch back to NPU 0
+            # between D2H, layer submissions and prefetch staging.
+            self._layered_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="engram-ssd",
+                initializer=torch.npu.set_device, initargs=(self.device,),
+            )
         ready = (Future(), Future())
         if graph_ready_events is not None:
             for layer, result in zip(self.layer_ids, ready, strict=True):
@@ -422,6 +387,17 @@ class EngramSSDRuntime:
             self._produce_layers, tokens, outputs, stream, d2h_event, mask_host,
             ready, retired, staging, staging_failed, graph_ready_events,
         )
+        # Initializer failures happen before _produce_layers can publish an
+        # error. Release consumer futures rather than leaving the model hung.
+        def producer_finished(done):
+            try:
+                done.result()
+            except BaseException as error:
+                for result in ready:
+                    if not result.done():
+                        result.set_exception(error)
+
+        producer.add_done_callback(producer_finished)
         self._step += 1
         return _LayeredLookup(tokens, stream, ready, retired, producer, self._step)
 
@@ -527,6 +503,28 @@ class EngramSSDRuntime:
                 graph_event.record(stream)
         return event
 
+    def defer_prefill(self, stage_inputs) -> None:
+        """Stage the next chunk after the current producer retires its UVA reads.
+
+        The same executor orders hash/D2H submission and cache transactions.
+        Staging only enqueues device work; it must not wait for the next fill,
+        which is queued behind it on this single producer.
+        """
+        if self._closed:
+            raise RuntimeError("EngramSSDRuntime closed")
+        assert self._prefill_staging is None and self._prefetched_chunk is None
+        if self._layered_executor is None:
+            raise RuntimeError("prefill lookahead requires an active layered producer")
+        self._prefill_staging = self._layered_executor.submit(stage_inputs)
+
+    def _wait_prefill_staging(self) -> None:
+        staging = self._prefill_staging
+        if staging is not None:
+            try:
+                staging.result()
+            finally:
+                self._prefill_staging = None
+
     def queue_prefill(self, key, hashes, mask, padded_tokens, gather_stream) -> None:
         # Stage the next exact chunk while the current model runs.
         tokens = hashes.shape[0]
@@ -568,6 +566,7 @@ class EngramSSDRuntime:
         self._prefetched_chunk = _PrefetchedChunk(key, lookup, None, None)
 
     def take_prefill(self, key) -> dict[str, Any] | None:
+        self._wait_prefill_staging()
         pending = self._prefetched_chunk
         if pending is None:
             return None
@@ -583,32 +582,21 @@ class EngramSSDRuntime:
         main = torch.npu.current_stream()
         for tensor in (*graph_inputs["engram_lookups"].values(), graph_inputs["engram_mask"]):
             tensor.record_stream(main)
-        if self.protocol.rank == 0:
-            logging.getLogger(__name__).info(
-                "engram-ssd-prefill-lookahead hit step=%d start=%d end=%d",
-                pending.lookup.step, key[2], key[3],
-            )
         return graph_inputs
 
     def _discard_prefill(self, *, failed: bool = False) -> None:
+        self._wait_prefill_staging()
         pending = self._prefetched_chunk
         if pending is None:
             return
         self._prefetched_chunk = None
-        if self.protocol.rank == 0:
-            logging.getLogger(__name__).info(
-                "engram-ssd-prefill-lookahead discard step=%d start=%d end=%d",
-                pending.lookup.step, pending.key[2], pending.key[3],
-            )
         self._join_layered(pending.lookup, failed=failed)
 
     def consume_layer(self, layer: int) -> None:
         lookup = self._layered_lookup
         if lookup is None or lookup.tokens == 0:
             return
-        before = time.perf_counter()
         event = lookup.ready[self.layer_ids.index(layer)].result()
-        lookup.wait_ms[layer] = (time.perf_counter() - before) * 1e3
         if event is not None:
             torch.npu.current_stream().wait_event(event)
 
@@ -620,9 +608,6 @@ class EngramSSDRuntime:
             self._join_layered(lookup, failed=failed)
         finally:
             self._layered_lookup = None
-        if lookup.wait_ms and (lookup.tokens >= 512 or lookup.step % 200 == 0):
-            logging.getLogger(__name__).info(
-                "engram-ssd-layer-consumer step=%d cpu_wait_ms=%s", lookup.step, lookup.wait_ms)
 
     def _join_layered(self, lookup, *, failed: bool) -> None:
         if lookup.retired is None:
@@ -778,26 +763,20 @@ class EngramSSDRuntime:
                                      "window_tokens": win})
 
     def _fill_misses(self, lease) -> None:
-        """统一 miss 填充: 大批走 extent 合并, 小批逐行。"""
-        from vllm_ascend.models.deepseek_v41.engram.ssd.engine import plan_row_extents
-
-        if len(lease.miss_rows) >= self.extents_threshold:
-            ext, sct, _ = plan_row_extents(
-                lease.miss_rows, lease.miss_slots,
-                base1=self.layer_bases[1] if self.num_layers > 1 else 0,
-                dual=self.engine.dual)
-            self.engine.read_extents(ext, sct, self._codes_np, self._scales_np)
-        else:
-            self.engine.fill(lease.miss_rows, lease.miss_slots,
-                             self._codes_np, self._scales_np)
+        self.engine.fill(lease.miss_rows, lease.miss_slots,
+                         self._codes_np, self._scales_np)
 
     def finish_execution(self, *, failed: bool = False) -> None:
         """gather 完成后释放租约; 步失败时 abort(不清 state unknown 的 poison 判定)。"""
-        if self._layered_lookup is not None or getattr(self, "_prefetched_chunk", None) is not None:
+        if (self._layered_lookup is not None or self._prefetched_chunk is not None
+                or self._prefill_staging is not None):
             try:
                 self._finish_layered(failed=failed)
             finally:
                 if getattr(self, "prefill_lookahead", False):
+                    # Deferred hashing must finish reading token_history before
+                    # the next runner step may update that input buffer.
+                    self._wait_prefill_staging()
                     if failed:
                         self._discard_prefill(failed=True)
                     elif self._prefetched_chunk is not None:

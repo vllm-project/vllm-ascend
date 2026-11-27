@@ -1375,8 +1375,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # context, so it keys by the padded token count (the FULL graph bucket).
             self._engram_graph_events = {}
             self._engram_prepare_stream = None
-            self._engram_prefill_stream = None
-            self._engram_prefill_gather_stream = None
             self._engram_capture_stream = None
             self._engram_capture_events = None
             self._engram_overlap_enabled = get_ascend_config().multistream_engram_overlap
@@ -1535,25 +1533,24 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                                * vllm_config.parallel_config.prefill_context_parallel_size)
         if get_engram_dp_size() != expected_group_size:
             raise ValueError("engram_ssd requires the full DP*PCP group on one node")
-        layerwise = getattr(ssd_cfg, "layerwise_overlap", False)
-        self._engram_layerwise_decode_graph = layerwise and not vllm_config.model_config.enforce_eager
-        if getattr(ssd_cfg, "prefill_lookahead", False) and (
-            vllm_config.parallel_config.data_parallel_size != 1
-            or vllm_config.parallel_config.decode_context_parallel_size != 1
-            or not vllm_config.model_config.enforce_eager
-        ):
-            raise ValueError("Engram SSD prefill_lookahead requires eager execution, DP1 and DCP1")
-        if layerwise and (
-            (not vllm_config.model_config.enforce_eager
-             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY)
-            or tp_size != 1
-            or get_pp_group().world_size != 1
-            or expected_group_size < 2
-            or max_tokens * 2 * part_cols * expected_group_size > ssd_cfg.capacity()
-            or sorted(config.engram_layer_ids) != list(config.engram_layer_ids)
-        ):
-            raise ValueError("layerwise Engram SSD requires eager or FULL_DECODE_ONLY in MRV2, "
-                             "TP1/PP1, ordered layers, and shared slots for a full DP/PCP batch")
+        eager = vllm_config.model_config.enforce_eager
+        ssd_cfg = ssd_cfg.resolve_overlap(
+            layerwise_supported=(
+                (eager or vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY)
+                and tp_size == 1
+                and get_pp_group().world_size == 1
+                and expected_group_size > 1
+                and max_tokens * 2 * part_cols * expected_group_size <= ssd_cfg.capacity()
+                and sorted(config.engram_layer_ids) == list(config.engram_layer_ids)
+            ),
+            lookahead_supported=(
+                eager
+                and vllm_config.parallel_config.data_parallel_size == 1
+                and vllm_config.parallel_config.decode_context_parallel_size == 1
+            ),
+        )
+        layerwise = ssd_cfg.layerwise_overlap
+        self._engram_layerwise_decode_graph = layerwise and not eager
         if get_engram_dp_size() > 1:
             from vllm_ascend.models.deepseek_v41.engram.ssd.distributed import (
                 LAYERED_DECODE_INLINE_ROWS,
@@ -1594,11 +1591,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             hooks = None
             if shared_cache is not None:
                 codes_np, scales_np = shared_planes.numpy_views()
-                hooks = LeaderCacheHooks(
-                    shared_cache, shared_engine, codes_np, scales_np,
-                    base1=manifest.specs[1].packed_global_base
-                    if len(manifest.specs) > 1 else 0,
-                    extents_threshold=64)
+                hooks = LeaderCacheHooks(shared_cache, shared_engine,
+                                         codes_np, scales_np)
             # The background thread can issue a collective during model forward.
             # Keep its ordering independent of the ordinary DP CPU group.
             cpu_group = (torch.distributed.new_group(ranks=dp_group.ranks, backend="gloo",
@@ -2144,15 +2138,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def _queue_engram_prefill(self, chunk, device) -> None:
         if chunk is None:
             return
+        # Record the input dependency now; waiting on the main stream from the
+        # background thread later could include the forward waiting for us.
+        inputs_ready = torch.npu.Event()
+        inputs_ready.record(torch.npu.current_stream())
+        self.engram_ssd_runtime.defer_prefill(partial(
+            self._stage_engram_prefill, chunk, device, inputs_ready,
+        ))
+
+    def _stage_engram_prefill(self, chunk, device, inputs_ready) -> None:
         runtime = self.engram_ssd_runtime
-        main = torch.npu.current_stream()
-        if self._engram_prefill_stream is None:
-            self._engram_prefill_stream = torch.npu.Stream(device=device)
-            self._engram_prefill_gather_stream = torch.npu.Stream(device=device)
-        stream = self._engram_prefill_stream
-        stream.wait_stream(main)
+        stream = self._engram_prepare_stream
         try:
-            with torch.npu.stream(stream):
+            with torch.inference_mode(), torch.npu.device(device), torch.npu.stream(stream):
+                stream.wait_event(inputs_ready)
                 _, _, start, end = chunk.key
                 history = chunk.token_history
                 inputs = history[start:end]
@@ -2173,11 +2172,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 )
                 runtime.queue_prefill(
                     chunk.key, hashes.index_select(0, indices), (~dead).index_select(0, indices),
-                    chunk.padded_tokens, self._engram_prefill_gather_stream,
+                    chunk.padded_tokens, stream,
                 )
         except Exception:
             logger.exception("Failed to stage Engram SSD prefill lookahead")
-            main.wait_stream(stream)
+            with torch.npu.device(device):
+                stream.synchronize()
             runtime.queue_failed_prefill(chunk.key)
 
     def prepare_engram_graph_inputs(self, padded_tokens=None, *, prime=True):

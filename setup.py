@@ -421,11 +421,7 @@ except LookupError:
 
 ext_modules = []
 if envs.COMPILE_CUSTOM_KERNELS:
-    ext_modules = [
-        CMakeExtension(name="vllm_ascend.vllm_ascend_C"),
-        # Engram SSD offload native engine (pure C, no torch/CANN deps).
-        CMakeExtension(name="vllm_ascend.engram_ssd_c"),
-    ]
+    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 
 def get_path(*filepath) -> str:

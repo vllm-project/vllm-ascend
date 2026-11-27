@@ -430,8 +430,8 @@ unchanged during serving.
 | `queue_depth` | 1024 | Maximum outstanding reads per worker. |
 | `io_setup_events` | 1280 | AIO event capacity requested per worker. |
 | `io_cpu_list` | Empty | Optional consecutive CPU IDs for read workers. By default, workers use the inherited CPU affinity. |
-| `layerwise_overlap` | `false` | Allow each Engram layer to begin its UVA gather as soon as its SSD fill completes. Supports eager or `FULL_DECODE_ONLY` with TP1 and a shared DP or PCP group. Size the cache for the full group's batch. |
-| `prefill_lookahead` | `false` | With layerwise overlap, prefetch the next chunk of a single prompt while the current chunk runs. Requires eager, TP1, DP1 and PCP greater than one. Changed batch boundaries fall back to demand lookup. |
+| `layerwise_overlap` | Automatic | Allow each Engram layer to begin its UVA gather as soon as its SSD fill completes. Enabled for eager or `FULL_DECODE_ONLY` with TP1, PP1, ordered layers and enough shared DP or PCP cache slots for the full group's batch. Set to `false` to disable. |
+| `prefill_lookahead` | Automatic | Prefetch the next chunk of a single prompt while the current chunk runs. Enabled with layerwise overlap in eager mode with TP1, DP1, DCP1 and PCP greater than one. Changed batch boundaries fall back to demand lookup. Set to `false` to disable. |
 
 `host_memory_bytes` covers the Engram cache's host allocations. Leave additional
 DDR for the rest of the service and check the container memory limit. The
