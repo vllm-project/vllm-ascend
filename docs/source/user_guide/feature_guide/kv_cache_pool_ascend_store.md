@@ -1596,6 +1596,7 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks on a consumer. Prefill writes are skipped until Decode saving starts, when missing Prefill ancestors can be filled. Supports blockwise and layerwise transfer. |
 | `enable_lookup` | bool | true on `kv_producer` and `kv_both`; false on `kv_consumer` | No | true / false | Whether this node queries KV Pool for reusable KV. |
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Decode saving requires `save_decode_cache=true`. |
+| `layerwise_pin_external_prefix` | bool | false | No | true / false | Acquire Memcache read leases before admitting an external prefix hit. Requires layerwise GVA KV offload, local prefix caching disabled, and a Memcache build with independent metadata-client lease owners. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |

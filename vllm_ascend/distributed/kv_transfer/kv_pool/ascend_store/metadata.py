@@ -1350,6 +1350,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
         self.cancelled_load_req_ids = cancelled_load_req_ids if cancelled_load_req_ids is not None else set()
+        self.scheduler_read_pin_ticket: int | None = None
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
@@ -1360,6 +1361,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
+    scheduler_read_pin_acks: dict[int, set[int]] = field(default_factory=dict)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
@@ -1372,4 +1374,7 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        return AscendStoreKVConnectorWorkerMetadata(merged)
+        acks = {ticket: ranks.copy() for ticket, ranks in self.scheduler_read_pin_acks.items()}
+        for ticket, ranks in other.scheduler_read_pin_acks.items():
+            acks.setdefault(ticket, set()).update(ranks)
+        return AscendStoreKVConnectorWorkerMetadata(merged, acks)
