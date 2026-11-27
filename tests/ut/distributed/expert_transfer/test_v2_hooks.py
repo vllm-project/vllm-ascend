@@ -161,19 +161,18 @@ def test_disabled_load_does_not_initialize_offload(load_hook_class, loading_memo
 
 
 @pytest.mark.parametrize(
-    "rows,drafts,prefilling,structured,invalid,width,expected",
+    "rows,drafts,prefilling,width,graph_eligible",
     [
-        ([6, 6], [5, 5], [False, False], False, False, 6, 6),
-        ([6, 6], [5, 5], [True, False], False, False, 6, None),
-        ([6], [5], [False], True, False, 6, None),
-        ([6], [5], [False], False, True, 6, None),
-        ([3, 3], [2, 2], [False, False], False, False, 3, None),
-        ([1, 6], [0, 5], [False, False], False, False, None, None),
-        ([1], None, [False], False, False, 1, 1),
+        ([6, 6], [5, 5], [False, False], 6, True),
+        ([6, 6], [5, 5], [True, False], 6, False),
+        ([6], [2], [False], 6, False),
+        ([3, 3], [2, 2], [False, False], 3, False),
+        ([1, 6], [0, 5], [False, False], None, True),
+        ([1], None, [False], 1, True),
     ],
 )
-def test_expert_pool_graph_dispatch_preserves_offload_metadata(
-    load_hook_class, rows, drafts, prefilling, structured, invalid, width, expected
+def test_batch_hook_leaves_dispatch_metadata_for_the_graph_manager(
+    load_hook_class, rows, drafts, prefilling, width, graph_eligible
 ):
     manager = ExpertOffloadManager()
     runner, _ = make_runner(load_hook_class, manager=manager)
@@ -186,13 +185,14 @@ def test_expert_pool_graph_dispatch_preserves_offload_metadata(
         is_prefilling_np=prefilling,
         has_prefill=any(prefilling),
     )
-    scheduled = SimpleNamespace(has_structured_output_requests=structured, num_invalid_spec_tokens=int(invalid))
+    scheduled = SimpleNamespace()
     parent = type(runner).__bases__[0]
     with patch.object(parent, "gather_batch_req_state", return_value=(state, width)):
         actual_state, actual_width = runner.gather_batch_req_state(scheduled, False)
     assert actual_state is state
-    assert actual_width == expected
+    assert actual_width == width
     assert manager.has_prefill is state.has_prefill
+    assert manager.can_dispatch_graph(width) is graph_eligible
 
 
 def test_execute_preserves_dummy_pool_and_restores_decode_phase(load_hook_class):

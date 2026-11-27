@@ -110,20 +110,19 @@ def initialize(runner: NPUModelRunner) -> None:
     initialize_expert_offload(runner)
 
 
-def before_execute(runner: NPUModelRunner) -> None:
+def prepare_batch(runner: NPUModelRunner, batch_state) -> None:
     if (manager := get_manager(getattr(runner, "model", None))) is not None:
-        manager.before_execute()
+        manager.prepare_batch(batch_state)
 
 
-def prepare_batch(runner: NPUModelRunner, batch_state, uniform_token_count: int | None, scheduler_output) -> int | None:
-    if (manager := get_manager(getattr(runner, "model", None))) is not None:
-        return manager.prepare_batch(batch_state, uniform_token_count, scheduler_output)
-    return uniform_token_count
+def can_dispatch_graph(model: torch.nn.Module | None, uniform_token_count: int | None) -> bool:
+    manager = get_manager(model)
+    return manager is None or manager.can_dispatch_graph(uniform_token_count)
 
 
-def prepare_inputs(runner: NPUModelRunner, input_batch, scheduler_output) -> None:
-    if (manager := get_manager(getattr(runner, "model", None))) is not None:
-        manager.prepare_inputs(input_batch, scheduler_output)
+def prepare_inputs(model: torch.nn.Module | None, input_batch) -> None:
+    if (manager := get_manager(model)) is not None:
+        manager.prepare_inputs(input_batch)
 
 
 def prepare_capture(model: torch.nn.Module | None, input_batch) -> None:

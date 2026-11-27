@@ -155,38 +155,6 @@ def test_initial_pool_allocation_is_counted_by_offload_loading(expert_factory, m
     assert runner.model_memory_usage == 1064
 
 
-@pytest.mark.parametrize(
-    "rows,drafts,structured,invalid,width,expected",
-    [
-        ([6, 6], [5, 5], False, False, 6, 6),
-        ([6], [5], True, False, 6, None),
-        ([6], [5], False, True, 6, None),
-        ([3], [2], False, False, 3, None),
-        ([1, 6], [0, 5], False, False, None, None),
-        ([1], None, False, False, 1, 1),
-    ],
-)
-def test_prepare_batch_returns_dispatch_width_without_changing_offload_phase(
-    rows, drafts, structured, invalid, width, expected
-):
-    manager = ExpertOffloadManager()
-    manager.dspark_expert_pool = DSparkExpertPool(
-        torch.device("cpu"), 12, 2, 2, num_speculative_tokens=5, num_device_experts=84
-    )
-    model = torch.nn.Module()
-    model._expert_offload_manager = manager
-    batch = SimpleNamespace(
-        has_prefill=False,
-        num_scheduled_tokens=rows,
-        num_draft_tokens_np=drafts,
-        is_prefilling_np=[False] * len(rows),
-    )
-    scheduled = SimpleNamespace(has_structured_output_requests=structured, num_invalid_spec_tokens=int(invalid))
-    actual = expert_offload.prepare_batch(SimpleNamespace(model=model), batch, width, scheduled)
-    assert actual == expected
-    assert manager.has_prefill is False
-
-
 @pytest.mark.parametrize("layout", ["verify", "decode_verify", "prefix_verify", "padding"])
 def test_router_captures_final_ids_once_and_preserves_requested_dtype(expert_factory, monkeypatch, layout):
     manager, runner, layers = _make_pool_runner(expert_factory)
@@ -310,7 +278,6 @@ def test_lifecycle_hooks_reset_and_prepare_roles_without_a_pool_reference(has_ma
         has_structured_output_reqs=False,
         has_prefill=False,
     )
-    scheduled = SimpleNamespace(num_invalid_spec_tokens=0)
     address = pool.roles.data_ptr()
     for real_rows in (12, 6, 12):
         batch.num_tokens = real_rows
@@ -318,38 +285,53 @@ def test_lifecycle_hooks_reset_and_prepare_roles_without_a_pool_reference(has_ma
         batch.num_draft_tokens_per_req = [5] * batch.num_reqs
         batch.is_prefilling_np = [False] * batch.num_reqs
         pool.active = True
-        expert_offload.before_execute(runner)
+        prepared = SimpleNamespace(
+            num_scheduled_tokens=[6] * batch.num_reqs,
+            num_draft_tokens_np=batch.num_draft_tokens_per_req,
+            is_prefilling_np=batch.is_prefilling_np,
+            has_prefill=False,
+        )
+        expert_offload.prepare_batch(runner, prepared)
         assert pool.active is (not has_manager)
         expert_offload.prepare_capture(model, batch)
-        expert_offload.prepare_inputs(runner, batch, scheduled)
+        expert_offload.prepare_inputs(model, batch)
         if has_manager:
             assert pool.active
             assert pool.roles.tolist() == [1, 1, 2, 2, 2, 2] * batch.num_reqs + [0] * (12 - real_rows)
             assert not pool.has_native_rows
             assert pool.roles.data_ptr() == address
     if has_manager:
-        scheduled.num_invalid_spec_tokens = 1
-        expert_offload.prepare_inputs(runner, batch, scheduled)
+        batch.has_prefill = True
+        expert_offload.prepare_inputs(model, batch)
         assert not pool.active
-    assert expert_offload.prepare_batch(runner, None, 1, scheduled) == 1
+    expert_offload.prepare_batch(runner, None)
     assert expert_offload.get_manager(model) is (manager if has_manager else None)
 
 
-def test_execute_clears_stale_pool_before_an_empty_or_failed_parent(load_hook_class):
+def test_existing_batch_hook_clears_stale_pool_before_a_failed_forward(load_hook_class):
     manager = ExpertOffloadManager()
     pool = DSparkExpertPool(torch.device("cpu"), 12, 2, 2, num_speculative_tokens=5, num_device_experts=84)
     pool.active = True
     manager.dspark_expert_pool = pool
 
     class Parent:
-        def execute_model(self, *args, **kwargs):
+        def gather_batch_req_state(self, scheduler_output, dummy_run):
+            return SimpleNamespace(
+                num_scheduled_tokens=[6],
+                num_draft_tokens_np=[5],
+                is_prefilling_np=[False],
+                has_prefill=False,
+            ), 6
+
+        def execute_model(self, scheduler_output, **kwargs):
+            self.gather_batch_req_state(scheduler_output, kwargs["dummy_run"])
             assert not pool.active
             raise RuntimeError("parent failure after reset")
 
     runner_class = load_hook_class(
         "vllm_ascend/worker/v2/model_runner.py",
         "NPUModelRunner",
-        {"execute_model"},
+        {"execute_model", "gather_batch_req_state"},
         Parent,
         {
             "expert_offload": expert_offload,
@@ -366,7 +348,10 @@ def test_execute_clears_stale_pool_before_an_empty_or_failed_parent(load_hook_cl
     runner.model._expert_offload_manager = manager
     runner.model_state = SimpleNamespace(finish_execution=Mock())
     runner.vllm_config = object()
-    scheduled = SimpleNamespace(total_num_scheduled_tokens=0)
+    runner.pcp_manager = None
+    runner._target_uses_flashmla = False
+    runner._start_dump_data = Mock()
+    scheduled = SimpleNamespace(total_num_scheduled_tokens=6, num_scheduled_tokens={"request": 6})
     with pytest.raises(RuntimeError, match="parent failure after reset"):
         runner.execute_model(scheduled)
     runner.model_state.finish_execution.assert_called_once_with(failed=True)

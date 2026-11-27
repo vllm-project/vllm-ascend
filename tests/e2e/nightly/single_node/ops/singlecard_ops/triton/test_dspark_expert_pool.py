@@ -10,8 +10,11 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
+from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.ops.triton.deepseek_expert_pool import CONTRIBUTOR, RESTRICTED, TOP_K, route_experts
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 DEVICE = "npu"
 SUPPORTED_DEVICES = (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5)
@@ -103,6 +106,53 @@ def _make_batch(boundaries, drafts, padded_rows):
 
 def _router(bias):
     return SimpleNamespace(num_logical_experts=EXPERTS, e_score_correction_bias=bias, routed_scaling_factor=SCALING)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in SUPPORTED_DEVICES,
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_model_state_refreshes_roles_before_reusing_a_verification_graph():
+    torch.manual_seed(31)
+    manager = ExpertOffloadManager()
+    pool = manager.dspark_expert_pool = _make_pool(12)
+    model = torch.nn.Module()
+    model._expert_offload_manager = manager
+    state = AscendModelState.__new__(AscendModelState)
+    state.model = model
+    logits = torch.randn(12, EXPERTS, dtype=torch.float32, device=DEVICE)
+    bias = torch.zeros(EXPERTS, dtype=torch.float32, device=DEVICE)
+    router = _router(bias)
+    batch = _make_batch([0, 6, 12], [5, 5], 12)
+    manager.prepare_batch(None)
+    expert_offload.prepare_capture(model, batch)
+    for _ in range(2):
+        pool.route(router, logits)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = pool.route(router, logits)
+    address = pool.roles.data_ptr()
+
+    for real_rows, structured in ((12, False), (6, True), (12, True), (6, False)):
+        batch = _make_batch(list(range(0, real_rows + 1, 6)), [5] * (real_rows // 6), 12)
+        batch.has_structured_output_reqs = structured
+        prepared = SimpleNamespace(
+            num_scheduled_tokens=np.full(batch.num_reqs, 6),
+            num_draft_tokens_np=batch.num_draft_tokens_per_req,
+            is_prefilling_np=batch.is_prefilling_np,
+            has_prefill=False,
+        )
+        manager.prepare_batch(prepared)
+        state.preprocess_state(batch, (), None, torch.empty(0, device=DEVICE))
+        graph.replay()
+        torch.npu.synchronize()
+        expected_roles = [CONTRIBUTOR, CONTRIBUTOR, RESTRICTED, RESTRICTED, RESTRICTED, RESTRICTED]
+        expected_roles = expected_roles * batch.num_reqs + [0] * (12 - real_rows)
+        assert pool.active and pool.roles.data_ptr() == address
+        assert pool.roles.cpu().tolist() == expected_roles
+        reference = _reference(logits.cpu(), torch.tensor(expected_roles), bias.cpu(), SUFFIX_EXPERTS, SCALING)
+        _assert_routing_matches(f"graph {real_rows=} {structured=}", captured, reference)
 
 
 @pytest.mark.skipif(

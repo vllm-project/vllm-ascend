@@ -328,49 +328,43 @@ class ExpertOffloadManager:
         self.full_pool = FullExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
+        self.verify_graph_eligible = True
         self.graph_load_stream = None
         self.graph_streams = set()
 
-    def before_execute(self) -> None:
-        if self.dspark_expert_pool is not None:
-            self.dspark_expert_pool.active = False
-
     @staticmethod
-    def _verify_graph_eligible(batch_state, *, num_speculative_tokens: int, structured: bool) -> bool:
+    def _verify_graph_eligible(batch_state, *, num_speculative_tokens: int) -> bool:
         rows = batch_state.num_scheduled_tokens
         drafts = batch_state.num_draft_tokens_np
         verify_width = num_speculative_tokens + 1
         return (
-            not structured
-            and drafts is not None
+            drafts is not None
             and len(rows) == len(drafts) > 0
             and not any(batch_state.is_prefilling_np)
             and all(count == num_speculative_tokens for count in drafts)
             and all(count == verify_width for count in rows)
         )
 
-    def prepare_batch(self, batch_state, uniform_token_count: int | None, scheduler_output) -> int | None:
+    def prepare_batch(self, batch_state) -> None:
         # Dummy batches have no request state and use the full expert pool.
         self.has_prefill = batch_state is None or batch_state.has_prefill
         pool = self.dspark_expert_pool
-        if (
-            pool is not None
-            and batch_state is not None
-            and uniform_token_count not in (None, 1)
-            and not self._verify_graph_eligible(
-                batch_state,
-                num_speculative_tokens=pool.num_speculative_tokens,
-                structured=scheduler_output.has_structured_output_requests
-                or bool(scheduler_output.num_invalid_spec_tokens),
-            )
-        ):
-            # Mixed and short verification retain the eager routing path.
-            return None
-        return uniform_token_count
+        if pool is not None:
+            # Both real and dummy forwards pass this hook before input staging.
+            # Capture preparation may explicitly enable the pool again.
+            pool.active = False
+        self.verify_graph_eligible = (
+            pool is None
+            or batch_state is None
+            or self._verify_graph_eligible(batch_state, num_speculative_tokens=pool.num_speculative_tokens)
+        )
 
-    def prepare_inputs(self, input_batch, scheduler_output) -> None:
+    def can_dispatch_graph(self, uniform_token_count: int | None) -> bool:
+        return self.dspark_expert_pool is None or uniform_token_count in (None, 1) or self.verify_graph_eligible
+
+    def prepare_inputs(self, input_batch) -> None:
         if self.dspark_expert_pool is not None:
-            self.dspark_expert_pool.prepare(input_batch, invalid_drafts=bool(scheduler_output.num_invalid_spec_tokens))
+            self.dspark_expert_pool.prepare(input_batch)
 
     def prepare_capture(self, input_batch) -> None:
         if self.dspark_expert_pool is not None:

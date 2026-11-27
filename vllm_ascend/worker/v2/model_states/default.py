@@ -432,6 +432,17 @@ class AscendModelState(DefaultModelState):
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
         return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
 
+    def preprocess_state(
+        self,
+        input_batch: AscendInputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        super().preprocess_state(input_batch, block_tables, kv_cache_config, num_computed_tokens)
+        # Real-batch row order and padding are final before eager/full replay.
+        expert_offload.prepare_inputs(self.model, input_batch)
+
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))

@@ -75,6 +75,8 @@ All parameters are required. Let `R` be the row count and `E` the expert count.
   batches retain eager execution. Role buffers are refreshed in place; offload
   separately makes padding reuse the first real row's IDs with zero weights
   before deciding which expert weights to load.
+- Structured-output constraints are applied during sampling and do not disable
+  pool routing for otherwise eligible verification batches.
 - Draft-model execution, profiling, disabled pools, and incompatible routers
   use native routing. Warmup registration for this operator: N/A.
 

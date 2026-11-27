@@ -39,29 +39,23 @@ def test_roles_follow_real_requests(boundaries, drafts, prefilling, padded_rows,
 
 
 @pytest.mark.parametrize(
-    ("configured_drafts", "rows", "drafts", "prefilling", "structured", "expected"),
+    ("configured_drafts", "rows", "drafts", "prefilling", "expected"),
     [
-        (5, [6], [5], [False], False, True),
-        (5, [6, 6], [5, 5], [False, False], False, True),
-        (5, [6, 6], [5, 5], [True, False], False, False),
-        (5, [6, 6], [5, 5], [False, False], True, False),
-        (5, [6, 6], [5, 1], [False, False], False, False),
-        (5, [1, 1], None, [False, False], False, False),
-        (5, [6, 6, 6], [5, 5, 5], [False] * 3, False, True),
-        (3, [4, 4, 4], [3, 3, 3], [False] * 3, False, True),
-        (7, [6, 6], [5, 5], [False, False], False, False),
+        (5, [6], [5], [False], True),
+        (5, [6, 6], [5, 5], [False, False], True),
+        (5, [6, 6], [5, 5], [True, False], False),
+        (5, [6, 6], [5, 1], [False, False], False),
+        (5, [1, 1], None, [False, False], False),
+        (5, [6, 6, 6], [5, 5, 5], [False] * 3, True),
+        (3, [4, 4, 4], [3, 3, 3], [False] * 3, True),
+        (7, [6, 6], [5, 5], [False, False], False),
     ],
 )
-def test_verify_graph_dispatch(configured_drafts, rows, drafts, prefilling, structured, expected):
+def test_verify_graph_dispatch(configured_drafts, rows, drafts, prefilling, expected):
     state = SimpleNamespace(
         num_scheduled_tokens=np.array(rows), num_draft_tokens_np=drafts, is_prefilling_np=prefilling
     )
-    assert (
-        ExpertOffloadManager._verify_graph_eligible(
-            state, num_speculative_tokens=configured_drafts, structured=structured
-        )
-        is expected
-    )
+    assert ExpertOffloadManager._verify_graph_eligible(state, num_speculative_tokens=configured_drafts) is expected
 
 
 def make_batch(boundaries, drafts, padded_rows, *, structured=False):
@@ -96,7 +90,7 @@ def test_same_graph_bucket_refreshes_padding_and_disables_on_ordinary_decode():
     assert not pool.active
 
 
-def test_structured_step_clears_active_routing():
+def test_structured_output_keeps_the_same_verification_roles():
     pool = DSparkExpertPool(
         torch.device("cpu"),
         capacity=6,
@@ -107,8 +101,10 @@ def test_structured_step_clears_active_routing():
     )
     pool.prepare(make_batch([0, 6], [5], 6))
     assert pool.active
+    roles = pool.roles.clone()
     pool.prepare(make_batch([0, 6], [5], 6, structured=True))
-    assert not pool.active
+    assert pool.active
+    torch.testing.assert_close(pool.roles, roles, rtol=0, atol=0)
 
 
 def test_prefill_step_disables_pool_then_decode_restores_current_roles():

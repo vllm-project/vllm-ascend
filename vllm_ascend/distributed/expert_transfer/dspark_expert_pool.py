@@ -99,12 +99,8 @@ class DSparkExpertPool:
                 source = source.pin_memory()
             self.roles[: self.num_rows].copy_(source, non_blocking=True)
 
-    def prepare(self, batch, *, invalid_drafts: bool = False) -> None:
-        drafts = (
-            None
-            if batch.has_prefill or batch.has_structured_output_reqs or invalid_drafts
-            else batch.num_draft_tokens_per_req
-        )
+    def prepare(self, batch) -> None:
+        drafts = None if batch.has_prefill else batch.num_draft_tokens_per_req
         self._prepare(batch, drafts, batch.is_prefilling_np)
 
     def prepare_capture(self, batch) -> None:
