@@ -200,37 +200,6 @@ def _kda_recoverssm_verify_kernel(
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
 
-    # Software-pipeline the token scan: issue each token's inputs one
-    # iteration ahead so the memory round-trip hides under the previous
-    # token's compute. The fold below runs first (deferred) and covers the
-    # prologue's latency; tok is clamped to a real token so empty requests
-    # stay in-bounds.
-    num_scan = tl.maximum(query_len - 1, 0)
-    tok = tl.where(query_len > 0, bos, 0)
-    q = tl.load(
-        q_ptr + tok * stride_q_token + pid_h * K + offs_k,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
-    k = tl.load(
-        k_ptr + tok * stride_k_token + pid_h * K + offs_k,
-        mask=mask_k,
-        other=0.0 if mask_k  is not None else None,
-    ).to(tl.float32)
-    v = tl.load(
-        v_ptr + tok * stride_v_token + pid_h * V + offs_v,
-        mask=mask_v,
-        other=0.0 if mask_v is not None else None,
-    ).to(tl.float32)
-    raw_g = tl.load(
-        raw_g_ptr + tok * stride_g_token + pid_h * K + offs_k,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
-    raw_beta = tl.load(
-        raw_beta_ptr + tok * stride_beta_token + pid_h,
-    ).to(tl.float32)
-
     # Deferred RecoverSSM, fused path: fold the previous step's accepted
     # tokens into the checkpoint before this verify advances it.  The state is
     # already in registers, so the replay reuses this load instead of a
@@ -336,33 +305,30 @@ def _kda_recoverssm_verify_kernel(
                         boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
                         tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
-    for token_offset in range(num_scan):
+    for token_offset in range(tl.maximum(query_len - 1, 0)):
         token = bos + token_offset
-        # The next token is always real while the loop runs (the peeled tail
-        # owns the last one), so its inputs load without a validity mask.
-        tok = token + 1
-        q_n = tl.load(
-            q_ptr + tok * stride_q_token + pid_h * K + offs_k,
+        q = tl.load(
+            q_ptr + token * stride_q_token + pid_h * K + offs_k,
             mask=mask_k,
             other=0.0 if mask_k is not None else None,
         ).to(tl.float32)
-        k_n = tl.load(
-            k_ptr + tok * stride_k_token + pid_h * K + offs_k,
+        k = tl.load(
+            k_ptr + token * stride_k_token + pid_h * K + offs_k,
             mask=mask_k,
             other=0.0 if mask_k is not None else None,
         ).to(tl.float32)
-        v_n = tl.load(
-            v_ptr + tok * stride_v_token + pid_h * V + offs_v,
+        v = tl.load(
+            v_ptr + token * stride_v_token + pid_h * V + offs_v,
             mask=mask_v,
             other=0.0 if mask_v is not None else None,
         ).to(tl.float32)
-        raw_g_n = tl.load(
-            raw_g_ptr + tok * stride_g_token + pid_h * K + offs_k,
+        raw_g = tl.load(
+            raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
             mask=mask_k,
             other=0.0 if mask_k is not None else None,
         ).to(tl.float32)
-        raw_beta_n = tl.load(
-            raw_beta_ptr + tok * stride_beta_token + pid_h,
+        raw_beta = tl.load(
+            raw_beta_ptr + token * stride_beta_token + pid_h,
         ).to(tl.float32)
 
         q = _kda_l2_normalize(q) * (K**-0.5)
@@ -405,13 +371,33 @@ def _kda_recoverssm_verify_kernel(
                 raw_g,
                 mask=mask_k,
             )
-        q, k, v, raw_g, raw_beta = q_n, k_n, v_n, raw_g_n, raw_beta_n
 
     if query_len > 0:
         token_offset = query_len - 1
         token = bos + token_offset
-        # The pipeline already prefetched this token's inputs during the
-        # scan's last iteration (or the prologue, for single-token requests).
+        q = tl.load(
+            q_ptr + token * stride_q_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        k = tl.load(
+            k_ptr + token * stride_k_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        v = tl.load(
+            v_ptr + token * stride_v_token + pid_h * V + offs_v,
+            mask=mask_v,
+            other=0.0 if mask_v is not None else None,
+        ).to(tl.float32)
+        raw_g = tl.load(
+            raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        raw_beta = tl.load(
+            raw_beta_ptr + token * stride_beta_token + pid_h,
+        ).to(tl.float32)
 
         q = _kda_l2_normalize(q) * (K**-0.5)
         normalized_k = _kda_l2_normalize(k)
