@@ -11,6 +11,7 @@ draft weights. IPC's same-device sleep/wake protocol is not used.
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 import requests
@@ -41,6 +42,7 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
+    fixed_startup_checkpoint,
     make_weight_source,
     packed_buffer_size_for,
 )
@@ -217,8 +219,6 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
     first_draft_updated = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=1)
     target_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=1)
     second_draft_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=2)
-    initial_path = tmp_path / "initial"
-    initial_source.write_checkpoint(initial_path)
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -232,31 +232,37 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         ("target", target_updated),
         ("draft-2", second_draft_updated),
     ):
-        checkpoint = tmp_path / f"{role}-reference"
-        source.write_checkpoint(checkpoint)
         wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
         port = get_open_port()
-        with rlhf_server(
-            str(checkpoint),
-            vllm_serve_args=draft_serve_args(
-                checkpoint, speculative_case, port, enforce_eager=enforce_eager, live=False
-            ),
-            server_host="127.0.0.1",
-            server_port=port,
-            env_dict=env_dict,
-        ) as server:
+        with (
+            fixed_startup_checkpoint(source) as checkpoint,
+            rlhf_server(
+                checkpoint,
+                vllm_serve_args=draft_serve_args(
+                    Path(checkpoint), speculative_case, port, enforce_eager=enforce_eager, live=False
+                ),
+                server_host="127.0.0.1",
+                server_port=port,
+                env_dict=env_dict,
+            ) as server,
+        ):
             _, references[role], _ = collect_draft_observation(server, case)
             (tmp_path / f"{role}-reference.json").write_text(json.dumps(references[role], indent=2))
 
     wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
     port = get_open_port()
-    with rlhf_server(
-        str(initial_path),
-        vllm_serve_args=draft_serve_args(initial_path, speculative_case, port, enforce_eager=enforce_eager, live=True),
-        server_host="127.0.0.1",
-        server_port=port,
-        env_dict=env_dict,
-    ) as server:
+    with (
+        fixed_startup_checkpoint(initial_source) as initial_path,
+        rlhf_server(
+            initial_path,
+            vllm_serve_args=draft_serve_args(
+                Path(initial_path), speculative_case, port, enforce_eager=enforce_eager, live=True
+            ),
+            server_host="127.0.0.1",
+            server_port=port,
+            env_dict=env_dict,
+        ) as server,
+    ):
         sync_client = WeightUpdateClient(server.url_root)
         assert first_draft_updated.draft_source is not None
         assert second_draft_updated.draft_source is not None
