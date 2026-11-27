@@ -1164,7 +1164,10 @@ def qsa_compress_norm_mrope_store(
     else:
         load_rope_positions = True
     if rows < 1024:
-        block_m = 1
+        # BLOCK_M=1 produces tensor<1x...> IR that the Ascend
+        # TritonToLinalg pass cannot materialize. Padding to the existing
+        # medium tile is semantics-preserving because row_mask guards tails.
+        block_m = _COMPRESS_BLOCK_M_MEDIUM
     elif rows < 4096:
         block_m = _COMPRESS_BLOCK_M_MEDIUM
     else:
