@@ -1,10 +1,6 @@
 # Speculative Decoding Guide
 
 Speculative decoding can reduce inter-token latency in memory-bound inference.
-This guide covers Model Runner V2 on Ascend.
-
-The Ascend components for drafting and verification are in
-`vllm_ascend/worker/v2/spec_decode/`.
 
 1. The **speculator** generates draft tokens using a method such as n-gram
    matching or a neural draft model.
@@ -789,8 +785,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     stochastic rounding. With prefix caching, use Mamba cache mode `align`
     and a block size of at least `K + 1`. Without prefix caching, use `none`.
 
-    For direct prefill/decode (P/D) transfer, use `MooncakePullConnector` or
-    the default pull mode of `MooncakeConnectorV2`. Enable RecoverSSM on both
-    roles and match the model weights, speculative method and window, draft
-    checkpoint if used, prefix-caching settings, state dtypes, and convolution
-    layout.
+    For direct prefill/decode (P/D) transfer, use `MooncakePullConnector`.
+    Enable RecoverSSM on both roles and match the model weights, speculative
+    method and window, draft checkpoint if used, prefix-caching settings,
+    state dtypes, and convolution layout.
