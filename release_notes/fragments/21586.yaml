@@ -1,0 +1,5 @@
+pr: 21586
+entries:
+  - category: performance
+    text: Use a unified rectangular tile for batched BF16 DCP packing; performance acceptance remains pending in this draft.
+    hardware: [A3]
