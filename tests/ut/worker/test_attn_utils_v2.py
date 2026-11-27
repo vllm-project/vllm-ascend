@@ -2398,6 +2398,81 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     assert cache.dtype == dtype
 
 
+def test_k3_unified_allocator_views_hidden_states_in_shared_backing(monkeypatch):
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
+
+    mla_name = "language_model.model.layers.0.self_attn.attn"
+    kda_name = "language_model.model.layers.1.linear_attn"
+    hidden_name = "draft.cache_only_layers.93"
+    num_blocks, block_size = 4, 128
+    mla_spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=576,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        dtype=torch.bfloat16,
+    )
+    page_bytes = mla_spec.page_size_bytes
+    kda_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((2, 2),),
+        dtypes=(torch.float32,),
+        page_size_padded=page_bytes,
+    )
+    hidden_spec = HiddenStateCacheSpec(
+        block_size=block_size,
+        num_kv_heads=3,
+        head_size=8,
+        dtype=torch.bfloat16,
+        page_size_padded=page_bytes,
+    )
+    specs = {mla_name: mla_spec, kda_name: kda_spec, hidden_name: hidden_spec}
+    backing_size = num_blocks * page_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(backing_size, [name], page_bytes) for name in specs],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    layers = {
+        mla_name: SimpleNamespace(get_attn_backend=lambda: AscendMLABackend),
+        kda_name: SimpleNamespace(get_attn_backend=lambda: KimiKDAHostMetadataBackend),
+        hidden_name: SimpleNamespace(get_attn_backend=lambda: CacheOnlyAttentionBackend),
+    }
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear"))
+    )
+    backing = torch.zeros(backing_size, dtype=torch.int8)
+    allocate = MagicMock(return_value=backing)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
+
+    device = torch.device("cpu")
+    caches = attn_utils.allocate_kv_cache_main(config, device, None, [block_size] * len(specs))
+
+    allocate.assert_called_once_with(backing_size, 2 * 1024 * 1024, device)
+    hidden = caches[hidden_name]
+    assert isinstance(hidden, torch.Tensor)
+    assert hidden.shape == (num_blocks, 3, block_size, 8)
+    assert hidden.dtype == torch.bfloat16
+    assert hidden.stride() == (page_bytes // hidden.element_size(), block_size * 8, 8, 1)
+    assert hidden.data_ptr() == backing.data_ptr()
+
+    # All three groups can alias the backing. Their live block IDs are distinct.
+    nope, rope = caches[mla_name]
+    (state,) = caches[kda_name]
+    nope[1].fill_(3)
+    rope[1].fill_(5)
+    state[2].fill_(7)
+    hidden[3, :, 2, :] = 9
+    assert (nope[1] == 3).all()
+    assert (rope[1] == 5).all()
+    assert (state[2] == 7).all()
+    assert backing.view(torch.bfloat16)[3 * hidden.stride(0) + 16] == 9
+
+
 class _PrefillStateBuilder:
     def __init__(self):
         self.extra_kwargs = None
