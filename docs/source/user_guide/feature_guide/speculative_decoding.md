@@ -1,8 +1,17 @@
 # Speculative Decoding Guide
 
 Speculative decoding can reduce inter-token latency in memory-bound inference.
-A proposer drafts tokens, and the target model verifies them in one decode step.
 This guide covers Model Runner V2 on Ascend.
+
+vLLM Ascend uses a **proposer-verifier** architecture. The Ascend components
+are in `vllm_ascend/worker/v2/spec_decode/`.
+
+1. The **proposer** generates draft tokens using a method such as n-gram
+   matching or a neural draft model.
+2. The **target model** scores the draft tokens in one decode step. The
+   **rejection sampler** applies the configured verification strategy to decide
+   which draft tokens to accept. Set `speculative_config.rejection_sample_method`
+   to `"block"` to use block verification.
 
 ## Quickstart
 
