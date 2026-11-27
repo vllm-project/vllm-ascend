@@ -70,7 +70,10 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          # pull_request does not set workflow_dispatch inputs, so the old
+          # fallback checked out main and missed files that exist only on the PR.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.vllm_ascend_ref || 'main' }}
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
 
       - name: Checkout coverage helper from main
