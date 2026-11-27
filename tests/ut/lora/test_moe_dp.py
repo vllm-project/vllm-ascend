@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import ClassVar
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from vllm_ascend.lora import moe_dp
 from vllm_ascend.lora.moe_dp import MoELoRACoordinator, lora_ids_to_slots, lora_slots_to_ids
 
 
@@ -70,6 +72,31 @@ def test_single_dp_uses_existing_slot_indices():
     indices = torch.tensor([1, -1, 0])
     assert lora_slots_to_ids(indices, None) is indices
     assert lora_ids_to_slots(indices, None) is indices
+
+
+@pytest.mark.parametrize(("dp_size", "has_context"), [(1, True), (2, False)])
+def test_coordinator_is_disabled_without_cross_dp_expert_lora(dp_size, has_context):
+    model = torch.nn.Linear(2, 2)
+    if has_context:
+        model._ascend_moe_lora_context = SimpleNamespace(punica_wrapper=Mock())
+    with patch.object(moe_dp, "get_ep_group") as get_group:
+        assert MoELoRACoordinator.from_model(model, ExpertAdapterManager(0), dp_size=dp_size) is None
+    get_group.assert_not_called()
+
+
+def test_coordinator_binds_existing_contexts_without_wrapper_type_dependency():
+    wrapper = Mock()
+    other_wrapper = Mock()
+    model = torch.nn.Sequential(*(torch.nn.Linear(2, 2) for _ in range(3)))
+    for layer, punica in zip(model, [wrapper, wrapper, other_wrapper]):
+        layer._ascend_moe_lora_context = SimpleNamespace(punica_wrapper=punica)
+    manager = ExpertAdapterManager(0)
+    with patch.object(moe_dp, "get_ep_group", return_value=SimpleNamespace(cpu_group="cpu")):
+        coordinator = MoELoRACoordinator.from_model(model, manager, dp_size=2)
+    assert coordinator.worker_manager is manager
+    assert coordinator.cpu_group == "cpu"
+    assert wrapper.moe_lora_slot_ids is coordinator.slot_ids
+    assert other_wrapper.moe_lora_slot_ids is coordinator.slot_ids
 
 
 def _dp_worker(rank, init_method):

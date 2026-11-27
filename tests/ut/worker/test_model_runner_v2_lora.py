@@ -42,26 +42,18 @@ def test_real_and_idle_dp_forward_synchronize_once(dummy_run):
     runner._moe_lora_coordinator.synchronize.assert_called_once_with(set() if dummy_run else {"adapter-a"})
 
 
-@pytest.mark.parametrize(("dp_size", "has_experts", "enabled"), [(1, True, False), (2, False, False), (2, True, True)])
-def test_only_cross_dp_expert_wrappers_enable_coordinator(dp_size, has_experts, enabled):
-    class ExpertWrapper(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.punica_wrapper = object()
-
-    model = torch.nn.Sequential(ExpertWrapper() if has_experts else torch.nn.Linear(2, 2))
+def test_model_loading_delegates_to_upstream_before_coordinator_binding():
+    original_model = torch.nn.Linear(2, 2)
+    wrapped_model = torch.nn.Sequential(original_model)
     runner = object.__new__(NPUModelRunner)
     runner.lora_manager = object()
-    config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=dp_size))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
+    device = torch.device("cpu")
     with (
-        patch.object(GPUModelRunner, "load_lora_model", return_value=model),
-        patch.object(model_runner, "AscendFusedMoEWithLoRA", ExpertWrapper),
-        patch.object(model_runner, "get_ep_group", return_value=SimpleNamespace(cpu_group="cpu")),
-        patch.object(model_runner, "MoELoRACoordinator") as coordinator,
+        patch.object(GPUModelRunner, "load_lora_model", return_value=wrapped_model) as load,
+        patch.object(model_runner.MoELoRACoordinator, "from_model") as bind,
     ):
-        assert runner.load_lora_model(model, config, torch.device("cpu")) is model
-    assert coordinator.called == enabled
-    if enabled:
-        assert coordinator.call_args.args == (runner.lora_manager, [model[0].punica_wrapper], "cpu")
-    else:
-        assert runner._moe_lora_coordinator is None
+        assert runner.load_lora_model(original_model, config, device) is wrapped_model
+    load.assert_called_once_with(original_model, config, device)
+    bind.assert_called_once_with(wrapped_model, runner.lora_manager, dp_size=2)
+    assert runner._moe_lora_coordinator is bind.return_value

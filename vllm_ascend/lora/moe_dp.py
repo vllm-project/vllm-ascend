@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from vllm.distributed.parallel_state import get_ep_group
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -43,6 +44,29 @@ class MoELoRACoordinator:
     once per forward. It runs before graph dispatch, never inside a graph or a
     per-layer hot path. The existing worker manager owns loading and eviction.
     """
+
+    @classmethod
+    def from_model(
+        cls,
+        model: torch.nn.Module,
+        worker_manager: LRUCacheWorkerLoRAManager,
+        *,
+        dp_size: int,
+    ) -> MoELoRACoordinator | None:
+        if dp_size <= 1:
+            return None
+        # Reuse the contexts installed by the existing MoE LoRA wrapper. The
+        # runner need not depend on a particular expert wrapper or quantizer.
+        wrappers = {
+            context.punica_wrapper
+            for module in model.modules()
+            if (context := getattr(module, "_ascend_moe_lora_context", None)) is not None
+        }
+        if not wrappers:
+            return None
+        # EP's CPU group spans all ranks sharing experts, including flattened
+        # MoE-TP execution without expert parallelism.
+        return cls(worker_manager, list(wrappers), get_ep_group().cpu_group)
 
     def __init__(
         self,
