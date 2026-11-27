@@ -9,7 +9,7 @@ import torch
 try:
     from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
 except ImportError:  # vLLM before the fla package moved to vllm/third_party
-    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor

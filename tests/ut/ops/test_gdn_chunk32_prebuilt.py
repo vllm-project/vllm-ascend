@@ -27,7 +27,7 @@ import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 try:
     from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
 except ImportError:  # vLLM before the fla package moved to vllm/third_party
-    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.device.hardware import AscendDeviceType
