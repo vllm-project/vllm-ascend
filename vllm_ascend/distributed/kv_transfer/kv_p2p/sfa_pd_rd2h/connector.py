@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextReceiver,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import hisparse_target_enabled
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
     SFAPDRD2HProducerScheduler,
     SFAPDRD2HScheduler,
@@ -57,7 +56,6 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     """
 
     supports_layerwise_buffer_reuse = True
-    _hisparse_target = False
 
     def __init__(
         self,
@@ -72,20 +70,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         self.is_consumer = vllm_config.kv_transfer_config.is_kv_consumer
         self.requires_full_blocks_on_update_after_alloc = role == KVConnectorRole.SCHEDULER and self.is_producer
         # SFA path is layer-wise on both sides.
-        extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-        self.use_layerwise = extra.get("use_layerwise", True)
-        hisparse_target = hisparse_target_enabled(extra)
-        self._hisparse_target = hisparse_target
-        if hisparse_target:
-            if not self.use_layerwise or self.is_producer == self.is_consumer:
-                raise ValueError("Layerwise HiSparse requires a dedicated producer or consumer")
-            parallel = vllm_config.parallel_config
-            if parallel.decode_context_parallel_size != 1:
-                raise ValueError("Layerwise HiSparse requires unsharded source and destination pages (DCP=1)")
-            if parallel.prefill_context_parallel_size > 1:
-                text_config = getattr(vllm_config.model_config, "hf_text_config", None)
-                if not self.is_producer or getattr(text_config, "model_type", None) != "glm_moe_dsa":
-                    raise ValueError("Layerwise HiSparse supports PCP on GLM SFA Prefill with replicated KV only")
+        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", True)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         # Decode offload is asymmetric: P exposes regular paged KV while D owns
         # the SparseKVOffloadManager CPU pool.
@@ -100,19 +85,9 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
                 "SfaRemoteD2HConnector producer (P) must run with sparse_kv_offload_config.enabled=false."
             )
         if self.is_consumer:
-            if hisparse_target:
-                if decode_offload_enabled or getattr(kv_cache_config, "hisparse_host_num_blocks", None) is None:
-                    raise ValueError(
-                        "Layerwise HiSparse requires a Core HiSparse Host pool and disabled legacy offload"
-                    )
-                if vllm_config.parallel_config.pipeline_parallel_size != 1:
-                    raise ValueError("Layerwise HiSparse Decode requires pipeline_parallel_size=1")
-                if getattr(vllm_config.speculative_config, "method", None) == "dspark":
-                    raise ValueError("Layerwise HiSparse does not transfer DSpark draft context")
-            else:
-                assert decode_offload_enabled, (
-                    "SfaRemoteD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
-                )
+            assert decode_offload_enabled, (
+                "SfaRemoteD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
+            )
 
         if role == KVConnectorRole.SCHEDULER:
             # Producer scheduler prepares P-side metadata; consumer scheduler
@@ -135,14 +110,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
             if self.is_producer:
                 self.connector_worker = SFAPDRD2HProducerWorker(vllm_config, kv_cache_config, str(self.engine_id))
             else:
-                worker = SFAPDRD2HConsumerWorker
-                if hisparse_target:
-                    from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.hisparse_consumer import (
-                        HiSparseLayerwiseConsumerWorker,
-                    )
-
-                    worker = HiSparseLayerwiseConsumerWorker
-                self.connector_worker = worker(
+                self.connector_worker = SFAPDRD2HConsumerWorker(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -302,7 +270,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_save(self):
         # Decode KV writes are synchronized by SparseKVOffloadManager. P-side
         # completion is tracked by READ_DONE/storage_send_done_events.
-        if self.connector_worker is not None and (self.is_consumer or self._hisparse_target):
+        if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
 
     def get_copy_sfa_slot_bindings(self) -> dict[str, int]:

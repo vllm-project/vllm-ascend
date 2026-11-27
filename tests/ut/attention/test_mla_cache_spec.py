@@ -19,18 +19,17 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 @pytest.mark.parametrize(
-    "model_type,pcp_size,heads",
+    "model_type,heads",
     [
-        ("glm_moe_dsa", 1, 12),
-        ("glm_moe_dsa", 8, 1),
-        ("glm4_moe_lite", 1, 12),
-        ("glm5_next", 1, 12),
-        ("glm5_next_text", 1, 12),
-        ("kimi_linear", 1, 1),
-        ("deepseek_v3", 1, 12),
+        ("glm_moe_dsa", 12),
+        ("glm4_moe_lite", 12),
+        ("glm5_next", 12),
+        ("glm5_next_text", 12),
+        ("kimi_linear", 1),
+        ("deepseek_v3", 12),
     ],
 )
-def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, pcp_size, heads):
+def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, heads):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -61,7 +60,6 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, pcp
     layer.impl.fa_quant_layer = False
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
     )
     actual = layer.get_kv_cache_spec(config)
     assert isinstance(actual, AscendMLAAttentionSpec)

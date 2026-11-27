@@ -168,12 +168,9 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
-        parallel = getattr(vllm_config, "parallel_config", None)
-        glm_pcp = model_type == "glm_moe_dsa" and getattr(parallel, "prefill_context_parallel_size", 1) > 1
         storage_heads = self.num_heads
-        if model_type == "kimi_linear" or glm_pcp:
-            # The PCP SFA page stores one latent KV head. The query heads
-            # stay on the attention layer and are not part of the page.
+        if model_type == "kimi_linear":
+            # Preserve the existing Kimi Linear cache head-count contract.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
             spec

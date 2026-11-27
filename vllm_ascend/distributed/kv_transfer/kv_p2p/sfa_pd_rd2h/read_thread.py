@@ -109,8 +109,6 @@ class MembPullReadThread(threading.Thread):
     batch_transfer_sync_read, then replies with READ_DONE or READ_FAILED.
     """
 
-    protocol_version = SFAPD_PROTOCOL_VERSION
-
     def __init__(
         self,
         tp_rank: int,
@@ -141,35 +139,6 @@ class MembPullReadThread(threading.Thread):
 
     def bind_dspark_context_receiver(self, receiver: DSparkContextReceiver) -> None:
         self._state.dspark_context_receiver = receiver
-
-    def _decode_read_requests(self, entries):
-        return [
-            (
-                entry[0],
-                list(entry[1]),
-                list(entry[2] if len(entry) > 2 else entry[1]),
-                int(entry[3]) if len(entry) > 3 else 0,
-                int(entry[4]) if len(entry) > 4 else 0,
-            )
-            for entry in entries
-        ]
-
-    def _check_final_layers(self, request_ids, producer_layers, pp_rank, pp_size) -> None:
-        """Targets with externally populated cache groups can check PP coverage before ACK."""
-
-    def _record_failed_batch(self, entries, done_ext_ids) -> None:
-        """Keep identifiable requests even if another entry could not be decoded."""
-        failed_ids = set()
-        if isinstance(entries, (list, tuple)):
-            failed_ids.update(
-                entry[0]
-                for entry in entries
-                if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str)
-            )
-        if isinstance(done_ext_ids, (list, tuple)):
-            failed_ids.update(ext_id for ext_id in done_ext_ids if isinstance(ext_id, str))
-        with self._lock:
-            self._failed_requests.update(failed_ids)
 
     def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
         """Accumulate a contributor's last-layer arrival."""
@@ -255,14 +224,14 @@ class MembPullReadThread(threading.Thread):
                         unknown_layers = set(p_layer_meta) - set(self._state.layer_metadata)
                         if unknown_layers:
                             raise ValueError(f"MF_META contains layers unknown to D: {sorted(unknown_layers)}")
-                        version = SFAPD_PROTOCOL_VERSION if len(msg) == 3 else int(msg[3])
-                        if version != self.protocol_version:
-                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, self.protocol_version))))
-                            continue
                         if len(msg) == 3:
                             pp_rank, pp_size = 0, 1
                         else:
-                            pp_rank, pp_size = map(int, msg[4:6])
+                            version, pp_rank, pp_size = map(int, msg[3:6])
+                            if version != SFAPD_PROTOCOL_VERSION:
+                                raise ValueError(
+                                    f"SFAPD protocol version mismatch: P={version}, D={SFAPD_PROTOCOL_VERSION}"
+                                )
                             if pp_size < 1 or not 0 <= pp_rank < pp_size:
                                 raise ValueError(f"invalid producer PP topology: rank={pp_rank}, size={pp_size}")
                         self._p_session = p_session
@@ -286,7 +255,7 @@ class MembPullReadThread(threading.Thread):
                         if len(msg) == 3:
                             sock.send_multipart((identity, b"", b"ACK"))
                         else:
-                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, self.protocol_version))))
+                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))))
 
                     elif msg_type == DSPARK_DRAFT_KV:
                         self._handle_dspark_draft_kv(identity, msg, sock, encoder)
@@ -303,25 +272,30 @@ class MembPullReadThread(threading.Thread):
                         # Legacy two-field entries contain one shared block-id
                         # list, so use it for both components and default both
                         # destination offsets to zero.
-                        entries = msg[3] if len(msg) > 3 else None
-                        done_ext_ids = msg[4] if len(msg) > 4 else ()
+                        read_reqs = [
+                            (
+                                entry[0],
+                                list(entry[1]),
+                                list(entry[2] if len(entry) > 2 else entry[1]),
+                                int(entry[3]) if len(entry) > 3 else 0,
+                                int(entry[4]) if len(entry) > 4 else 0,
+                            )
+                            for entry in msg[3]
+                        ]
+                        done_ext_ids = list(msg[4]) if len(msg) > 4 else []
+                        # Contributor identity (unequal P/D TP). Absent = legacy single
+                        # contributor: member 0 of a 1-member group pulls everything.
+                        group_member_idx = int(msg[5]) if len(msg) > 5 else 0
+                        ratio = max(int(msg[6]), 1) if len(msg) > 6 else 1
+                        logger.debug(
+                            "MembPull D recv READ_READY_BATCH: layer=%d (%s), reqs=%d, done_reqs=%d",
+                            layer_idx,
+                            layer_name,
+                            len(read_reqs),
+                            len(done_ext_ids),
+                        )
                         succeeded = False
                         try:
-                            if not isinstance(entries, (list, tuple)) or not isinstance(done_ext_ids, (list, tuple)):
-                                raise ValueError("Expected request entries and completion IDs to be sequences")
-                            if any(not isinstance(ext_id, str) for ext_id in done_ext_ids):
-                                raise ValueError("Expected string completion IDs")
-                            # Legacy messages have one contributor.
-                            group_member_idx = int(msg[5]) if len(msg) > 5 else 0
-                            ratio = max(int(msg[6]), 1) if len(msg) > 6 else 1
-                            logger.debug(
-                                "MembPull D recv READ_READY_BATCH: layer=%d (%s), reqs=%d, done_reqs=%d",
-                                layer_idx,
-                                layer_name,
-                                len(entries),
-                                len(done_ext_ids),
-                            )
-                            read_reqs = self._decode_read_requests(entries)
                             p_session = self._p_sessions.get(identity)
                             p_layer_meta = self._p_layer_metas.get(identity)
                             if p_session is None or p_layer_meta is None:
@@ -337,28 +311,29 @@ class MembPullReadThread(threading.Thread):
                                     group_member_idx=group_member_idx,
                                     ratio=ratio,
                                 )
-                            if done_ext_ids:
-                                pp_rank, pp_size = self._p_pp_topology[identity]
-                                self._check_final_layers(done_ext_ids, p_layer_meta.keys(), pp_rank, pp_size)
                             sock.send_multipart((identity, b"", encoder.encode((READ_DONE, layer_idx))))
                             succeeded = True
                             logger.debug(
                                 "MembPull D sent READ_DONE: layer=%d (%s), reqs=%d, done_reqs=%d",
                                 layer_idx,
                                 layer_name,
-                                len(entries),
+                                len(read_reqs),
                                 len(done_ext_ids),
                             )
                         except Exception as e:
                             logger.error(
-                                "MembPull batch read failed for layer %d (%s): %s",
+                                "MembPull batch read failed for layer %d (%s), reqs=%d: %s",
                                 layer_idx,
                                 layer_name,
+                                len(read_reqs),
                                 e,
                             )
-                            self._record_failed_batch(entries, done_ext_ids)
                             failure_payload = encoder.encode((READ_FAILED, layer_idx, str(e)))
                             sock.send_multipart((identity, b"", failure_payload))
+                            failed_ids = {entry[0] for entry in read_reqs}
+                            failed_ids.update(done_ext_ids)
+                            with self._lock:
+                                self._failed_requests.update(failed_ids)
                         if succeeded and done_ext_ids:
                             pp_rank, pp_size = self._p_pp_topology[identity]
                             self._record_chunk_done(
