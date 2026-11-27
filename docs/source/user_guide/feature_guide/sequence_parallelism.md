@@ -129,7 +129,7 @@ The current eligibility matrix is:
 | **Input shape** | Nonempty 2D tensor | Nonempty 2D tensor |
 | **K dimension** | [256, 65535) | [256, 65535), and the input K must match the weight K |
 | **Token count** | [256, 16384) | No fixed token-count limit |
-| **Communication volume** | Bounded by the token-count limit | `padded_tokens × N × 2B < 4 GiB` |
+| **Communication volume** | Bounded by the token-count limit | `padded_tokens × N × 2B < 4GiB` |
 | **Weight format** | ND format | `weight_nz_mode != 2` |
 | **Weight contiguity** | Must be contiguous | Must be contiguous |
 | **Batch type** | Pure prefill | Pure prefill |
