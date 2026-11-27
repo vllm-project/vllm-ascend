@@ -165,13 +165,13 @@ POOL_PROMPT_TOKEN_SPAN = 7000
 POOL_MAX_TOKENS = 16
 
 
-def build_pool_prompts(prompt_tokens: int) -> tuple[list[int], list[int]]:
+def build_pool_prompts(prompt_tokens: int, seed_offset: int = 0) -> tuple[list[int], list[int]]:
     """Return two token-id prompts of ``prompt_tokens``; the first block differs (R4)."""
 
     def _build(seed: int) -> list[int]:
         return [POOL_PROMPT_TOKEN_BASE + (seed + index * 7) % POOL_PROMPT_TOKEN_SPAN for index in range(prompt_tokens)]
 
-    return _build(0), _build(POOL_PROMPT_TOKEN_SPAN // 2)
+    return _build(seed_offset), _build(POOL_PROMPT_TOKEN_SPAN // 2 + seed_offset)
 
 
 POOL_SECRET = "8"
@@ -239,6 +239,7 @@ def run_pool_hit_sequence(
     block_size: int,
     prompt_tokens: int,
     prompt_ids: list[int] | None = None,
+    miss_prompt_ids: list[int] | None = None,
     replicas: int = 1,
     max_tokens: int = POOL_MAX_TOKENS,
     lcm_block_size: int | None = None,
@@ -252,13 +253,14 @@ def run_pool_hit_sequence(
     """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
 
     ``prompt_ids`` supplies a measured long natural-language prompt;
-    ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
+    ``miss_prompt_ids`` overrides the R4 disjoint prompt. ``answer_secret``
+    asserts the cold and hit answers. ``replicas`` scales with
     DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
     checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
     skips H3 (DSpark and dummy-weight cases).
     """
     prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
-    prompt_b = build_pool_prompts(prompt_tokens)[1]
+    prompt_b = miss_prompt_ids if miss_prompt_ids is not None else build_pool_prompts(prompt_tokens)[1]
     effective_tokens = len(prompt_a)
     if expected_hit_tokens is None:
         expected_hits = expected_hit_token_count(effective_tokens, block_size, lcm_block_size)
@@ -442,28 +444,67 @@ def _collect_perf(
     runner: Any,
     prompt_tokens: int,
     *,
+    prompt_ids: list[int] | None = None,
     reset_local_cache: bool = False,
     seed_concurrency: bool = False,
+    concurrency: int = AB_CONCURRENCY,
+    batch_requests: int = 0,
+    sample_count: int | None = None,
+    warmup_count: int | None = None,
 ) -> float:
-    """Return input throughput for 32 requests at concurrency 16."""
-    prompt, _ = build_pool_prompts(prompt_tokens)
+    """Return input throughput.
+
+    The defaults keep the PR #22849 sampling: two warmup rounds of two requests,
+    one timed block of 32 requests at concurrency 16 (2 waves). Nightly callers
+    override the sample/warmup counts, concurrency and batch size.
+    ``sample_count=None`` keeps the single timed block; an integer runs that many
+    timed samples, each issuing ``batch_requests`` requests. ``warmup_count=None``
+    keeps the two rounds of two requests; an integer runs that many warmup calls
+    of ``concurrency`` requests.
+    """
+    if sample_count is not None and sample_count < 1:
+        raise ValueError("sample_count must be positive")
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     if seed_concurrency:
         # Hybrid align only: seed the tail block at the target concurrency so
         # the first timed wave does not measure an under-populated block.
-        runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
-    for _ in range(AB_WARMUP_ROUNDS):
-        runner.generate_greedy([prompt] * AB_WARMUP_REQUESTS, 1)
+        runner.generate_greedy([prompt] * concurrency, 1)
+    if warmup_count is None:
+        for _ in range(AB_WARMUP_ROUNDS):
+            runner.generate_greedy([prompt] * AB_WARMUP_REQUESTS, 1)
+    else:
+        for _ in range(warmup_count):
+            runner.generate_greedy([prompt] * concurrency, 1)
     # Let scheduling and in-flight async writes settle before timing.
     time.sleep(AB_PERF_SETTLE_SECONDS)
     if reset_local_cache:
         # Drop the warmup-filled local blocks so the timed requests hit the pool.
         with contextlib.suppress(RuntimeError):
             runner.model.reset_prefix_cache(reset_connector=False)
+    requests_per_sample = batch_requests or (AB_REQUESTS if sample_count is None else concurrency)
+    if requests_per_sample < concurrency or requests_per_sample % concurrency:
+        raise ValueError("batch_requests must be a positive multiple of concurrency")
+    waves = requests_per_sample // concurrency
+    timed_samples = 1 if sample_count is None else sample_count
     begin = time.perf_counter()
-    for _ in range(AB_REQUESTS // AB_CONCURRENCY):
-        runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
+    for sample_index in range(timed_samples):
+        sample_begin = time.perf_counter()
+        for _ in range(waves):
+            runner.generate_greedy([prompt] * concurrency, 1)
+        print(
+            f"[kv_pool_perf] sample={sample_index + 1}/{timed_samples} "
+            f"requests={requests_per_sample} "
+            f"elapsed_ms={(time.perf_counter() - sample_begin) * 1000.0:.1f}",
+            flush=True,
+        )
     elapsed = time.perf_counter() - begin
-    return AB_REQUESTS * prompt_tokens / elapsed
+    print(
+        f"[kv_pool_perf] prompt_tokens={prompt_tokens} concurrency={concurrency} "
+        f"batch_requests={requests_per_sample} samples={timed_samples} waves={waves} "
+        f"elapsed_ms={elapsed * 1000.0:.1f}",
+        flush=True,
+    )
+    return requests_per_sample * timed_samples * prompt_tokens / elapsed
 
 
 def _control_hit_outputs(
@@ -545,11 +586,17 @@ def run_pool_ab(
     prompt_tokens: int = POOL_PROMPT_TOKENS,
     prompt_ids: list[int] | None = None,
     perf_prompt_tokens: int | None = None,
+    perf_prompt_ids: list[int] | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
     perf_reset_local: bool = False,
     perf_seed_concurrency: bool = False,
+    perf_concurrency: int = AB_CONCURRENCY,
+    perf_batch_requests: int = 0,
+    perf_sample_count: int | None = None,
+    perf_warmup_count: int | None = None,
     gate: bool = True,
+    perf_gate: bool = True,
     pool_first: bool = False,
     acceptance_ratio: float | None = None,
 ) -> PoolABReport:
@@ -581,8 +628,13 @@ def run_pool_ab(
                 throughput = _collect_perf(
                     runner,
                     perf_tokens,
+                    prompt_ids=perf_prompt_ids,
                     reset_local_cache=perf_reset_local and use_pool,
                     seed_concurrency=perf_seed_concurrency,
+                    concurrency=perf_concurrency,
+                    batch_requests=perf_batch_requests,
+                    sample_count=perf_sample_count,
+                    warmup_count=perf_warmup_count,
                 )
                 result = LegResult(
                     True,
@@ -627,7 +679,8 @@ def run_pool_ab(
         token_identity and a.result is not None and b.result is not None and a_result.outputs != b_result.outputs
     )
     perf_bad = (
-        a.result is not None
+        perf_gate
+        and a.result is not None
         and b.result is not None
         and a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
     )
