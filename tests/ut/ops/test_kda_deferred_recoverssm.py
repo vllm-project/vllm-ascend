@@ -439,13 +439,13 @@ def test_fused_verify_matches_flush_then_verify():
 
 
 # ---------------------------------------------------------------------------
-# Test 4c: start_flush gate (fusion threshold) picks fused vs flush+verify
+# Test 4c: start_flush gate picks fused vs flush
 # ---------------------------------------------------------------------------
 
-def test_start_flush_gate_selects_fused_vs_flush(monkeypatch):
-    """Below the ``recoverssm_replays`` threshold, ``start_flush`` folds the
-    pending replays (``flushed``, no replay plan); at or above it, it keeps the
-    fused ``compact_conv`` plan (``started``, replay plan available)."""
+def test_start_flush_gate_selects_fused_vs_flush():
+    """The first KDA layer keeps the fused ``compact_conv`` plan (``started``,
+    replay plan available); a prefix outside ``layer_names`` folds the pending
+    replays (``flushed``, no replay plan)."""
     from vllm_ascend.models.glm5next.recoverssm_deferred import KDARecoverSSMDeferred
 
     ctx, _ = _make_context(num_layers=2, heads=HEADS, max_reqs=8)
@@ -463,15 +463,6 @@ def test_start_flush_gate_selects_fused_vs_flush(monkeypatch):
             layer_names=["layer0", "layer1"],
         )
 
-    # Force the flush path: an unattainably high threshold.
-    monkeypatch.setenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS", "1000000")
-    deferred = make_deferred()
-    deferred.start_flush("layer0")
-    assert deferred.flushed and not deferred.started
-    assert deferred.replay_plan() is None
-
-    # Force the fused path: a zero threshold fuses any non-empty step.
-    monkeypatch.setenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS", "0")
     deferred = make_deferred()
     deferred.start_flush("layer0")
     assert deferred.started and not deferred.flushed
@@ -480,15 +471,12 @@ def test_start_flush_gate_selects_fused_vs_flush(monkeypatch):
     # The plan arrays are allocated at max_num_reqs; only the real rows matter.
     assert plan[0].shape[0] >= state_indices.shape[0]
 
-    # Without an override, the experiment build always fuses non-empty steps
-    # (the size-based threshold is removed).
-    monkeypatch.delenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
     deferred = make_deferred()
-    deferred.start_flush("layer0")
-    assert deferred.started and not deferred.flushed
-    assert deferred.replay_plan() is not None
+    deferred.start_flush("not_a_layer")
+    assert deferred.flushed and not deferred.started
+    assert deferred.replay_plan() is None
 
-    print("[PASS] start_flush gate: below threshold flushes, at/above fuses")
+    print("[PASS] start_flush gate: KDA layer fuses, unknown prefix flushes")
 
 
 # ---------------------------------------------------------------------------

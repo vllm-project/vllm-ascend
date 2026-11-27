@@ -22,10 +22,8 @@ in-kernel replay): the saving is fused vs stock, both against the same
 deferred commit.
 
 ``--sweep`` runs that comparison over a range of batch sizes and reports
-where the fused path wins — with ``--heads`` set to the model's *local* heads
-(``num_heads / tp``), the ``heads*batch`` crossover is exactly the
-``VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS`` threshold the deferred orchestration
-uses.
+where the fused path wins (``--heads`` set to the model's *local* heads,
+``num_heads / tp``, makes the ``heads*batch`` column comparable to serving).
 
 ``--blocks`` sizes the paged checkpoint pool, and ``--records`` gives the
 correction/key-gate records their own pool instead of packing them into the
@@ -533,7 +531,7 @@ def main() -> None:
         print(f"{'batch':>6} {'heads*batch':>12} {'flush+verify':>14} "
               f"{'fused':>10} {'saving':>10} {'saving%':>8} {'code picks':>12}")
         for b, hb, t_stock, t_fused in rows:
-            choice = "fused" if recoverssm_replays(heads, b) else "flush"
+            choice = "fused" if recoverssm_replays(b) else "flush"
             print(f"{b:6d} {hb:12d} {t_stock:14.3f} {t_fused:10.3f} "
                   f"{t_stock - t_fused:10.3f} {(1 - t_fused / t_stock) * 100:7.1f}% "
                   f"{choice:>12}")
@@ -541,8 +539,6 @@ def main() -> None:
         if wins:
             print(f"\nfused wins from batch={min(wins)} "
                   f"(heads*batch={heads * min(wins)})")
-            print(f"set VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS={heads * min(wins)} "
-                  "to fuse at and above this point")
         else:
             print("\nfused never wins in this sweep: raise batch or lower layers")
         return

@@ -6,7 +6,6 @@ Adapted from vLLM c4df37dfcc. Preserve its paged-cache strides and public
 verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
 """
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -33,19 +32,10 @@ RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
-# Experiment build: the size-based fusion threshold is disabled, so every
-# non-empty deferred step replays the previous commit in the verify kernel.
-# `VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS` still pins an item threshold for A/B
-# runs (0 forces the fused path, a large value forces flush + verify).
-def recoverssm_replays(num_heads: int, requests: int) -> bool:
-    """Whether a deferred RecoverSSM verify of ``num_heads * requests`` items
-    replays the previous step's commit in the same pass (else: flush + verify)."""
-    if requests <= 0:
-        return False
-    forced = os.environ.get("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
-    if forced is None:
-        return True
-    return num_heads * requests >= int(forced)
+def recoverssm_replays(requests: int) -> bool:
+    """Whether a deferred RecoverSSM verify replays the previous step's commit
+    in the same pass (else: flush + verify)."""
+    return requests > 0
 
 
 @triton.jit
