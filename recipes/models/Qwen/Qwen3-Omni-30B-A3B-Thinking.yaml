@@ -46,9 +46,9 @@ variants:
         docker_serve_command: "vllm serve"
     description: "Official BF16 checkpoint; the default, CI-verifiable configuration. No quantization flag is added."
   w8a8:
-    model_id: "./Qwen3-Omni-30B-A3B-Thinking-w8a8"
+    model_id: "local/Qwen3-Omni-30B-A3B-Thinking-w8a8"
     precision: int8
-    label: "W8A8 (local dir required)"
+    label: "W8A8 (local path required)"
     vram_minimum_gb: 37
     supported_hardware: [ascend_910c]
     hardware_overrides:
@@ -58,7 +58,7 @@ variants:
     extra_args:
       - "--quantization"
       - "ascend"
-    description: "Optional W8A8 weights produced locally from the official BF16 checkpoint with msmodelslim; replace the placeholder model_id with the local quantized directory."
+    description: "Optional W8A8 weights produced locally from the official BF16 checkpoint with msmodelslim. The local/... model id is a placeholder, not a Hugging Face repo; replace it with the absolute path to the quantized directory before serving."
 
 compatible_strategies:
   - single_node_tp
@@ -243,7 +243,8 @@ guide: |
 
   All presets therefore load the public official BF16 checkpoint by default and run as
   generated. The optional W8A8 variant uses the placeholder model id
-  `./Qwen3-Omni-30B-A3B-Thinking-w8a8`; replace it with the local quantized directory
+  `local/Qwen3-Omni-30B-A3B-Thinking-w8a8` (a placeholder, not a Hugging Face
+  repo); replace it with the absolute path to the local quantized directory
   before rendering or serving it, and keep the canonical Hugging Face id as the BF16
   download.
 
