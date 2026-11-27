@@ -136,6 +136,15 @@ def _dp_worker(rank, init_method):
         coordinator.synchronize(set())
         assert not wrapper.moe_lora_active
 
+        # An idle rank must not publish the previous global activity as its
+        # own synthetic activity on the next base-only step.
+        wrapper.active_lora_slots = frozenset()
+        coordinator.synchronize({AdapterRequest(33, "/c")} if rank == 0 else set(), dummy_run=rank == 1)
+        assert coordinator.num_active_loras == 1
+        coordinator.synchronize(set(), dummy_run=rank == 1)
+        assert coordinator.num_active_loras == 0
+        assert not wrapper.moe_lora_active
+
         # The union capacity, rather than only the local request count, matters.
         coordinator.step_active = False
         with pytest.raises(ValueError, match="--max-loras"):

@@ -137,7 +137,9 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
             # A locally base-only rank can receive expert LoRA tokens from a
             # peer. Replay an active-LoRA graph on every participating rank;
             # the zero-LoRA graph intentionally contains no adapter operations.
-            num_active_loras = max(num_active_loras, coordinator.num_active_loras)
+            # Upstream uses max_loras + 1 for dummy/idle dispatch. That is a
+            # capture sentinel, not the current group's adapter count.
+            num_active_loras = coordinator.num_active_loras
         return super().dispatch(
             num_reqs,
             num_tokens,

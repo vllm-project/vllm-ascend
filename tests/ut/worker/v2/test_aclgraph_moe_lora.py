@@ -12,7 +12,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 
 @pytest.mark.parametrize(
     ("local_loras", "global_loras", "synchronized", "expected"),
-    [(0, 2, True, 2), (1, 2, True, 2), (0, 0, True, 0), (0, 2, False, 0), (2, 1, True, 2)],
+    [(0, 2, True, 2), (1, 2, True, 2), (0, 0, True, 0), (0, 2, False, 0), (3, 0, True, 0), (3, 1, True, 1)],
 )
 def test_remote_expert_adapters_select_active_lora_graph(local_loras, global_loras, synchronized, expected):
     manager = object.__new__(ModelAclGraphManager)

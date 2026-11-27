@@ -75,7 +75,10 @@ class MoELoRACoordinator:
         # Profiling uses already-resident synthetic adapters rather than real
         # checkpoint requests. Normal forwards must not reuse the previous
         # batch's activity, since local mappings are updated after this hook.
-        dummy_count = self.num_active_loras if dummy_run else 0
+        # An idle DP rank also uses a dummy forward. Its explicit local
+        # mapping is empty; the previous global count may describe a peer's
+        # real adapter and must not keep later base-only steps active.
+        dummy_count = max(len(wrapper.active_lora_slots) for wrapper in self.wrappers) if dummy_run else 0
         gathered = self._gather((list(requests), dummy_count))
         for rank_requests, _ in gathered:
             for request in rank_requests:
