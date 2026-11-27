@@ -1,0 +1,208 @@
+# DSV4.1-Flash two-node PD KV pool watch, Mooncake backend (128K leg).
+# Local runs: set cluster_hosts to [prefill_ip, decode_ip]; CI resolves nodes via LWS.
+test_name: "DSv41-Flash-PD-Mooncake-KVPool"
+model: "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8"
+num_nodes: 2
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 17100
+    dp_rpc_port: 19321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 1
+    cp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 17100
+    dp_rpc_port: 19321
+    dp_size: 16
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    cp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+kv_pool:
+  type: mooncake
+  master_port: 5007
+  metrics_port: 8007
+  config:
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    global_segment_size: "16GB"
+
+# A/B watch parameters: the driver replays this prompt cold -> hit -> hit ->
+# disjoint through the proxy, then samples throughput on both legs.
+pool_ab:
+  case_name: "nightly_dsv41_flash_pd_mooncake_128k"
+  model_env: "DEEPSEEK_V41_PD_MODEL_PATH"
+  prompt_tokens: 131076
+  lcm_block_size: 16384
+  control_port: 19556
+  perf_gate: true
+  check_output: true
+  perf_aisbench:
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    request_conf: vllm_api_stream_chat
+    num_prompts: 128
+    batch_size: 32
+    max_out_len: 1
+    request_rate: 0
+    seed: 1024
+    hit_rate_target: 0.9
+    hit_rate_tolerance: 0.03
+    warmup:
+      num_prompts: 4
+      batch_size: 4
+
+env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_USE_MODELSCOPE: "true"
+  VLLM_ENGINE_READY_TIMEOUT_S: "36000"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ASCEND_AUTO_CONNECT: "1"
+  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"fabric_memory.max_capacity": "1"}'
+  PYTHONHASHSEED: "0"
+  VLLM_HOST_IP: "${LOCAL_IP}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "1024"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "4096"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "dsv41"
+      - --max-model-len
+      - "132096"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "16"
+      - --trust-remote-code
+      - --block-size
+      - "128"
+      - --tokenizer-mode
+      - "deepseek_v41"
+      - --reasoning-parser
+      - "deepseek_v41"
+      - --tool-call-parser
+      - "deepseek_v41"
+      - --enable-auto-tool-choice
+      - --safetensors-load-strategy
+      - "lazy"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --enforce-eager
+      - --swa-bounded-replay
+      - --no-enable-prefix-caching
+      - --engram-config
+      - '{"cpu_offload": true, "dp_shared_memory": true}'
+      - --additional-config
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": false, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"use_layerwise": true}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "1", "use_layerwise": true}}]}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "dsv41"
+      - --max-model-len
+      - "132096"
+      - --max-num-batched-tokens
+      - "512"
+      - --max-num-seqs
+      - "72"
+      - --async-scheduling
+      - --trust-remote-code
+      - --block-size
+      - "128"
+      - --tokenizer-mode
+      - "deepseek_v41"
+      - --reasoning-parser
+      - "deepseek_v41"
+      - --tool-call-parser
+      - "deepseek_v41"
+      - --enable-auto-tool-choice
+      - --safetensors-load-strategy
+      - "lazy"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --no-swa-bounded-replay
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --engram-config
+      - '{"cpu_offload": true, "dp_shared_memory": true}'
+      - --additional-config
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"use_layerwise": true}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "1", "use_layerwise": false}}]}}'
+
+benchmarks: {}

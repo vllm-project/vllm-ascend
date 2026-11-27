@@ -433,8 +433,16 @@ jobs:
               POD="${LWS_NAME}-0-${i}"
             fi
             echo "==== Collecting logs from worker pod: $POD ===="
-            kubectl logs -f "$POD" -n "$NAMESPACE" \
-              > "/tmp/${POD}_logs.txt" 2>&1 &
+            if [ "${i}" -eq 0 ]; then
+              # Leader stdout is streamed below with phase parsing; keep it file-only here.
+              kubectl logs -f "$POD" -n "$NAMESPACE" \
+                > "/tmp/${POD}_logs.txt" 2>&1 &
+            else
+              # Follower pods carry the D-side harness output (rank log tails).
+              # Tee to the step stdout so PD failures are visible in the CI job log.
+              kubectl logs -f "$POD" -n "$NAMESPACE" \
+                2>&1 | tee "/tmp/${POD}_logs.txt" &
+            fi
 
             pids+=($!)
           done
@@ -867,6 +875,13 @@ jobs:
               mkdir -p "${DEST}/node${i}/${EXT_LOG_PATH}"
               cp "$EXT_SRC" "${DEST}/node${i}/${EXT_LOG_PATH}/" 2>/dev/null || true
             fi
+            # KV pool A/B legs pack per-rank raw logs into one archive per leg.
+            for kv_archive in "${LOG_PREFIX}"/node_${i}_kv_pool_pd_*.tar.gz; do
+              if [ -f "$kv_archive" ]; then
+                mkdir -p "${DEST}/node${i}/kv-pool-pd"
+                cp "$kv_archive" "${DEST}/node${i}/kv-pool-pd/" 2>/dev/null || true
+              fi
+            done
           done
 
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
