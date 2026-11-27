@@ -386,6 +386,7 @@ Before starting the service:
             --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
+            --quantization ascend \
             --served-model-name qwen3.8 \
             --max-num-seqs 128 \
             --max-model-len 16384 \
@@ -921,12 +922,12 @@ The following optimizations are enabled by default and require no additional con
 | Chunked Prefill | The vLLM V1 scheduler splits long prefill inputs into chunks, with each step processing at most `--max-num-batched-tokens` tokens. | Reduces per-step memory peaks, enabling larger batch sizes and higher throughput. |
 | Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '"cudagraph_mode":"FULL_DECODE_ONLY"'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
 | CPU Binding | Binds worker threads to dedicated CPU cores via `--additional-config '"enable_cpu_binding":true'`. | Reduces CPU scheduling jitter and stabilizes decode latency. |
+| Prefix Cache | Reuses cached KV state for repeated prefixes (e.g., shared system prompts, few-shot examples), avoiding redundant prefill computation. | Avoids redundant prefill for repeated prefixes; the benefit depends on the prefix cache hit rate. |
 
 ##### Optimizations That Require Explicit Enabling
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --- | --- | --- | --- | --- |
-| Prefix Cache | Scenarios with repeated prefixes (e.g., shared system prompts, few-shot examples) | `--enable-prefix-caching` | Reuses cached KV state for repeated prefixes, avoiding redundant prefill computation. | The benefit depends on the prefix cache hit rate. |
 | Qwen3.5 MTP Speculative Decoding | Decode-heavy workloads with acceptable acceptance rate | `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'` | Uses the built-in MTP draft head to speculate multiple tokens per step and verifies them in a single forward pass. | Tune the speculative token count for the target workload; benefit depends on the acceptance rate. |
 
 ## 10 FAQ
