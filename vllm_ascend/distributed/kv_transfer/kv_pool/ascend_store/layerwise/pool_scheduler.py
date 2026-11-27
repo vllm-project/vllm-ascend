@@ -101,34 +101,40 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
+    def _lookup_external_hit_tokens(
+        self, request: Request, num_computed_tokens: int, reuse_limit: int | None = None
+    ) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
+        token_len = (
+            self._floor_to_cache_transfer_granularity(prompt_token_len)
+            if self.use_block_key_layerwise
+            else prompt_token_len
+        )
+        if (
+            self.use_block_key_layerwise
+            and reuse_limit is None
+            and not self.use_eagle
+            and len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+        if reuse_limit is not None and token_len > reuse_limit:
+            coordinator = self.cache_coordinator
+            assert coordinator is not None
+            local = 0 if self.use_block_key_layerwise or self.layerwise_offload else num_computed_tokens
+            if self.use_layerwise_transfer:
+                self._get_or_create_request_tracker(request.request_id)
+            hits = coordinator.find_reachable_hits_with_replay(
+                request.block_hashes,
+                token_len,
+                partial(self._query_layerwise_group_hits, local),
+                replay_token_limit=reuse_limit,
+                hbm_hit_tokens=local,
+                log_context=f"hit_check: req={request.request_id}",
+            )
+            return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
         if self.use_block_key_layerwise:
-            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
-                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            replay_token_limit = (
-                self._floor_to_cache_transfer_granularity(
-                    (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
-                )
-                if self.use_eagle and self.block_key_hybrid
-                else token_len
-            )
-            if token_len > replay_token_limit:
-                coordinator = self.cache_coordinator
-                assert coordinator is not None
-                # Block-key layerwise lookup also probes the local prefix, as
-                # before, to preserve its original save boundary.
-                hits = coordinator.find_reachable_hits_with_replay(
-                    request.block_hashes,
-                    token_len,
-                    partial(self._query_layerwise_group_hits, 0),
-                    replay_token_limit=replay_token_limit,
-                    log_context=f"hit_check: req={request.request_id}",
-                )
-                return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
             return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))
 
         if self.use_layerwise_transfer:

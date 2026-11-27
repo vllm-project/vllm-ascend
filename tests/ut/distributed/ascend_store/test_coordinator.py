@@ -110,28 +110,23 @@ class TestReplayLookup(unittest.TestCase):
                 )
                 self.assertEqual(calls, [0, 1])
 
-    def test_union_mask_preserves_original_hit_and_adds_replay_candidates(self):
-        state = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")
-        coord = self._coordinator(state)
-        hashes = _hashes(4)
-
-        def masks(length):
-            return (None, [False, False, False, True] if length == 64 else [False, True, False])
-
-        for terminal_present in (True, False):
-            present = {hashes[1], hashes[3]} if terminal_present else {hashes[1]}
-            queried_masks: list[list[bool] | None] = []
-
-            def query(group, group_hashes, mask, queried_masks=queried_masks, present=present):
-                queried_masks.append(mask)
-                return [
-                    h for i, h in enumerate(group_hashes) if (group == 0 or h in present) and (mask is None or mask[i])
-                ]
-
-            with patch.object(coord, "lookup_mask", side_effect=masks):
-                result = coord.find_reachable_hits_with_replay(hashes, 64, query, replay_token_limit=48)
-            self.assertEqual(result, LookupResult(64, 32) if terminal_present else LookupResult(0, 0))
-            self.assertEqual(queried_masks, [None, [False, True, False, True]])
+    def test_whole_page_lookup_covers_shorter_manager_masks(self):
+        # A full lookup includes every aligned resume boundary, even when the
+        # manager probes only recurrent checkpoints or sliding-window tails.
+        for state_size, retention in itertools.product((16, 32), (None, 0, 32)):
+            for state in (
+                MambaSpec(block_size=state_size, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+                _sliding_spec(state_size, 2 * state_size),
+            ):
+                coord = self._coordinator(state, retention)
+                step = coord.lcm_block_size
+                original = coord.lookup_mask(4 * step)
+                for limit in range(step, 4 * step, step):
+                    for group, bounded in enumerate(coord.lookup_mask(limit)):
+                        count = limit // coord.group_effective_block_sizes[group]
+                        for index in range(count):
+                            if bounded is None or bounded[index]:
+                                assert original[group] is None or original[group][index]
 
     def test_zero_replay_limit_and_no_cross_lookup_existence_cache(self):
         state = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")

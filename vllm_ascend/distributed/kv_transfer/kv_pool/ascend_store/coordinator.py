@@ -377,6 +377,12 @@ class AscendStoreCoordinator:
         external hits; locally computed complete blocks are marked lazily for
         the existing managers, including each group's terminal-hash selection.
         """
+        exists = self._query_reachable_blocks(block_hashes, token_len, query_group_hits)
+        return self._resolve_hit(block_hashes, token_len, exists, hbm_hit_tokens, log_context)
+
+    def _query_reachable_blocks(
+        self, block_hashes: list[BlockHash], token_len: int, query_group_hits: GroupHitQuery
+    ) -> set[tuple[int, bytes]]:
         aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
         lookup_masks = self.lookup_mask(aligned_len)
         exists: set[tuple[int, bytes]] = set()
@@ -388,6 +394,16 @@ class AscendStoreCoordinator:
             hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
 
+        return exists
+
+    def _resolve_hit(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        exists: set[tuple[int, bytes]],
+        hbm_hit_tokens: int,
+        log_context: str,
+    ) -> int:
         if not exists and hbm_hit_tokens <= 0:
             logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
             return 0
@@ -414,61 +430,15 @@ class AscendStoreCoordinator:
         log_context: str = "reachable_lookup",
         hbm_hit_tokens: int = 0,
     ) -> LookupResult:
-        """Resolve both boundaries with one existence query per cache group.
-
-        Probe the union of the original and replay masks, but give each solve
-        only its own view. Extra replay candidates must not extend the original
-        hit used to skip saves. Existence results live only for this call; they
-        neither reserve pooled objects nor replace load failure handling.
-        """
-        replay_token_limit = max(0, min(replay_token_limit, token_len))
-        replay_masks = self.lookup_mask(cdiv(replay_token_limit, self.lcm_block_size) * self.lcm_block_size)
-        present: set[tuple[int, bytes]] = set()
-
-        def cached_hits(
-            group_id: int, hashes: Sequence[BlockHash | str], mask: Sequence[bool] | None
-        ) -> list[BlockHash | str]:
-            return [
-                h
-                for i, h in enumerate(hashes)
-                if (mask is None or (i < len(mask) and mask[i])) and (group_id, block_hash_to_bytes(h)) in present
-            ]
-
-        def query_once(
-            group_id: int, hashes: Sequence[BlockHash | str], mask: Sequence[bool] | None
-        ) -> list[BlockHash | str]:
-            combined_mask = mask
-            if mask is not None:
-                replay_mask = replay_masks[group_id]
-                replay_blocks = replay_token_limit // self.group_effective_block_sizes[group_id]
-                combined_mask = [
-                    (i < len(mask) and mask[i])
-                    or (i < replay_blocks and (replay_mask is None or (i < len(replay_mask) and replay_mask[i])))
-                    for i in range(len(hashes))
-                ]
-            hits = query_group_hits(group_id, hashes, combined_mask)
-            present.update((group_id, block_hash_to_bytes(h)) for h in hits)
-            return cached_hits(group_id, hashes, mask)
-
-        raw_hit = self.find_reachable_hit_tokens(
-            block_hashes,
-            token_len,
-            query_once,
-            log_context=log_context,
-            hbm_hit_tokens=hbm_hit_tokens,
-        )
-        if raw_hit <= replay_token_limit:
-            return LookupResult(raw_hit, raw_hit)
-        replay_hit = 0
+        """Whole-page lookup already probes every aligned boundary within token_len."""
+        exists = self._query_reachable_blocks(block_hashes, token_len, query_group_hits)
+        raw = self._resolve_hit(block_hashes, token_len, exists, hbm_hit_tokens, log_context)
+        if raw <= replay_token_limit:
+            return LookupResult(raw, raw)
+        resume = 0
         if replay_token_limit > hbm_hit_tokens:
-            replay_hit = self.find_reachable_hit_tokens(
-                block_hashes,
-                replay_token_limit,
-                cached_hits,
-                log_context=log_context,
-                hbm_hit_tokens=hbm_hit_tokens,
-            )
-        return LookupResult(raw_hit, replay_hit)
+            resume = self._resolve_hit(block_hashes, replay_token_limit, exists, hbm_hit_tokens, log_context)
+        return LookupResult(raw, resume)
 
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes

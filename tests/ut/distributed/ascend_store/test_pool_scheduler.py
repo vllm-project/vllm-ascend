@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     BoundaryPut,
     LoadSpec,
@@ -433,7 +434,7 @@ class TestKVPoolScheduler(unittest.TestCase):
                 ) as lookup:
                     self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
                 if expected:
-                    lookup.assert_called_once_with(request, 0)
+                    lookup.assert_called_once_with(request, 0, None)
                 else:
                     lookup.assert_not_called()
 
@@ -450,7 +451,7 @@ class TestKVPoolScheduler(unittest.TestCase):
                 ) as lookup:
                     self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
                 if enabled:
-                    lookup.assert_called_once_with(request, 0)
+                    lookup.assert_called_once_with(request, 0, None)
                 else:
                     lookup.assert_not_called()
 
@@ -2402,12 +2403,9 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
                     self._stub_pool(scheduler, 4, {0: [0, 1, 2, 3], 1: state_blocks})
 
                     self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, False))
-                    if expected:
-                        load = scheduler.load_specs[request.request_id]
-                        self.assertEqual(load.kvpool_cached_tokens, expected)
-                        self.assertEqual(load.pool_hit_tokens, expected)
-                    else:
-                        self.assertNotIn(request.request_id, scheduler.load_specs)
+                    load = scheduler.load_specs[request.request_id]
+                    self.assertEqual(load.kvpool_cached_tokens, expected)
+                    self.assertEqual(load.pool_hit_tokens, 64)
 
     def test_hbm_prefix_is_not_queried_and_pool_tail_can_extend_hit(self):
         for local in (16, 24, 32, 64):
@@ -2551,7 +2549,7 @@ def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end
     scheduler.load_specs["tail"] = LoadSpec(640, 1920, True)
     assert scheduler.load_async is (load_async is True)
     assert scheduler.get_num_new_matched_tokens(request, local_start) == (expected, expected > 0 and load_async is True)
-    scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
+    scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start, None)
     if expected:
         blocks = MagicMock()
         blocks.get_block_ids.return_value = (list(range(1, 1 + (local_start + expected) // 640)),)
@@ -2686,6 +2684,7 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
     "mode,discard_partial_chunks",
     [("bulk", True), ("bulk", False), ("mooncake_layerwise", True), ("memcache_layerwise", True)],
 )
+@pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("family", ["mamba", "swa"])
 @pytest.mark.parametrize(
     "snapshots,local_tokens,prompt_tokens,expected",
@@ -2702,13 +2701,13 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
         (None, 16, 64, 16),
     ],
 )
-def test_draft_replay_loads_only_reachable_prefixes(
-    mode, discard_partial_chunks, family, snapshots, local_tokens, prompt_tokens, expected
+def test_hybrid_lookup_loads_only_reachable_prefixes(
+    mode, discard_partial_chunks, use_eagle, family, snapshots, local_tokens, prompt_tokens, expected
 ):
     """A full hit must not turn into a load of a missing predecessor state."""
     config = make_config(extra_config={"backend": "memcache" if mode == "memcache_layerwise" else "mooncake"})
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    config.speculative_config.use_eagle.return_value = True
+    config.speculative_config.use_eagle.return_value = use_eagle
     state_spec = (
         MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")
         if family == "mamba"
@@ -2741,17 +2740,17 @@ def test_draft_replay_loads_only_reachable_prefixes(
     assert isinstance(coordinator, AscendStoreCoordinator)
     if snapshots is None:
         # Use the current save policy, not an arbitrary missing-key layout:
-        # a 96-token producer retains states at 64 and 80, but not at 48.
+        # The producer retains the 64-token checkpoint but not the one at 48.
         # Its exact 64-token consumer must not load a nonexistent 48-token state.
         coordinator.retention_interval = 0
         producer = Request(
             request_id="producer",
-            prompt_token_ids=list(range(96)),
+            prompt_token_ids=list(range(96 if use_eagle else 80)),
             sampling_params=SamplingParams(max_tokens=1),
             pooling_params=None,
             block_hasher=get_request_block_hasher(16, sha256),
         )
-        masks = coordinator.store_mask(96, num_prompt_tokens=96)
+        masks = coordinator.store_mask(producer.num_tokens, num_prompt_tokens=producer.num_tokens)
         stored = {
             group: {h for h, keep in zip(producer.block_hashes, mask) if keep} for group, mask in enumerate(masks)
         }
@@ -2821,3 +2820,29 @@ def test_draft_replay_loads_only_reachable_prefixes(
             assert scheduler.load_specs[request.request_id].kvpool_store_skip_tokens == 64
     elif mode == "mooncake_layerwise":
         assert scheduler.store_scheduler.batch_is_readable.call_count == 2
+    if mode == "bulk" and prompt_tokens == 64 and local_tokens == 0:
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = ([1, 2, 3, 4], [5, 6, 7, 8])
+        scheduler.update_state_after_alloc(request, blocks, hit)
+        new_req = SimpleNamespace(
+            req_id=request.request_id,
+            block_ids=([1, 2, 3, 4], [5, 6, 7, 8]),
+            prompt_token_ids=request.prompt_token_ids,
+            prefill_token_ids=request.prompt_token_ids,
+            num_computed_tokens=hit,
+        )
+        output = SimpleNamespace(num_scheduled_tokens={request.request_id: 64 - hit})
+        meta = scheduler._process_new_request(new_req, output, False)
+        if hit:
+            worker = MagicMock()
+            worker.load_async = True
+            worker.cache_transfer_granularity = 16
+            assert meta is not None and meta.load_spec is not None
+            metadata = AscendConnectorMetadata(set())
+            metadata.add_request(meta)
+            KVPoolWorker.start_load_kv(worker, metadata)
+            worker.kv_recv_thread.add_request.assert_called_once_with(meta)
+            assert meta.load_spec.token_len == expected
+        else:
+            assert meta is None or not meta.can_save
+            assert request.request_id not in scheduler._async_loading_req_ids

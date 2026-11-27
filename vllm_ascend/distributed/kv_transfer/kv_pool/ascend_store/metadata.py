@@ -876,6 +876,9 @@ class LoadSpec:
     # Append protocol extensions to preserve legacy positional construction.
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
+    # The coordinator selected the exact whole-page state to load.
+    resolved_resume: bool = False
+
     @property
     def pool_hit_tokens(self) -> int:
         """External pool coverage in tokens.
@@ -886,6 +889,11 @@ class LoadSpec:
         hybrid groups that are not all cacheable) keep guards at call sites.
         """
         return self.kvpool_store_skip_tokens if self.kvpool_store_skip_tokens is not None else self.kvpool_cached_tokens
+
+    @property
+    def physical_load_tokens(self) -> int:
+        """Legacy full hits can load the final page. A resolved state must match exactly."""
+        return self.kvpool_cached_tokens if self.resolved_resume else self.pool_hit_tokens
 
     def clamp_save_start(self, start_block: int, block_size: int) -> int:
         """Clamp ``start_block`` up past blocks the pool hit already covers.
@@ -910,6 +918,8 @@ class RequestTracker:
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
+
+    pooled_save_range: tuple[int, int] | None = None
 
     # The token ids that has been scheduled so far
     # NOTE: This field will only be used when you enable kv-event
@@ -1040,6 +1050,8 @@ class ReqMeta:
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
+    pooled_save_range: tuple[int, int] | None = None
+
     # Tokens computed before this step of an uninterrupted running request.
     computed_prefix_tokens: int = 0
 
@@ -1113,6 +1125,7 @@ class ReqMeta:
         completed_token_len: int | None = None,
         publish_partial_tail: bool = False,
         computed_prefix_tokens: int = 0,
+        pooled_save_range: tuple[int, int] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1121,6 +1134,7 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
+        self.pooled_save_range = pooled_save_range
         self.computed_prefix_tokens = computed_prefix_tokens
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
@@ -1226,6 +1240,15 @@ class ReqMeta:
         if block_hashes is None:
             block_hashes = []
         target_token_len = tracker.token_len
+        # A verified bulk hit can be entirely recomputed. Carry its pooled
+        # interval across prefill chunks without scheduling a GET or claiming
+        # that the unqueried local prefix is present in the store.
+        if load_spec is not None and load_spec.resolved_resume and not load_spec.can_load:
+            tracker.pooled_save_range = (load_spec.vllm_cached_tokens, load_spec.pool_hit_tokens)
+        if tracker.pooled_save_range is not None:
+            start, end = tracker.pooled_save_range
+            if start <= tracker.num_saved_tokens < end:
+                tracker.num_saved_tokens = max(tracker.num_saved_tokens, min(end, target_token_len))
         previous_saved_tokens = tracker.num_saved_tokens
 
         # For save operation: do not save if the following condition is met
@@ -1277,7 +1300,10 @@ class ReqMeta:
             and target_token_len >= prefill_end
         )
         skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary
+            (
+                num_tokens_to_save < chunk_boundary
+                or (tracker.pooled_save_range is not None and num_tokens_to_save <= previous_saved_tokens)
+            )
             and partial_block_index is None
             and not should_save_partial_block
             and not publish_partial_tail
@@ -1322,6 +1348,7 @@ class ReqMeta:
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
             save_start_token=previous_saved_tokens,
+            pooled_save_range=tracker.pooled_save_range,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,

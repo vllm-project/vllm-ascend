@@ -302,7 +302,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64 if eagle else 32)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64)
         # The full hit is a write-skip extent, not the recurrent resume point.
         worker.use_eagle = False
         request = ReqMeta(
@@ -317,6 +317,23 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
         self.assertFalse(views[3])
         self.assertTrue(all(slot < 2 for _, _, _, slot in open_get.call_args.args[0]))
+
+    def test_ordinary_hybrid_get_uses_the_resolved_checkpoint(self):
+        worker, _, _, _, _ = self.make_hybrid()
+        worker.use_eagle = False
+        request = ReqMeta(
+            "resume",
+            token_len_chunk=64,
+            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            load_spec=LoadSpec(0, 32, True, 64, resolved_resume=True),
+        )
+        with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
+            worker._data_plane.prepare_sessions([request])
+        worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
+        slots = open_get.call_args.args[0]
+        self.assertTrue(slots)
+        self.assertTrue(all(slot < 2 for _, _, _, slot in slots))
 
     def _roundtrip(self, private_tail=False):
         worker, store, arrays, jobs, errors = self.make_hybrid(private_tail=private_tail)

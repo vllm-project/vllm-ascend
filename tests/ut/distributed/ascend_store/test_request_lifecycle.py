@@ -420,7 +420,7 @@ def test_raw_sequence_lifecycle(
             tokens = list(range(length))
             if fork is not None:
                 tokens[fork] += 1000
-            if not has_private_state and not speculative_method and fork is None:
+            if len(plan.kv_cache_groups) == 1 and not speculative_method and fork is None:
                 # Legacy full hits still reserve only the final token.
                 hit = {125: 0, 126: 0, 127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
             generated = run_request(f"consumer-{case}", tokens, hit)
@@ -436,7 +436,7 @@ def test_raw_sequence_lifecycle(
         assert scheduler.reset_prefix_cache()
         MemoryBackend.payloads = dict(saved)
         seed_length = 256 if speculative_method else 128
-        seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
+        seed_hit = 128 if speculative_method else (127 if len(plan.kv_cache_groups) == 1 else 0)
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
         # vLLM main caches speculative blocks in the base Scheduler; only the
         # pure full-attention dspark layout sees the doubled local prefix hit.

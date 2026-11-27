@@ -960,16 +960,9 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
             logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_id, exc)
             store_masks = None
         load_spec = req_meta.load_spec
-        skip_start = load_spec.vllm_cached_tokens if load_spec is not None else 0
-        skip_end = (
-            (
-                load_spec.kvpool_store_skip_tokens
-                if load_spec.kvpool_store_skip_tokens is not None
-                else load_spec.kvpool_cached_tokens
-            )
-            if load_spec is not None
-            else 0
-        )
+        skip_start, skip_end = req_meta.pooled_save_range or (0, 0)
+        if load_spec is not None:
+            skip_start, skip_end = load_spec.vllm_cached_tokens, load_spec.pool_hit_tokens
         save_start_token = self.get_saved_offset(req_id)
 
         def should_skip(start: int, end: int, group_save_start: int) -> bool:
