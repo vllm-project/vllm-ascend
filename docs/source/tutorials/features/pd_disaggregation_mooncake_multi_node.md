@@ -1265,6 +1265,27 @@ this example. Keep these unauthenticated example endpoints on a trusted network.
 
 ## Example Proxy for Deployment
 
+The layerwise proxy supports `--workers N` for Mooncake push deployments. With
+`N > 1`, each worker binds an independent `SO_REUSEPORT` listener on the public
+`--host:--port` address. The platform must support TCP `SO_REUSEPORT`. Backend
+load estimates are shared across workers; request data and HTTP clients remain
+local to the worker that accepted the request. New TCP connections are distributed
+across workers; requests on an existing keep-alive connection stay with its worker.
+
+Each worker also listens for D metadata callbacks on `--port + 1 + worker_id`,
+where `worker_id` ranges from `0` to `N - 1`. For example, `--port 1999 --workers 4`
+uses public port `1999` and callback ports `2000` through `2003`. Reserve the
+whole range, expose it to D nodes, and keep it separate from P/D service ports.
+In particular, the default P/D ports `8001` and `8002` overlap the callback range
+when the proxy uses its default port `8000`. An occupied port causes startup to
+fail. Multi-worker mode requires `--port > 0` and `--port + N <= 65535`.
+
+The proxy includes the owning worker's callback URL in each request, so the
+connector does not need a separate metaserver configuration. A replacement worker
+keeps the same worker ID and callback port; in-flight requests from a failed
+worker are not recovered. The default `--workers 1` retains the existing single
+port for both inference requests and metadata callbacks.
+
 Run a proxy server on the same node where your prefiller service instance is deployed. You can find the proxy implementation in the repository's examples directory.
 
 We provide two different proxy implementations with distinct request routing behaviors:
@@ -1381,6 +1402,7 @@ Both proxies share the following backend options.
 | --- | --- | --- | --- | --- |
 | `--port` | Both | `8000` | `1999` | Proxy listen port. Must be free, reachable, and between `1` and `65535`. |
 | `--host` | Both | `localhost` | `192.0.0.1` | Proxy listen address. Layerwise mode requires a non-wildcard address reachable by D nodes. |
+| `--workers` | Both | `1` | `4` | Proxy process count. Layerwise multi-worker mode additionally reserves callback ports `--port + 1` through `--port + --workers`. |
 | `--prefiller-hosts` | Both | `localhost` | `192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2` | P-instance hosts. Count must equal the number of `--prefiller-ports`. |
 | `--prefiller-ports` | Both | `8001` | `7100 7101 7100 7101` | P-instance ports. Each host-port pair must be unique and reachable. |
 | `--decoder-hosts` | Both | `localhost` | Sixteen `192.0.0.3`, then sixteen `192.0.0.4` | D-instance hosts. Count must equal the number of `--decoder-ports`. |

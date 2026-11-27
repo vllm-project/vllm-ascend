@@ -35,15 +35,15 @@
 # ------------------------------
 # Run the proxy server, specifying the host/port for each prefiller and decoder:
 #
-#   python load_balance_proxy_server_example.py \
-#     --host 0.0.0.0 --port 9000 \
+#   python load_balance_proxy_layerwise_server_example.py \
+#     --host 127.0.0.1 --port 9000 --workers 4 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
 #     --decoder-ports 8200 8201
 #
 # This will start the proxy on port 9000, load balancing between two prefiller
-# and two decoder servers.
+# and two decoder servers. D must also reach callback ports 9001 through 9004.
 #
 # Step 3: Send a Request to the Proxy
 # -----------------------------------
@@ -88,31 +88,47 @@ import argparse
 import asyncio
 import copy
 import functools
-import heapq
 import ipaddress
 import json
+import logging
+import multiprocessing
 import os
+import signal
+import socket
 import sys
+import threading
+import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
+from multiprocessing.managers import BaseManager
 
 import httpx
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from vllm.logger import init_logger
-
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
-    BATCH_KV_TRANSFER_PARAMS,
-)
 
 try:
     # Imported as a package module (tests).
+    from examples.disaggregated_prefill_v1.load_balance_proxy_server_example import (
+        ServerRole,
+        SharedProxyScheduler,
+        server_key,
+    )
     from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
 except ImportError:
     # Run as a standalone script: the script's own directory is on sys.path.
+    from load_balance_proxy_server_example import ServerRole, SharedProxyScheduler, server_key
     from sse_frame_parser import SSEFrameParser
 
-logger = init_logger(__name__)
+logger = logging.getLogger(__name__)
+
+# Wire key consumed by the connector's per-prompt metadata selection.
+BATCH_KV_TRANSFER_PARAMS = "batch_kv_transfer_params"
+WORKER_START_TIMEOUT = 30
+WORKER_STOP_TIMEOUT = 10
+WORKER_POLL_INTERVAL = 0.1
+LISTEN_BACKLOG = 2048
+MAX_PORT = 65535
 
 # Add uvloop for faster event loop if available
 try:
@@ -147,21 +163,58 @@ class ServerState:
         # Removed individual server lock - will use global locks instead
 
 
-class ProxyState:
+class LayerwiseScheduler(SharedProxyScheduler):
+    """Share backend load, retaining ownership so a dead worker can release it."""
+
     def __init__(self, prefiller_instances, decoder_instances):
+        super().__init__(prefiller_instances, decoder_instances)
+        self.worker_loads = {}
+
+    def reserve(self, worker_id, role, load):
+        role = ServerRole(role)
+        with self._lock:
+            picked = self._pick_server(role, load, active_tokens=True, kv_cache=role is ServerRole.PREFILL)
+            loads = self.worker_loads.setdefault(worker_id, {}).setdefault((role, picked["key"]), [0.0, 0.0])
+            loads[0] += load
+            if role is ServerRole.PREFILL:
+                loads[1] += load
+            return picked["key"]
+
+    def release(self, worker_id, role, key, load, kv_cache=False):
+        role = ServerRole(role)
+        with self._lock:
+            loads = self.worker_loads[worker_id][role, key]
+            loads[int(kv_cache)] -= load
+            self._release_load(role, key, load, active_tokens=not kv_cache, kv_cache=kv_cache)
+
+    def release_worker(self, worker_id):
+        with self._lock:
+            for (role, key), (tokens, kv_cache) in self.worker_loads.pop(worker_id, {}).items():
+                self._release_load(role, key, tokens, active_tokens=True)
+                self._release_load(role, key, kv_cache, kv_cache=True)
+
+
+class LayerwiseManager(BaseManager):
+    """Own the scheduler without moving HTTP clients or asyncio state across processes."""
+
+
+LayerwiseManager.register("Scheduler", LayerwiseScheduler)
+
+
+class ProxyState:
+    def __init__(self, prefiller_instances, decoder_instances, scheduler=None, worker_id=0):
         self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
         self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
+        self.scheduler = (
+            scheduler if scheduler is not None else LayerwiseScheduler(prefiller_instances, decoder_instances)
+        )
+        self.worker_id = worker_id
+        self.prefiller_indices = {server_key(h, p): i for i, (h, p) in enumerate(prefiller_instances)}
+        self.decoder_indices = {server_key(h, p): i for i, (h, p) in enumerate(decoder_instances)}
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
 
-        # Initialize priority queues for efficient server selection
-        # Each entry is (priority_score, server_index, server_reference)
-        # Lower priority score = higher priority (less loaded)
-        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
-        self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
-        heapq.heapify(self.prefiller_heap)
-        heapq.heapify(self.decoder_heap)
         self.req_id_future = {}
         self.req_data_dict = {}
         self.metaserver_expected_ids = {}
@@ -169,23 +222,6 @@ class ProxyState:
         self.metaserver_ready_events = {}
         self.metaserver_dispatch_tasks = {}
         self.metaserver_lock = asyncio.Lock()
-
-    def _update_prefiller_priority(self, server_idx: int):
-        """Update the priority of a prefiller server in the heap."""
-        server = self.prefillers[server_idx]
-        # Priority based on active_tokens and active_kv_cache
-        priority = server.active_tokens + server.active_kv_cache * 0.3
-        # Remove old entry and add new one
-        self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
-        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore
-
-    def _update_decoder_priority(self, server_idx: int):
-        """Update the priority of a decoder server in the heap."""
-        server = self.decoders[server_idx]
-        priority = server.active_tokens
-        # Remove old entry and add new one
-        self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
-        heapq.heappush(self.decoder_heap, (priority, server_idx, server))  # type: ignore
 
     def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
@@ -226,55 +262,27 @@ class ProxyState:
             self.metaserver_ready_events.pop(parent_request_id, None)
             self.metaserver_dispatch_tasks.pop(parent_request_id, None)
 
-    def select_prefiller(self, token_count):  # Changed to synchronous
-        # No lock needed - entire function is atomic
-        if not self.prefiller_heap:
-            raise RuntimeError("No prefiller servers available")
+    def select_prefiller(self, token_count):
+        key = self.scheduler.reserve(self.worker_id, ServerRole.PREFILL, token_count)
+        return self.prefiller_indices[key]
 
-        priority, chosen, server = heapq.heappop(self.prefiller_heap)
+    def release_prefiller(self, idx, token_count):
+        server = self.prefillers[idx]
+        self.scheduler.release(self.worker_id, ServerRole.PREFILL, server_key(server.host, server.port), token_count)
 
-        # Update the chosen server atomically
-        self.prefillers[chosen].active_tokens += token_count
-        self.prefillers[chosen].active_kv_cache += token_count
+    def release_prefiller_kv(self, idx, token_count):
+        server = self.prefillers[idx]
+        self.scheduler.release(
+            self.worker_id, ServerRole.PREFILL, server_key(server.host, server.port), token_count, kv_cache=True
+        )
 
-        # Update priority and re-add to heap
-        self._update_prefiller_priority(chosen)
+    def select_decoder(self, token_count):
+        key = self.scheduler.reserve(self.worker_id, ServerRole.DECODE, token_count)
+        return self.decoder_indices[key]
 
-        return chosen
-
-    def release_prefiller(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        self.prefillers[idx].active_tokens -= token_count
-        # Update priority queue after releasing
-        self._update_prefiller_priority(idx)
-
-    def release_prefiller_kv(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        if self.prefillers[idx].active_kv_cache > 0:
-            self.prefillers[idx].active_kv_cache -= token_count
-        # Update priority queue after releasing
-        self._update_prefiller_priority(idx)
-
-    def select_decoder(self, token_count):  # Changed to synchronous
-        # No lock needed - entire function is atomic
-        if not self.decoder_heap:
-            raise RuntimeError("No decoder servers available")
-
-        priority, chosen, server = heapq.heappop(self.decoder_heap)
-
-        # Update the chosen server atomically
-        self.decoders[chosen].active_tokens += token_count
-
-        # Update priority and re-add to heap
-        self._update_decoder_priority(chosen)
-
-        return chosen
-
-    def release_decoder(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
-        self.decoders[idx].active_tokens -= token_count
-        # Update priority queue after releasing
-        self._update_decoder_priority(idx)
+    def release_decoder(self, idx, token_count):
+        server = self.decoders[idx]
+        self.scheduler.release(self.worker_id, ServerRole.DECODE, server_key(server.host, server.port), token_count)
 
     # Omni_infer's calculate_input_scores function
     def calculate_prefill_scores(self, request_length: int) -> float:
@@ -325,6 +333,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Worker processes; metaserver ports are --port + 1 + worker_id when workers > 1.",
+    )
     parser.add_argument("--prefiller-hosts", type=str, nargs="+", default=["localhost"])
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=["localhost"])
@@ -334,11 +348,15 @@ def parse_args():
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+    if args.workers > 1 and not 0 < args.port <= MAX_PORT - args.workers:
+        parser.error("Multi-worker mode requires 1 <= --port and --port + --workers <= 65535")
     logger.info(
-        "Decoder hosts will access Proxy host:port/metaserver, ensure that %s can access %s:%s/metaserver",
+        "Decoder hosts %s must reach %s on metaserver port(s) %s at /v1/metaserver",
         set(args.decoder_hosts),
         args.host,
-        args.port,
+        list(range(args.port + 1, args.port + args.workers + 1)) if args.workers > 1 else [args.port],
     )
     # Wildcard address is not allowed for layerwise connector
     if args.host in ["0.0.0.0", "::", "0:0:0:0:0:0:0:0"]:
@@ -363,13 +381,23 @@ def parse_args():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(global_args.prefiller_instances, global_args.decoder_instances)
+    proxy_state = ProxyState(
+        global_args.prefiller_instances,
+        global_args.decoder_instances,
+        getattr(app.state, "scheduler", None),
+        getattr(app.state, "worker_id", 0),
+    )
     print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
-    yield
-    for p in proxy_state.prefillers:
-        await p.client.aclose()
-    for d in proxy_state.decoders:
-        await d.client.aclose()
+    try:
+        yield
+    finally:
+        tasks = list(proxy_state.metaserver_dispatch_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for server in proxy_state.prefillers + proxy_state.decoders:
+            await server.client.aclose()
+        proxy_state.scheduler.release_worker(proxy_state.worker_id)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -506,7 +534,7 @@ async def _handle_completions(api: str, request: Request):
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
-            "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
+            "metaserver": metaserver_url(global_args),
         }
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
@@ -767,9 +795,125 @@ async def metaserver(request: Request):
     return {"status": "ok"}
 
 
-if __name__ == "__main__":
-    global global_args
-    global_args = parse_args()
-    import uvicorn
+def metaserver_url(args):
+    host = f"[{args.host}]" if ":" in args.host else args.host
+    return f"http://{host}:{getattr(args, 'metaserver_port', args.port)}/v1/metaserver"
 
-    uvicorn.run(app, host=global_args.host, port=global_args.port)
+
+def bind_listener(host, port, *, reuse_port=False):
+    family, socktype, protocol, _, address = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0]
+    sock = socket.socket(family, socktype, protocol)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if reuse_port:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(address)
+        sock.listen(LISTEN_BACKLOG)
+        sock.setblocking(False)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+class WorkerServer(uvicorn.Server):
+    def __init__(self, config, ready):
+        super().__init__(config)
+        self.ready = ready
+
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        if self.started:
+            self.ready.set()
+
+
+def run_worker(args, scheduler, worker_id, ready):
+    """Both listeners run on this worker's event loop and share its request state."""
+    global global_args
+    global_args = args
+    args.metaserver_port = args.port + 1 + worker_id
+    app.state.scheduler = scheduler
+    app.state.worker_id = worker_id
+    logging.basicConfig(level=logging.INFO)
+    with ExitStack() as stack:
+        public = stack.enter_context(bind_listener(args.host, args.port, reuse_port=True))
+        metadata = stack.enter_context(bind_listener(args.host, args.metaserver_port))
+        logger.info(
+            "Worker %s (pid %s, Uvicorn %s) metaserver: %s",
+            worker_id,
+            os.getpid(),
+            uvicorn.__version__,
+            metaserver_url(args),
+        )
+        server = WorkerServer(
+            uvicorn.Config(app, host=args.host, port=args.port, timeout_graceful_shutdown=WORKER_STOP_TIMEOUT), ready
+        )
+        server.run(sockets=[public, metadata])
+
+
+def start_worker(ctx, args, scheduler, worker_id, stopping):
+    ready = ctx.Event()
+    process = ctx.Process(target=run_worker, args=(args, scheduler, worker_id, ready))
+    process.start()
+    deadline = time.monotonic() + WORKER_START_TIMEOUT
+    while not ready.wait(WORKER_POLL_INTERVAL):
+        if process.exitcode is not None or stopping.is_set() or time.monotonic() >= deadline:
+            stop_workers([process])
+            raise RuntimeError(f"Layerwise proxy worker {worker_id} failed to start")
+    return process
+
+
+def stop_workers(processes):
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    deadline = time.monotonic() + WORKER_STOP_TIMEOUT
+    for process in processes:
+        process.join(timeout=max(0, deadline - time.monotonic()))
+        if process.is_alive():
+            process.kill()
+            process.join()
+        process.close()
+
+
+def run_workers(args):
+    if not hasattr(socket, "SO_REUSEPORT"):
+        raise RuntimeError("Multi-worker layerwise proxy requires SO_REUSEPORT")
+    # Check the whole range without SO_REUSEPORT: do not join another proxy's
+    # listener group. Children still bind their own sockets and surface races.
+    with ExitStack() as stack:
+        for port in range(args.port, args.port + args.workers + 1):
+            stack.enter_context(bind_listener(args.host, port))
+
+    ctx = multiprocessing.get_context("spawn")
+    stopping = threading.Event()
+    previous_handlers = {sig: signal.signal(sig, lambda *_: stopping.set()) for sig in (signal.SIGINT, signal.SIGTERM)}
+    processes = []
+    try:
+        with LayerwiseManager(ctx=ctx) as manager:
+            scheduler = manager.Scheduler(args.prefiller_instances, args.decoder_instances)
+            try:
+                for worker_id in range(args.workers):
+                    processes.append(start_worker(ctx, args, scheduler, worker_id, stopping))
+                while not stopping.wait(WORKER_POLL_INTERVAL):
+                    for worker_id, process in enumerate(processes):
+                        if process.exitcode is not None:
+                            process.join()
+                            scheduler.release_worker(worker_id)
+                            replacement = start_worker(ctx, args, scheduler, worker_id, stopping)
+                            process.close()
+                            processes[worker_id] = replacement
+            finally:
+                stop_workers(processes)
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    global_args = parse_args()
+    if global_args.workers > 1:
+        run_workers(global_args)
+    else:
+        uvicorn.run(app, host=global_args.host, port=global_args.port)
