@@ -446,6 +446,67 @@ def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
     prepare.assert_not_called()
 
 
+@pytest.mark.parametrize("dummy_run", [False, True])
+def test_lora_dp_sync_includes_idle_ranks(dummy_run):
+    runner = _make_runner()
+    runner.lora_manager = SimpleNamespace(requires_dp_sync=True, synchronize_requests=Mock())
+    runner.lora_state = SimpleNamespace(get_activate_loras=Mock(return_value={"adapter-a"}))
+    state = None if dummy_run else SimpleNamespace(req_ids=["request-a"])
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(state, 1)),
+        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
+    ):
+        runner.gather_batch_req_state(SimpleNamespace(), dummy_run)
+    runner.lora_manager.synchronize_requests.assert_called_once_with(set() if dummy_run else {"adapter-a"})
+
+
+def test_lora_dp_sync_uses_prepared_backend_request_ids():
+    runner = _make_runner()
+    runner._target_uses_flashmla = True
+    runner.lora_manager = SimpleNamespace(requires_dp_sync=True, synchronize_requests=Mock())
+    runner.lora_state = SimpleNamespace(get_activate_loras=Mock(return_value={"adapter-a"}))
+    before = SimpleNamespace(req_ids=["before"])
+    prepared = SimpleNamespace(req_ids=["prepared"])
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(before, 1)),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_flashmla_batch_req_state", return_value=(prepared, 1)),
+        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
+    ):
+        runner.gather_batch_req_state(SimpleNamespace(), False)
+    runner.lora_state.get_activate_loras.assert_called_once_with(["prepared"])
+    runner.lora_manager.synchronize_requests.assert_called_once_with({"adapter-a"})
+
+
+def test_model_specific_lora_manager_uses_upstream_creation_contract():
+    runner = _make_runner()
+    manager = Mock()
+    factory = Mock(return_value=manager)
+    model = SimpleNamespace(lora_worker_manager_cls=factory, embedding_modules={})
+    config, device = object(), torch.device("cpu")
+    result = runner.load_lora_model(model, config, device)
+    factory.assert_called_once_with(config, device, model.embedding_modules)
+    manager.create_lora_manager.assert_called_once_with(model, config)
+    assert result is manager.create_lora_manager.return_value
+
+
+def test_lora_manager_for_other_models_delegates_to_upstream():
+    runner = _make_runner()
+    model, config, device = torch.nn.Linear(2, 2), object(), torch.device("cpu")
+    with patch.object(GPUModelRunner, "load_lora_model", return_value=model) as upstream:
+        assert runner.load_lora_model(model, config, device) is model
+    upstream.assert_called_once_with(model, config, device)
+
+
+@pytest.mark.parametrize("is_profile,explicit", [(False, None), (True, None), (False, 2)])
+def test_dummy_lora_preserves_upstream_defaults_and_explicit_warmup(is_profile, explicit):
+    runner = _make_runner()
+    runner.lora_manager = SimpleNamespace(requires_dp_sync=True)
+    kwargs = {"num_active_loras": explicit} if explicit is not None else {}
+    with patch.object(GPUModelRunner, "_dummy_run", return_value=(None, None)) as parent:
+        runner._dummy_run(4, is_profile=is_profile, skip_eplb=True, **kwargs)
+    assert parent.call_args.kwargs.get("num_active_loras") == explicit
+
+
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     manager = SimpleNamespace(update_stream=None)

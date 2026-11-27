@@ -172,6 +172,13 @@ class NPUModelRunner(GPUModelRunner):
     max_num_reqs: int
     max_num_tokens: int
 
+    def load_lora_model(self, model: torch.nn.Module, vllm_config: VllmConfig, device: torch.device):
+        manager_cls = getattr(model, "lora_worker_manager_cls", None)
+        if manager_cls is None:
+            return super().load_lora_model(model, vllm_config, device)
+        self.lora_manager = manager_cls(vllm_config, device, model.embedding_modules)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -921,6 +928,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is not None:
             self.pcp_manager.set_dispatch_batch_req_state(batch_state)
         expert_offload.prepare_batch(self, batch_state)
+        lora_manager = getattr(self, "lora_manager", None)
+        if getattr(lora_manager, "requires_dp_sync", False):
+            requests = self.lora_state.get_activate_loras(batch_state.req_ids) if batch_state is not None else set()
+            lora_manager.synchronize_requests(requests)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

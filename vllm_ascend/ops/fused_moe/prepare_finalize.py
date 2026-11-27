@@ -453,10 +453,19 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        local_num_tokens = hidden_states.shape[0]
         if self._use_ep_sequence_parallel():
-            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
-
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+            result = self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+        else:
+            result = self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        if self.lora_context is not None and (
+            self.moe_config.dp_size > 1 or self.moe_config.pcp_size > 1 or self._use_ep_sequence_parallel()
+        ):
+            indices = self.lora_context.punica_wrapper.token_lora_indices[:local_num_tokens]
+            # Reuse the exact hidden-state gather order. Encode -1 as zero so
+            # the existing input-id padding also produces inactive LoRA rows.
+            self.lora_context.local_token_lora_mapping = self.all_gather_input_ids(indices + 1) - 1
+        return result
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
