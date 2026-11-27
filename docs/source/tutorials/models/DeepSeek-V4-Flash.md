@@ -123,7 +123,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 !!! note
 
-    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to your own path.
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/DeepSeek-V4-Flash-0731`. Feel free to change it to your own path.
 
     It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
@@ -564,7 +564,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     }
                 }' \
                 --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
                 }' \
                 2>&1 | tee "v4_flash_d_dp${4}.log"
             ```
@@ -681,7 +681,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             parser.add_argument(
                 "--dp-rpc-port",
                 type=str,
-                default=12345,
+                default="12345",
                 help="Port for data parallel master node."
             )
             parser.add_argument(
@@ -898,7 +898,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     },
                     "enable_cpu_binding":true,
                     "multistream_overlap_shared_expert":true,
-                    "recompute_scheduler_enable":true
+                    "scheduler_config": {"recompute_scheduler_enable": true}
                 }'
             ```
 
@@ -1132,7 +1132,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
       sleep 3
     done
     wait
@@ -1418,7 +1418,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             }' \
             --additional-config '{
                 "ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
             }' \
             2>&1 | tee "v4_flash_d_memcache_dp${4}.log"
         ```
@@ -1832,7 +1832,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                 },
                 "enable_cpu_binding":true,
                 "multistream_overlap_shared_expert":true,
-                "recompute_scheduler_enable":true
+                "scheduler_config": {"recompute_scheduler_enable": true}
             }'
         ```
 
@@ -2342,7 +2342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
@@ -2457,7 +2457,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
