@@ -16,6 +16,7 @@ from vllm_ascend.ops.lightning_indexer_v2 import (
     has_lightning_indexer_v2,
     lightning_indexer_v2_candidates,
 )
+from vllm_ascend.ops.triton.sharded_indexer import restore_li_v2_scores
 
 
 @torch.inference_mode()
@@ -288,3 +289,21 @@ def test_native_bf16_indexer_causal_tnd_padding_replay(native_indexer_metadata_s
     used_query.zero_()
     graph.replay()
     check(graph_ids, [0] * rows)
+
+
+@pytest.mark.parametrize("flag_dtype", [torch.bool, torch.uint8])
+@torch.inference_mode()
+def test_restore_li_v2_scores_npu_with_masked_tail(flag_dtype):
+    # Three 128-token pages leave a partial 256-lane Triton program.
+    width, page_size, offset = 384, 128, 128
+    ids = torch.arange(width, dtype=torch.int32).flip(0).repeat(2, 1, 1)
+    ids[0, 0, :3] = torch.tensor([-1, width, width + 1])
+    scores = torch.arange(2 * width, dtype=torch.float32).reshape(2, 1, width) - width
+    flags = torch.tensor([[0, 1, 0, 1, 0], [1, 0, 1, 1, 0]], dtype=flag_dtype, device="npu")[:, 1:4]
+    lengths = torch.tensor([width - 2, 0], dtype=torch.int32, device="npu")
+    dense = torch.full((2, width + 2 * offset), -torch.inf, device="npu")
+    restore_li_v2_scores(ids.npu(), scores.npu(), flags, lengths, dense, offset, page_size)
+    expected = torch.full(dense.shape, -torch.inf)
+    valid_ids = torch.cat([torch.arange(page_size), torch.arange(2 * page_size, width - 3)])
+    expected[0, offset + valid_ids] = scores[0, 0, width - 1 - valid_ids]
+    torch.testing.assert_close(dense.cpu(), expected)

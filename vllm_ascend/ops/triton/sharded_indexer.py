@@ -38,7 +38,8 @@ def _restore_li_v2_scores(
     visible = tl.load(lengths + row)
     valid = (idx >= 0) & (idx < WIDTH) & (idx < visible)
     safe_idx = tl.where(valid, idx, 0)
-    valid_page = tl.load(pages + row * page_stride + safe_idx // PAGE_SIZE)
+    # Ascend Triton can load the page flag as a byte. A store mask needs an i1 predicate.
+    valid_page = tl.load(pages + row * page_stride + safe_idx // PAGE_SIZE) != 0
     # Native IDs within a window are unique. Masked slots keep their -inf
     # initializer, including holes that used physical page zero for safety.
     tl.store(dense + row * dense_stride + offset + safe_idx, score, valid & valid_page)

@@ -4,7 +4,65 @@
 import pytest
 import torch
 
+from tests.ut.ops.test_dcp_lse_batch_cpu import Pointer, TorchLanguage, load_function
 from vllm_ascend.ops import bf16_sharded_indexer
+
+
+class _RestoreLanguage(TorchLanguage):
+    """Model Ascend's byte page loads and Triton's i1 store-mask requirement."""
+
+    def program_id(self, axis):
+        return torch.tensor(self.index[axis], dtype=torch.int32)
+
+    def load(self, pointer, mask=None, other=0):
+        if mask is None:
+            mask = torch.ones_like(torch.as_tensor(pointer.offset), dtype=torch.bool)
+        return super().load(pointer, mask, other)
+
+    def store(self, pointer, value, mask):
+        assert mask.dtype == torch.bool, "Mask must have boolean scalar type"
+        super().store(pointer, value, mask)
+
+
+@pytest.mark.parametrize("width", [128, 384, 8192])
+def test_restore_li_v2_scores_with_byte_page_flags(width):
+    rows, page_size, offset, block = 3, 128, 7, 256
+    pages = width // page_size
+    ids = torch.arange(width, dtype=torch.int32).flip(0).repeat(rows, 1)
+    ids[0, :3] = torch.tensor([-1, width, width + 3])
+    scores = torch.arange(rows * width, dtype=torch.float32).reshape(rows, width) - width
+    # Views of per-row windows have a nonzero storage offset and full-table stride.
+    flags = torch.zeros((rows, pages + 3), dtype=torch.uint8)[:, 1 : 1 + pages]
+    flags[:, ::2] = 1
+    lengths = torch.tensor([width, width - 17, 0], dtype=torch.int32)
+    dense = torch.full((rows, offset + width + 3), -torch.inf)
+    expected = dense.clone()
+    for row in range(rows):
+        token_ids = ids[row]
+        valid = (token_ids >= 0) & (token_ids < lengths[row])
+        positions = valid.nonzero().flatten()
+        positions = positions[flags[row, token_ids[positions] // page_size].bool()]
+        expected[row, offset + token_ids[positions]] = scores[row, positions]
+
+    language = _RestoreLanguage(programs=rows)
+    kernel = load_function("../sharded_indexer.py", "_restore_li_v2_scores", {"tl": language})
+    for row in range(rows):
+        for tile in range((width + block - 1) // block):
+            language.index = row, tile
+            kernel(
+                Pointer(ids),
+                Pointer(scores),
+                Pointer(flags),
+                Pointer(lengths),
+                Pointer(dense),
+                offset,
+                dense.stride(0),
+                flags.stride(0),
+                width,
+                page_size,
+                block,
+            )
+    torch.testing.assert_close(dense, expected)
 
 
 @pytest.mark.parametrize("topk", [2, 20])
