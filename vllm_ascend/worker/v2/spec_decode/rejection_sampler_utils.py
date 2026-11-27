@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
+from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_cumulative_log_p_kernel,
     _compute_global_residual_mass,
@@ -35,7 +35,6 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.triton.sample.rng import spec_step_seed
 from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_partials_kernel,
     _entropy_verify,

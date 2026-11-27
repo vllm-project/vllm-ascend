@@ -6,8 +6,8 @@ from collections.abc import Callable
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import spec_step_seed
 
-from vllm_ascend.ops.triton.sample.rng import spec_step_seed
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 # Hierarchical sampling: prepare 8K coarse-block masses once, then sample
