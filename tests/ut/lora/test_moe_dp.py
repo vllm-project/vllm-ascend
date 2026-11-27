@@ -76,7 +76,7 @@ def _dp_worker(rank, init_method):
     dist.init_process_group("gloo", rank=rank, world_size=2, init_method=init_method, timeout=timedelta(seconds=30))
     try:
         manager = ExpertAdapterManager(rank)
-        wrapper = SimpleNamespace(active_lora_slots=frozenset())
+        wrapper = SimpleNamespace()
         coordinator = MoELoRACoordinator(manager, [wrapper], dist.group.WORLD)
         slot_buffer = wrapper.moe_lora_slot_ids.data_ptr()
         requests = [AdapterRequest(11, "/a"), AdapterRequest(22, "/b")]
@@ -127,9 +127,8 @@ def _dp_worker(rank, init_method):
         # Synthetic capture adapters have no checkpoint requests. Capture's
         # explicit mapping still selects active graphs; normal base requests
         # must ignore that previous synthetic activity.
-        wrapper.active_lora_slots = frozenset({0})
         coordinator.step_active = False
-        coordinator.refresh_slot_ids(update_activity=True)
+        coordinator.refresh_slot_ids(num_local_loras=1)
         coordinator.synchronize(set(), dummy_run=True)
         assert wrapper.moe_lora_active
         assert coordinator.num_active_loras == 1
@@ -138,7 +137,7 @@ def _dp_worker(rank, init_method):
 
         # An idle rank must not publish the previous global activity as its
         # own synthetic activity on the next base-only step.
-        wrapper.active_lora_slots = frozenset()
+        coordinator.refresh_slot_ids(num_local_loras=0)
         coordinator.synchronize({AdapterRequest(33, "/c")} if rank == 0 else set(), dummy_run=rank == 1)
         assert coordinator.num_active_loras == 1
         coordinator.synchronize(set(), dummy_run=rank == 1)

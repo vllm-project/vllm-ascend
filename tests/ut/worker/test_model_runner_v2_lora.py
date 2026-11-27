@@ -13,17 +13,18 @@ from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize("synchronized", [None, False, True])
-def test_active_mapping_does_not_reload_global_adapters(synchronized):
+@pytest.mark.parametrize(("mapping", "local_count"), [((11, 0), 1), ((0, 0), 0), ((11, 22), 2)])
+def test_active_mapping_does_not_reload_global_adapters(synchronized, mapping, local_count):
     runner = object.__new__(NPUModelRunner)
     coordinator = None if synchronized is None else SimpleNamespace(step_active=synchronized, refresh_slot_ids=Mock())
     runner._moe_lora_coordinator = coordinator
     requests = {"adapter-a"}
     with patch.object(GPUModelRunner, "_set_active_loras") as activate:
-        runner._set_active_loras((11,), (11, 0), requests)
-    assert activate.call_args.args[:2] == ((11,), (11, 0))
+        runner._set_active_loras((11,), mapping, requests)
+    assert activate.call_args.args[:2] == ((11,), mapping)
     assert activate.call_args.args[2] == (set() if synchronized else requests)
     if coordinator is not None:
-        coordinator.refresh_slot_ids.assert_called_once_with(update_activity=not synchronized)
+        coordinator.refresh_slot_ids.assert_called_once_with(num_local_loras=local_count)
 
 
 @pytest.mark.parametrize("dummy_run", [False, True])

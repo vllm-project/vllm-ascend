@@ -58,6 +58,7 @@ class MoELoRACoordinator:
         self.wrappers = wrappers
         self.step_active = False
         self.num_active_loras = 0
+        self.num_local_loras = 0
         self._slot_ids = (-1,) * self.model_manager.lora_slots
         self.slot_ids = torch.full((self.model_manager.lora_slots,), -1, dtype=torch.long, device=worker_manager.device)
         for wrapper in wrappers:
@@ -78,7 +79,7 @@ class MoELoRACoordinator:
         # An idle DP rank also uses a dummy forward. Its explicit local
         # mapping is empty; the previous global count may describe a peer's
         # real adapter and must not keep later base-only steps active.
-        dummy_count = max(len(wrapper.active_lora_slots) for wrapper in self.wrappers) if dummy_run else 0
+        dummy_count = self.num_local_loras if dummy_run else 0
         gathered = self._gather((list(requests), dummy_count))
         for rank_requests, _ in gathered:
             for request in rank_requests:
@@ -125,12 +126,14 @@ class MoELoRACoordinator:
         for wrapper in self.wrappers:
             wrapper.moe_lora_active = count > 0
 
-    def refresh_slot_ids(self, *, update_activity: bool = False) -> None:
+    def refresh_slot_ids(self, *, num_local_loras: int | None = None) -> None:
         ids = tuple(adapter_id if adapter_id is not None else -1 for adapter_id in self.model_manager.lora_index_to_id)
         if ids != self._slot_ids:
             self.slot_ids.copy_(torch.tensor(ids, dtype=torch.long, device="cpu"))
             self._slot_ids = ids
-        if update_activity:
+        if num_local_loras is not None:
             # Capture hooks run outside execute_model. Their explicit dummy
             # adapter count selects the matching LoRA or base-only graph.
-            self._set_activity(max(len(wrapper.active_lora_slots) for wrapper in self.wrappers))
+            self.num_local_loras = num_local_loras
+            if not self.step_active:
+                self._set_activity(num_local_loras)

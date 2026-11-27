@@ -371,7 +371,8 @@ class NPUModelRunner(GPUModelRunner):
         super()._set_active_loras(prompt_lora_mapping, token_lora_mapping, requests, mapping_type)
         if coordinator is not None:
             # Also covers dummy/capture hooks outside execute_model.
-            coordinator.refresh_slot_ids(update_activity=not coordinator.step_active)
+            num_local_loras = len({lora_id for lora_id in token_lora_mapping if lora_id > 0})
+            coordinator.refresh_slot_ids(num_local_loras=num_local_loras)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         expert_offload.validate_loading(self, load_dummy_weights)
