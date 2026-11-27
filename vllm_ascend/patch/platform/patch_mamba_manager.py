@@ -7,6 +7,7 @@
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -14,9 +15,78 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
 )
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.request import Request
+
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 
 
 class AscendMambaManager(MambaManager):
+    gdn_checkpoint_policy: GDNCheckpointPolicy | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dedicated_plans: dict[str, tuple[int, int]] = {}
+        self.dedicated_pages: dict[str, tuple[int, KVCacheBlock]] = {}
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        blocks = super().allocate_new_blocks(request_id, num_tokens, num_tokens_main_model)
+        plan = self.dedicated_plans.pop(request_id, None)
+        if plan is not None and plan[1] == num_tokens_main_model:
+            # The extra page is not part of the position-addressed or MTP state table.
+            self.dedicated_pages[request_id] = (plan[0], self.block_pool.get_new_blocks(1)[0])
+        return blocks
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self.dedicated_plans.pop(request_id, None)
+        page = self.dedicated_pages.pop(request_id, None)
+        blocks = super().pop_blocks_for_free(request_id)
+        if page is not None:
+            blocks.append(page[1])
+        return blocks
+
+    def _gdn_internal_position(self, position: int, start: int, end: int) -> int:
+        policy = self.gdn_checkpoint_policy
+        if policy is None:
+            return position
+        return policy.internal_position(
+            position, start, end, self.block_size, self.kv_cache_spec.prefill_checkpoint_alignment
+        )
+
+    def _needs_internal_checkpoint(
+        self, request_id: str, query_start: int, query_end: int, checkpoint_position: int, prefill_end: int
+    ) -> bool:
+        return super()._needs_internal_checkpoint(
+            request_id,
+            query_start,
+            query_end,
+            self._gdn_internal_position(checkpoint_position, query_start, query_end),
+            prefill_end,
+        )
+
+    def _cache_partial_tail_block(
+        self, request: Request, num_tokens: int, retention_interval: int | None
+    ) -> BlockHashWithGroupId | None:
+        checkpoint = self._checkpoints.get(request.request_id)
+        policy = self.gdn_checkpoint_policy
+        if retention_interval is not None and checkpoint is not None and policy is not None:
+            position, column = checkpoint
+            if position > 0 and position == (column + 1) * self.block_size:
+                prompt_end = request.num_prompt_tokens
+                prompt_checkpoint = get_mamba_prefill_checkpoint_position(
+                    prompt_end,
+                    self.cache_hit_alignment_tokens,
+                    self.drop_eagle_checkpoint_block,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                )
+                if position != prompt_checkpoint and position == self._gdn_internal_position(
+                    prompt_checkpoint, 0, prompt_end
+                ):
+                    # This slot holds the exported cold-prefill replay state.
+                    # Sparse retention normally recognizes the unmodified tail.
+                    retention_interval = None
+        return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -77,6 +147,14 @@ class AscendMambaManager(MambaManager):
             apply_admission_cap=apply_admission_cap,
             prefill_end=prefill_end,
         )
+        if self.gdn_checkpoint_policy is not None and not apply_admission_cap:
+            checkpoint = self._checkpoints.get(request_id)
+            if checkpoint is not None:
+                position, column = checkpoint
+                # The upstream capacity check recorded its original position.
+                # Keep the reserved column and publish the position the worker writes.
+                position = self._gdn_internal_position(position, total_computed_tokens, num_tokens_main_model)
+                self._checkpoints[request_id] = (position, column)
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one
         # extra block to hold the external cache content. Account
@@ -88,6 +166,9 @@ class AscendMambaManager(MambaManager):
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
         if has_external_tokens and has_new_scheduled_tokens:
             # one more block for external computed tokens
+            num_new_blocks += 1
+        plan = self.dedicated_plans.get(request_id) if not apply_admission_cap else None
+        if plan is not None and plan[1] == num_tokens_main_model:
             num_new_blocks += 1
         return num_new_blocks
 

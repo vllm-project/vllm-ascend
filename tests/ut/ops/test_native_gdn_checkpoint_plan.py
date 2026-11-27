@@ -1,0 +1,232 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+import torch
+
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+from vllm_ascend.ops import gdn_checkpoint, native_gdn_checkpoint
+from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoint_metadata
+from vllm_ascend.ops.native_gdn_checkpoint import plan_native_checkpoint
+
+
+def test_mixed_batch_restores_original_token_order():
+    prefix, tail, tail_rows, restore, prefix_limits, tail_limits = plan_native_checkpoint([2, 0, 1], [4, 2, 3])
+    packed = prefix + tail
+    assert prefix == [0, 1, 4, 5, 6]
+    assert tail == [2, 3, 7, 8]
+    assert tail_rows == [0, 2]
+    assert prefix_limits == [0, 2, 4, 5]
+    assert tail_limits == [0, 2, 4]
+    assert [packed[index] for index in restore] == list(range(9))
+
+
+@pytest.mark.parametrize(("offsets", "lengths"), [([4], [4]), ([0], [4])])
+def test_plan_requires_a_checkpoint_with_a_nonempty_tail(offsets, lengths):
+    with pytest.raises(AssertionError):
+        plan_native_checkpoint(offsets, lengths)
+
+
+def test_native_fla_uses_chunk64_with_processed_beta_on_a5(monkeypatch):
+    from vllm_ascend.device import device_op
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5))
+    monkeypatch.setattr(device_op, "DeviceOperator", device_op.A5DeviceAdaptor)
+    qkv = torch.zeros(1, 65, 1, 4, dtype=torch.bfloat16)
+    state = torch.zeros(1, 1, 4, 4)
+    gate = torch.zeros(1, 65, 1)
+    beta = torch.full_like(gate, 0.75, dtype=qkv.dtype)
+    partition = native_gdn_checkpoint.NativeFlaPartition((0, 65), (0, 0, 0, 1))
+    fla_fwd = Mock(return_value=(qkv, state))
+
+    native_gdn_checkpoint._apply_recurrence(
+        (qkv, qkv, qkv, gate, beta), state, partition, 0.5, None, fla_fwd, save_training_intermediates=False
+    )
+
+    fla_fwd.assert_called_once()
+    args, kwargs = fla_fwd.call_args
+    assert kwargs["chunk_size"] == 64
+    assert kwargs["chunk_indices"] is partition.chunk_indices_chunk64_host
+    assert kwargs["use_beta_sigmoid_in_kernel"] is False
+    assert kwargs["disable_recompute"] is False
+    assert kwargs["state_v_first"] is True
+    torch.testing.assert_close(args[4], beta)
+
+
+@pytest.mark.parametrize("joint_pack", [False, True])
+def test_contiguous_checkpoint_keeps_token_order_and_packs_heads_once(monkeypatch, joint_pack):
+    head_first = torch.arange(56).reshape(4, 7, 2)
+    tensors = tuple(part.transpose(0, 1).unsqueeze(0) for part in head_first.split((1, 1, 2)))
+    checkpoint = SimpleNamespace(query_lens=[7], offsets=[4])
+    metadata = SimpleNamespace(checkpoint=checkpoint)
+    initial_state = torch.zeros(1, 2, 2, 2)
+    gate = torch.ones(1, 7, 2)
+    calls = []
+
+    def recur(inputs, state, partition, scale, fused, fla_fwd, *, save_training_intermediates):
+        calls.append((inputs, state, partition, save_training_intermediates))
+        return inputs[2], state + 1
+
+    export = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint, "_apply_recurrence", recur)
+    monkeypatch.setattr(native_gdn_checkpoint, "_export_checkpoint", export)
+    layer = SimpleNamespace()
+    output, state = native_gdn_checkpoint.run_gdn_native_checkpoint_prefill(
+        layer,
+        metadata,
+        None,
+        *tensors,
+        gate,
+        gate,
+        initial_state,
+        fused=None,
+        fla_fwd=object(),
+        head_first_qkv=head_first if joint_pack else None,
+    )
+
+    assert len(calls) == 2
+    for (inputs, _, _, saves), tokens in zip(calls, (slice(0, 4), slice(4, None)), strict=True):
+        assert saves is not joint_pack
+        for actual, expected in zip(inputs[:3], tensors, strict=True):
+            torch.testing.assert_close(actual, expected[:, tokens])
+        if joint_pack:
+            assert all(part.transpose(1, 2).is_contiguous() for part in inputs[:3])
+            assert len({part.untyped_storage().data_ptr() for part in inputs[:3]}) == 1
+    torch.testing.assert_close(calls[1][1], initial_state + 1)
+    torch.testing.assert_close(export.call_args.args[-1], initial_state + 1)
+    torch.testing.assert_close(output, tensors[2])
+    torch.testing.assert_close(state, initial_state + 2)
+
+
+@pytest.mark.parametrize("shared_ops_available", [False, True])
+def test_aligned_a5_checkpoint_can_share_fla_preparation(monkeypatch, shared_ops_available):
+    length, offset = 65, 64
+    q = torch.zeros(1, length, 16, 128, dtype=torch.bfloat16)
+    v = torch.zeros(1, length, 32, 128, dtype=torch.bfloat16)
+    gate = torch.ones(1, length, 32)
+    initial = torch.zeros(1, 32, 128, 128)
+    metadata = SimpleNamespace(checkpoint=SimpleNamespace(query_lens=[length], offsets=[offset]))
+    prepare = Mock(side_effect=lambda q, k, v, g, *_args, **_kwargs: (q, k, None, None, None, g, v, v, None))
+    recurrence = Mock(
+        side_effect=lambda _k, _w, u, *, initial_state, **_kwargs: (torch.zeros(1, 1, 1), u, initial_state + 1)
+    )
+    attention = Mock(return_value=v)
+    ops = (prepare, recurrence, attention) if shared_ops_available else None
+    fallback = Mock(side_effect=lambda tensors, state, *_args, **_kwargs: (tensors[2], state + 1))
+    export = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint, "_get_shared_fla_ops", lambda: ops)
+    monkeypatch.setattr(native_gdn_checkpoint, "_apply_recurrence", fallback)
+    monkeypatch.setattr(native_gdn_checkpoint, "_export_checkpoint", export)
+    log = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint.logger, "info_once", log)
+
+    output, state = native_gdn_checkpoint.run_gdn_native_checkpoint_prefill(
+        SimpleNamespace(),
+        metadata,
+        None,
+        q,
+        q,
+        v,
+        gate,
+        gate,
+        initial,
+        fused=None,
+        fla_fwd=object(),
+        head_first_qkv=torch.zeros(64, length, 128, dtype=torch.bfloat16),
+    )
+
+    if shared_ops_available:
+        fallback.assert_not_called()
+        prepare.assert_called_once()
+        attention.assert_called_once()
+        log.assert_called_once()
+        assert prepare.call_args.kwargs["cu_seqlens"] == (0, length)
+        assert [call.kwargs["cu_seqlens"] for call in recurrence.call_args_list] == [(0, offset), (0, length - offset)]
+        assert recurrence.call_args.args[0].shape[2] == length - offset
+        torch.testing.assert_close(recurrence.call_args.kwargs["initial_state"], initial + 1)
+    else:
+        prepare.assert_not_called()
+        recurrence.assert_not_called()
+        attention.assert_not_called()
+        log.assert_not_called()
+        assert fallback.call_count == 2
+    export.assert_called_once()
+    torch.testing.assert_close(export.call_args.args[-1], initial + 1)
+    torch.testing.assert_close(output, v)
+    torch.testing.assert_close(state, initial + 2)
+
+
+def test_host_block_ids_match_device_null_mask():
+    cache = SimpleNamespace(hash_block_size=64, cache_hit_alignment_tokens=64)
+    config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=0)
+    spec = SimpleNamespace(block_size=1152, prefill_checkpoint_alignment=64)
+    builder = SimpleNamespace(vllm_config=config, kv_cache_spec=spec, drop_eagle_block=False)
+    query_starts = torch.tensor([0, 3400, 6800, 10200], dtype=torch.int32)
+    blocks = torch.tensor([[0, 17, 19], [0, 0, 20], [0, 0, 0]], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([3400, 3400, 3400], dtype=torch.int32),
+        query_start_loc_cpu=query_starts,
+        query_start_loc=query_starts,
+        block_table_tensor=blocks,
+    )
+    policy = GDNCheckpointPolicy(8192, True, True)
+    rows = [2, 0, 1]
+    fallback = build_gdn_checkpoint_metadata(builder, metadata, rows, policy)
+    fallback.checkpoint_offsets.masked_fill_(fallback.state_indices == 0, 0)
+
+    host_blocks = ([0, 17, 19], [0, 0, 20])
+    optimized = build_gdn_checkpoint_metadata(builder, metadata, rows, policy, host_blocks=host_blocks)
+    assert optimized.offsets == [0, 2304, 0] == fallback.checkpoint_offsets.tolist()
+    assert optimized.state_indices.tolist() == fallback.state_indices.tolist() == [0, 17, 0]
+    assert optimized.query_lens == fallback.query_lens
+    assert build_gdn_checkpoint_metadata(builder, metadata, [1, 2], policy, host_blocks=host_blocks) is None
+
+
+def test_dedicated_page_coexists_with_another_rows_positional_checkpoint():
+    cache = SimpleNamespace(hash_block_size=128, cache_hit_alignment_tokens=128)
+    config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=1)
+    spec = SimpleNamespace(block_size=2048, prefill_checkpoint_alignment=64)
+    builder = SimpleNamespace(vllm_config=config, kv_cache_spec=spec, drop_eagle_block=False)
+    query_starts = torch.tensor([0, 1452, 4852], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([3500, 3400], dtype=torch.int32),
+        query_start_loc_cpu=query_starts,
+        query_start_loc=query_starts,
+        block_table_tensor=torch.tensor([[31, 40], [22, 33]], dtype=torch.int32),
+        gdn_dedicated_checkpoint_rows={0: ("req", (1, 3456, 77))},
+    )
+    checkpoint = build_gdn_checkpoint_metadata(
+        builder, metadata, [0, 1], GDNCheckpointPolicy(8192, False, False), host_blocks=([31, 40], [22, 33])
+    )
+    assert checkpoint.offsets == [1408, 3328]
+    assert checkpoint.state_indices.tolist() == [77, 22]
+    assert checkpoint.dedicated_ack.writes == {"req": ((1, 3456, 77),)}
+    assert checkpoint.dedicated_ack.layers == set()
+
+
+def test_dedicated_only_batch_uses_one_host_transfer(monkeypatch):
+    cache = SimpleNamespace(hash_block_size=128, cache_hit_alignment_tokens=128)
+    config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=1)
+    spec = SimpleNamespace(block_size=2048, prefill_checkpoint_alignment=64)
+    builder = SimpleNamespace(vllm_config=config, kv_cache_spec=spec, drop_eagle_block=False)
+    starts = torch.tensor([0, 1452, 2308], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([3500, 7000], dtype=torch.int32),
+        query_start_loc_cpu=starts,
+        query_start_loc=starts,
+        # The dedicated-only planner needs the dtype but never indexes this table.
+        block_table_tensor=torch.empty((0, 0), dtype=torch.int32),
+        gdn_dedicated_checkpoint_rows={0: ("a", (1, 3456, 77)), 1: ("b", (1, 6912, 78))},
+    )
+    upload = Mock(side_effect=torch.tensor)
+    monkeypatch.setattr(gdn_checkpoint, "async_tensor_h2d", upload)
+    checkpoint = build_gdn_checkpoint_metadata(builder, metadata, [0, 1], GDNCheckpointPolicy(65536, True, False))
+    upload.assert_called_once()
+    assert checkpoint.offsets == checkpoint.checkpoint_offsets.tolist() == [1408, 768]
+    assert checkpoint.state_indices.tolist() == [77, 78]
+    assert checkpoint.request_rows is None and checkpoint.block_cols is None
+    assert checkpoint.dedicated_ack.writes == {"a": ((1, 3456, 77),), "b": ((1, 6912, 78),)}

@@ -1027,6 +1027,9 @@ class BaseDeviceAdaptor:
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        *,
+        save_training_intermediates: bool = False,
+        allow_chunk32: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
         # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
@@ -1069,7 +1072,7 @@ class BaseDeviceAdaptor:
             use_qk_l2norm_in_kernel=True,
             use_beta_sigmoid_in_kernel=False,
             allow_neg_eigval=False,
-            disable_recompute=False,
+            disable_recompute=save_training_intermediates,
             state_v_first=True,
         )
         if keep_meta is not None:
@@ -2100,9 +2103,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        *,
+        save_training_intermediates: bool | None = None,
+        allow_chunk32: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
-        use_chunk32 = get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+        use_chunk32 = allow_chunk32 and get_current_hardware_profile().supports(
+            HardwareCapability.FLA_GDN_PREFILL_CHUNK32
+        )
         # Conv1d head-first output is exposed as BSND views by GDN. Recover
         # its contiguous BNSD storage instead of copying all three tensors.
         # A token slice in a mixed batch may break contiguity; retain BSND
@@ -2134,7 +2142,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             raise ValueError("A5 chunk32 prefill requires prebuilt chunk32 metadata")
         # Preserve the existing chunk64 contract, including preprocessed beta.
         use_exp2 = not use_chunk32
-        disable_recompute = not use_chunk32
+        disable_recompute = not use_chunk32 if save_training_intermediates is None else save_training_intermediates
         output, final_state, *_ = fused_fwd(
             q,
             k,

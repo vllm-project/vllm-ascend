@@ -1,0 +1,9 @@
+pr: 23315
+entries:
+  - category: performance
+    text: >-
+      Supported fused GDN models on Ascend can save fine-grained prefix checkpoints
+      within one model forward during cache-hit prefill with MTP.
+      Enable `gdn_internal_prefill_checkpoints`, `gdn_native_prefill_checkpoints`
+      and `gdn_dedicated_prefill_checkpoints` for supported single-rank V2
+      deployments with local prefix caching.

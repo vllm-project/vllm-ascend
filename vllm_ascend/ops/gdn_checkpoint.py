@@ -3,10 +3,18 @@
 """GDN checkpoint export from FP32 chunk-start recurrent states."""
 
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position, is_mamba_prefill_checkpoint_valid
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+from vllm_ascend.core.gdn_dedicated_checkpoint import GDNCheckpointAcknowledgement
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
+
+logger = init_logger(__name__)
 
 GDN_CHECKPOINT_ALIGNMENT = 64
 
@@ -22,7 +30,8 @@ def _supports_checkpoint_boundary_policy(config) -> bool:
 
 
 def initialize_gdn_checkpoints(layer) -> None:
-    if not get_ascend_config().gdn_internal_prefill_checkpoints:
+    ascend_config = get_ascend_config()
+    if not ascend_config.gdn_internal_prefill_checkpoints:
         return
     # Do not advertise unsupported layers: the upstream all-layer capability
     # check keeps the scheduler's split fallback when any layer cannot export.
@@ -48,13 +57,95 @@ def initialize_gdn_checkpoints(layer) -> None:
     if "num_prefill_checkpoint_blocks" not in MambaSpec.__dataclass_fields__:
         raise ValueError("GDN internal checkpoints require vLLM with PR #60050")
     layer._ascend_internal_checkpoint_enabled = True
+    layer._ascend_native_checkpoint_enabled = ascend_config.gdn_native_prefill_checkpoints
     layer.register_buffer("_ascend_checkpoint_workspace", None, persistent=False)
     layer._checkpoint_alignment = GDN_CHECKPOINT_ALIGNMENT
     layer._max_num_batched_tokens = config.scheduler_config.max_num_batched_tokens
     layer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=layer.conv_kernel_size - 1)
 
 
+def build_gdn_checkpoint_metadata(
+    builder, metadata, rows, policy: GDNCheckpointPolicy, *, host_blocks: tuple[list[int], ...] | None = None
+):
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
+
+    config = builder.vllm_config
+    cache_config = config.cache_config
+    hash_size = cache_config.hash_block_size
+    hit_alignment = cache_config.cache_hit_alignment_tokens
+    if hash_size is None or hit_alignment is None:
+        return None
+    spec = builder.kv_cache_spec
+    assert metadata.seq_lens_cpu_upper_bound is not None
+    seq_lens = metadata.seq_lens_cpu_upper_bound.tolist()
+    all_query_lens = metadata.query_start_loc_cpu.diff().tolist()
+    query_lens = [all_query_lens[row] for row in rows]
+    offsets, columns = [], []
+    dedicated = getattr(metadata, "gdn_dedicated_checkpoint_rows", None)
+    dedicated_blocks = [NULL_BLOCK_ID] * len(rows) if dedicated else None
+    dedicated_writes = {}
+    for index, (row, query_len) in enumerate(zip(rows, query_lens, strict=True)):
+        end = seq_lens[row]
+        start = end - query_len
+        position = get_mamba_prefill_checkpoint_position(
+            end, hit_alignment, builder.drop_eagle_block, config.num_hash_lookahead_tokens
+        )
+        plan = dedicated.get(row) if dedicated else None
+        if plan is not None:
+            req_id, write = plan
+            _, planned_position, page = write
+            valid = page > NULL_BLOCK_ID and start < position < end and position == planned_position
+            offsets.append(position - start if valid else 0)
+            columns.append(-1)
+            if valid:
+                dedicated_blocks[index] = page
+                dedicated_writes[req_id] = (write,)
+            continue
+        position = policy.internal_position(position, start, end, spec.block_size, spec.prefill_checkpoint_alignment)
+        valid = is_mamba_prefill_checkpoint_valid(
+            start, end, position, hash_size, spec.block_size, spec.prefill_checkpoint_alignment
+        )
+        column = cdiv(end, spec.block_size) - 2
+        if valid and host_blocks is not None:
+            blocks = host_blocks[row] if row < len(host_blocks) else ()
+            valid = 0 <= column < len(blocks) and blocks[column] != NULL_BLOCK_ID
+        offsets.append(position - start if valid else 0)
+        columns.append(column if valid else -1)
+    if not any(offsets):
+        return None
+    if host_blocks is not None:
+        logger.info_once("Native GDN checkpoints use host block metadata")
+    device = metadata.query_start_loc.device
+    if dedicated_writes and metadata.block_table_tensor.dtype == torch.int32 and not any(col >= 0 for col in columns):
+        # Dedicated pages already have absolute IDs. With no positional
+        # destinations in the batch, upload the two vectors together.
+        offsets_npu, indices = async_tensor_h2d([offsets, dedicated_blocks], dtype=torch.int32, device=device).unbind(0)
+        checkpoint = MambaPrefillCheckpointMetadata(
+            checkpoint_offsets=offsets_npu, state_indices=indices, offsets=offsets, query_lens=query_lens
+        )
+        checkpoint.dedicated_ack = GDNCheckpointAcknowledgement(dedicated_writes)
+        return checkpoint
+    checkpoint = MambaPrefillCheckpointMetadata(
+        checkpoint_offsets=async_tensor_h2d(offsets, dtype=torch.int32, device=device),
+        state_indices=None,
+        offsets=offsets,
+        query_lens=query_lens,
+        request_rows=async_tensor_h2d(rows, dtype=torch.int64, device=device),
+        block_cols=async_tensor_h2d(columns, dtype=torch.int64, device=device),
+    )
+    checkpoint = checkpoint.regather_state_indices(metadata.block_table_tensor)
+    if dedicated_writes:
+        pages = async_tensor_h2d(dedicated_blocks, dtype=checkpoint.state_indices.dtype, device=device)
+        checkpoint.state_indices = torch.where(pages > NULL_BLOCK_ID, pages, checkpoint.state_indices)
+        checkpoint.dedicated_ack = GDNCheckpointAcknowledgement(dedicated_writes)
+    return checkpoint
+
+
 def ensure_gdn_checkpoint_workspace(layer, tensor):
+    if getattr(layer, "_ascend_native_checkpoint_enabled", False):
+        return
     if getattr(layer, "_exports_checkpoints", False) and layer._ascend_checkpoint_workspace is None:
         # Allocate during the profiling forward, including when its metadata is
         # None, so KV-cache sizing accounts for the persistent FP32 snapshots.
