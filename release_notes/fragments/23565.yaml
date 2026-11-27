@@ -1,0 +1,7 @@
+pr: 23565
+entries:
+  - category: feature
+    text: >-
+      Prefill can combine KVPP with layerwise Memcache pooling across pipeline
+      and prefill context parallel ranks. Set `enable_kvpp=true` and enable
+      `use_layerwise=true` on the Memcache-backed `AscendStoreConnector`.
