@@ -189,7 +189,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
         stderr_thread.start()
         return proc
 
-    def _terminate_server(self) -> list[int | None]:
+    def _terminate_servers(self) -> list[int | None]:
         """Kill server processes and their children, returning their exit codes.
 
         Idempotent: after the first stop the recorded exit codes are returned
@@ -211,6 +211,10 @@ class RemoteEPDServer(RemoteOpenAIServer):
         self._terminated = True
         return self.exit_codes
 
+    def _terminate_server(self) -> None:
+        """Override the framework hook; the exit codes are exposed through stop()."""
+        self._terminate_servers()
+
     def instance_pids(self) -> list[int]:
         """Return the pid of every started instance, in launch order."""
         return [proc.pid for proc in self._proc_list]
@@ -226,7 +230,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
 
     def stop(self) -> list[int | None]:
         """Stop every instance and return their exit codes."""
-        return self._terminate_server()
+        return self._terminate_servers()
 
     def _assert_clean_shutdown(self) -> None:
         """Assert that every server process exited with an expected code."""
