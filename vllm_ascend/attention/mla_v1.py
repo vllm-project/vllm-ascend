@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, MLAAttentionSpec, SlidingWindowMLASpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -168,6 +168,13 @@ class AscendMLAAttention(MLAAttention):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        if isinstance(spec, SlidingWindowMLASpec):
+            if getattr(spec, "bounded_replay", False):
+                raise NotImplementedError("Ascend MLA full-context caches do not support bounded replay.")
+            # The full-context manager retains every block. Keep the computation
+            # window, but omit fields used only by sliding-window allocation.
+            values.pop("extra_retained_tokens", None)
+            values.pop("bounded_replay", None)
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
         if model_type == "kimi_linear":

@@ -9,7 +9,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SlidingWindowMLASpec, SparseCacheRole
 
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
@@ -92,6 +92,28 @@ def _make_owner(impl, backend, rope_dim=64):
     layer.kv_lora_rank = 512
     layer.qk_rope_head_dim = rope_dim
     return layer
+
+
+def test_windowed_mla_owner_preserves_window_with_full_context_storage(monkeypatch):
+    source = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        sliding_window=2051,
+        non_causal_multi_token_decode=True,
+    )
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
+    layer = _make_owner(AscendMLAImpl.__new__(AscendMLAImpl), AscendMLABackend)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="mistral_large4")),
+    )
+
+    actual = layer.get_kv_cache_spec(config)
+
+    assert isinstance(actual, AscendMLAAttentionSpec)
+    assert actual.sliding_window == source.sliding_window
+    assert actual.non_causal_multi_token_decode
 
 
 def _get_owner_spec(monkeypatch, layer):
