@@ -4401,6 +4401,9 @@ class NPUModelRunner(GPUModelRunner):
             with disable_compilation(self.get_model()):
                 self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         super().profile_run()
+        from vllm_ascend.ops.kimi_kda import release_kda_prolog_nd_weights
+
+        self.kda_prolog_nd_released_bytes = release_kda_prolog_nd_weights(self.model)
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:

@@ -72,6 +72,14 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
 from vllm_ascend.utils import npu_stream_switch
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+_KDA_PROLOG_WEIGHT_NAMES = (
+    "_kda_prolog_qkv_weight",
+    "_kda_prolog_f_a_weight",
+    "_kda_prolog_f_b_weight",
+    "_kda_prolog_b_weight",
+    "_kda_prolog_conv_weight",
+    "_kda_prolog_output_gate_weight",
+)
 _F_PROJ_SHARD_ID = 1
 _MEGA_KDA_MAX_BATCH_MULTIPLIER = 32
 _MEGA_KDA_CACHE_ALIGNMENT_BYTES = 16
@@ -108,6 +116,19 @@ def release_mega_kda_nd_weights(model) -> int:
             and not getattr(module, "_mega_nd_released", False)
         ):
             released += module._release_default_kda_weights()
+    return released
+
+
+def release_kda_prolog_nd_weights(model) -> int:
+    """Release replaced input projections after profiling on pure PD prefill workers."""
+    released = 0
+    for module in model.modules():
+        if (
+            isinstance(module, AscendKimiK3DeltaAttention)
+            and getattr(module, "_mega_pd_prefill_worker", False)
+            and not getattr(module, "_mega_pd_decode_worker", False)
+        ):
+            released += module._release_kda_prolog_nd_weights()
     return released
 
 
@@ -474,6 +495,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self._mega_pd_decode_worker = _is_pd_decode_worker(vllm_config)
         self._mega_pd_prefill_worker = _is_pd_prefill_worker(vllm_config)
         self._mega_nd_released = False
+        self._kda_prolog_nd_released = False
         quant_config = getattr(vllm_config, "quant_config", None)
         uses_mixed_projection = bool(
             quant_config is not None
@@ -547,14 +569,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 requires_grad=False,
             ),
         )
-        for name in (
-            "_kda_prolog_qkv_weight",
-            "_kda_prolog_f_a_weight",
-            "_kda_prolog_f_b_weight",
-            "_kda_prolog_b_weight",
-            "_kda_prolog_conv_weight",
-            "_kda_prolog_output_gate_weight",
-        ):
+        for name in _KDA_PROLOG_WEIGHT_NAMES:
             self.register_buffer(name, None, persistent=False)
         original_process_weights = self.conv1d.quant_method.process_weights_after_loading
 
@@ -586,12 +601,16 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _prepare_kda_prolog_weights(self) -> bool:
         """Materialize Prolog's four complete NZ projection allocations.
 
-        The original projections remain resident for decode and fallback. With
+        The original projections remain resident through profiling. Pure PD
+        prefill workers then release their replaced input projections. With
         H=7168, 96 heads and D=128, the extra BF16 payload per layer/rank is
         65.29 MiB at TP8 or 33.52 MiB at TP16, before NZ padding/workspaces.
         These allocations are prepared before memory profiling so they reduce
-        the available KV-cache budget.
+        the available KV-cache budget until the post-profile ND release.
         """
+        self._kda_prolog_nd_released = False
+        for name in _KDA_PROLOG_WEIGHT_NAMES:
+            setattr(self, name, None)
         if self._prefill_fused_kda_operator is None:
             return False
         if self.model_config.dtype != torch.bfloat16 or self._mega_pd_decode_worker:
@@ -644,6 +663,43 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if self._kda_prolog_conv_weight.dtype != torch.bfloat16:
             raise RuntimeError("KDA Prolog requires a BF16 packed Conv weight")
         return True
+
+    @torch.no_grad()
+    def _release_kda_prolog_nd_weights(self) -> int:
+        """Keep Prolog operands and release their ND sources after memory profiling."""
+        if (
+            getattr(self, "_kda_prolog_nd_released", False)
+            or getattr(self, "_prefill_fused_kda_operator", None) is None
+            or any(getattr(self, name, None) is None for name in _KDA_PROLOG_WEIGHT_NAMES)
+        ):
+            return 0
+        params = [self.in_proj_qkvgfab.weight]
+        if self.uses_mixed_projection:
+            # Recurrent groups use the composed F projection in the fused BFG
+            # weight. Its output-gate view also shares that retained storage.
+            params.extend((self.fused_bfg_proj.f_a_weight, self.fused_bfg_proj.f_b_weight))
+        else:
+            params.append(self.f_b_proj.weight)
+        source_storages = {param.untyped_storage().data_ptr(): param.untyped_storage().nbytes() for param in params}
+        gate_bytes = 0
+        if not self.uses_mixed_projection:
+            # A contiguous row slice still owns the entire packed ND storage.
+            # Give the output gate its own allocation before dropping that owner.
+            gate_storage = self._kda_prolog_output_gate_weight.untyped_storage()
+            source_storages[gate_storage.data_ptr()] = gate_storage.nbytes()
+            del gate_storage
+            self._kda_prolog_output_gate_weight = self._kda_prolog_output_gate_weight.clone()
+            gate_bytes = (
+                self._kda_prolog_output_gate_weight.numel() * self._kda_prolog_output_gate_weight.element_size()
+            )
+        released = sum(source_storages.values()) - gate_bytes
+        for param in params:
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+        self._kda_prolog_nd_released = True
+        logger.info_once(
+            "KDA Prolog released replaced ND input projections on the PD prefill worker for %s", self.prefix
+        )
+        return released
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         if self.use_mega_kda_replayssm:
@@ -813,9 +869,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
         if self._can_use_kda_prolog_prefill():
             return self._forward_kda_prolog_prefill(hidden_states)
-        if self.uses_mixed_projection:
+        prolog_nd_released = getattr(self, "_kda_prolog_nd_released", False)
+        if self.uses_mixed_projection or prolog_nd_released:
             num_tokens = hidden_states.size(0)
-            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+            if prolog_nd_released:
+                mixed_qkv, g1, beta, g2 = self._project_recurrent_inputs(hidden_states)
+                beta_is_preprocessed = True
+            else:
+                mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+                beta_is_preprocessed = getattr(self, "_prefill_fused_kda_operator", None) is None
             core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
@@ -827,7 +889,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
-                beta_is_preprocessed=getattr(self, "_prefill_fused_kda_operator", None) is None,
+                beta_is_preprocessed=beta_is_preprocessed,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -851,21 +913,33 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _project_recurrent_inputs(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        prolog_nd_released = getattr(self, "_kda_prolog_nd_released", False)
         if self.uses_mixed_projection:
-            qkv, beta_logits, raw_gate, output_gate = self._run_overlapped_qkv_bfg(hidden_states)
+            if prolog_nd_released:
+                qkv = torch.matmul(hidden_states, self._kda_prolog_qkv_weight)
+                beta_logits, raw_gate, output_gate = self._postprocess_bfg(self._project_bfg(hidden_states))
+            else:
+                qkv, beta_logits, raw_gate, output_gate = self._run_overlapped_qkv_bfg(hidden_states)
             return qkv, raw_gate, beta_logits.float().sigmoid(), output_gate
-        projected = self.in_proj_qkvgfab(hidden_states)[0]
-        split_sizes = [
-            3 * self.local_projection_size,
-            self.local_projection_size,
-            self.head_dim,
-            self.local_num_heads,
-        ]
-        padding = getattr(self, "in_proj_padding", 0)
-        if padding:
-            split_sizes.append(padding)
-        qkv, output_gate, f_a, beta_logits = projected.split(split_sizes, dim=-1)[:4]
-        raw_gate = self.f_b_proj(f_a)[0]
+        if prolog_nd_released:
+            qkv = torch.matmul(hidden_states, self._kda_prolog_qkv_weight)
+            output_gate = torch.nn.functional.linear(hidden_states, self._kda_prolog_output_gate_weight)
+            f_a = torch.matmul(hidden_states, self._kda_prolog_f_a_weight)
+            raw_gate = torch.matmul(f_a, self._kda_prolog_f_b_weight)
+            beta_logits = torch.matmul(hidden_states, self._kda_prolog_b_weight)
+        else:
+            projected = self.in_proj_qkvgfab(hidden_states)[0]
+            split_sizes = [
+                3 * self.local_projection_size,
+                self.local_projection_size,
+                self.head_dim,
+                self.local_num_heads,
+            ]
+            padding = getattr(self, "in_proj_padding", 0)
+            if padding:
+                split_sizes.append(padding)
+            qkv, output_gate, f_a, beta_logits = projected.split(split_sizes, dim=-1)[:4]
+            raw_gate = self.f_b_proj(f_a)[0]
         return (
             qkv,
             rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim),

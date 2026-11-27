@@ -581,6 +581,9 @@ class NPUWorker(WorkerBase):
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             self.model_runner.profile_run()
+            self.model_runner.model_memory_usage -= int(
+                getattr(self.model_runner, "mega_kda_nd_released_bytes", 0) or 0
+            ) + int(getattr(self.model_runner, "kda_prolog_nd_released_bytes", 0) or 0)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -614,17 +617,18 @@ class NPUWorker(WorkerBase):
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
 
-        # The PD-decode worker releases the default-path ND KDA projections
-        # inside profile_run() (after its forward), so the measured peak
+        # PD workers release replaced ND KDA projections inside profile_run()
+        # after its forward, so the measured peak
         # activation keeps the weights-resident baseline. The profile result's
         # weights snapshot was taken at load time, before that release: deduct
         # the freed bytes so the KV cache pool reclaims them.
         released_nd_weights = int(getattr(self.model_runner, "mega_kda_nd_released_bytes", 0) or 0)
+        released_nd_weights += int(getattr(self.model_runner, "kda_prolog_nd_released_bytes", 0) or 0)
         if released_nd_weights:
             profile_result.weights_memory -= released_nd_weights
             self.model_runner.model_memory_usage -= released_nd_weights
             logger.info(
-                "Released %.2f GiB of default-path ND KDA projections after profiling on this PD decode worker",
+                "Released %.2f GiB of replaced ND KDA projections after profiling on this PD worker",
                 GiB(released_nd_weights),
             )
         profile_result.non_kv_cache_memory = (

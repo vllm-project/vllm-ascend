@@ -769,9 +769,10 @@ class NPUModelRunner(GPUModelRunner):
         # forward, so the measured peak activation keeps its conservative
         # (weights-resident) baseline. The worker subtracts the stashed byte
         # count from the weights accounting before sizing the KV cache pool.
-        from vllm_ascend.ops.kimi_kda import release_mega_kda_nd_weights
+        from vllm_ascend.ops.kimi_kda import release_kda_prolog_nd_weights, release_mega_kda_nd_weights
 
         self.mega_kda_nd_released_bytes = release_mega_kda_nd_weights(self.model)
+        self.kda_prolog_nd_released_bytes = release_kda_prolog_nd_weights(self.model)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
