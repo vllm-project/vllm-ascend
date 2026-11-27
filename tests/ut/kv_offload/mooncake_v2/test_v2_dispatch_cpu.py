@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p import hisparse_pd
 from vllm_ascend.utils import vllm_version_is
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -35,7 +36,10 @@ def execute(relative, scope, *, owner=None, method=None):
 def facade():
     return execute(
         "kv_p2p/mooncake/connector.py",
-        {"KVConnectorBase_V1": type("Base", (), {}), "SupportsHMA": type("HMA", (), {})},
+        {
+            "KVConnectorBase_V1": type("Base", (), {}),
+            "SupportsHMA": type("HMA", (), {}),
+        },
     )
 
 
@@ -56,28 +60,47 @@ def registration():
 
 
 @pytest.mark.parametrize(
-    "extra,expected",
+    "connector_name,extra,expected",
     [
-        ({}, "MooncakePullConnector"),
-        ({"use_layerwise": False}, "MooncakePullConnector"),
-        ({"use_layerwise": True}, "MooncakePushConnector"),
+        ("MooncakeConnectorV2", {}, "MooncakePullConnector"),
+        ("MooncakeConnectorV2", {"transfer_backend": "ascend"}, "MooncakePullConnector"),
+        ("MooncakeConnectorV2", {"transfer_backend": "unknown"}, "MooncakePullConnector"),
+        ("MooncakeConnectorV2", {"transfer_backend": "memfabric"}, "MooncakePullConnector"),
+        ("MooncakeConnectorV2", {"use_layerwise": True}, "MooncakePushConnector"),
+        ("MooncakeConnectorV2", {"use_layerwise": True, "transfer_backend": "memfabric"}, "MooncakePushConnector"),
+        ("MooncakePullConnector", {}, "MooncakePullConnector"),
+        ("MooncakePullConnector", {"transfer_backend": "unknown"}, "MooncakePullConnector"),
+        ("MooncakePullConnector", {"use_layerwise": True}, "MooncakePullConnector"),
+        ("MooncakePullConnector", {"transfer_backend": "memfabric"}, "MooncakePullConnector"),
     ],
 )
-def test_registered_v2_selects_requested_protocol(extra, expected):
+def test_registered_v2_selects_requested_protocol(connector_name, extra, expected):
     classes = facade()
-    module, name = registration()["MooncakeConnectorV2"]
+    registry = registration()
+    module, name = registry[connector_name]
     assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector"
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
+    assert name == connector_name
+    assert "HiSparseMooncakePullConnector" not in registry
+    assert "_HiSparseMooncakePullConnector" not in registry
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector=connector_name, kv_connector_extra_config=extra)
+    )
     role, cache = object(), object()
-    with (
-        patch.object(classes["MooncakePushConnector"], "__init__", return_value=None) as push_init,
-        patch.object(classes["MooncakePullConnector"], "__init__", return_value=None) as pull_init,
-    ):
+    expected_cls = classes.get(expected, hisparse_pd._HiSparseMooncakePullConnector)
+    with patch.object(expected_cls, "__init__", return_value=None) as init:
         result = classes[name](config, role, cache)
-    assert type(result) is classes[expected]
-    selected = push_init if expected == "MooncakePushConnector" else pull_init
-    selected.assert_called_once_with(config, role, cache)
+    assert type(result) is expected_cls
+    init.assert_called_once_with(config, role, cache)
     assert classes["MooncakeConnector"] is classes["MooncakePullConnector"]
+
+
+def test_v2_hisparse_selection_uses_explicit_flag():
+    classes = facade()
+    transfer = SimpleNamespace(kv_connector_extra_config={})
+    assert (
+        classes["MooncakeConnectorV2"]._get_connector_cls(transfer, use_hisparse=True)
+        is hisparse_pd._HiSparseMooncakePullConnector
+    )
 
 
 @pytest.mark.parametrize("chosen", [-1, 0, 1])
