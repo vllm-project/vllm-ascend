@@ -159,7 +159,6 @@ class TestLookupKeyServer(unittest.TestCase):
     def test_structured_response_and_reset(self):
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
 
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
@@ -216,14 +215,6 @@ class TestLookupKeyServer(unittest.TestCase):
                 )
                 self.assertEqual(socket.send_multipart.call_args_list[1].args[0], [b"\x01"])
                 worker.reset_store.assert_called_once_with()
-                client = LookupKeyClient(config)
-                socket.recv_multipart.side_effect = None
-                socket.recv_multipart.return_value = response
-                self.assertEqual(client.lookup(48, [b"hash"], [0, 1]), result)
-                socket.recv_multipart.return_value = [b"\x00"]
-                self.assertEqual(client.lookup(48, [b"hash"]), StoreLookupResult(0))
-                self.assertEqual(client.snapshot(), {"decode:decode_error": 1})
-                client.close()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.threading.Thread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Poller")

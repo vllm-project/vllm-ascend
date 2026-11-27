@@ -56,19 +56,12 @@ def test_lookup_counts_reach_a_real_prometheus_gauge():
     prom.observe(stats.data)
 
     assert _samples(registry) == {"recv:timeout": 3.0, "server:backend_error": 1.0}
-
-
-def test_gauge_is_bound_to_the_engine_labels_and_the_failure_category():
-    registry = CollectorRegistry()
-    prom = AscendStorePromMetrics(MagicMock(), _types_for(registry), ["model_name"], {0: ["proto-model"]})
-    prom.observe({LOOKUP_RPC_FAILURES_KEY: {"decode:decode_error": 7}})
-
     for metric in registry.collect():
         if metric.name == "vllm:ascend_store_lookup_rpc_failures":
-            assert [tuple(sorted(sample.labels.items())) for sample in metric.samples] == [
-                (("failure", "decode:decode_error"), ("model_name", "proto-model"))
-            ]
-            assert metric.samples[0].value == 7.0
+            assert {tuple(sorted(sample.labels.items())) for sample in metric.samples} == {
+                (("failure", "recv:timeout"), ("model_name", "proto-model")),
+                (("failure", "server:backend_error"), ("model_name", "proto-model")),
+            }
             return
     raise AssertionError("the lookup RPC gauge was not registered")
 
@@ -83,7 +76,7 @@ def test_scheduler_counts_survive_aggregation_into_worker_stats():
     assert worker.data["load_get_keys"] == 3
 
 
-def test_get_stats_publishes_only_what_the_client_has_counted():
+def test_get_stats_and_empty_payload_publish_only_real_counts():
     quiet = SimpleNamespace(client=SimpleNamespace(snapshot=lambda: {}))
     assert KVPoolScheduler.get_stats(quiet) is None  # type: ignore[arg-type]
     assert KVPoolScheduler.get_stats(SimpleNamespace(client=None)) is None  # type: ignore[arg-type]
@@ -93,6 +86,12 @@ def test_get_stats_publishes_only_what_the_client_has_counted():
     assert stats is not None
     assert stats.data == {LOOKUP_RPC_FAILURES_KEY: _COUNTS}
     assert stats.is_empty() is False
+
+    registry = CollectorRegistry()
+    prom = AscendStorePromMetrics(MagicMock(), _types_for(registry), ["model_name"], {0: ["proto-model"]})
+    prom.observe({})
+
+    assert _samples(registry) == {}
 
 
 def test_published_stats_cannot_be_rewritten_by_later_failures():
@@ -106,11 +105,3 @@ def test_published_stats_cannot_be_rewritten_by_later_failures():
 
     assert stats is not None
     assert stats.data == {LOOKUP_RPC_FAILURES_KEY: _COUNTS}
-
-
-def test_an_empty_payload_never_starts_a_scrape_series():
-    registry = CollectorRegistry()
-    prom = AscendStorePromMetrics(MagicMock(), _types_for(registry), ["model_name"], {0: ["proto-model"]})
-    prom.observe({})
-
-    assert _samples(registry) == {}

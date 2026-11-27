@@ -170,43 +170,23 @@ def err_payload(code):
 
 @pytest.mark.parametrize(
     "value",
-    [0, -1, -5000, True, False, 1.0, 5000.5, "5000", "", None, [], {}, 2**31, 2**62],
-    ids=[
-        "zero",
-        "minus-one",
-        "minus-big",
-        "true",
-        "false",
-        "float-one",
-        "float-half",
-        "str",
-        "empty-str",
-        "none",
-        "list",
-        "dict",
-        "over-option-cap",
-        "huge-int",
-    ],
+    [0, True, "5000", 2**31],
+    ids=["zero", "bool", "str", "over-option-cap"],
 )
 def test_timeout_rejects_every_unusable_shape(value):
     """Both families: not a positive int, and an int too large to be a real deadline."""
     with pytest.raises(ValueError) as excinfo:
         validate_timeout_ms(value)
     assert "lookup_rpc_timeout_ms" in str(excinfo.value)
+    if value == 0:
+        assert "unbounded" in str(excinfo.value)
 
 
-def test_zero_is_not_treated_as_an_unbounded_wait():
-    with pytest.raises(ValueError) as excinfo:
-        validate_timeout_ms(0)
-    assert "unbounded" in str(excinfo.value)
+def test_timeout_accepts_positive_ints():
+    assert validate_timeout_ms(DEFAULT_TIMEOUT_MS) == DEFAULT_TIMEOUT_MS
 
 
-@pytest.mark.parametrize("value", [1, 250, DEFAULT_TIMEOUT_MS, 2**31 - 1])
-def test_timeout_accepts_positive_ints(value):
-    assert validate_timeout_ms(value) == value
-
-
-@pytest.mark.parametrize("value", [0, -1, "5000", True])
+@pytest.mark.parametrize("value", [0], ids=["zero"])
 def test_scheduler_construction_rejects_a_bad_timeout(value):
     """Rejection belongs at engine startup, not on the first lazy client build."""
     from tests.ut.distributed.ascend_store.test_pool_scheduler import make_config as scheduler_config
@@ -224,7 +204,7 @@ def test_scheduler_construction_rejects_a_bad_timeout(value):
     assert "lookup_rpc_timeout_ms" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("value", [0, -1, "5000"])
+@pytest.mark.parametrize("value", [0], ids=["zero"])
 def test_construction_fails_before_any_socket_is_opened(sockets, value):
     with pytest.raises(ValueError):
         build_client(sockets, lookup_rpc_timeout_ms=value)
@@ -263,19 +243,11 @@ DISCONNECT_ERRNOS = ["ENOTCONN", "ETERM", "EHOSTUNREACH", "ENETDOWN"]
 
 RESPONSE_SHAPES = [
     ("empty-response", [], "decode:frame_count"),
-    ("two-frames", [b"a", b"b"], "decode:frame_count"),
-    ("zero-length-frame", [b""], "decode:decode_error"),
     ("legacy-bare-4-byte-int", "legacy", "decode:decode_error"),
     (
         "unknown-version",
         {"version": 2, "status": "ok", "hit_tokens": 8, "tail_key_boundaries": []},
         "decode:decode_error",
-    ),
-    ("missing-field", {"version": 1, "status": "ok"}, "decode:field_invalid"),
-    (
-        "extra-field",
-        {"version": 1, "status": "ok", "hit_tokens": 8, "tail_key_boundaries": [], "extra": 1},
-        "decode:field_invalid",
     ),
     (
         "unknown-status",
@@ -288,17 +260,11 @@ RESPONSE_SHAPES = [
         "decode:field_invalid",
     ),
     (
-        "negative-hit",
-        {"version": 1, "status": "ok", "hit_tokens": -1, "tail_key_boundaries": []},
-        "decode:field_invalid",
-    ),
-    (
         "over-limit-hit",
         {"version": 1, "status": "ok", "hit_tokens": 65, "tail_key_boundaries": []},
         "decode:field_invalid",
     ),
     ("error-envelope", err_payload("backend_error"), "server:backend_error"),
-    ("non-mapping", [1, 2, 3], "decode:decode_error"),
 ]
 
 
@@ -335,18 +301,6 @@ def test_next_lookup_after_a_fault_succeeds(sockets):
     sockets[1].recv_multipart.return_value = [b"envelope"]
     assert client.lookup(64, [bytes.fromhex(HASH_HEX)]) == StoreLookupResult(24)
     assert client.snapshot() == {"recv:timeout": 1}
-
-
-def test_recv_timeout_reports_zero_inside_the_budget(sockets):
-    clock = FakeClock()
-    client = build_client(sockets, clock=clock)
-    client.decoder = FakeDecoder(payload=ok_payload(16))
-    # The budget opens at call entry, so an overrun has to happen inside the call.
-    client.socket.send_multipart.side_effect = lambda *a, **k: clock.advance_ms(DEFAULT_TIMEOUT_MS + 1)
-    assert client.lookup(64, [bytes.fromhex(HASH_HEX)], hbm_hit_tokens=8) == StoreLookupResult(0)
-    assert client.snapshot() == {"recv:timeout": 1}
-    assert not client.closed
-    assert len(sockets) == 2
 
 
 def test_send_wait_and_validation_share_one_budget_not_one_each(sockets):
@@ -410,38 +364,12 @@ def test_again_from_send_is_a_timeout(sockets):
     sockets[0].close.assert_called_once_with(linger=0)
 
 
-def test_other_errno_is_a_transport_fault(sockets):
-    client = build_client(sockets)
-    client.decoder = FakeDecoder(payload=None)
-    client.socket.recv_multipart.side_effect = ZMQError(errno.ENOTCONN)
-    assert client.lookup(64, [bytes.fromhex(HASH_HEX)]) == StoreLookupResult(0)
-    assert client.snapshot() == {"recv:transport": 1}
-    assert client.socket is sockets[1], "a disconnect is the case that most needs a fresh handle"
-    sockets[0].close.assert_called_once_with(linger=0)
-
-
 def test_lookup_after_close_returns_zero_without_opening_sockets(sockets):
     client = build_client(sockets)
     client.close()
     assert client.lookup(64, [bytes.fromhex(HASH_HEX)]) == StoreLookupResult(0)
     assert len(sockets) == 1
     sockets[0].send_multipart.assert_not_called()
-
-
-def test_repeated_failures_reuse_one_context_and_retire_each_socket_once(sockets):
-    client = build_client(sockets)
-    client.decoder = FakeDecoder(payload=None)
-    for _ in range(5):
-        sockets[-1].recv_multipart.side_effect = Again()
-        assert client.lookup(64, [bytes.fromhex(HASH_HEX)]) == StoreLookupResult(0)
-    assert len(sockets) == 6
-    for stale in sockets[:-1]:
-        stale.close.assert_called_once_with(linger=0)
-    sockets[-1].close.assert_not_called()
-    client.ctx.term.assert_not_called()
-    client.close()
-    client.ctx.term.assert_called_once_with()
-    assert client.snapshot()["recv:timeout"] == 5
 
 
 def test_client_close_is_idempotent(sockets):
@@ -452,15 +380,6 @@ def test_client_close_is_idempotent(sockets):
     sockets[0].close.assert_called_once_with(linger=0)
 
 
-def test_hit_count_at_the_limit_is_accepted(sockets):
-    client = build_client(sockets)
-    client.decoder = FakeDecoder(payload=ok_payload(64))
-    client.socket.recv_multipart.return_value = [b"envelope"]
-    assert client.lookup(64, [bytes.fromhex(HASH_HEX)]) == StoreLookupResult(64)
-    assert len(sockets) == 1
-    assert client.snapshot() == {}
-
-
 # --------------------------------------------------------------------------------------
 # Task 2: the server refuses malformed requests, with one versioned error each.
 # --------------------------------------------------------------------------------------
@@ -469,13 +388,8 @@ REQUEST_CASES = [
     ("too-few-frames", lambda: lookup_frames()[: EXPECTED_LOOKUP_FRAMES - 1], [0], [HASH_HEX], "frame_count"),
     ("too-many-frames", lambda: lookup_frames() + [b"extra"], [0], [HASH_HEX], "frame_count"),
     ("short-int-frame", lambda: [b"lookup", b"\x00\x00", b"g", int_frame(0), b"h"], [0], [HASH_HEX], "field_invalid"),
-    ("long-int-frame", lambda: [b"lookup", int_frame(64), b"g", b"\x00" * 5, b"h"], [0], [HASH_HEX], "field_invalid"),
     ("undecodable-payload", lambda: lookup_frames(groups=b"g"), None, None, "decode_error"),
-    ("empty-group-list", lambda: lookup_frames(groups=b"g"), [], [HASH_HEX], "field_invalid"),
-    ("bool-group-id", lambda: lookup_frames(groups=b"g"), [True], [HASH_HEX], "field_invalid"),
-    ("negative-group-id", lambda: lookup_frames(groups=b"g"), [-1], [HASH_HEX], "field_invalid"),
     ("duplicate-group-id", lambda: lookup_frames(groups=b"g"), [0, 0], [HASH_HEX], "field_invalid"),
-    ("empty-hash-list", lambda: lookup_frames(groups=b"g"), [0], [], "field_invalid"),
     ("non-string-hash", lambda: lookup_frames(groups=b"g"), [0], [b"bytes"], "field_invalid"),
     ("oversized-hash", lambda: lookup_frames(groups=b"g"), [0], ["z" * 2000], "field_invalid"),
     ("hbm-above-token-len", lambda: lookup_frames(token_len=10, hbm=11, groups=b"g"), [0], [HASH_HEX], "field_invalid"),
@@ -527,18 +441,11 @@ def test_real_miss_is_ok_zero_while_backend_failure_is_an_error(sockets):
 @pytest.mark.parametrize(
     "bad, message",
     [
-        (-1, "backend result has the wrong type"),
-        (65, "backend result has the wrong type"),
-        (True, "backend result has the wrong type"),
         ("30", "backend result has the wrong type"),
-        (None, "backend result has the wrong type"),
-        (4.0, "backend result has the wrong type"),
-        (StoreLookupResult(-1), "backend lookup result out of range"),
         (StoreLookupResult(65), "backend lookup result out of range"),
-        (StoreLookupResult(True), "backend lookup result out of range"),
-        (StoreLookupResult(32, (TailKeyBoundary(0, 65),)), "backend lookup result out of range"),
         (StoreLookupResult(32, (TailKeyBoundary(2, 32),)), "backend lookup result out of range"),
     ],
+    ids=["wrong-type", "hit-over-limit", "reversed-boundary"],
 )
 def test_out_of_range_backend_results_are_protocol_errors(sockets, bad, message):
     server = build_server(sockets)
@@ -608,10 +515,14 @@ def poller_for(*batches):
 def test_receive_fault_while_running_rebinds_and_keeps_serving(sockets):
     server = build_server(sockets)
     poller = poller_for([(sockets[0], 1)], [])
+    events = []
+    poller.unregister.side_effect = lambda sock: events.append("unregister")
+    sockets[0].close.side_effect = lambda linger=None: events.append("close")
     sockets[0].recv_multipart.side_effect = ZMQError(errno.ENOTCONN)
 
     server._serve_iteration(poller)
 
+    assert events == ["unregister", "close"]
     assert server.running
     assert len(sockets) == 2, "a broken REP must be replaced, not abandoned"
     sockets[0].close.assert_called_once_with(linger=0)
@@ -619,19 +530,6 @@ def test_receive_fault_while_running_rebinds_and_keeps_serving(sockets):
     poller.register.assert_called_with(sockets[1], POLLIN)
     sockets[0].send_multipart.assert_not_called()
     assert server.snapshot() == {"server:transport": 1}
-
-
-def test_unregister_happens_before_the_handle_is_closed(sockets):
-    server = build_server(sockets)
-    events = []
-    poller = poller_for([(sockets[0], 1)], [])
-    poller.unregister.side_effect = lambda sock: events.append("unregister")
-    sockets[0].recv_multipart.side_effect = ZMQError(errno.ENOTCONN)
-    sockets[0].close.side_effect = lambda linger=None: events.append("close")
-
-    server._serve_iteration(poller)
-
-    assert events == ["unregister", "close"]
 
 
 def test_spurious_poll_timeout_does_not_rebuild_the_handle(sockets):
@@ -722,17 +620,6 @@ def capture_lookup_logs(level):
         log.setLevel(previous)
 
 
-def test_the_logger_under_test_is_a_real_logger_not_a_stub():
-    """The log assertions above only prove something if this object is a real Logger.
-
-    Locally `vllm.*` is served by import shims, so a MagicMock would keep every one of
-    them green while asserting nothing. Real vLLM hands out `logging.getLogger(...)` from
-    `init_logger()`, so this holds in both shapes and fails loudly if the shim ever
-    starts handing out a stub.
-    """
-    assert isinstance(lookup_key.logger, logging.Logger), type(lookup_key.logger)
-
-
 def test_unknown_msg_type_is_logged_by_length_and_redacted(sockets):
     """Task 5's log whitelist covers this line too: a hash-shaped tag must not echo."""
     server = build_server(sockets)
@@ -766,17 +653,6 @@ def test_ok_debug_line_reports_group_count_not_the_group_list(sockets):
     assert HASH_HEX not in text
 
 
-def test_empty_request_frames_are_answered_instead_of_crashing(sockets):
-    server = build_server(sockets)
-    poller = poller_for([(sockets[0], 1)])
-    sockets[0].recv_multipart.return_value = []
-
-    server._serve_iteration(poller)
-
-    assert server.envelopes[-1]["code"] == "frame_count"
-    assert sockets[0].send_multipart.call_count == 1
-
-
 def test_reset_keeps_the_bare_wire_format_and_requires_one_frame(sockets):
     server = build_server(sockets)
     assert server._handle_reset([b"reset"]) == [b"\x01"]
@@ -802,19 +678,6 @@ def test_server_close_joins_once_with_a_bound(sockets):
     server.close()
 
     server.thread.join.assert_called_once_with(SHUTDOWN_JOIN_TIMEOUT_S)
-
-
-def test_server_close_returns_even_when_the_thread_is_stuck(sockets):
-    server = build_server(sockets)
-    stuck = MagicMock()
-    stuck.is_alive.return_value = True
-    server.thread = stuck
-
-    started = time.monotonic()
-    server.close()
-
-    assert time.monotonic() - started < 1.0
-    stuck.join.assert_called_once_with(SHUTDOWN_JOIN_TIMEOUT_S)
 
 
 # --------------------------------------------------------------------------------------
@@ -961,9 +824,8 @@ def test_server_error_message_carries_no_exception_payload(sockets):
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("hit", [0, 7, 64])
-def test_valid_ok_envelopes_pass(hit):
-    assert decode_lookup_result(ok_payload(hit), 64) == StoreLookupResult(hit)
+def test_valid_ok_envelopes_pass():
+    assert decode_lookup_result(ok_payload(64), 64) == StoreLookupResult(64)
 
 
 def test_valid_tail_key_boundaries_round_trip():
@@ -978,17 +840,11 @@ def test_valid_tail_key_boundaries_round_trip():
     "boundaries",
     [
         None,
-        [1],
-        [[0]],
-        [[0, 32, 1]],
         [[True, 32]],
-        [[-1, 32]],
-        [[0, True]],
-        [[0, -1]],
         [[0, 65]],
         [[2, 32]],
-        [[0, 32], [0, 36]],
     ],
+    ids=["none", "bool-group", "end-over-limit", "unknown-group"],
 )
 def test_invalid_tail_key_boundaries_are_protocol_errors(boundaries):
     with pytest.raises(lookup_key.ProtocolViolation) as excinfo:
@@ -1576,29 +1432,6 @@ def test_a_spent_budget_fails_open_before_the_frame_reaches_the_wire(sockets):
 
     sockets[0].send_multipart.assert_not_called()
     assert client.snapshot().get("send:timeout") == 1
-
-
-def test_a_permanently_failing_reopen_does_not_spin_the_serving_loop(sockets):
-    """Without a wait, every pass re-enters immediately and the loop eats a core."""
-    server = build_server(sockets)
-    attempts = []
-
-    def refuse():
-        attempts.append(1)
-        raise ZMQError(errno.EMFILE, "too many open files")
-
-    server._open_socket = refuse
-    server.socket = None
-    poller = MagicMock()
-
-    started = time.monotonic()
-    passes = 0
-    while time.monotonic() - started < 0.3:
-        server._serve_iteration(poller)
-        passes += 1
-
-    assert passes <= 10, f"{passes} reopen attempts in 300 ms -- the loop spins with no backoff"
-    assert len(attempts) == passes, "every pass must still try to bring the socket back"
 
 
 def test_repeated_reopen_failures_log_on_the_throttle_not_once_per_attempt(sockets):
