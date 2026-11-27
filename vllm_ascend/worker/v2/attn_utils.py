@@ -78,12 +78,10 @@ from vllm_ascend.attention.utils import (
     supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
-    requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
@@ -95,7 +93,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
-from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -1023,36 +1020,6 @@ def _allocate_kv_cache(
             kv_cache_config,
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
         )
-    uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
-    has_shared_slot_descriptors = any(descriptor.layer_stride == 0 for descriptor in kv_cache_config.kv_cache_tensors)
-    # GLM-Next emits one descriptor for each physical cache slot. Layers
-    # listed by a descriptor deliberately alias that slot even when they
-    # belong to different scheduler groups (for example MLA and Mamba, or
-    # the compressed indexer and its state cache). This differs from the
-    # generic main layout, which treats descriptor layers as independent
-    # regions within one common backing.
-    if uses_padded_page_layout and has_shared_slot_descriptors:
-        slot_layers: set[str] = set()
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            names = get_kv_cache_tensor_layers(descriptor)
-            if (
-                not names
-                or descriptor.offset != 0
-                or descriptor.layer_stride != 0
-                or descriptor.block_stride <= 0
-                or descriptor.size != kv_cache_config.num_blocks * descriptor.block_stride
-                or any(layer_kv_cache_spec[name].page_size_bytes != descriptor.block_stride for name in names)
-            ):
-                raise ValueError("Invalid padded shared-slot KV cache descriptor geometry.")
-            slot_layers.update(names)
-        if layer_kv_cache_spec.keys() != (slot_layers | shared_layers.keys()):
-            raise ValueError("Padded shared-slot KV cache descriptors must cover every cache spec.")
-
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
-            for name in get_kv_cache_tensor_layers(descriptor):
-                kv_cache_raw_tensors[name] = backing
-        return kv_cache_raw_tensors
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -1107,14 +1074,6 @@ def _allocate_kv_cache(
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
-            continue
-
-        if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
-            # The compressed indexer and request-private tail share a physical
-            # small-page slot. Both need the same single backing allocation.
-            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
         example_layer_name = shared_names[0]
@@ -1929,24 +1888,6 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-                kv_caches[layer_name] = view_kpool_tail_cache(
-                    layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks
-                )
-                continue
-            if (
-                isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-                and getattr(kv_cache_spec, "model_version", None) == "glm5_next"
-                and get_kv_cache_compression_ratio(kv_cache_spec) > 1
-            ):
-                kv_caches[layer_name] = view_compressed_indexer_cache(
-                    layer_name,
-                    kv_cache_spec,
-                    raw_cache,
-                    group.backend,
-                    kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
-                )
-                continue
             if isinstance(kv_cache_spec, MambaSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
