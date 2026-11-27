@@ -546,9 +546,40 @@ def test_v2_mamba_state_copy_runs_after_all_connector_loads():
 def test_mamba_state_copy_rejects_non_model_state():
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector.requires_mamba_state_copy_after_layer_load = True
+    connector._mamba_state_copy_connectors = [SimpleNamespace(has_pending_layerwise_load=MagicMock(return_value=True))]
 
     with pytest.raises(TypeError, match="expects a mamba hybrid model state"):
         connector.prepare_mamba_state_copy(object())
+
+
+def test_mamba_state_copy_stays_bulk_without_child_layerwise_load():
+    child = SimpleNamespace(
+        requires_mamba_state_copy_after_layer_load=True,
+        has_pending_layerwise_load=MagicMock(return_value=False),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._mamba_state_copy_connectors = [child]
+    connector.requires_mamba_state_copy_after_layer_load = True
+    connector._mamba_state = None
+
+    assert connector.has_pending_layerwise_load() is False
+    assert connector.prepare_mamba_state_copy(MagicMock()) is False
+    assert connector._mamba_state is None
+
+
+def test_mamba_state_copy_defers_for_child_layerwise_load():
+    child = SimpleNamespace(
+        requires_mamba_state_copy_after_layer_load=True,
+        has_pending_layerwise_load=MagicMock(return_value=True),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._mamba_state_copy_connectors = [child]
+    connector.requires_mamba_state_copy_after_layer_load = True
+    connector._mamba_state = None
+    mamba_state = MagicMock()
+
+    assert connector.prepare_mamba_state_copy(mamba_state) is True
+    assert connector._mamba_state is mamba_state
 
 
 def test_mamba_state_copy_skipped_without_deferral():

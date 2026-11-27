@@ -167,9 +167,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         AscendStore requires PIECEWISE CUDA graph mode when layerwise
-        operations are enabled.
+        operations are enabled, except for the MemCache backend where the
+        layer operations remain outside the captured model graph.
         """
-        return extra_config.get("use_layerwise", False)
+        return extra_config.get("use_layerwise", False) and extra_config.get("backend", "mooncake") != "memcache"
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
@@ -478,13 +479,23 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._mamba_state is not None:
             self._mamba_state.do_mamba_copy_for_layer(layer_name)
 
+    def has_pending_layerwise_load(self) -> bool:
+        """Whether this step has pool data whose per-layer load needs a copy."""
+        if not self.use_layerwise or not self.has_connector_metadata():
+            return False
+        metadata = self._get_connector_metadata()
+        return any(
+            request.load_spec is not None and getattr(request.load_spec, "can_load", False)
+            for request in metadata.requests
+        )
+
     def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
         """Take over the mamba align pre-copy for this step.
 
         Each layer's copy is executed from :meth:`wait_for_layer_load` right
         after that layer's KV load (conv/ssm state included) completes.
         """
-        if not self.requires_mamba_state_copy_after_layer_load:
+        if not self.requires_mamba_state_copy_after_layer_load or not self.has_pending_layerwise_load():
             return False
         if not hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
             raise TypeError(

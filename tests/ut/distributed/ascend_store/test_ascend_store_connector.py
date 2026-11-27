@@ -842,7 +842,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
     def test_requires_piecewise_for_cudagraph(self):
         cases = [
             ({"use_layerwise": True}, True),
+            ({"use_layerwise": True, "backend": "memcache"}, False),
             ({"use_layerwise": False}, False),
+            ({"use_layerwise": False, "backend": "memcache"}, False),
             ({}, False),
         ]
         for config, expected in cases:
@@ -905,6 +907,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
                 role=KVConnectorRole.WORKER,
                 kv_cache_config=None,
             )
+            metadata = AscendConnectorMetadata(set())
+            metadata.requests = [types.SimpleNamespace(load_spec=types.SimpleNamespace(can_load=True))]
+            connector.bind_connector_metadata(metadata)
             mamba_state = MagicMock()
             mamba_state.do_mamba_copy_for_layer.side_effect = lambda layer: call_order.append("copy:" + layer)
             self.assertTrue(connector.prepare_mamba_state_copy(mamba_state))
@@ -920,7 +925,32 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         connector.requires_mamba_state_copy_after_layer_load = True
 
         with self.assertRaisesRegex(TypeError, "expects a mamba hybrid model state"):
+            connector.has_pending_layerwise_load = MagicMock(return_value=True)
             connector.prepare_mamba_state_copy(object())
+
+    def test_mamba_state_copy_stays_bulk_without_layerwise_load(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "create_kv_pool_worker"),
+            patch.object(self.connector_mod, "LookupKeyServer"),
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_consumer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            metadata = AscendConnectorMetadata(set())
+            metadata.requests = [types.SimpleNamespace(load_spec=None)]
+            connector.bind_connector_metadata(metadata)
+
+            self.assertFalse(connector.has_pending_layerwise_load())
+            self.assertFalse(connector.prepare_mamba_state_copy(MagicMock()))
 
     def _make_shared_layer_connector(self, mamba_state=True):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -989,6 +1019,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
                 role=KVConnectorRole.WORKER,
                 kv_cache_config=None,
             )
+            metadata = AscendConnectorMetadata(set())
+            metadata.requests = [types.SimpleNamespace(load_spec=types.SimpleNamespace(can_load=True))]
+            connector.bind_connector_metadata(metadata)
             self.assertTrue(connector.prepare_mamba_state_copy(MagicMock()))
             connector.finish_mamba_state_copy()
 

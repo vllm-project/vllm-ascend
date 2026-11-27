@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -11,7 +12,9 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
     collect_storage_merged_register_regions,
+    get_ascend_store_extra_config,
     inject_qos,
+    uses_ascend_store,
 )
 
 ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
@@ -79,6 +82,54 @@ class TestAscendResourceConfig(unittest.TestCase):
             with self.assertRaises(ValueError):
                 inject_qos(1)
             log.info.assert_not_called()
+
+
+class TestAscendStoreConfig(unittest.TestCase):
+    def test_detects_direct_store_and_preserves_extra_config(self):
+        for connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
+            extra_config = {"backend": "memcache", "use_layerwise": True}
+            transfer = SimpleNamespace(
+                kv_connector=connector_name,
+                kv_connector_extra_config=extra_config,
+            )
+            self.assertTrue(uses_ascend_store(transfer))
+            self.assertIs(get_ascend_store_extra_config(transfer), extra_config)
+
+    def test_detects_nested_store_without_assuming_child_order(self):
+        extra_config = {"backend": "memcache", "use_layerwise": True}
+        transfer = SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "MooncakeConnectorV2"},
+                    {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": extra_config},
+                ]
+            },
+        )
+        self.assertTrue(uses_ascend_store(transfer))
+        self.assertIs(get_ascend_store_extra_config(transfer), extra_config)
+
+    def test_ignores_absent_or_malformed_config(self):
+        cases = [
+            None,
+            SimpleNamespace(),
+            SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+            SimpleNamespace(kv_connector="MultiConnector", kv_connector_extra_config=None),
+            SimpleNamespace(kv_connector="MultiConnector", kv_connector_extra_config={"connectors": None}),
+            SimpleNamespace(
+                kv_connector="MultiConnector",
+                kv_connector_extra_config={"connectors": [None, "bad", {"kv_connector": "OtherConnector"}]},
+            ),
+        ]
+        for transfer in cases:
+            with self.subTest(transfer=transfer):
+                self.assertFalse(uses_ascend_store(transfer))
+                self.assertIsNone(get_ascend_store_extra_config(transfer))
+
+    def test_store_without_extra_config_is_still_detected(self):
+        transfer = SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config=None)
+        self.assertTrue(uses_ascend_store(transfer))
+        self.assertEqual(get_ascend_store_extra_config(transfer), {})
 
 
 class TestKVRegisterRegions(unittest.TestCase):
