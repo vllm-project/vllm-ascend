@@ -628,55 +628,6 @@ Set `num_speculative_tokens` on the prefill and decode roles when speculative de
 
 See the [P/D deployment guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for role-specific serving and parallelism settings.
 
-### Dynamic Speculative Decoding
-
-Add `num_speculative_tokens_per_batch_size` to `speculative_config`.
-Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
-range. A draft length of 0 disables drafting for that range.
-
-The following settings use three, one, or zero draft tokens as the batch grows.
-
-**Offline inference**
-
-```python
-from vllm import LLM, SamplingParams
-
-llm = LLM(
-    model="Qwen/Qwen3-8B",
-    enforce_eager=True,
-    speculative_config={
-        "method": "eagle3",
-        "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
-        "num_speculative_tokens": 3,
-        "num_speculative_tokens_per_batch_size": [
-            [1, 64, 3],
-            [65, 128, 1],
-            [129, 512, 0],
-        ],
-    },
-)
-sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
-outputs = llm.generate(["The future of AI is"], sampling_params)
-print(outputs[0].outputs[0].text)
-```
-
-**Online serving**
-
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
-  --speculative-config '{
-    "method":"eagle3",
-    "model":"RedHatAI/Qwen3-8B-speculator.eagle3",
-    "num_speculative_tokens":3,
-    "num_speculative_tokens_per_batch_size":[[1,64,3],[65,128,1],[129,512,0]]
-  }'
-```
-
-Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a fixed
-draft length. Ascend rejects DCP greater than 1 when the dynamic schedule is
-active.
-
 ### Adaptive Verification
 
 With a DSpark checkpoint that has a confidence head, set
@@ -795,3 +746,52 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     Enable RecoverSSM on both roles and match the model weights, speculative
     method and window, draft checkpoint if used, prefix-caching settings,
     state dtypes, and convolution layout.
+
+### Dynamic Speculative Decoding
+
+Add `num_speculative_tokens_per_batch_size` to `speculative_config`.
+Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
+range. A draft length of 0 disables drafting for that range.
+
+The following settings use three, one, or zero draft tokens as the batch grows.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    enforce_eager=True,
+    speculative_config={
+        "method": "eagle3",
+        "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": [
+            [1, 64, 3],
+            [65, 128, 1],
+            [129, 512, 0],
+        ],
+    },
+)
+sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+outputs = llm.generate(["The future of AI is"], sampling_params)
+print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method":"eagle3",
+    "model":"RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens":3,
+    "num_speculative_tokens_per_batch_size":[[1,64,3],[65,128,1],[129,512,0]]
+  }'
+```
+
+Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a fixed
+draft length. Ascend rejects DCP greater than 1 when the dynamic schedule is
+active.
