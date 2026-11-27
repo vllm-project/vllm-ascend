@@ -31,7 +31,7 @@ from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_ep_group, get_pp_group
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.lora.layers import LoRAMappingType
@@ -109,7 +109,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
-from vllm_ascend.lora.fused_moe import AscendFusedMoEWithLoRA
 from vllm_ascend.lora.moe_dp import MoELoRACoordinator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
@@ -343,17 +342,9 @@ class NPUModelRunner(GPUModelRunner):
 
     def load_lora_model(self, model: torch.nn.Module, vllm_config: VllmConfig, device: torch.device):
         model = super().load_lora_model(model, vllm_config, device)
-        self._moe_lora_coordinator = None
-        if vllm_config.parallel_config.data_parallel_size > 1:
-            wrappers = {
-                module.punica_wrapper for module in model.modules() if isinstance(module, AscendFusedMoEWithLoRA)
-            }
-            if wrappers:
-                # EP's CPU group spans the DP/TP/PCP ranks that share experts,
-                # including the flattened MoE-TP layout without expert parallelism.
-                self._moe_lora_coordinator = MoELoRACoordinator(
-                    self.lora_manager, list(wrappers), get_ep_group().cpu_group
-                )
+        self._moe_lora_coordinator = MoELoRACoordinator.from_model(
+            model, self.lora_manager, dp_size=vllm_config.parallel_config.data_parallel_size
+        )
         return model
 
     def _set_active_loras(
