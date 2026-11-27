@@ -39,13 +39,14 @@ import http.client
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 DEFAULT_TOLERANCE = 0.05
 DEFAULT_BENCH_TIMEOUT_SECONDS = 7200.0

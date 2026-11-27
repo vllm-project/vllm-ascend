@@ -23,11 +23,11 @@ no network access is needed.
 
 import asyncio
 import json
-import re
 import time
 
 import aiohttp
 import pytest
+import regex as re
 
 from examples.disaggregated_encoder import disagg_epd_proxy as proxy
 
