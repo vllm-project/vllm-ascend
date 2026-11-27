@@ -24,6 +24,7 @@ from vllm_ascend.models.deepseek_v41.engram.npu import (
     HostUvaBufferCleanupError,
     SharedUvaBuffer,
 )
+from vllm_ascend.models.deepseek_v41.engram.shared_pool import ple_checkpoint_index
 from vllm_ascend.models.deepseek_v41.engram.shared_rdma import _reader_operation
 from vllm_ascend.models.host_offload import register_host_offload_owner
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
@@ -37,7 +38,9 @@ class PLECheckpoint:
 
     def __init__(self, model):
         root = Path(model)
-        index_path = root / "model.safetensors.index.json"
+        index_path = ple_checkpoint_index(root)
+        if index_path is None:
+            raise ValueError("shared PLE requires a safetensors checkpoint index")
         index = json.loads(index_path.read_text())["weight_map"]
         pattern = re.compile(r"^(.*\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding)\.shard_(\d+)\.weight$")
         matches = [

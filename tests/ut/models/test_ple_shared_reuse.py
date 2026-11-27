@@ -30,6 +30,24 @@ def checkpoint(tmp_path):
     return tmp_path, data
 
 
+@pytest.mark.parametrize(
+    "index_name",
+    ["model.safetensors.index.json", "quant_model_weights.safetensors.index.json"],
+)
+def test_checkpoint_supports_both_index_names(checkpoint, index_name):
+    root, data = checkpoint
+    default = root / "model.safetensors.index.json"
+    if index_name != default.name:
+        default.rename(root / index_name)
+    from vllm_ascend.models.deepseek_v41.engram.shared_pool import has_ple_checkpoint
+
+    assert has_ple_checkpoint(root)
+    table = ple.PLECheckpoint(root)
+    out = torch.empty(data.shape, dtype=torch.bfloat16)
+    table.copy_rows(out, 0)
+    assert torch.equal(out, data)
+
+
 def test_checkpoint_inference_and_padded_bm_publication(checkpoint, monkeypatch):
     root, data = checkpoint
     from vllm_ascend.models.deepseek_v41.engram.shared_pool import has_ple_checkpoint
