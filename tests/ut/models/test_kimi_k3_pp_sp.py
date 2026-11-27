@@ -12,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -734,7 +736,11 @@ def test_host_positions_after_rejection_or_chunk(
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
+    namespace: dict[str, Any] = {
+        "BaseStateRunner": BaseStateRunner,
+        "MambaHybridModelState": type("MambaHybridModelState", (), {}),
+        "np": np,
+    }
     load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41"}, namespace)
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
@@ -768,7 +774,8 @@ def test_host_positions_after_rejection_or_chunk(
     )
     runner.num_computed_tokens_cpu = torch.tensor([35])
     runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: events.append("wait"))
-    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(1, dtype=torch.int64))
+    seq_lens_cpu = torch.zeros(1, dtype=torch.int64)
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=seq_lens_cpu, seq_lens_np=seq_lens_cpu.numpy())
     if prefill_chunk:
         runner.postprocess_num_computed_tokens(SimpleNamespace())
         expected_position = 27

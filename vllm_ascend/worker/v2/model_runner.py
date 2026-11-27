@@ -159,6 +159,18 @@ if TYPE_CHECKING:
     from vllm.v1.worker.utils import AttentionGroup
 
 
+def count_draft_tokens_per_req(
+    draft_tokens: dict[str, list[int]],
+    req_ids: list[str],
+) -> np.ndarray:
+    """Scheduled draft token count of each request, in batch order."""
+    return np.fromiter(
+        (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+        dtype=np.int32,
+        count=len(req_ids),
+    )
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -980,15 +992,14 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
+        # Count draft tokens once: the same per-request counts also give the
+        # valid token count build_attn_state needs.
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_draft_tokens_per_req = None
         num_valid_tokens = num_scheduled_tokens_np
-        if scheduler_output.scheduled_spec_decode_tokens:
-            num_valid_tokens = np.array(
-                [
-                    num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                ],
-                dtype=np.int32,
-            )
+        if draft_tokens:
+            num_draft_tokens_per_req = count_draft_tokens_per_req(draft_tokens, req_ids)
+            num_valid_tokens = (num_scheduled_tokens_np - num_draft_tokens_per_req).astype(np.int32, copy=False)
         attn_state = build_attn_state(
             self.vllm_config,
             self.input_buffers.seq_lens_np,
@@ -998,9 +1009,6 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config=self.kv_cache_config,
         )
 
-        # Get the number of draft tokens for each request.
-        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
@@ -1010,11 +1018,7 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
-            )
+            assert num_draft_tokens_per_req is not None
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
@@ -1586,22 +1590,40 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        req_id_to_index = self.req_states.req_id_to_index
+        # The mirrors are CPU tensors; ``.numpy()`` is zero-copy, so bulk writes
+        # stay visible to the torch views (and to the PCP NumPy state) while
+        # avoiding ~8 us per element for scalar tensor indexing.
+        num_computed_tokens_cpu = self.req_states.num_computed_tokens_cpu.numpy()
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
         if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+            cached_req_ids = scheduler_output.scheduled_cached_reqs.req_ids
+            if cached_req_ids:
+                cached_indices = np.fromiter(
+                    (req_id_to_index[req_id] for req_id in cached_req_ids),
+                    dtype=np.int64,
+                    count=len(cached_req_ids),
+                )
+                d2h_num_computed_tokens_cpu = self.num_computed_tokens_cpu.numpy()
+                num_computed_tokens_cpu[cached_indices] = d2h_num_computed_tokens_cpu[cached_indices]
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        req_indices = np.fromiter(
+            (req_id_to_index[req_id] for req_id in req_ids),
+            dtype=np.int64,
+            count=len(req_ids),
+        )
+        scheduled_tokens = np.fromiter(
+            (num_scheduled_tokens[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=len(req_ids),
+        )
+        self.input_buffers.seq_lens_np[: len(req_ids)] = num_computed_tokens_cpu[req_indices] + scheduled_tokens
 
     def _pad_query_start_loc_for_fia(
         self,

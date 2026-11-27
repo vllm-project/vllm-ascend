@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -70,6 +71,7 @@ def runner_cls(mamba_state_cls):
         "Parent": Parent,
         "MambaHybridModelState": mamba_state_cls,
         "QWEN_FA3_TARGETS": {"Qwen3_5ForConditionalGeneration"},
+        "np": np,
     }
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
     predicate = next(
@@ -117,7 +119,8 @@ def test_exact_counts_after_rejection_or_chunk(
     runner.req_states = SimpleNamespace(
         req_id_to_index={"cached": 0, "new": 1}, num_computed_tokens_cpu=torch.tensor([35, 128])
     )
-    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(2, dtype=torch.int32))
+    seq_lens_cpu = torch.zeros(2, dtype=torch.int32)
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=seq_lens_cpu, seq_lens_np=seq_lens_cpu.numpy())
     if prefill_chunk:
         runner.postprocess_num_computed_tokens(SimpleNamespace(num_scheduled_tokens=8))
     else:
@@ -340,7 +343,8 @@ def test_fa3_skips_cpu_snapshot_and_wait(fa3_runner):
     namespace[copy.name](runner)
     runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: pytest.fail("unexpected CPU wait"))
     runner.req_states = SimpleNamespace(req_id_to_index={"cached": 0}, num_computed_tokens_cpu=torch.tensor([20]))
-    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(1, dtype=torch.int32))
+    seq_lens_cpu = torch.zeros(1, dtype=torch.int32)
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=seq_lens_cpu, seq_lens_np=seq_lens_cpu.numpy())
     scheduler = SimpleNamespace(
         num_scheduled_tokens={"cached": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["cached"])
     )
