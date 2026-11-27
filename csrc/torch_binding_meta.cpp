@@ -511,6 +511,20 @@ void npu_fused_scatter_copy_sparse_flash_attention_meta(
 {
 }
 
+void npu_lim_copy_descriptors_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&)
+{
+}
+
+void npu_lim_copy_descriptors_linear_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&)
+{
+    // No-output operator: the effect is the miss-plan copy itself.
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -1884,6 +1898,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Fused copy and sparse flash attention for MTP
     ops.impl("npu_fused_scatter_copy_sparse_flash_attention",
              &vllm_ascend::meta::npu_fused_scatter_copy_sparse_flash_attention_meta);
+    // Side-stream miss-plan onboarding copies (group pre-copy)
+    ops.impl("npu_lim_copy_descriptors",
+             &vllm_ascend::meta::npu_lim_copy_descriptors_meta);
+    ops.impl("npu_lim_copy_descriptors_linear",
+             &vllm_ascend::meta::npu_lim_copy_descriptors_linear_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Add_Rms_Norm_Bias

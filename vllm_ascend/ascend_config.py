@@ -1847,11 +1847,43 @@ class SparseKVOffloadConfig:
     store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    # offload_shared_indexer_only: keep the KV cache of full (indexer-owner)
+    # layers resident in NPU HBM paged caches and only offload the
+    # shared-indexer layers. Full layers then run the standard (non-offload)
+    # decode flow - no miss onboarding, no D2H, attention straight over the
+    # paged cache - while owners with shared members still produce the
+    # selection so their group reuses it (the LIM operator on the fused
+    # Copy-SFA path, the external LRU plan run at owner attention time on
+    # the fused_overlap path).
+    offload_shared_indexer_only: bool = False
+    # miss_onboard_mode: how miss KV rows are moved from the host DRAM pool
+    # into the decode-time resident rows of the offloaded shared layers.
+    # Unset / "inline" (default): the fused attention operator resolves misses
+    #         inside the kernel (host reads in the critical path).
+    # "side_stream": during the resident owner's forward, one pre-copy launch
+    #         per shared member moves the group's landed prefix misses into
+    #         the resident rows on a side stream, hidden behind the owner's
+    #         SFA + MoE compute. The pre-copied rows are then encoded as hits
+    #         in the plan, so the fused operator reads them directly and never
+    #         re-copies: the fused Copy-SFA members run with an all-zero miss
+    #         plan (pure direct-addressed HBM attention), and the
+    #         fused_overlap members read the selection rows without the
+    #         inline host-pool gather. The speculative suffix (this step's
+    #         not-yet-written-back tokens) always stays on the inline path -
+    #         its data has not landed at pre-copy time. Requires
+    #         offload_shared_indexer_only and the corresponding operator
+    #         registration in vllm_ascend_C; auto-falls back to inline with a
+    #         warning when unavailable.
+    miss_onboard_mode: str = "inline"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
         """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
         return self.enabled and not self.use_fused_overlap
+
+    @property
+    def use_side_stream_onboard(self) -> bool:
+        return self.miss_onboard_mode == "side_stream"
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1861,6 +1893,17 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         if not 1 <= self.store_port_base <= 65535:
             raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
+        if self.miss_onboard_mode not in ("inline", "side_stream"):
+            raise ValueError(
+                f"sparse_kv_offload_config.miss_onboard_mode must be inline or "
+                f"side_stream, got {self.miss_onboard_mode!r}"
+            )
+        if self.use_side_stream_onboard and not self.offload_shared_indexer_only:
+            raise ValueError(
+                "sparse_kv_offload_config.miss_onboard_mode=side_stream requires "
+                "offload_shared_indexer_only=true (the side stream is driven by "
+                "the group owner's selection)"
+            )
         return self
 
     @classmethod

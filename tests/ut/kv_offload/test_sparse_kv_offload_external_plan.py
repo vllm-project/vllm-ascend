@@ -206,6 +206,7 @@ def _make_plan_manager():
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
     manager.use_fused_overlap = True
     manager.tp_rank = 0
+    manager.tp_size = 1
     manager.topk = 4
     manager.topk_buffer_size = 8
     manager.max_model_len = 64
@@ -560,3 +561,77 @@ def test_current_kv_injection_uses_planner_linear_slots_and_sentinel():
     torch.testing.assert_close(selection_kv[0], torch.tensor([0.0, 1.0]))
     torch.testing.assert_close(selection_rope[0], torch.tensor([0.0]))
     assert scatter_op.call_count == 2
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_capture_inject_waits_current_kv_writeback_before_selection_scatter(tp_rank):
+    """The fused attention operator's inline miss gather reads the CPU pool
+    after the inject scatter. Under the owner-time group plan the plan no
+    longer joins current_kv_save_stream, so the inject itself must order this
+    step's D2H writeback (capture mode side stream, TP0-only writer) before
+    the first pool consumer — otherwise a multi-token step whose rows select
+    sibling new tokens gathers pool rows whose writeback is still in flight."""
+    manager = _make_plan_manager()
+    manager.tp_rank = tp_rank
+    manager.fused_plan_stream = MagicMock()
+    manager.current_kv_save_stream = MagicMock()
+    manager.current_kv_by_layer[0] = (
+        torch.arange(8, dtype=torch.float32).reshape(2, 4),
+        torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    )
+    current_stream = MagicMock()
+    calls = []
+    current_stream.wait_stream.side_effect = lambda stream: calls.append(("wait_stream", stream))
+    with (
+        patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current_stream),
+        patch.object(
+            manager_module.torch_npu,
+            "npu_scatter_nd_update_",
+            side_effect=lambda *args: calls.append(("scatter",)),
+        ),
+    ):
+        manager.inject_current_kv_into_selection(
+            layer_name="layer.0",
+            num_tokens=2,
+            selection_kv_cache=torch.zeros(4, 4),
+            selection_k_rope=torch.zeros(4, 2),
+            capturing=True,
+        )
+    waited = [call[1] for call in calls if call[0] == "wait_stream"]
+    if tp_rank == 0:
+        # The save-stream join is the last ordering operation before the
+        # scatter that feeds the fused operator's pool reads.
+        assert manager.current_kv_save_stream in waited
+        assert calls.index(("wait_stream", manager.current_kv_save_stream)) < calls.index(("scatter",))
+    else:
+        # Only TP0 writes the shared pool, so only TP0 has save-stream work
+        # to join.
+        assert manager.current_kv_save_stream not in waited
+    assert calls[-1] == ("scatter",)
+    # The plan stream is joined on every rank in capture mode.
+    assert manager.fused_plan_stream in waited
+
+
+def test_eager_inject_does_not_join_save_stream():
+    """Eager execution keeps the D2H on the current compute stream, so the
+    inject never needs a save-stream join."""
+    manager = _make_plan_manager()
+    manager.fused_plan_stream = MagicMock()
+    manager.current_kv_save_stream = MagicMock()
+    manager.current_kv_by_layer[0] = (
+        torch.arange(8, dtype=torch.float32).reshape(2, 4),
+        torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    )
+    current_stream = MagicMock()
+    with (
+        patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current_stream),
+        patch.object(manager_module.torch_npu, "npu_scatter_nd_update_"),
+    ):
+        manager.inject_current_kv_into_selection(
+            layer_name="layer.0",
+            num_tokens=2,
+            selection_kv_cache=torch.zeros(4, 4),
+            selection_k_rope=torch.zeros(4, 2),
+            capturing=False,
+        )
+    current_stream.wait_stream.assert_not_called()

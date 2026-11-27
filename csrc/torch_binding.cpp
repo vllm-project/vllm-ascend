@@ -50,6 +50,8 @@
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "attention/indexer_region_score/indexer_region_score_torch_adpt.h"
+#include "attention/lim_copy_descriptors/lim_copy_descriptors_torch_adpt.h"
+#include "attention/lim_copy_descriptors_linear/lim_copy_descriptors_linear_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
@@ -2428,7 +2430,8 @@ FORCE_INLINE void process_one_lru_resident_row(
     int32_t* RESTRICT miss_slots_out, int32_t* RESTRICT token_mark, int32_t* RESTRICT token_pos,
     int32_t* RESTRICT slot_workspace, int32_t* RESTRICT miss_positions, int32_t* RESTRICT epoch,
     int32_t* RESTRICT current_token_slots, int16_t* RESTRICT encoded_plan, const int32_t encoded_plan_stride,
-    const bool encode_physical_row, const int32_t* RESTRICT visible_seq_lens) {
+    const bool encode_physical_row, const int32_t* RESTRICT visible_seq_lens,
+    const bool mark_misses_resident = false) {
   int32_t* RESTRICT slot_to_token_row = slot_to_token + static_cast<int64_t>(physical_row) * capacity;
   int32_t* RESTRICT lru_slots_row = lru_slots + static_cast<int64_t>(physical_row) * capacity;
   int32_t* RESTRICT current_slots_row = current_slots + static_cast<int64_t>(logical_row) * topk;
@@ -2519,6 +2522,16 @@ FORCE_INLINE void process_one_lru_resident_row(
   }
 
   const int32_t assign_count = std::min(local_miss_count, evictable_count);
+  // mark_misses_resident (group side-stream pre-copy): prefix misses
+  // (token < stable_prefix_len) are filled by the side-stream copy kernel
+  // before any member kernel reads the plan, so they are encoded as HITS
+  // (positive) and listed for the pre-copy. The speculative suffix
+  // (token >= stable_prefix_len) is excluded from the pre-copy lists: its
+  // CPU-pool writeback is still in flight at pre-copy time, so those
+  // tokens keep the inline miss resolution inside the member kernels
+  // (their data has landed by then). Slots and LRU state are maintained
+  // identically for every assigned miss either way.
+  int32_t listed_miss_count = 0;
   for (int32_t miss_idx = 0; miss_idx < assign_count; ++miss_idx) {
     const int32_t slot = evictable_slots[miss_idx];
     const int32_t token = miss_tokens_row[miss_idx];
@@ -2528,14 +2541,21 @@ FORCE_INLINE void process_one_lru_resident_row(
     if (token == visible_seq_len - 1) {
       current_token_slot = slot;
     }
+    const bool pre_copied = mark_misses_resident && token < stable_prefix_len;
     if (encoded_plan_row != nullptr) {
       const bool is_current_token = visible_seq_lens != nullptr && token == visible_seq_len - 1;
-      encoded_plan_row[pos] = static_cast<int16_t>(is_current_token ? slot + 1 : -(slot + 1));
+      encoded_plan_row[pos] = static_cast<int16_t>(
+          (is_current_token || pre_copied) ? slot + 1 : -(slot + 1));
     }
-    miss_slots_row[miss_idx] = slot;
     assigned_miss_slots[miss_idx] = slot;
-    miss_count[logical_row] = miss_idx + 1;
+    if (mark_misses_resident && !pre_copied) {
+      continue;
+    }
+    miss_tokens_row[listed_miss_count] = token;
+    miss_slots_row[listed_miss_count] = slot;
+    ++listed_miss_count;
   }
+  miss_count[logical_row] = listed_miss_count;
 
   int32_t write_pos = 0;
   for (int32_t idx = assign_count; idx < evictable_count; ++idx) {
@@ -2562,7 +2582,8 @@ HOT_FUNCTION void lru_resident_compact_impl(
     uintptr_t token_pos_workspace_ptr, uintptr_t slot_workspace_ptr, uintptr_t miss_position_workspace_ptr,
     uintptr_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity, int64_t max_token,
     int64_t workspace_threads, int64_t requested_threads, uintptr_t encoded_plan_ptr, int64_t encoded_plan_stride,
-    uintptr_t physical_row_workspace_ptr, int64_t physical_row_capacity, uintptr_t visible_seq_lens_ptr) {
+    uintptr_t physical_row_workspace_ptr, int64_t physical_row_capacity, uintptr_t visible_seq_lens_ptr,
+    bool mark_misses_resident = false) {
   if (num_reqs <= 0 || topk <= 0 || capacity <= 0 || max_token <= 0 || physical_row_capacity < num_reqs) {
     return;
   }
@@ -2648,7 +2669,7 @@ HOT_FUNCTION void lru_resident_compact_impl(
                                    miss_count, miss_tokens, miss_slots, token_mark_workspace, token_pos_workspace,
                                    slot_workspace, miss_position_workspace, epochs, current_token_slots, encoded_plan,
                                    static_cast<int32_t>(encoded_plan_stride), logical_to_physical != nullptr,
-                                   visible_seq_lens);
+                                   visible_seq_lens, mark_misses_resident);
     }
     return;
   }
@@ -2667,7 +2688,7 @@ HOT_FUNCTION void lru_resident_compact_impl(
                                    topk_indices, stable_prefix_lens, slot_to_token, lru_slots, current_slots,
                                    miss_count, miss_tokens, miss_slots, token_mark, token_pos, slots, miss_positions,
                                    epoch, current_token_slots, encoded_plan, static_cast<int32_t>(encoded_plan_stride),
-                                   logical_to_physical != nullptr, visible_seq_lens);
+                                   logical_to_physical != nullptr, visible_seq_lens, mark_misses_resident);
     }
   }
 }
@@ -2679,7 +2700,8 @@ HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
     int64_t token_pos_workspace_ptr, int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
     int64_t epochs_ptr, int64_t physical_row_workspace_ptr, int64_t physical_row_capacity,
     int64_t encoded_plan_ptr, int64_t encoded_plan_stride, int64_t num_reqs, int64_t topk, int64_t capacity,
-    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr) {
+    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr,
+    bool mark_misses_resident) {
   TORCH_CHECK(physical_row_workspace_ptr != 0, "stable-row planner requires physical_row_workspace_ptr");
   TORCH_CHECK(physical_row_capacity >= num_reqs, "stable-row planner capacity must cover all logical rows");
   TORCH_CHECK(physical_row_capacity <= std::numeric_limits<int16_t>::max(),
@@ -2693,7 +2715,8 @@ HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
                             token_mark_workspace_ptr, token_pos_workspace_ptr, slot_workspace_ptr,
                             miss_position_workspace_ptr, epochs_ptr, num_reqs, topk, capacity, max_token,
                             workspace_threads, requested_threads, encoded_plan_ptr, encoded_plan_stride,
-                            physical_row_workspace_ptr, physical_row_capacity, visible_seq_lens_ptr);
+                            physical_row_workspace_ptr, physical_row_capacity, visible_seq_lens_ptr,
+                            mark_misses_resident);
 }
 
 namespace {
@@ -2725,6 +2748,7 @@ struct LruResidentCompactWithPlanPayload {
   int64_t max_token;
   int64_t workspace_threads;
   int64_t requested_threads;
+  bool mark_misses_resident;
   bool delete_after_run;
 };
 
@@ -2791,7 +2815,8 @@ void lru_resident_compact_with_plan_callback(void* args) noexcept {
       payload->token_pos_workspace_ptr, payload->slot_workspace_ptr, payload->miss_position_workspace_ptr,
       payload->epochs_ptr, payload->num_reqs, payload->topk, payload->capacity, payload->max_token,
       payload->workspace_threads, payload->requested_threads, payload->encoded_plan_ptr, payload->encoded_plan_stride,
-      payload->physical_row_workspace_ptr, payload->physical_row_capacity, payload->visible_seq_lens_ptr);
+      payload->physical_row_workspace_ptr, payload->physical_row_capacity, payload->visible_seq_lens_ptr,
+      payload->mark_misses_resident);
   if (payload->delete_after_run) {
     delete payload;
   }
@@ -2806,7 +2831,8 @@ void enqueue_lru_resident_compact_with_plan_stable_rows(
     int64_t token_pos_workspace_ptr, int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
     int64_t epochs_ptr, int64_t physical_row_workspace_ptr, int64_t physical_row_capacity,
     int64_t encoded_plan_ptr, int64_t encoded_plan_stride, int64_t num_reqs, int64_t topk, int64_t capacity,
-    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr) {
+    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr,
+    bool mark_misses_resident) {
   TORCH_CHECK(physical_row_workspace_ptr != 0, "stable-row planner requires physical_row_workspace_ptr");
   TORCH_CHECK(physical_row_capacity >= num_reqs, "stable-row planner capacity must cover all logical rows");
   TORCH_CHECK(physical_row_capacity <= std::numeric_limits<int16_t>::max(),
@@ -2855,6 +2881,7 @@ void enqueue_lru_resident_compact_with_plan_stable_rows(
           max_token,
           workspace_threads,
           requested_threads,
+          mark_misses_resident,
           !graph_lifetime});
   auto* raw_payload = payload.get();
   if (graph_lifetime) {
@@ -3081,7 +3108,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int miss_position_workspace_ptr, int epochs_ptr, int physical_row_workspace_ptr, "
             "int physical_row_capacity, int encoded_plan_ptr, int encoded_plan_stride, int num_reqs, "
             "int topk, int capacity, int max_token, int workspace_threads, int requested_threads, "
-            "int visible_seq_lens_ptr) -> ()");
+            "int visible_seq_lens_ptr, bool mark_misses_resident) -> ()");
     ops.impl("sparse_kv_lru_resident_compact_with_plan_stable_rows", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::lru_resident_compact_with_plan_stable_rows);
 
@@ -3092,7 +3119,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int miss_position_workspace_ptr, int epochs_ptr, int physical_row_workspace_ptr, "
             "int physical_row_capacity, int encoded_plan_ptr, int encoded_plan_stride, int num_reqs, "
             "int topk, int capacity, int max_token, int workspace_threads, int requested_threads, "
-            "int visible_seq_lens_ptr) -> ()");
+            "int visible_seq_lens_ptr, bool mark_misses_resident) -> ()");
     ops.impl("sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows",
              c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::enqueue_lru_resident_compact_with_plan_stable_rows);
@@ -3736,6 +3763,29 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_scatter_copy_sparse_flash_attention", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_scatter_copy_sparse_flash_attention);
+
+    // Side-stream miss-plan onboarding copies for the fused Copy-SFA
+    // pipeline (offload_shared_indexer_only + miss_onboard_mode=side_stream):
+    // per-request hot-row destinations.
+    ops.def(
+        "npu_lim_copy_descriptors("
+        "Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, "
+        "Tensor source_block_table, Tensor pool_entries, Tensor host_ptrs, "
+        "Tensor dev_ptrs, Tensor params, Tensor active_geometry) -> ()"
+    );
+    ops.impl("npu_lim_copy_descriptors", torch::kPrivateUse1,
+             &vllm_ascend::npu_lim_copy_descriptors);
+
+    // Side-stream miss-plan onboarding copies for the fused-overlap
+    // pipeline: linear destination slots into the selection buffer.
+    ops.def(
+        "npu_lim_copy_descriptors_linear("
+        "Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, "
+        "Tensor source_block_table, Tensor host_ptrs, "
+        "Tensor dev_ptrs, Tensor params, Tensor active_geometry) -> ()"
+    );
+    ops.impl("npu_lim_copy_descriptors_linear", torch::kPrivateUse1,
+             &vllm_ascend::npu_lim_copy_descriptors_linear);
 
     ops.def(
         "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "

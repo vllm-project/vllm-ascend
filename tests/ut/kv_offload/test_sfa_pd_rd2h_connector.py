@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import msgspec
 import pytest
+import torch
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
@@ -251,7 +252,6 @@ def _make_read_thread() -> MembPullReadThread:
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": ([3, 4], [8])},
-        get_offload_layer_id=lambda _: 0,
     )
     return thread
 
@@ -1333,7 +1333,6 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},
-        get_offload_layer_id=lambda _: 0,
     )
     return thread
 
@@ -1974,3 +1973,151 @@ def test_connector_reports_the_groups_its_scheduler_restores():
     connector.connector_scheduler.get_loaded_kv_cache_group_ids.return_value = (0, 1)
 
     assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 1)
+
+
+# ---------------------------------------------------------------------------
+# _register_memfabric_pull: per-rank GVA binding under offload_shared_indexer_only
+# ---------------------------------------------------------------------------
+
+
+def _make_consumer_worker_for_gva_test(tp_rank, layer_count_mismatch=False, full_gva_mismatch=False):
+    """A consumer worker whose offload manager exposes one shared (offloaded)
+    layer and one device-resident full layer, so ``_register_memfabric_pull``
+    has to bind a TP-shared CPU pool for the former and a rank-local HBM base
+    for the latter."""
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.tp_rank = tp_rank
+    worker.tp_size = 2
+    worker.side_channel_port = 30100
+    worker.engine = None  # _ensure_engine is stubbed; the read thread is a mock
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
+    worker.kv_cache_config = SimpleNamespace(num_blocks=16)
+    worker.offload_manager = SimpleNamespace(
+        offload_layer_names=["model.layers.1.self_attn.attn"],
+        full_resident_layer_names=["model.layers.0.self_attn.attn"],
+        # shared CPU pool (2 blocks x 8 elements per block, k and v)
+        k_caches_cpu=[torch.zeros(32, 8, dtype=torch.bfloat16)],
+        v_caches_cpu=[torch.zeros(32, 8, dtype=torch.bfloat16)],
+        gvas_k_bases=[1000],
+        gvas_v_bases=[2000],
+        cpu_block_lens=[(10, 20)] if not layer_count_mismatch else [],
+        # rank-local HBM bases of the device-resident full layer
+        full_resident_k_bases=[3000],
+        full_resident_v_bases=[4000] if not full_gva_mismatch else [],
+        full_resident_block_lens=[(10, 20)],
+    )
+    worker.dspark_draft_layer_names = set()
+    worker.layer_metadata = {}
+    worker._main_name_to_idx = {}
+    worker._main_gva_bases = []
+    worker._main_block_lens = []
+    worker._per_rank_dest = []
+    worker._cpu_pools = []
+    worker._indexer_tensors = []
+    worker._indexer_scale_tensors = []
+    worker._dest_blocks_by_req = {}
+    worker._copy_sfa_tail_by_req = {}
+    worker._topk_k_bases = []
+    worker._topk_v_bases = []
+    worker._topk_row_tokens = []
+    worker._topk_hot_tokens = []
+    worker._copy_sfa_block_size = None
+    worker._topk_base_index = 0
+    worker.dspark_draft_kv_metadata = None
+    worker._dspark_draft_blocks_by_req = {}
+    return worker
+
+
+def _run_register_memfabric_pull(worker, kv_caches):
+    """Run the real binding with the engine, read thread and tail-destination
+    bookkeeping stubbed out; the GVA/pool resolution under test is untouched."""
+    fake_thread = MagicMock()
+    fake_thread.ready_event.wait.return_value = True
+    fake_thread.startup_error = None
+    with (
+        patch.object(worker, "_ensure_engine"),
+        patch.object(worker, "_bind_copy_sfa_tail_destinations"),
+        patch.object(worker, "_gather_tp_read_status", create=True),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.MembPullReadThread",
+            return_value=fake_thread,
+        ) as thread_cls,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.infer_sfa_component_group_ids",
+            return_value=(0, 1),
+        ),
+    ):
+        worker._register_memfabric_pull(kv_caches)
+    return thread_cls.call_args.kwargs["state"]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_register_memfabric_pull_binds_full_resident_layer_to_rank_local_hbm(tp_rank):
+    # Shared layer pulls into the TP-shared CPU pool; the device-resident full
+    # layer carries this rank's own HBM base and is flagged per-rank so the
+    # read thread never splits it across D TP ranks.
+    worker = _make_consumer_worker_for_gva_test(tp_rank)
+    kv_caches = {
+        "model.layers.0.self_attn.attn": torch.zeros(16, 8, dtype=torch.bfloat16),
+        "model.layers.1.self_attn.attn": torch.zeros(16, 8, dtype=torch.bfloat16),
+    }
+    state = _run_register_memfabric_pull(worker, kv_caches)
+
+    full = worker.layer_metadata["model.layers.0.self_attn.attn"]
+    assert full.kv_caches_base_addr == [3000, 4000]
+    assert full.block_len == [10, 20]
+    assert full.block_size_scale == [1, 1]
+    assert full.main_tensor_count == 2
+    assert worker._per_rank_dest[worker._main_name_to_idx["model.layers.0.self_attn.attn"]] is True
+
+    assert worker._per_rank_dest[worker._main_name_to_idx["model.layers.1.self_attn.attn"]] is False
+
+    # The shared layer: TP0 pulls into the TP-shared CPU pool (handle-based,
+    # split across D TP ranks); other ranks hold no tensor and address the
+    # pool through the broadcast GVA on the read side.
+    shared = worker.layer_metadata["model.layers.1.self_attn.attn"]
+    k_cpu = worker.offload_manager.k_caches_cpu[0]
+    v_cpu = worker.offload_manager.v_caches_cpu[0]
+    if tp_rank == 0:
+        assert shared.kv_caches_base_addr == [k_cpu.data_ptr(), v_cpu.data_ptr()]
+        assert shared.block_len == [16, 16]  # 8 bf16 elements per block
+        assert shared.block_size_scale == [2, 2]  # 32 blocks / 16 num_blocks
+        assert shared.main_tensor_count == 2
+        assert worker._cpu_pools[1] == (k_cpu, v_cpu)
+    else:
+        assert shared.kv_caches_base_addr == []
+        assert shared.block_len == []
+        assert shared.block_size_scale == []
+        assert shared.main_tensor_count == 0
+        assert worker._cpu_pools[1] is None
+    # The full layer never has a CPU pool on any rank.
+    assert worker._cpu_pools[0] is None
+
+    # Read-thread state: every layer's GVA/block-len is populated so the
+    # consumer can address either destination; per_rank_dest marks the
+    # layer that must not be split across TP.
+    assert state.per_rank_dest == [True, False]
+    assert state.main_gva_bases == [(3000, 4000), (1000, 2000)]
+    assert state.main_block_lens == [(10, 20), (10, 20)]
+    assert state.cpu_pools == worker._cpu_pools
+
+
+def test_register_memfabric_pull_rejects_cpu_block_len_layer_count_mismatch():
+    worker = _make_consumer_worker_for_gva_test(tp_rank=0, layer_count_mismatch=True)
+    with pytest.raises(RuntimeError, match="block-size/layer count mismatch"):
+        _run_register_memfabric_pull(
+            worker,
+            {"model.layers.1.self_attn.attn": torch.zeros(16, 8, dtype=torch.bfloat16)},
+        )
+
+
+def test_register_memfabric_pull_rejects_full_resident_gva_layer_count_mismatch():
+    # The rank-local HBM base arrays must line up with the full-resident
+    # layer list; a short array means the manager and worker disagree on
+    # which layers are device-resident.
+    worker = _make_consumer_worker_for_gva_test(tp_rank=1, full_gva_mismatch=True)
+    with pytest.raises(RuntimeError, match="full-resident HBM base/layer count mismatch"):
+        _run_register_memfabric_pull(
+            worker,
+            {"model.layers.0.self_attn.attn": torch.zeros(16, 8, dtype=torch.bfloat16)},
+        )
