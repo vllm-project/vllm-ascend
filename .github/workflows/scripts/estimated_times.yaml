@@ -218,6 +218,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/test_kda_gate_cumsum_vllm.py: 30
   tests/e2e/pull_request/two_card/ops/test_kda_layout_swap12.py: 30
   tests/e2e/pull_request/two_card/ops/test_moe_gating_top_k_hash.py: 30
+  tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_bad_words.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_batch_memcpy.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_bincount.py: 50
