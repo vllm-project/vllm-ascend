@@ -354,8 +354,13 @@ class TestCaMem(PytestBase):
         data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor, is_asleep=True)
         allocator.pointer_to_data = {1000: data}
 
-        allocator.wake_up(tags=["tag1"])
+        with (
+            patch.object(torch.npu, "empty_cache") as empty_cache,
+            patch.object(torch.accelerator, "empty_cache", side_effect=AssertionError("requires a DeviceAllocator")),
+        ):
+            allocator.wake_up(tags=["tag1"])
 
+        empty_cache.assert_called_once_with()
         mock_create_and_map.assert_called_once_with(handle)
         assert data.cpu_backup_tensor is tensor
         assert mock_memcpy.called
