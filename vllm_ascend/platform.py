@@ -822,6 +822,7 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config)
+        _validate_direct_reload_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -1303,15 +1304,6 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         additional_config = dict(additional_config)
         additional_config["eplb_config"] = eplb_config
         vllm_config.additional_config = additional_config
-    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false"
-    ).lower() in ("true", "1"):
-        logger.warning(
-            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-            "additional_config.eplb_config supports only %s.",
-            sorted(_V2_EPLB_CONFIG_FIELDS),
-        )
     load_collection_phase = eplb_config.get("load_collection_phase", "all")
     # Disabled drafts inherit this target-only setting but never collect
     # EPLB load. Keep target validation strict and preserve other checks.
@@ -1334,6 +1326,19 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             upstream_eplb_config.use_async = True
         if vllm_config.parallel_config.enable_elastic_ep:
             raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
+
+
+def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
+    if (
+        getattr(envs_vllm, "VLLM_RELOAD_MODE", None) == "direct"
+        and ascend_config.enable_fused_mc2
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.is_moe
+    ):
+        raise ValueError(
+            "Direct weight reload does not support fused MC2 or MegaMoE. "
+            "Set enable_fused_mc2=0 or use VLLM_RELOAD_MODE=layerwise."
+        )
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:

@@ -4182,7 +4182,6 @@ Select the tab that matches your deployment hardware.
             export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
             export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
             export VLLM_ASCEND_DP_ALLREDUCE_ON_NPU=1
-            export DYNAMIC_EPLB=true
 
             unset ftp_proxy
             unset https_proxy

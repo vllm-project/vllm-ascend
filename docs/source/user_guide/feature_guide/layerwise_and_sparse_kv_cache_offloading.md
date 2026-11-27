@@ -70,13 +70,17 @@ There is no extra work to do on decode nodes.
 
 Requirements and limitations:
 
-- Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
-- `SfaRemoteD2HConnector` is the only supported connector to be used with prefill offload and decode offload.
+- Shared-buffer Layerwise Prefill Offload requires Memcache and a top-level
+  `kv_role` of `kv_producer`.
+- When graph execution is enabled with `use_layerwise: true` on
+  `AscendStoreConnector`, use `PIECEWISE` graph mode.
+- Use `SfaRemoteD2HConnector` when combining prefill offload with sparse decode offload.
 
 For a combined deployment, Prefill TP must be greater than or equal to Decode
 TP and divisible by it.
 
-Add the following options to the Prefill launch command. `MultiConnector` lets
+For the combined example, add the following options to the Prefill launch
+command, including `--enforce-eager`. `MultiConnector` lets
 `AscendStoreConnector` offload layer buffers to Memcache while
 `SfaRemoteD2HConnector` exposes the same buffers to Decode:
 
@@ -162,10 +166,12 @@ On Decode, reserve
 `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
 starting from `kv_port`.
 
+The following `sparse_kv_offload_config` options are supported:
+
 | Parameter | Description |
 | :--- | :--- |
 | `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
-| `dram_size_per_dp_GB` | Defaults to `110` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
+| `dram_size_per_dp_GB` | Defaults to `110` GB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
 | `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |
 | `store_port_base` | Defaults to `8500`. Base TCP port of the MemFabric shared offload store. The data parallel group `i` binds `store_port_base + i`. Independent services that share a network namespace must use distinct bases, otherwise they contend for the same endpoint. |
 

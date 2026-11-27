@@ -875,11 +875,9 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_t
     at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        // Match PR48's runtime adapter: arch22 scores are FP32, while
-        // Ascend950 retains BF16. Empty placeholders below remain BF16.
         const char *soc_name = aclrtGetSocName();
         const bool fp32_score =
-            (soc_name == nullptr) || (std::string(soc_name).find("Ascend950") == std::string::npos);
+            return_value == 2 && (soc_name == nullptr || std::string(soc_name).find("Ascend950") == std::string::npos);
         sparse_values_out = at::empty_symint(
             output_size, query.options().dtype(fp32_score ? at::kFloat : at::kBFloat16));
     } else {
@@ -904,7 +902,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
     int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
     bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_kv_cache_interleave_size,
-    const c10::optional<at::Tensor> &causal_seqlens_kv_global)
+    const c10::optional<at::Tensor> &causal_seqlens_kv_global, bool /*initialize_outputs*/)
 {
     std::string query_layout_str = std::string(layout_q);
     std::string key_layout_str = std::string(layout_k);

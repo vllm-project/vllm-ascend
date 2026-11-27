@@ -53,6 +53,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -495,6 +496,39 @@ class AscendKimiMoE(nn.Module):
             router_logits=router_logits,
         )
         return final_hidden_states.view(num_tokens, hidden_size)
+
+
+def store_mla_draft_context_kv(
+    layers: nn.ModuleList,
+    context_states: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None,
+) -> None:
+    """Project draft context during profiling and write the selected layers once KV cache is bound."""
+    for layer_idx, layer in enumerate(layers):
+        if isinstance(slot_mapping, (list, tuple)):
+            slots = slot_mapping[layer_idx]
+            if slots is None:
+                continue
+        else:
+            slots = slot_mapping
+        attn = layer.self_attn
+        if slots is not None:
+            cache = attn.kv_cache
+            if isinstance(cache, torch.Tensor):
+                rank = attn.impl.kv_lora_rank
+                assert rank is not None
+                cache = (cache[..., :rank], cache[..., rank:])
+            if attn.impl._cache_requires_prolog_v3_writer(cache):
+                attn.impl.exec_context_kv_prolog_v3(context_states, cos, sin, cache, slots)
+                continue
+
+        assert attn.fused_qkv_a_proj is not None and attn.q_lora_rank is not None
+        qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
+        kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
+        if slots is not None:
+            attn.impl.exec_kv_prefill(kv_no_split, cos, sin, cache, slots, return_bf16_kv=False)
 
 
 class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
@@ -992,6 +1026,11 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return prefix_sum, block_residual, hidden_states
 
 
+def _needs_target_embedding(vllm_config: VllmConfig) -> bool:
+    """Whether this PP stage must own the target input embedding."""
+    return get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config)
+
+
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
@@ -1050,6 +1089,19 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.dspark_aux_capture_materialized = draft_config.model_type == "qwen3" and any(
                 arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in (draft_config.architectures or ())
             )
+        elif spec_config is not None and spec_config.method == "dflash":
+            draft_hf_config = getattr(spec_config.draft_model_config, "hf_config", None)
+            dflash_config = getattr(draft_hf_config, "dflash_config", None)
+            # Checkpoints such as Kimi-K3.1-Dflash2-Preview set
+            # aux_hidden_stream="attn_res": the draft was trained against
+            # the AttnRes mixture, not the raw residual prefix sum.
+            # Upstream gates the same stream behind
+            # VLLM_KIMI_K3_AUX_ATTN_RES_STREAM; read the draft's own
+            # declaration so prefix-sum capture stays the default for
+            # DFlash checkpoints that do not set it.
+            self.dspark_aux_capture_materialized = isinstance(dflash_config, dict) and (
+                dflash_config.get("aux_hidden_stream") == "attn_res"
+            )
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
@@ -1061,7 +1113,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         self.use_sequence_parallel = parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
 
-        if get_pp_group().is_first_rank:
+        if _needs_target_embedding(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1201,10 +1253,31 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     if mapped_name in params_dict:
                         kwargs = dict(args[2]) if len(args) > 2 else {}
                         kwargs["loaded_shard_id"] = shard_id
-                        yield mapped_name, loaded_weight, kwargs
+                        if ".self_attn.indexer." in mapped_name:
+                            # The Ascend DSA stack builds the GLM/DeepSeek
+                            # indexer under self_attn.indexer.*, while the
+                            # inherited upstream loader renames every
+                            # .self_attn.indexer.* weight to its native
+                            # .dsa_indexer.* layout. Consume the mapped
+                            # weight here, like the standalone gates above.
+                            weight_loader = getattr(params_dict[mapped_name], "weight_loader", default_weight_loader)
+                            weight_loader(params_dict[mapped_name], loaded_weight, **kwargs)
+                            standalone_gate_params.add(mapped_name)
+                        else:
+                            yield mapped_name, loaded_weight, kwargs
                         break
                 else:
-                    yield args
+                    if ".self_attn.indexer." in name and name in params_dict:
+                        # Un-fused indexer weights (wq_b, k_norm) already
+                        # match the Ascend parameter names; load them here
+                        # so the upstream DSA rename never sees them.
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        kwargs = args[2] if len(args) > 2 else {}
+                        weight_loader(param, loaded_weight, **kwargs)
+                        standalone_gate_params.add(name)
+                    else:
+                        yield args
 
         loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
@@ -1479,11 +1552,9 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         vLLM main lets the AMD Kimi class provide its own model state; that
         state builds upstream attention metadata, which is invalid on NPU.
         """
-        from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
-            AscendMambaHybridModelState,
-        )
+        from vllm_ascend.models.kimi_k3.model_state import AscendKimiModelState
 
-        return AscendMambaHybridModelState
+        return AscendKimiModelState
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
