@@ -85,40 +85,50 @@ class RemoteEPDServer(RemoteOpenAIServer):
 
         serve_arg_cmd = ["vllm", "serve"]
 
-        for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
-            instance_env = dict(self.env_dict)
-            instance_env["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
-            if per_instance_env is not None:
-                instance_env.update({key: str(value) for key, value in per_instance_env[i].items()})
-            if isinstance(vllm_serve_arg, list):
+        try:
+            for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
+                instance_env = dict(self.env_dict)
+                instance_env["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
+                if per_instance_env is not None:
+                    instance_env.update({key: str(value) for key, value in per_instance_env[i].items()})
                 if "--port" not in vllm_serve_arg:
-                    raise ValueError("You have to manually specify the port")
-                else:
-                    port_arg = "--port"
-                    try:
-                        index = vllm_serve_arg.index(port_arg)
-                    except ValueError:
-                        raise ValueError(f"--port not found in args: {vllm_serve_arg}")
-                    port_str = vllm_serve_arg[index + 1]
-                    self.port = int(port_str)
-            else:
-                vllm_serve_arg_str = str(vllm_serve_arg)
-                if "--port" not in vllm_serve_arg_str:
-                    raise ValueError("You have to manually specify the port")
-                else:
-                    raise ValueError(f"Unexpected type for vllm_serve_arg: {type(vllm_serve_arg)}")
+                    raise ValueError(f"instance {i} must specify --port: {vllm_serve_arg}")
+                port_index = vllm_serve_arg.index("--port") + 1
+                if port_index >= len(vllm_serve_arg):
+                    raise ValueError(f"instance {i} must give a value after --port: {vllm_serve_arg}")
+                try:
+                    self.port = int(vllm_serve_arg[port_index])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"instance {i} has a non-integer --port value: {vllm_serve_arg[port_index]!r}"
+                    ) from exc
 
-            self.health_url_list.append(super().url_for("health"))
-            vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
-            proc = self._start_server_with_prefix(vllm_serve_arg, instance_env, f"[VLLM_{i}] ")
-            self._proc_list.append(proc)
+                self.health_url_list.append(super().url_for("health"))
+                proc = self._start_server_with_prefix([*serve_arg_cmd, *vllm_serve_arg], instance_env, f"[VLLM_{i}] ")
+                self._proc_list.append(proc)
 
-        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
-        super()._wait_for_multiple_servers(
-            [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
-        )
+            timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
+            super()._wait_for_multiple_servers(
+                [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
+            )
+        except BaseException:
+            # A later instance or the readiness wait can fail after earlier
+            # instances already started. __enter__/__exit__ are not reached in
+            # that case, so terminate here instead of leaking NPU-holding peers.
+            self._terminate_server()
+            raise
 
     def _poll(self) -> int | None:
+        """Return the non-zero exit code of an instance that died during startup.
+
+        _wait_for_multiple_servers() calls this while it polls /health. Returning
+        None unconditionally would hide a crashed "vllm serve" until the startup
+        timeout (2800 s by default) expires.
+        """
+        for proc in self._proc_list:
+            result = proc.poll()
+            if result is not None and result != 0:
+                return result
         return None
 
     def _delete_shm(self) -> list[str]:
@@ -239,23 +249,29 @@ class DisaggEpdProxy(RemoteEPDServer):
         self.assert_clean_exit = assert_clean_exit
         self.host = server_host
 
+        # Validate the port before launching: when the argument list is rejected
+        # the context manager is never entered, so a started proxy would leak.
+        if "--port" not in self.proxy_args:
+            raise ValueError(f"proxy args must include --port: {self.proxy_args}")
+        port_index = self.proxy_args.index("--port") + 1
+        if port_index >= len(self.proxy_args):
+            raise ValueError(f"proxy args must give a value after --port: {self.proxy_args}")
+        try:
+            self.port = int(self.proxy_args[port_index])
+        except ValueError as exc:
+            raise ValueError(f"proxy --port value is not an integer: {self.proxy_args[port_index]!r}") from exc
+
         print(f"proxy param is: {self.proxy_args}")
         proxy_cmd = [sys.executable, str(DISAGG_EPD_PROXY_SCRIPT), *self.proxy_args]
         proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PROXY] ")
         self._proc_list.append(proc)
 
-        if "--port" not in self.proxy_args:
-            raise ValueError("You have manually specified the port ")
-        else:
-            try:
-                index = self.proxy_args.index("--port")
-            except ValueError:
-                raise ValueError("--port not found in proxy args")
-            port_str = self.proxy_args[index + 1]
-            self.port = int(port_str)
-
         timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
-        super()._wait_for_multiple_servers([(self.host, super().url_for("health"))], timeout=timeout_value)
+        try:
+            super()._wait_for_multiple_servers([(self.host, super().url_for("health"))], timeout=timeout_value)
+        except BaseException:
+            self._terminate_server()
+            raise
 
     def __enter__(self):
         """Context manager entry point."""

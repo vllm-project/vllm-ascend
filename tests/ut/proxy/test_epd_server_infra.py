@@ -274,5 +274,70 @@ def test_disagg_epd_proxy_uses_sys_executable(monkeypatch):
         pass
     assert proxy.exit_codes == [1]
 
+    # A rejected argument list must not launch a proxy: the context manager is
+    # never entered, so nothing would terminate it.
+    factory = _FakePopenFactory()
+    _install_fake_popen(monkeypatch, factory)
     with pytest.raises(ValueError, match="port"):
         DisaggEpdProxy(proxy_args=["--host", "127.0.0.1"], max_wait_seconds=1)
+    assert factory.calls == [], "a proxy rejected before launch must not leave a process behind"
+
+
+def test_poll_reports_a_crashed_instance(monkeypatch):
+    """The readiness loop must notice a server that already exited."""
+    server, _ = _make_server(monkeypatch, exit_codes=[7, 0])
+
+    assert server._poll() is None, "live instances are not failures"
+    server._proc_list[0].alive = False
+    assert server._poll() == 7, "a crashed instance must surface its non-zero exit code"
+
+    clean, _ = _make_server(monkeypatch, exit_codes=[0, 0])
+    for proc in clean._proc_list:
+        proc.alive = False
+    assert clean._poll() is None, "a clean exit is not a startup failure"
+
+
+def test_failed_readiness_wait_terminates_started_instances(monkeypatch):
+    terminated: list[bool] = []
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("startup health probe failed")
+
+    def _record_terminate(self):
+        terminated.append(True)
+        return []
+
+    monkeypatch.setattr(RemoteOpenAIServer, "_wait_for_multiple_servers", _fail)
+    monkeypatch.setattr(RemoteEPDServer, "_terminate_server", _record_terminate)
+
+    factory = _FakePopenFactory()
+    _install_fake_popen(monkeypatch, factory)
+    with pytest.raises(RuntimeError, match="startup health probe failed"):
+        RemoteEPDServer(
+            vllm_serve_args=[["--port", ENCODE_PORT], ["--port", PREFILL_DECODE_PORT]],
+            max_wait_seconds=1,
+        )
+
+    assert len(factory.calls) == 2
+    assert terminated == [True], "instances started before the failed wait must be terminated"
+
+
+def test_late_invalid_instance_terminates_started_instances(monkeypatch):
+    terminated: list[bool] = []
+
+    def _record_terminate(self):
+        terminated.append(True)
+        return []
+
+    monkeypatch.setattr(RemoteEPDServer, "_terminate_server", _record_terminate)
+
+    factory = _FakePopenFactory()
+    _install_fake_popen(monkeypatch, factory)
+    with pytest.raises(ValueError, match="port"):
+        RemoteEPDServer(
+            vllm_serve_args=[["--port", ENCODE_PORT], ["--model", "dummy"]],
+            max_wait_seconds=1,
+        )
+
+    assert len(factory.calls) == 1, "only the valid first instance may start"
+    assert terminated == [True], "the already-started instance must be terminated on failure"
