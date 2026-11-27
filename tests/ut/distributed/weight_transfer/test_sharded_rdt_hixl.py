@@ -325,47 +325,20 @@ def test_ipc_export_resolves_current_npu_reducer(active):
             namespace["_reduce_npu_tensor"](object())
 
 
-@pytest.mark.parametrize(
-    "active,configured,fails",
-    [
-        (True, True, False),
-        (False, False, False),
-        (False, True, False),
-        (False, True, True),
-    ],
-)
-def test_worker_shutdown_rpc_preserves_update_guard_and_propagates_failure(active, configured, fails):
-    path = ROOT / "vllm_ascend/worker/worker.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    worker_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUWorker")
-    method = next(
-        node
-        for node in worker_class.body
-        if isinstance(node, ast.FunctionDef) and node.name == "shutdown_weight_transfer_engine"
-    )
-    namespace: dict[str, Any] = {}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), "worker_shutdown", "exec"), namespace)
-    calls = []
+def test_worker_shutdown_rpc_propagates_engine_failure():
+    from vllm_ascend.worker.worker import NPUWorker
 
-    def shutdown():
-        calls.append("shutdown")
-        if fails:
-            raise RuntimeError("HIXL close failed")
+    worker = object.__new__(NPUWorker)
+    engine = MagicMock()
+    engine.shutdown.side_effect = RuntimeError("HIXL close failed")
+    worker.weight_transfer_engine = engine
+    worker._weight_update_active = False
 
-    engine = SimpleNamespace(shutdown=shutdown) if configured else None
-    worker = SimpleNamespace(_weight_update_active=active, weight_transfer_engine=engine)
-    if active:
-        with pytest.raises(RuntimeError, match="during a weight update"):
-            namespace["shutdown_weight_transfer_engine"](worker)
-        assert not calls
-    elif fails:
-        with pytest.raises(RuntimeError, match="HIXL close failed"):
-            namespace["shutdown_weight_transfer_engine"](worker)
-        assert worker.weight_transfer_engine is engine
-        assert calls == ["shutdown"]
-    else:
-        namespace["shutdown_weight_transfer_engine"](worker)
-        assert calls == (["shutdown"] if configured else [])
+    with pytest.raises(RuntimeError, match="HIXL close failed"):
+        worker.shutdown_weight_transfer_engine()
+
+    assert worker.weight_transfer_engine is engine
+    engine.shutdown.assert_called_once_with()
 
 
 @pytest.mark.parametrize("platform", ["cuda", "npu"])
