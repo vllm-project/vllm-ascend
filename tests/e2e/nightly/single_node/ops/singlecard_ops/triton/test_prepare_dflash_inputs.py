@@ -407,6 +407,8 @@ def _build_reference(data, case):
     assert case["num_speculative_steps"] == expected_steps
 
     num_reqs = case.get("num_reqs_override", data.input_batch.num_reqs)
+    query_rows = case.get("query_rows")
+    num_query_reqs = num_reqs if query_rows is None else sum(row >= 0 for row in query_rows)
     max_num_reqs = case["max_num_reqs"]
     max_num_tokens = case["max_num_tokens"]
     num_query_per_req = case["num_query_per_req"]
@@ -431,8 +433,8 @@ def _build_reference(data, case):
     block_table = data.block_table.cpu().tolist()
 
     ref = SimpleNamespace(
-        input_ids=[None] * (num_reqs * num_query_per_req),
-        query_positions=[None] * (num_reqs * num_query_per_req),
+        input_ids=[None] * (num_query_reqs * num_query_per_req),
+        query_positions=[None] * (num_query_reqs * num_query_per_req),
         query_start_loc=[None] * (max_num_reqs + 1),
         seq_lens=[None] * max_num_reqs,
         query_slot_mapping=[None] * max_num_tokens,
@@ -447,6 +449,7 @@ def _build_reference(data, case):
 
     for req_idx in range(num_reqs):
         state_idx = idx_mapping[req_idx]
+        block_table_row = block_table[state_idx if query_rows is not None else req_idx]
         ctx_start = query_start_loc[req_idx]
         ctx_end = query_start_loc[req_idx + 1]
         valid_ctx_end = ctx_end - num_rejected[req_idx]
@@ -464,12 +467,15 @@ def _build_reference(data, case):
             ctx_pos = positions[ctx_idx]
             ref.context_positions[ctx_idx] = ctx_pos
             ref.context_slot_mapping[ctx_idx] = _local_slot(
-                ctx_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
+                ctx_pos, block_table_row, block_size, block_stride, cp_rank, cp_size, cp_interleave
             )
 
-        query_base = req_idx * num_query_per_req
-        ref.query_start_loc[req_idx] = query_base
-        ref.seq_lens[req_idx] = min(last_valid_pos + 1 + num_query_per_req, max_model_len)
+        query_row = req_idx if query_rows is None else query_rows[req_idx]
+        if query_row < 0:
+            continue
+        query_base = query_row * num_query_per_req
+        ref.query_start_loc[query_row] = query_base
+        ref.seq_lens[query_row] = min(last_valid_pos + 1 + num_query_per_req, max_model_len)
         ref.temperature[state_idx] = input_temperature[state_idx]
         ref.seeds[state_idx] = input_seeds[state_idx]
 
@@ -479,32 +485,32 @@ def _build_reference(data, case):
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
             ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
+                query_pos, block_table_row, block_size, block_stride, cp_rank, cp_size, cp_interleave
             )
 
         for sample_local in range(num_speculative_steps):
             query_off = sample_local + sample_off
-            sample_idx = req_idx * num_speculative_steps + sample_local
+            sample_idx = query_row * num_speculative_steps + sample_local
             query_idx = query_base + query_off
             query_pos = last_valid_pos + 1 + query_off
             ref.sample_indices[sample_idx] = query_idx
             ref.sample_pos[sample_idx] = query_pos + 1 if sample_from_anchor else query_pos
             ref.sample_idx_mapping[sample_idx] = state_idx
 
-    last_query_end = num_reqs * num_query_per_req
-    for i in range(num_reqs, max_num_reqs + 1):
+    last_query_end = num_query_reqs * num_query_per_req
+    for i in range(num_query_reqs, max_num_reqs + 1):
         ref.query_start_loc[i] = last_query_end
-    for i in range(num_reqs, max_num_reqs):
+    for i in range(num_query_reqs, max_num_reqs):
         ref.seq_lens[i] = 0
 
-    sample_pad_start = num_reqs * num_speculative_steps
+    sample_pad_start = num_query_reqs * num_speculative_steps
     sample_pad_end = max_num_reqs * num_speculative_steps
     for i in range(sample_pad_start, sample_pad_end):
         ref.sample_indices[i] = 0
         ref.sample_pos[i] = 0
         ref.sample_idx_mapping[i] = -1
 
-    query_pad_start = num_reqs * num_query_per_req
+    query_pad_start = num_query_reqs * num_query_per_req
     for i in range(query_pad_start, max_num_tokens):
         ref.query_slot_mapping[i] = PAD_SLOT_ID
 
@@ -520,7 +526,7 @@ def _validate_outputs(data, case, ref):
     outputs = data.outputs
     num_reqs = case.get("num_reqs_override", data.input_batch.num_reqs)
     total_context = int(data.input_batch.query_start_loc[num_reqs].item())
-    total_query = num_reqs * case["num_query_per_req"]
+    total_query = len(ref.input_ids)
 
     _assert_exact(outputs.input_buffers.input_ids[:total_query], ref.input_ids)
     _assert_exact(outputs.input_buffers.positions[:total_query], ref.query_positions)
@@ -701,3 +707,17 @@ def test_prepare_dflash_inputs_num_reqs_override() -> None:
     _validate_outputs(data, case, _build_reference(data, case))
     for actual, initial in zip(untouched, initial_values):
         torch.testing.assert_close(actual, initial, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_prepare_dflash_inputs_pcp_owner_queries() -> None:
+    case = next(case for case in ACCURACY_CASES if case["name"] == "ragged_nondefault_block").copy()
+    case.update(sample_from_anchor=True, num_speculative_steps=5, num_rejected=[2, 1, 4, 0], query_rows=[-1, 1, -1, 0])
+    data = _build_inputs(case, "npu")
+    query_rows = torch.tensor(case["query_rows"], dtype=torch.int64, device="npu")
+    prepare_dflash_inputs_triton(*_impl_args(data, case), query_rows=query_rows, num_query_reqs=2)
+
+    _validate_outputs(data, case, _build_reference(data, case))

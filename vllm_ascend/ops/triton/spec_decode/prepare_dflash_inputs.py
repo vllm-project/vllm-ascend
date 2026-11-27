@@ -82,7 +82,7 @@ def _dflash_local_slot(
     return tl.where(valid & is_local & (block_numbers != 0), slot, PAD_SLOT_ID)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_query_reqs"])
 def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
@@ -101,6 +101,7 @@ def _prepare_dflash_inputs_kernel(
     target_positions_ptr,
     target_query_start_loc_ptr,
     idx_mapping_ptr,
+    query_rows_ptr,
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     num_sampled_ptr,
@@ -115,12 +116,14 @@ def _prepare_dflash_inputs_kernel(
     parallel_drafting_token_id,
     block_size,
     block_stride,
+    num_query_reqs,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
     max_num_tokens,
     max_model_len,
     cp_rank,
+    SHARD_QUERY: tl.constexpr,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
@@ -141,6 +144,13 @@ def _prepare_dflash_inputs_kernel(
     total_workers = num_reqs * workers_per_req
 
     # Context
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    if SHARD_QUERY:
+        query_req_idx = tl.load(query_rows_ptr + req_idx).to(tl.int32)
+        block_table_row = req_state_idx
+    else:
+        query_req_idx = req_idx
+        block_table_row = req_idx
     ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
     ctx_end = tl.load(target_query_start_loc_ptr + req_idx + 1)
     num_ctx = ctx_end - ctx_start
@@ -162,7 +172,7 @@ def _prepare_dflash_inputs_kernel(
         ctx_pos,
         block_table_ptr,
         block_table_stride,
-        req_idx,
+        block_table_row,
         ctx_valid_mask,
         block_size,
         block_stride,
@@ -176,26 +186,25 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
 
     # Request state shared by query/sample.
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     has_valid_ctx = num_valid_ctx > 0
     last_pos_idx = tl.where(has_valid_ctx, valid_ctx_end - 1, ctx_start)
     last_pos = tl.load(target_positions_ptr + last_pos_idx, mask=num_ctx > 0, other=0)
     # A fully rejected step restarts at this request's first position.
     last_valid_pos = tl.where(has_valid_ctx, last_pos, last_pos - 1)
-    query_base = req_idx * num_query_per_req
+    query_base = query_req_idx * num_query_per_req
 
     # Query
     query_begin, query_count = _partition_work(num_query_per_req, worker_idx, workers_per_req)
 
     query_lane = tl.arange(0, QUERY_BLOCK_SIZE)
-    query_mask = query_lane < query_count
+    query_mask = (query_lane < query_count) & (query_req_idx >= 0)
     query_off = query_begin + query_lane
     query_pos = last_valid_pos + 1 + query_off
     query_idx = query_base + query_off
 
     # query_off == 0 is always owned by worker 0 under quotient/remainder splitting.
     bonus_token = 0
-    if worker_idx == 0:
+    if worker_idx == 0 and query_req_idx >= 0:
         num_sampled = tl.load(num_sampled_ptr + req_idx)
         if num_sampled > 0:
             bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
@@ -208,7 +217,7 @@ def _prepare_dflash_inputs_kernel(
         query_pos,
         block_table_ptr,
         block_table_stride,
-        req_idx,
+        block_table_row,
         query_mask,
         block_size,
         block_stride,
@@ -226,13 +235,13 @@ def _prepare_dflash_inputs_kernel(
     sample_begin, sample_count = _partition_work(num_speculative_steps, worker_idx, workers_per_req)
 
     sample_lane = tl.arange(0, SAMPLE_BLOCK_SIZE)
-    sample_mask = sample_lane < sample_count
+    sample_mask = (sample_lane < sample_count) & (query_req_idx >= 0)
     sample_local = sample_begin + sample_lane
     sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
     sample_query_off = sample_local + sample_off
     sample_mask &= sample_query_off < num_query_per_req
 
-    sample_idx = req_idx * num_speculative_steps + sample_local
+    sample_idx = query_req_idx * num_speculative_steps + sample_local
     sample_query_idx = query_base + sample_query_off
     sample_query_pos = last_valid_pos + 1 + sample_query_off
     sampled_pos = sample_query_pos + 1 if SAMPLE_FROM_ANCHOR else sample_query_pos
@@ -242,19 +251,19 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=sample_mask)
 
     # Per-request scalar state.
-    if worker_idx == 0:
-        tl.store(out_query_start_loc_ptr + req_idx, query_base)
-        tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
+    if worker_idx == 0 and query_req_idx >= 0:
+        tl.store(out_query_start_loc_ptr + query_req_idx, query_base)
+        tl.store(out_seq_lens_ptr + query_req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
         tl.store(out_temperature_ptr + req_state_idx, tl.load(temperature_ptr + req_state_idx))
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
 
     # Graph-safety padding. Each range is balanced across the full launch grid.
-    last_query_end = num_reqs * num_query_per_req
+    last_query_end = num_query_reqs * num_query_per_req
 
     # query_start_loc: [num_reqs, max_num_reqs + 1)
-    qs_pad_count = max_num_reqs + 1 - num_reqs
+    qs_pad_count = max_num_reqs + 1 - num_query_reqs
     qs_begin, qs_count = _partition_work(qs_pad_count, global_worker_idx, total_workers)
-    qs_begin += num_reqs
+    qs_begin += num_query_reqs
     qs_end = qs_begin + qs_count
 
     for i in range(qs_begin, qs_end, REQUEST_PADDING_BLOCK_SIZE):
@@ -262,9 +271,9 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_query_start_loc_ptr + qs_off, last_query_end, mask=qs_off < qs_end)
 
     # seq_lens: [num_reqs, max_num_reqs)
-    seq_pad_count = max_num_reqs - num_reqs
+    seq_pad_count = max_num_reqs - num_query_reqs
     seq_begin, seq_count = _partition_work(seq_pad_count, global_worker_idx, total_workers)
-    seq_begin += num_reqs
+    seq_begin += num_query_reqs
     seq_end = seq_begin + seq_count
 
     for i in range(seq_begin, seq_end, REQUEST_PADDING_BLOCK_SIZE):
@@ -272,8 +281,8 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_seq_lens_ptr + seq_off, 0, mask=seq_off < seq_end)
 
     # Sample buffers: [num_reqs * steps, max_num_reqs * steps)
-    sample_pad_start = num_reqs * num_speculative_steps
-    sample_pad_count = (max_num_reqs - num_reqs) * num_speculative_steps
+    sample_pad_start = num_query_reqs * num_speculative_steps
+    sample_pad_count = (max_num_reqs - num_query_reqs) * num_speculative_steps
     sp_begin, sp_count = _partition_work(sample_pad_count, global_worker_idx, total_workers)
     sp_begin += sample_pad_start
     sp_end = sp_begin + sp_count
@@ -286,7 +295,7 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_sample_idx_mapping_ptr + sp_off, -1, mask=sp_mask)
 
     # query_slot_mapping: [num_reqs * query_per_req, max_num_tokens)
-    q_pad_start = num_reqs * num_query_per_req
+    q_pad_start = num_query_reqs * num_query_per_req
     q_pad_count = max_num_tokens - q_pad_start
     qp_begin, qp_count = _partition_work(q_pad_count, global_worker_idx, total_workers)
     qp_begin += q_pad_start
@@ -329,6 +338,8 @@ def prepare_dflash_inputs_triton(
     num_reqs_override: int | None = None,
     *,
     block_stride: int | None = None,
+    query_rows: torch.Tensor | None = None,
+    num_query_reqs: int | None = None,
 ) -> None:
     """Prepare DFlash inputs and KV slot mappings for a draft step.
 
@@ -341,9 +352,14 @@ def prepare_dflash_inputs_triton(
             (#58984) forwards the DP-synced request count during dummy runs so
             the drafter does not process target request padding; the remaining
             slots are graph-safely zeroed below.
+        query_rows: Global request row to local query row, with -1 for other
+            owners. When supplied, block_table is indexed by request state
+            and context outputs still cover the full input batch.
+        num_query_reqs: Number of local query rows when query_rows is supplied.
     """
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert 0 < num_reqs <= input_batch.num_reqs
+    num_query_reqs = num_reqs if num_query_reqs is None else num_query_reqs
 
     max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
 
@@ -388,6 +404,7 @@ def prepare_dflash_inputs_triton(
         input_batch.positions,
         input_batch.query_start_loc,
         input_batch.idx_mapping,
+        query_rows,
         last_sampled,
         next_prefill_tokens,
         num_sampled,
@@ -399,12 +416,14 @@ def prepare_dflash_inputs_triton(
         parallel_drafting_token_id,
         block_size,
         block_stride,
+        num_query_reqs,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
         cp_rank,
+        SHARD_QUERY=query_rows is not None,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
@@ -419,6 +438,6 @@ def prepare_dflash_inputs_triton(
     # Upstream's prepare kernel also writes is_padding: the query rows above are
     # real and the rest up to max_num_tokens is padding. MoE layers in the draft
     # read it to skip padding rows, and graph capture leaves it all True.
-    num_query_tokens = num_reqs * num_query_per_req
+    num_query_tokens = num_query_reqs * num_query_per_req
     input_buffers.is_padding[:num_query_tokens].fill_(False)
     input_buffers.is_padding[num_query_tokens:max_num_tokens].fill_(True)

@@ -12,6 +12,7 @@ import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import (
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -53,6 +54,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode, gather_lm_head_outputs, lmhead_all_to_all
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
@@ -317,6 +319,13 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.main_norm(self.main_proj(aux_hidden_states))
 
+    def project_context_wkv(self, context_states: torch.Tensor) -> torch.Tensor:
+        return self.context_wkv_proj(context_states).view(
+            context_states.shape[0],
+            self.num_dspark_layers,
+            self.config.head_dim,
+        )
+
     def _project_shared_kv(
         self,
         kv: torch.Tensor,
@@ -340,23 +349,25 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         # Profiling omits slot mappings, but must still execute this projection
         # so its workspace is included in the memory profile.
-        all_kv = self.context_wkv_proj(context_states).view(
-            context_states.shape[0],
-            self.num_dspark_layers,
-            self.config.head_dim,
-        )
-        if context_slot_mapping is None:
-            return
+        wkv = self.project_context_wkv(context_states)
+        if context_slot_mapping is not None:
+            self.store_context_wkv(wkv, context_positions, context_slot_mapping)
 
+    def store_context_wkv(
+        self,
+        wkv: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: list[torch.Tensor | None],
+    ) -> None:
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
-        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
-            layer_context_slot_mapping = context_slot_mapping[layer_idx]
-            if layer_context_slot_mapping is None:
+        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), wkv.unbind(1), strict=True)):
+            slots = context_slot_mapping[layer_idx]
+            if slots is None:
                 continue
             attn = layer.self_attn
             shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
-            self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+            self._store_standard_swa_kv(shared_kv, slots, attn)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
@@ -468,6 +479,16 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_pcp_owner_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Score each owner's rows against a head shared with the PCP target."""
+        pcp = get_pcp_group()
+        hidden_states = pcp.all_gather(self.model.norm(hidden_states).contiguous(), dim=0)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        # Every PCP rank has one vocabulary slice for all owners. Return each
+        # slice to the owner of its query rows before joining the TP columns.
+        logits = lmhead_all_to_all(logits, pcp)
+        return gather_lm_head_outputs(logits, VocabParallelMode.STANDARD)[..., : self.config.vocab_size]
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -498,6 +519,17 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(aux_hidden_states)
+
+    def project_context_wkv(self, context_states: torch.Tensor) -> torch.Tensor:
+        return self.model.project_context_wkv(context_states)
+
+    def store_context_wkv(
+        self,
+        wkv: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: list[torch.Tensor | None],
+    ) -> None:
+        self.model.store_context_wkv(wkv, context_positions, context_slot_mapping)
 
     def precompute_and_store_context_kv(
         self,

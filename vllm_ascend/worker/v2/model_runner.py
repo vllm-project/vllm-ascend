@@ -166,6 +166,7 @@ class NPUModelRunner(GPUModelRunner):
     # backing allocation. Ascend MRV2 preserves that allocation and exposes
     # backend-specific views; MLA may use a page-strided fused/component view.
     supports_standardized_shared_kv_backing = True
+    _pcp_draft_wkv_logits_hook: torch.utils.hooks.RemovableHandle | None = None
 
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
@@ -400,6 +401,11 @@ class NPUModelRunner(GPUModelRunner):
 
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
+        if state is not None and self._pcp_draft_wkv_logits_hook is not None:
+            # Select the consumer before PCP chooses between aux and WKV restoration.
+            self.pcp_manager.draft_wkv_batch_desc = self.speculator.dispatch_owner_graph(
+                self.pcp_manager.global_batch, state.num_spec_tokens_to_schedule
+            )
         output = super().sample_tokens(grammar_output)
         d2h_record_source_ready(self)
         self._lmhead_pad_size = None
@@ -545,6 +551,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
                 if isinstance(self.speculator, DraftModelSpeculator):
                     self.pcp_manager.set_speculator(self.speculator)
+                if (
+                    getattr(self.speculator, "_owner_graph_manager", None) is not None
+                    and self.is_last_pp_rank
+                    and self.batch_sharder is None
+                ):
+                    self.pcp_manager.enable_draft_wkv_overlap()
+                    if self._pcp_draft_wkv_logits_hook is None:
+                        target = getattr(self.model, "language_model", self.model)
+                        self._pcp_draft_wkv_logits_hook = target.logits_processor.register_forward_hook(
+                            self._start_pcp_draft_wkv_gather
+                        )
                 self.model_state.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
@@ -1262,6 +1279,12 @@ class NPUModelRunner(GPUModelRunner):
             if dp_sync is not None:
                 pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
         return pad_size
+
+    def _start_pcp_draft_wkv_gather(self, _module, _inputs, _logits) -> None:
+        # The logits processor has already submitted any target PCP vocab gather.
+        if self.pcp_manager.draft_wkv_batch_desc is not None:
+            with self.draft_context():
+                self.pcp_manager.start_draft_wkv_gather(self.speculator.project_owner_wkv)
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed

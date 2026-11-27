@@ -16,8 +16,9 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, cast
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -25,7 +26,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vll
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -34,11 +37,14 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
+from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -46,6 +52,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
@@ -59,6 +66,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    _owner_graph_manager: DFlashAclGraphManager | None = None
     _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
@@ -157,6 +165,111 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+
+        pcp = self.pcp_manager
+        manager = self.query_cudagraph_manager
+        self._owner_graph_manager = None
+        if (
+            pcp is not None
+            and pcp.shard_decode_requests
+            and pcp.dcp_world_size == 1
+            and self.dp_size == 1
+            and manager.needs_capture()
+            and all(backend is DeepseekV41CacheBackend for backend in self.attn_backends.values())
+            and self.draft_logits is None
+            and not self.enable_adaptive_verification
+            and self.draft_watermarker is None
+            and self.model.model.embed_tokens.parallel_mode is not VocabParallelMode.FINE_GRAINED
+            and self.model.lm_head.parallel_mode is not VocabParallelMode.FINE_GRAINED
+        ):
+            self._owner_pcp_size = pcp.pcp_world_size
+            max_owner_reqs = cdiv(self.max_num_reqs, self._owner_pcp_size)
+            # Keep the bucket that covers a partial last owner batch as well.
+            capture_reqs = min(
+                (
+                    desc.num_reqs
+                    for desc in manager._capture_descs[CUDAGraphMode.FULL]
+                    if desc.num_reqs >= max_owner_reqs
+                ),
+                default=max_owner_reqs,
+            )
+            self._owner_graph_manager = DFlashAclGraphManager(
+                self.vllm_config,
+                self.device,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                decode_query_lens={self.num_query_per_req: capture_reqs},
+                speculator=self,
+                # V4.1 uses stable metadata buffers instead of per-size task updates.
+                register_graph_params=False,
+            )
+            self._owner_graph_manager.update_stream = self.update_stream
+            model = self.model.model
+            self._owner_wkv_staging = torch.zeros(
+                self._num_graph_context_tokens(self.max_num_reqs),
+                model.num_dspark_layers,
+                model.config.head_dim,
+                dtype=self.dtype,
+                device=self.device,
+            )
+
+    def dispatch_owner_graph(
+        self, input_batch: InputBatch, num_speculative_tokens: int | None
+    ) -> BatchExecutionDescriptor | None:
+        manager = self._owner_graph_manager
+        if (
+            manager is None
+            or input_batch.is_dummy
+            or num_speculative_tokens == 0
+            or input_batch.num_reqs < self._owner_pcp_size
+            or input_batch.is_prefilling_np[: input_batch.num_reqs].any()
+            or input_batch.num_tokens > self._num_graph_context_tokens(input_batch.num_reqs)
+        ):
+            return None
+        # All PCP groups use the same bucket even when their real request counts differ.
+        owner_capacity = cdiv(input_batch.num_reqs, self._owner_pcp_size)
+        desc = manager.dispatch(owner_capacity, owner_capacity * self.num_query_per_req, self.num_query_per_req, 0)
+        return desc if desc.cg_mode == CUDAGraphMode.FULL else None
+
+    def project_owner_wkv(self, aux_hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        context_states = self.model.combine_hidden_states(torch.cat(aux_hidden_states, dim=-1))
+        return self.model.project_context_wkv(context_states)
+
+    def capture(self) -> None:
+        super().capture()
+        if self._owner_graph_manager is not None:
+            model = self.model
+            owner_logits = (
+                patch.object(model, "compute_draft_logits", model.compute_pcp_owner_draft_logits)
+                if model.lm_head.parallel_mode is VocabParallelMode.PCP_X_TP
+                else nullcontext()
+            )
+            with owner_logits:
+                self._owner_graph_manager.capture(
+                    self._generate_draft,
+                    self.input_buffers,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    self.max_model_len,
+                    causal=self._group_causal,
+                    prepare_forward=self._prepare_owner_graph_forward,
+                    progress_bar_desc="Capturing DSpark PCP owner ACL graphs",
+                )
+
+    def _owner_context_reqs(self, num_query_reqs: int) -> int:
+        return min(self.max_num_reqs, num_query_reqs * self._owner_pcp_size)
+
+    def _prepare_owner_graph_forward(self, num_reqs: int, attn_metadata: dict[str, Any] | None) -> None:
+        # Each owner refreshes the committed context for every request so the
+        # next step can change owners. Only draft queries use the local shape.
+        num_context = self._num_graph_context_tokens(self._owner_context_reqs(num_reqs))
+        self.model.store_context_wkv(
+            self._owner_wkv_staging[:num_context],
+            self.context_positions[:num_context],
+            [self._context_slot_mappings[group_idx, :num_context] for group_idx in self._layer_group_idx],
+        )
+        if attn_metadata is not None and self.supports_decode_metadata_update:
+            self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
     @torch.inference_mode()
     def get_draft_context_group_layout(self) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:
@@ -426,6 +539,84 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 decode_metadata.block_tables = decode_metadata.block_tables[:num_reqs_padded]
         return attn_metadata
 
+    @torch.inference_mode()
+    def _propose_owner_drafts(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        input_batch: InputBatch,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+    ) -> torch.Tensor:
+        local_batch, query_rows, owned_rows = self.pcp_manager.owner_draft_rows(input_batch)
+        num_local_reqs = local_batch.num_reqs
+        self.input_batch = local_batch
+        self.draft_max_seq_len = min(
+            int(local_batch.seq_lens_cpu_upper_bound[:num_local_reqs].max()) + self.num_query_per_req,
+            self.max_model_len,
+        )
+        # Attention needs only the local block-table rows. The input kernel
+        # uses the request-state tables directly for the global context slots.
+        block_tables = self.block_tables
+        block_tables.gather_block_tables(local_batch.idx_mapping[:num_local_reqs], batch_desc.num_reqs)
+        for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            group = self.attn_groups[gid][0]
+            block_size = block_tables.block_sizes[gid]
+            block_stride = (
+                group.kernel_block_stride * group.kernel_block_size if group.kernel_block_stride else block_size
+            )
+            prepare_dflash_inputs_triton(
+                self.input_buffers,
+                block_tables.slot_mappings[gid],
+                self.context_positions,
+                self._context_slot_mappings[i],
+                self.sample_indices,
+                self.sample_pos,
+                self.sample_idx_mapping,
+                self.temperature,
+                self.seeds,
+                input_batch,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                temperature,
+                seeds,
+                block_tables.block_tables[gid].gpu,
+                block_size,
+                block_tables.cp_rank,
+                self.dcp_size,
+                block_tables.cp_interleave,
+                self.parallel_drafting_token_id,
+                self.num_query_per_req,
+                self.num_speculative_steps,
+                self.max_num_reqs,
+                self.max_num_tokens,
+                self.max_model_len,
+                self.sample_from_anchor,
+                block_stride=block_stride,
+                query_rows=query_rows,
+                num_query_reqs=num_local_reqs,
+            )
+        num_tokens = input_batch.num_tokens
+        num_context = self._num_graph_context_tokens(self._owner_context_reqs(batch_desc.num_reqs))
+        self._context_slot_mappings[:, num_tokens:num_context].fill_(PAD_SLOT_ID)
+        wkv_input = self._owner_wkv_staging[:num_tokens]
+        if self.pcp_manager.draft_wkv_batch_desc is not None:
+            self.pcp_manager.finish_draft_wkv_gather(wkv_input)
+        else:
+            wkv_input.copy_(self.project_owner_wkv(aux_hidden_states))
+        if self.supports_decode_metadata_update:
+            self._map_kernel_block_tables()
+        self._prepare_eplb_forward(num_local_reqs * self.num_query_per_req)
+        with self._proposal_metadata(num_local_reqs):
+            self._owner_graph_manager.run_fullgraph(batch_desc)
+        return self.pcp_manager.stage_owner_drafts(self.draft_tokens[: input_batch.num_reqs], owned_rows)
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -446,6 +637,22 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        if self._owner_graph_manager is not None and not dummy_run and not is_profile:
+            batch_desc = self.pcp_manager.draft_wkv_batch_desc
+            if batch_desc is None:
+                batch_desc = self.dispatch_owner_graph(input_batch, num_speculative_tokens)
+            if batch_desc is not None:
+                return self._propose_owner_drafts(
+                    batch_desc,
+                    input_batch,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                )
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
         # capacity independently for PCP.
