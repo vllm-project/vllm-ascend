@@ -20,11 +20,10 @@ shows both forms. Use local checkpoint paths when you already have the weights.
     hybrid Mamba models. Use the model tutorial for role-specific serving and
     parallelism settings. See the [model tutorials](../../tutorials/models/index.md).
 
-!!! note "Ascend decode limits"
+!!! note "ACLGraph capture sizes"
 
-    On paths that use `npu_fused_infer_attention_score`, keep `K + 1` at or
-    below 16. For fixed-length full ACLGraph with EAGLE, DFlash2, or MTP with
-    `K > 1`, set manual capture sizes to multiples of `K + 1`.
+    For fixed-length full ACLGraph with EAGLE, DFlash2, or MTP with `K > 1`,
+    set manual capture sizes to multiples of `K + 1`.
 
 ## Speculative Decoding Methods
 
