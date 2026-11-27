@@ -8,7 +8,8 @@ from unittest.mock import patch
 import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from huggingface_hub.constants import HF_HUB_OFFLINE
-from vllm import SamplingParams
+from modelscope import snapshot_download as ms_snapshot_download  # type: ignore[import-untyped]
+from vllm import SamplingParams, envs
 from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -41,7 +42,10 @@ def _spec_decode_count(runner, metric_name):
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_logprobs_match_greedy_reference(enforce_eager: bool) -> None:
-    model_path = hf_snapshot_download(MODEL, local_files_only=HF_HUB_OFFLINE)
+    if envs.VLLM_USE_MODELSCOPE:
+        model_path = ms_snapshot_download(MODEL, local_files_only=HF_HUB_OFFLINE)
+    else:
+        model_path = hf_snapshot_download(MODEL, local_files_only=HF_HUB_OFFLINE)
     runner_kwargs: _RunnerKwargs = {
         "dtype": "bfloat16",
         "max_model_len": 256,
