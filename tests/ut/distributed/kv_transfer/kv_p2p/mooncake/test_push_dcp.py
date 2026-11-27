@@ -10,6 +10,7 @@ import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from tests.ut.kv_offload.mooncake_v2.test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -66,7 +67,7 @@ def test_chunked_write_matches_token_oracle(
     if cache_kind != "mla":
         worker.kv_cache_specs = [
             Mock(
-                spec=push_worker.AscendSFAIndexerCacheSpec,
+                spec=AscendSFAIndexerCacheSpec,
                 dcp_sharded=True,
                 sliding_window=None,
                 is_circular=False,
@@ -118,6 +119,44 @@ def test_chunked_write_matches_token_oracle(
     assert worker._send_done.call_count == tp
     assert all(call.args[1] is None for call in worker._send_done.call_args_list)
     assert len(copies) == len(set(copies)), "A later chunk must not resend a completed block"
+
+
+@pytest.mark.parametrize("pcp_rank", range(4))
+def test_kpool_push_copies_replicated_history_from_one_prefill_rank(worker, monkeypatch, pcp_rank):
+    remote = configure(worker, monkeypatch, dcp=1, tp=1, local_scale=4, remote_scale=4)
+    worker.dcp_size = worker.pcp_size = 4
+    worker.dcp_rank = worker.pcp_rank = pcp_rank
+    worker.kv_cache_specs = [
+        Mock(
+            spec=AscendIndexerKPoolSpec,
+            dcp_sharded=True,
+            dcp_replication_size=4,
+            sliding_window=None,
+            is_circular=False,
+        )
+    ]
+    remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [1]
+    source = (ctypes.c_ubyte * 64)(*range(64))
+    target = (ctypes.c_ubyte * 64)()
+    source_base, target_base = ctypes.addressof(source), ctypes.addressof(target)
+    worker.transfer_metadata.kv_caches_base_addr[:] = [[source_base]]
+    remote_pcp = remote.metadata_by_pp_rank[0].metadata_by_pcp_rank[0]
+    remote_pcp.metadata_by_tp_rank[0].kv_caches_base_addr[:] = [[target_base]]
+
+    def copy(session, src, dst, lengths):
+        for source_addr, target_addr, length in zip(src, dst, lengths, strict=True):
+            assert source_base <= source_addr < source_addr + length <= source_base + len(source)
+            assert target_base <= target_addr < target_addr + length <= target_base + len(target)
+            ctypes.memmove(target_addr, source_addr, length)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = copy
+    worker.start_load_kv(metadata(0, 29, prompt=29, remote_blocks=(1, 2), tp=1))
+    worker.save_kv_layer(worker.transfer_metadata.layer_names[0])
+    worker.wait_for_save()
+    assert target[16:48] == (source[16:48] if pcp_rank == 0 else [0] * 32)
+    assert worker._send_done.call_count == 1
+    assert worker._send_done.call_args.args[1] is None
 
 
 def test_empty_final_stripe_completes_without_write(worker, monkeypatch):
@@ -179,8 +218,8 @@ def test_effective_dcp_depends_on_cache_layout(worker, monkeypatch, kind):
     spec_type = {
         "swa": push_worker.SlidingWindowMLASpec,
         "circular": push_worker.MLAAttentionSpec,
-        "replicated_indexer": push_worker.AscendSFAIndexerCacheSpec,
-        "sharded_indexer": push_worker.AscendSFAIndexerCacheSpec,
+        "replicated_indexer": AscendSFAIndexerCacheSpec,
+        "sharded_indexer": AscendSFAIndexerCacheSpec,
     }[kind]
     worker.kv_cache_specs = [
         Mock(
