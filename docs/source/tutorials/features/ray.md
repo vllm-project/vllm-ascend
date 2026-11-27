@@ -59,7 +59,7 @@ Below is the example container setup command, which should be executed on **all 
 
 ```bash
 # Update the vllm-ascend image
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -179,7 +179,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen",
         "prompt": "tell me how to sleep well",
-        "max_completion_tokens": 100,
+        "max_tokens": 100,
         "temperature": 0
     }'
 ```
