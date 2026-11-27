@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parallel O-projection execution independent of the attention backend."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from contextlib import contextmanager, suppress
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -41,7 +41,7 @@ class ParallelOProjection:
         *,
         config: WeightSwitchConfig,
         tp_group: Any,
-        pool: dict[Any, torch.Tensor],
+        pool: MutableMapping[Any, torch.Tensor],
         pool_key: str,
         project_full: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         decode_sharded: bool,

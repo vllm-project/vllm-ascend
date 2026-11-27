@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
+from weakref import WeakValueDictionary
 
 import torch
 import torch_npu
@@ -861,7 +862,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     enable_sparse_sfa_hif8: bool = False
 
     supports_pcp: ClassVar[bool] = True
-    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_full_pools: ClassVar[WeakValueDictionary[Any, torch.Tensor]] = WeakValueDictionary()
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
 
     def __init__(
