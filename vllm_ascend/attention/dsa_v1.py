@@ -1633,21 +1633,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             return result
 
-        req_metadata_ref: list[AscendDSAReqMetadata | None] = [None]
+        self._device_metadata_tasks = ()
         if build_dspark_swa is not None:
+            assert self.spec_sas_metadata is not None
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
-            group_id = id(sas_metadata)
-
-            def run_attention_metadata() -> None:
-                req_metadata = req_metadata_ref[0]
-                assert req_metadata is not None
-                req_metadata.sas_metadata = build_attention_metadata()
-
-            self._device_metadata_tasks = (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, group_id),
-            )
         else:
-            self._device_metadata_tasks = ()
             sas_metadata = build_attention_metadata()
 
         assert self.spec_slot_mapping is not None
@@ -1665,7 +1655,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_reqs,
             cache_group_key=self.cache_group_key,
             sas_metadata=sas_metadata,
-            sas_metadata_group_id=group_id if build_dspark_swa is not None else None,
             qli_metadata=None,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
@@ -1674,7 +1663,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             dspark_swa_indices=dspark_swa_indices,
         )
         if build_dspark_swa is not None:
-            req_metadata_ref[0] = req_metadata
+            group_id = id(sas_metadata)
+            req_metadata.sas_metadata_group_id = group_id
+
+            def run_attention_metadata() -> None:
+                req_metadata.sas_metadata = build_attention_metadata()
+
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, group_id),
+            )
         return req_metadata
 
     def build_for_graph_capture(
