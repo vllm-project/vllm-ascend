@@ -9,12 +9,12 @@
 
 - `bitmask` 使用 INT32 压缩存储，每个 INT32 表示连续 32 个 token 的允许/禁止状态。
 
-- `logits_indices` 用于建立 grammar bitmask 行与实际 logits 行之间的映射：
-  `logits_indices[i]` 表示第 `i` 行 bitmask 应作用到哪一行 logits。
+- `logits_indices` 编码请求及请求内位置。对第 `r` 行，令 `req, pos = divmod(logits_indices[r], MASK_STRIDE)`。
+  若 `pos < cu_num_logits[req + 1] - cu_num_logits[req]`，目标行为 `row = cu_num_logits[req] + pos`；否则跳过该行。
 
 - 计算公式：
 
-  对第 `r` 行 bitmask、第 `v` 个 token：
+  对活动的第 `r` 行 bitmask、第 `v` 个 token：
 
   $$
   word = \left\lfloor \frac{v}{32} \right\rfloor,\qquad
@@ -33,10 +33,10 @@
   最终：
 
   $$
-  logits_{logits\_indices[r],v}
+  logits_{row,v}
   =
   \begin{cases}
-  logits_{logits\_indices[r],v}, & allowed_{r,v}=1 \\
+  logits_{row,v}, & allowed_{r,v}=1 \\
   -\infty, & allowed_{r,v}=0
   \end{cases}
   $$
@@ -54,18 +54,19 @@
   3. **Bitmask 解包**：每次加载对应 vocab block 的 packed INT32 bitmask，通过按位与
      判断每个 token 对应 bit 是否为 0。
 
-  4. **应用掩码**：仅对 bit 为 0 的 token 写入 `-inf`；bit 为 1 的位置不写回，保持
-     原始 logits 不变。
+  4. **应用掩码**：读取活动行中词表范围内的 logits，按 bit 选择原值或 `-inf` 后写回。非活动行和词表尾部的 padding 不写回。
 
 ## 参数说明
 
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
 |:--------|:----------------|:------|:---------|:---------|
-| logits | 输入/输出 | 二维 `[num_logits, vocab_size]` logits 张量。根据 grammar bitmask 原地将禁止 token 对应位置写为 `-inf`。 | BFLOAT16 | ND |
-| logits_indices | 输入 | 一维 `[num_masks]` 映射表。`logits_indices[i]` 指定第 `i` 行 bitmask 对应的 logits 行。 | INT32 | ND |
+| logits | 输入/输出 | 二维 `[num_logits, vocab_size]` logits 张量。根据 grammar bitmask 原地将禁止 token 对应位置写为 `-inf`。 | FP32 / FP16 / BF16 | ND |
+| logits_indices | 输入 | 一维 `[num_masks]` 映射表。`logits_indices[i]` 存储 `req * MASK_STRIDE + pos`。 | INT32 | ND |
+| cu_num_logits | 输入 | 长度为 `num_reqs + 1` 的 logits 行前缀和，相邻两项界定一个请求的有效行区间。 | INT32 | ND |
+| MASK_STRIDE | 属性 | 编码和解码请求位置使用的正整数基数。 | INT | - |
 | bitmask | 输入 | 二维 `[num_masks, ceil(vocab_size / 32)]` packed grammar bitmask，每个 INT32 保存连续 32 个 token 的允许/禁止状态。 | INT32 | ND |
 | vocab_size | 属性 | 实际词表大小，用于限制最后一个 vocab block 的有效范围。 | INT | - |
-| BLOCK_SIZE | 属性 | 每个 logical task 负责的 vocab block 大小。当前 A2/A3 验证配置为 `8192`。 | INT | - |
+| BLOCK_SIZE | 属性 | 每个 logical task 负责的 vocab block 大小。nightly 用例配置为 `8192`。 | INT | - |
 
 ## 约束说明
 
@@ -75,7 +76,7 @@
 
 - `logits_indices` 必须为一维 INT32 tensor，长度等于 `bitmask.shape[0]`。
 
-- `logits_indices[i]` 必须为合法的 logits 行下标。
+- 映射解码后的请求下标必须满足 `0 <= req < num_reqs`，编码的位置满足 `0 <= pos < MASK_STRIDE`。
 
 - `bitmask` 必须为二维 INT32 tensor，其第二维至少满足：
 
@@ -96,7 +97,7 @@
 
 - 最后一个 vocab block 不足 `BLOCK_SIZE` 时，通过 `block_offset < vocab_size` 做越界保护。
 
-- 当前 A2/A3 验证配置中 `BLOCK_SIZE=8192`，每个 logical task 直接处理完整 8192-token
+- nightly 用例配置中 `BLOCK_SIZE=8192`，每个 logical task 直接处理完整 8192-token
   vocab block，不再额外使用 `BLOCK_SIZE_SUB` 二次切分。
 
 - Ascend NPU 上实际 launch grid 根据 VectorCore 数量确定：
@@ -109,8 +110,7 @@
 
 - 当前实现使用 `multibuffer=False`。
 
-- 当前 PR 的功能与性能验证范围为 Ascend A2 / A3；Ascend 950PR&950DT 系列产品的进一步 grid / tile 优化不在
-  当前 PR 范围内。
+- 本次优化的实测结果来自 Ascend A2。掩码数或词表大小为零时，启动器直接返回。
 
 - 当前重点业务 shape：
 
@@ -195,7 +195,11 @@ _apply_grammar_bitmask_kernel[grid](
 )
 ```
 
-## test ut
+## Nightly 算子测试
+
+- BF16 业务用例在 `[64, 151936]` 形状下与 CPU 参考比较。
+- 6 组数据类型与词表大小组合逐位核对结果，覆盖非活动映射、行尾 padding、带符号零和 NaN payload。
+- 3 组空任务分别覆盖掩码数为零、词表为空及两者均为空时调用能正常返回。
 
 ```bash
 pytest -sv --noconftest \
