@@ -24,15 +24,20 @@ matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`
 
 from __future__ import annotations
 
+from threading import Lock
+from weakref import WeakValueDictionary
+
 import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderGraphKey,
     get_encoder_forward_context,
@@ -45,6 +50,62 @@ MIN_PAD_SIZE: int = 64
 MAX_PAD_SIZE: int = 128
 SWA_INT_MAX: int = 2147483647
 FIA_BLOCK_SIZE: int = 128
+# The opaque operator schema cannot carry the bound MMEncoderAttention module.
+_COMPILED_ATTENTION_LAYERS: WeakValueDictionary[int, MMEncoderAttention] = WeakValueDictionary()
+_COMPILED_ATTENTION_LAYERS_LOCK = Lock()
+
+
+def _get_fused_fia_seq_lengths(
+    cu_seqlens: torch.Tensor,
+    token_count: int,
+) -> list[int] | None:
+    """Read the current CPU boundaries without a device synchronization."""
+    if cu_seqlens.device.type != "cpu" or cu_seqlens.dtype not in (torch.int32, torch.int64):
+        return None
+    boundaries = cu_seqlens.tolist()
+    if token_count <= 0 or len(boundaries) < 2 or boundaries[0] != 0 or boundaries[-1] != token_count:
+        return None
+    lengths = boundaries[1:]
+    if any(end < start for start, end in zip(boundaries, lengths)):
+        return None
+    return lengths
+
+
+def _compiled_mm_encoder_attention_fia(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+    max_seqlen: torch.Tensor | None,
+    sequence_lengths: torch.Tensor | None,
+    layer_id: int,
+) -> torch.Tensor:
+    with _COMPILED_ATTENTION_LAYERS_LOCK:
+        layer = _COMPILED_ATTENTION_LAYERS.get(layer_id)
+    if layer is None:
+        raise RuntimeError(f"MM encoder attention layer {layer_id} is no longer available")
+    return layer._forward_oot_impl(query, key, value, cu_seqlens, max_seqlen, sequence_lengths)
+
+
+def _compiled_mm_encoder_attention_fia_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+    max_seqlen: torch.Tensor | None,
+    sequence_lengths: torch.Tensor | None,
+    layer_id: int,
+) -> torch.Tensor:
+    return torch.empty_like(query)
+
+
+direct_register_custom_op(
+    op_name="ascend_mm_encoder_attention_fia",
+    op_func=_compiled_mm_encoder_attention_fia,
+    fake_impl=_compiled_mm_encoder_attention_fia_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
@@ -95,6 +156,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
         self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self._compiled_fia_layer_id = id(self)
+        with _COMPILED_ATTENTION_LAYERS_LOCK:
+            _COMPILED_ATTENTION_LAYERS[self._compiled_fia_layer_id] = self
 
     def _reshape_qkv_to_3d(
         self,
@@ -217,6 +281,78 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             **fia_kwargs,
         )
         return out
+
+    def _can_use_fused_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        cu_seqlens: torch.Tensor | None,
+    ) -> bool:
+        """Check the specialized Qwen vision eager preprocessing contract."""
+        # The production kernel has been validated on Ascend A2 (910B3).
+        if not HAS_TRITON or get_ascend_device_type() != AscendDeviceType.A2:
+            return False
+        # ACL-graph capture owns the preallocated FIA buffers and remains on
+        # the established path until this producer has capture-safe buffers.
+        if get_encoder_forward_context().capturing:
+            return False
+        if self.head_size != 72 or self.num_heads != 8 or self.num_kv_heads != 8:
+            return False
+        if cu_seqlens is None or rotary_pos_emb_cos is None or rotary_pos_emb_sin is None:
+            return False
+        if qkv_proj.ndim != 3 or qkv_proj.shape[1] != 1:
+            return False
+        # Packed multi-sequence inputs (multi-image, multi-frame video and
+        # window attention) stay on the fused path: QKV/RoPE/padding act per
+        # token and FIA separates sequences through the host lengths derived
+        # from cu_seqlens.
+        if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+            return False
+        token_count = qkv_proj.shape[0]
+        if qkv_proj.shape[2] != 3 * self.num_heads * self.head_size:
+            return False
+        if rotary_pos_emb_cos.shape != (token_count, self.head_size // 2):
+            return False
+        if rotary_pos_emb_sin.shape != rotary_pos_emb_cos.shape:
+            return False
+        if qkv_proj.dtype != torch.bfloat16:
+            return False
+        if rotary_pos_emb_cos.dtype != qkv_proj.dtype or rotary_pos_emb_sin.dtype != qkv_proj.dtype:
+            return False
+        if qkv_proj.device.type != "npu":
+            return False
+        if rotary_pos_emb_cos.device != qkv_proj.device or rotary_pos_emb_sin.device != qkv_proj.device:
+            return False
+        return qkv_proj.is_contiguous() and rotary_pos_emb_cos.is_contiguous() and rotary_pos_emb_sin.is_contiguous()
+
+    def forward_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        *,
+        cu_seqlens: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Return fused eager FIA output as ``[1, T, H, 72]``, or ``None``.
+
+        The Triton producer replaces QKV layout extraction, Q/K RoPE, and
+        three pad-to-128 operations. Unsupported inputs deliberately return
+        ``None`` so that the vLLM model keeps its existing implementation.
+        """
+        if not self._can_use_fused_qkv_rope_pad_fia(qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens):
+            return None
+
+        assert cu_seqlens is not None and rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None
+        actual_seq_lengths = _get_fused_fia_seq_lengths(cu_seqlens, qkv_proj.shape[0])
+        if actual_seq_lengths is None:
+            return None
+
+        from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
+
+        q_pad, k_pad, v_pad = vision_qkv_rope_pad(qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin)
+        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_seq_lengths, actual_seq_lengths)
+        return self._maybe_unpad_output(context, self.head_size).unsqueeze(0)
 
     def _forward_eager_fia(
         self,
@@ -349,6 +485,27 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
     def forward_oot(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
+    ):
+        if torch.compiler.is_compiling() and query.dim() == 4:
+            return torch.ops.vllm.ascend_mm_encoder_attention_fia(
+                query,
+                key,
+                value,
+                cu_seqlens,
+                max_seqlen,
+                sequence_lengths,
+                self._compiled_fia_layer_id,
+            )
+        return self._forward_oot_impl(query, key, value, cu_seqlens, max_seqlen, sequence_lengths)
+
+    def _forward_oot_impl(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
