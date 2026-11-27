@@ -756,6 +756,76 @@ class NPUWorker(GPUWorker):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    def set_kv_cache_layout(self, kv_cache_layout: str, cp_kv_cache_interleave_size: int) -> None:
+        """Adopt the engine core's resolution and rebind attention impls.
+
+        Executor construction (model load, attention impl __init__) runs
+        BEFORE resolve_kv_cache_layout in the engine core, so impls
+        constructed in that window cached a PROVISIONAL binding (the
+        pre-resolution fallback: explicit config, env, or the default).
+        This RPC lands after resolution and before every
+        layout-dependent operation (memory profiling, allocation, KV
+        writes, graph capture): give the already-constructed attention
+        implementations the final layout here, and re-check the
+        full-graph gate against the now-effective layout -- the
+        platform validation ran pre-resolution and cannot have seen a
+        layout adopted after it (worker vote, connector preference).
+        """
+        super().set_kv_cache_layout(kv_cache_layout, cp_kv_cache_interleave_size)
+        self._rebind_attention_kv_layouts(kv_cache_layout)
+        self._check_effective_layout_full_graph_gate(kv_cache_layout)
+
+    def _rebind_attention_kv_layouts(self, kv_cache_layout: str | None) -> None:
+        """Give every attention impl the engine core's final layout.
+
+        Impls that expose rebind_kv_cache_layout re-derive their cached
+        binding from the adopted layout; the count of changed bindings is
+        logged so a stale provisional binding is visible in startup logs.
+        """
+        if kv_cache_layout is None:
+            return
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        rebound = 0
+        for module in forward_context.values():
+            impl = getattr(module, "impl", None)
+            rebind = getattr(impl, "rebind_kv_cache_layout", None)
+            if callable(rebind) and rebind(kv_cache_layout):
+                rebound += 1
+        if rebound:
+            logger.info(
+                "Rebound %d attention impl(s) to the resolved KV cache layout %s.",
+                rebound,
+                kv_cache_layout,
+            )
+
+    def _check_effective_layout_full_graph_gate(self, kv_cache_layout: str | None) -> None:
+        """cudagraph_mode=FULL does not support the head-major KV layout.
+
+        The pre-resolution platform gate sees only the explicit
+        config/env, so a layout adopted AFTER it (worker vote, connector
+        preference) could bypass it. Re-check the gate here against the
+        now-effective layout: with the head-major layout, the first
+        replayed prefill graph crashes the NPU stream (device error
+        507011 'model stream execute failed', reproduced on 910C).
+        """
+        if kv_cache_layout not in ("LBHNC", "HND"):
+            return
+        cudagraph_mode = getattr(self.vllm_config.compilation_config, "cudagraph_mode", None)
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            raise RuntimeError(
+                "cudagraph_mode=FULL (token-keyed graphs replayed for "
+                "prefill/mixed batches) is not supported with the "
+                "head-major KV cache layout (VLLM_KV_CACHE_LAYOUT=HND or "
+                "LBHNC) on Ascend: the first replayed prefill graph "
+                "crashes the NPU stream (device error 507011 'model "
+                "stream execute failed', reproduced on 910C). Use the "
+                "validated graph mode for this layout, "
+                "cudagraph_mode=FULL_DECODE_ONLY (decode-only graphs; "
+                "prefill/mixed batches run eager), or keep the default "
+                "(LBNHC) layout. See the graph mode guide "
+                "(docs/source/user_guide/feature_guide/graph_mode.md)."
+            )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much

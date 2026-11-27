@@ -74,7 +74,7 @@ def test_non_pa_params_preserve_current_kv_inputs(contiguous, cross_attention):
         key = key.contiguous()
         value = value.contiguous()
 
-    actual_key, actual_value, _, block_table, seq_lens = impl._get_fia_params(key, value, metadata)
+    actual_key, actual_value, _, block_table, seq_lens = impl._get_fia_params(key, value, metadata, capturing=False)
 
     assert block_table is None
     assert seq_lens == ([5] if cross_attention else [3])
@@ -101,13 +101,21 @@ def test_pa_params_preserve_cache_storage_and_stride(use_bnsd, state):
     impl.key_cache, impl.value_cache = backing[:, 0], backing[:, 1]
     metadata = _make_metadata(state)
 
-    key, value, block_size, block_table, _ = impl._get_fia_params(_strided_kv(), _strided_kv(), metadata)
+    key, value, block_size, block_table, _ = impl._get_fia_params(
+        _strided_kv(), _strided_kv(), metadata, capturing=False
+    )
 
     assert block_size == 3
-    assert block_table.data_ptr() == metadata.block_tables.data_ptr()
-    for actual, original in ((key, impl.key_cache), (value, impl.value_cache)):
-        assert not actual.is_contiguous()
-        assert actual.data_ptr() == original.data_ptr()
+    if use_bnsd:
+        # The HND gather materializes a token-major view with a sequential
+        # remapped table; the original block table is consumed by the gather.
+        assert block_table is not None
+        assert key.shape[0] == block_table.numel()  # gathered rows match
+    else:
+        assert block_table.data_ptr() == metadata.block_tables.data_ptr()
+        for actual, original in ((key, impl.key_cache), (value, impl.value_cache)):
+            assert not actual.is_contiguous()
+            assert actual.data_ptr() == original.data_ptr()
         assert actual.storage_offset() == original.storage_offset()
         assert actual.stride(0) == original.stride(0)
         torch.testing.assert_close(actual.reshape(original.shape), original)

@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -70,6 +71,49 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+def _resolved_kv_layout() -> str | None:
+    """The init-resolved KV cache layout: CacheConfig wins, env is the fallback.
+
+    The engine core resolves the layout once (resolve_kv_cache_layout,
+    engine/core.py:303) and pushes it to every worker through the
+    set_kv_cache_layout RPC (engine/core.py:311), which adopts it on
+    CacheConfig BEFORE any layout-dependent operation runs: memory
+    profiling (:327), allocation (initialize_from_config :391 ->
+    get_kv_cache_shape), and graph capture (:394). Executor construction
+    (engine/core.py:164: model load + attention impl __init__) happens
+    BEFORE that resolution, so an impl constructed in that window sees
+    only the pre-resolution fallback (explicit config, env, or the
+    default) -- the worker rebinds it to the final resolution right
+    after adoption (NPUWorker.set_kv_cache_layout ->
+    rebind_kv_cache_layout). Reading the raw env here would miss the
+    resolved value when the layout was set via config without the env
+    -- and allocation followed the resolved value, so a mismatch between
+    this reading and the allocation is a shape/data corruption, not a
+    display issue. The env remains the fallback for pre-config contexts
+    (unit tests that stub the config layer) and for the documented
+    VLLM_KV_CACHE_LAYOUT override path.
+    """
+    try:
+        cache_config = get_current_vllm_config().cache_config
+        if cache_config.kv_cache_layout is not None:
+            return cache_config.kv_cache_layout
+    except Exception:  # noqa: BLE001
+        pass
+    return envs_vllm.VLLM_KV_CACHE_LAYOUT
+
+
+def full_graph_fia_uses_gathered_kv_read() -> bool:
+    """Whether captured full-graph FIA tasks read a gathered (HND) KV cache.
+
+    Draft speculators build FIA task-update parameters outside the attention
+    backend (SharedSource updates), so they must mirror the backend's
+    capture-time binding: when the HND gather is active, the captured FIA
+    block table is the constant sequential remapped table over the compact
+    gather buffers, and replay must not rebind it to the raw physical table.
+    """
+    return _resolved_kv_layout() in ("LBHNC", "HND")
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -107,7 +151,12 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+        # The shape MUST follow the init-resolved layout (CacheConfig first,
+        # env fallback): the allocation and every downstream consumer
+        # (attention read, graph capture, repair fence) must see one
+        # physical order. Reading only the env missed the config-resolved
+        # value (see _resolved_kv_layout).
+        if _resolved_kv_layout() in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -181,6 +230,15 @@ class AscendMetadata:
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
+
+    # The runner-persistent block-table view BEFORE the builder padded it
+    # with synthetic zero rows for the FIA batch-size parity (see build()).
+    # torch.cat COPIES, so the padded metadata.block_tables is a snapshot
+    # whose storage is never refreshed; ACL-graph replay re-executes only
+    # device work, so a captured HND gather that consumed the padded copy
+    # would keep reading capture-time physical ids forever. Captured HND
+    # gathers must source the table from this in-place-refreshed view.
+    block_tables_pre_padding: torch.Tensor | None = None
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -313,6 +371,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
+        # The pre-padding view (the runner-persistent buffer slice) must be
+        # captured BEFORE the synthetic zero-row padding below rebinds
+        # block_table to a torch.cat copy: the captured HND gather sources
+        # this view, and the copy's storage is never refreshed at replay.
+        block_table_pre_padding = block_table
 
         # TODO: This will be moved to propose and deleted after fia ops fixed.
         seq_lens = _select_seq_lens(
@@ -419,6 +482,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
+        # Retain the pre-padding view (the runner-persistent buffer slice)
+        # for captured HND gathers: the padded metadata.block_tables is a
+        # torch.cat COPY whose storage is never refreshed, and ACL-graph
+        # replay re-executes only captured device work, so a captured
+        # gather that consumed the copy would read capture-time physical
+        # ids forever. See AscendMetadata.block_tables_pre_padding.
+        attn_metadata.block_tables_pre_padding = block_table_pre_padding
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata
@@ -476,6 +546,19 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    # True when the registered FIA task was captured against the gathered
+    # HND (head-major) KV read: the kernel then indexes the compact
+    # (num_rows * table_width [+1], block_size, num_kv_heads * head_dim)
+    # gather buffers through the captured sequential remapped table, whose
+    # content is constant across replays (the captured arange rewrites it on
+    # every replay). Replay must NOT rebind that input to
+    # metadata.block_tables: raw physical block ids address the full KV
+    # pool, not the compact gathered buffer (wrong blocks, or out of bounds
+    # once a physical id >= the gathered row count). The physical table the
+    # captured gather consumes is the runner's persistent block-table
+    # buffer, refreshed in place every step, so replaying the captured
+    # gather already reads the current ids.
+    block_table_is_remapped: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -484,8 +567,9 @@ class FIAParamProvider:
             params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
             }
+            if not self.block_table_is_remapped:
+                params["block_table"] = None if self.is_non_pa else metadata.block_tables
         else:
             params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
@@ -572,7 +656,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-        self.kv_cache_layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
+        # The impl is constructed during executor construction, BEFORE
+        # resolve_kv_cache_layout runs in the engine core, so the binding
+        # cached here is the PRE-RESOLUTION fallback (explicit config, env,
+        # or the default). The worker's set_kv_cache_layout RPC rebinds
+        # these fields to the final resolution before the first
+        # layout-dependent operation (see rebind_kv_cache_layout); the
+        # bound views follow the same resolved CacheConfig at allocation,
+        # so use_bnsd_kv_cache must track it, never the raw env alone.
+        self.kv_cache_layout = _resolved_kv_layout()
         self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -608,6 +700,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        # Full-graph FIA tasks captured against the gathered HND KV read must
+        # keep their remapped block table alive for the graph's lifetime:
+        # UpdatableGraph.register_task wraps the capture kwargs with
+        # weak_ref_tensors, so without an owner the storage would be freed
+        # back to the graph pool and the replay-side rebind would pass a
+        # dead weak tensor into the FIA op (see the PR #22649 review).
+        self._gathered_pa_read_strong_refs: list[torch.Tensor] = []
+
+    def rebind_kv_cache_layout(self, kv_cache_layout: str | None) -> bool:
+        """Adopt the engine core's final layout resolution.
+
+        This impl is constructed during executor construction, BEFORE
+        resolve_kv_cache_layout runs in the engine core, so the fields
+        cached at construction reflect the pre-resolution fallback.
+        The worker calls this from the set_kv_cache_layout RPC -- after
+        adoption, before the first layout-dependent operation (memory
+        profiling, allocation, KV writes, graph capture/update/replay)
+        -- so every consumer of use_bnsd_kv_cache follows the SAME
+        resolved layout the allocation followed. Returns whether the
+        binding changed.
+        """
+        if kv_cache_layout is None:
+            return False
+        if self.kv_cache_layout == kv_cache_layout:
+            return False
+        self.kv_cache_layout = kv_cache_layout
+        self.use_bnsd_kv_cache = kv_cache_layout in ("LBHNC", "HND")
+        return True
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -659,6 +779,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             0 if self.sliding_window else SWA_INT_MAX,
         )
 
+    def _retain_gathered_pa_read_table(self, block_table: torch.Tensor | None) -> bool:
+        """Whether ``block_table`` is the gathered HND read's remapped table.
+
+        When it is, the captured FIA task must keep this exact tensor bound:
+        its content is the constant sequential mapping into the compact
+        gather buffers, and no replay-time parameter replaces it. Retain a
+        strong reference because ``UpdatableGraph.register_task`` wraps the
+        capture kwargs with ``weak_ref_tensors``, which do not keep the
+        storage alive.
+        """
+        if block_table is None or not self.use_bnsd_kv_cache:
+            return False
+        self._gathered_pa_read_strong_refs.append(block_table)
+        return True
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -668,7 +803,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=True
+        )
+        # For the gathered HND read, ``block_table`` is the sequential
+        # remapped table over the compact gather buffers; the strong
+        # reference kept by the helper below survives register_task's
+        # weak_ref_tensors wrapping of the capture kwargs.
+        block_table_is_remapped = self._retain_gathered_pa_read_table(block_table)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -753,6 +895,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                block_table_is_remapped=block_table_is_remapped,
             ),
         )
         return output, num_tokens
@@ -765,7 +908,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=True
+        )
+        # FIAV2ParamProvider never resolves a block_table override, so the
+        # captured remapped table stays bound at replay; keep it alive the
+        # same way as the v1 path.
+        self._retain_gathered_pa_read_table(block_table)
         actual_seq_lengths_kv = attn_metadata.seq_lens
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -871,7 +1020,107 @@ class AscendAttentionBackendImpl(AttentionImpl):
             _, _, block_size, _ = key.shape
         return key, value, block_size
 
-    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
+    def _materialize_bnsd_pa_read(
+        self, block_table: torch.Tensor, max_kv_len: int | None = None, *, capturing: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gather the head-major KV cache into the form the FIA kernel reads.
+
+        aclnnFusedInferAttentionScore has no kv-cache layout parameter: in
+        page-attention mode it reads the cache as token-major 3D blocks
+        (block_num, block_size, num_kv_heads * head_dim), the shape the
+        default layout hands it as a zero-copy view. The BNSD/HND allocation
+        is head-major (num_blocks, num_kv_heads, block_size, head_dim); the
+        kernel's tiling rejects that 4D form (EZ0037 "key tensor must be
+        contiguous"), and head-major memory has no zero-copy token-major
+        view, so the read gathers the blocks this step's block table
+        references and permutes them into the accepted layout.
+
+        The gather is deliberately NOT deduplicated: torch.unique on a
+        device tensor produces a data-dependent output shape, which forces
+        the host synchronization AsyncScheduler must avoid, and in the
+        common case (requests not sharing physical blocks) every table
+        entry is distinct so there is nothing to remove. Duplicate blocks
+        are harmless because each row is read by the kernel only up to its
+        seq len, and unfilled entries are clamped to block 0.
+
+        The gathered width differs by execution mode. Under ACL-graph
+        capture (_EXTRA_CTX.capturing) the full table width is mandatory:
+        the captured shape must be static, the capture dummy table covers
+        the maximum replay width, and the padding row appended for the
+        synthetic replay request relies on that fixed width, so
+        max_kv_len is ignored there. On the eager path max_kv_len - the
+        batch-maximum live KV length the caller already holds on the host -
+        bounds the gather to ceil(max_kv_len / block_size) columns, copying
+        only the pages this batch actually reads instead of the full
+        block-table width (unused columns, repeated block-0 padding
+        included, would otherwise be copied too and can OOM a wide batch
+        on the first cached read). The bound is a scalar maximum over the
+        batch, so it introduces no device-to-host read and no per-request
+        variable shapes; None keeps the full width for callers without
+        the live lengths. The gathered size is batch x gathered-width
+        blocks per layer per step - never more than the dedup worst case,
+        only forgoing the shrink of shared prefixes - and is the documented
+        read overhead of the HND layout.
+
+        This is a read-side view builder only: the bound cache tensors keep
+        their identity and geometry for the scatter write path and the
+        repair fence. The per-layer per-step copy is the documented read
+        overhead of the HND layout.
+        """
+        num_rows, table_width = block_table.shape
+        # _get_fia_params guarantees the caches are bound before the gather
+        # (it refuses with a RuntimeError otherwise); narrow for mypy.
+        assert self.key_cache is not None and self.value_cache is not None
+        block_size = self.key_cache.shape[2]
+        if max_kv_len is not None and not capturing:
+            # Eager callers hold the live KV lengths on the host, so only
+            # the pages this batch actually reads need gathering. The
+            # batch-maximum scalar keeps one static shape per step and
+            # needs no device-to-host read; capture keeps the full width.
+            needed_width = max(1, math.ceil(max_kv_len / block_size))
+            block_table = block_table[:, : min(table_width, needed_width)]
+            num_rows, table_width = block_table.shape
+        # Unfilled table entries can hold negative ids; rows are read by the
+        # kernel only up to each request's seq len, so mapping them to block
+        # 0 is safe. Gather the selected table width (see the docstring: no
+        # device-side dedup, so no host synchronization).
+        flat_ids = block_table.reshape(-1).to(torch.int64).clamp(min=0)
+        num_gathered = flat_ids.numel()
+        remapped = torch.arange(num_gathered, device=flat_ids.device)
+
+        def to_token_major(cache: torch.Tensor) -> torch.Tensor:
+            # (U, H, block, D) -> (U, block, H * D); the reshape copies once.
+            return cache.index_select(0, flat_ids).permute(0, 2, 1, 3).reshape(flat_ids.numel(), block_size, -1)
+
+        remapped_table = remapped.reshape(num_rows, table_width).to(block_table.dtype)
+        if capturing:
+            # Graph replay can grow the FIA batch by one synthetic padding
+            # request beyond the captured request rows (see
+            # AscendAttentionMetadataBuilder.build: a padded FULL-graph
+            # decode query tensor can exceed the last cumulative query
+            # length, so build() appends a final synthetic request with KV
+            # len 1). The physical-side padding points that request at block
+            # 0; mirror it in the gathered world by appending one extra
+            # gathered slot holding physical block 0 and one extra remapped
+            # row mapping every entry to that slot. Rows are read by the
+            # kernel only up to each request's seq len, so the padding row
+            # is read as a single block-0 entry and nothing else touches it.
+            remapped_table = torch.cat(
+                [remapped_table, remapped_table.new_full((1, table_width), num_gathered)],
+                dim=0,
+            )
+            flat_ids = torch.cat([flat_ids, flat_ids.new_zeros(1)])
+        return to_token_major(self.key_cache), to_token_major(self.value_cache), remapped_table
+
+    def _get_fia_params(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        kv_cache=None,
+        *,
+        capturing: bool,
+    ):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
@@ -912,6 +1161,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        if block_table is not None and self.use_bnsd_kv_cache:
+            # The head-major (BNSD/HND) cache has no zero-copy form the FIA
+            # kernel reads in page-attention mode; gather the referenced
+            # blocks into the token-major layout the kernel accepts. Eager
+            # callers bound the gather by the batch-maximum live KV length
+            # from the host-side seq_lens_list, so unused table columns
+            # (repeated block-0 padding included) are not copied; graph
+            # capture keeps the full static width (max_kv_len=None). Under
+            # capture the gather must read the runner-persistent table
+            # (refreshed in place every step): when the builder padded
+            # block_tables with a synthetic zero row the padded tensor is a
+            # cat COPY -- a snapshot whose storage replay never refreshes --
+            # so the captured gather sources the pre-padding view instead
+            # (the padding request is already mirrored in the gathered
+            # world's extra block-0 slot; see _materialize_bnsd_pa_read).
+            if capturing:
+                pre_padding = getattr(attn_metadata, "block_tables_pre_padding", None)
+                if pre_padding is not None:
+                    block_table = pre_padding
+            max_kv_len = None
+            if not capturing:
+                # Host-side per-request KV lengths: a scalar batch-maximum
+                # bound avoids any device-to-host read. Absent, empty, or
+                # non-list values fall back to the full table width.
+                seq_lens_list = attn_metadata.seq_lens_list
+                if isinstance(seq_lens_list, (list, tuple)) and seq_lens_list:
+                    max_kv_len = max(seq_lens_list)
+            key, value, block_table = self._materialize_bnsd_pa_read(block_table, max_kv_len, capturing=capturing)
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
@@ -937,7 +1214,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return output
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
-            key, value, attn_metadata, kv_cache
+            key, value, attn_metadata, kv_cache, capturing=False
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
@@ -1783,7 +2060,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 FIA V1 TND for prefill states (PrefillNoCache uses float KV directly,
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=False
+        )
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]

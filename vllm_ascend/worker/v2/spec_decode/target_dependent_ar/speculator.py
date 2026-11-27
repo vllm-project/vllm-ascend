@@ -41,7 +41,11 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionState,
+    full_graph_fia_uses_gathered_kv_read,
+)
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
@@ -751,6 +755,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if self.use_dcp and self.attn_architecture == "MLA":
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         block_table = next(iter(draft_attn_metadata.values())).block_tables
+        # The gathered HND KV read captures a constant sequential remapped
+        # block table over the compact gather buffers; rebinding it to the
+        # raw physical table would index out of those buffers (see
+        # AscendAttentionBackendImpl._materialize_bnsd_pa_read), so only the
+        # default layout replays with a fresh physical block table.
+        rebind_block_table = not full_graph_fia_uses_gathered_kv_read()
         if is_draft_model_prefill:
             prefill_fia_params: list[dict[str, Any]] = []
             for layer_name, metadata in draft_attn_metadata.items():
@@ -758,16 +768,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 prefill_metadata = metadata.decode if is_mla else metadata
                 assert prefill_metadata is not None
 
-                prefill_fia_params.append(
-                    {
-                        "layer_name": layer_name,
-                        "actual_seq_lengths": prefill_metadata.actual_seq_lengths_q,
-                        "actual_seq_lengths_kv": prefill_metadata.seq_lens_list,
-                        "actual_seq_qlen": prefill_metadata.actual_seq_lengths_q,
-                        "actual_seq_kvlen": prefill_metadata.seq_lens_list,
-                        "block_table": prefill_metadata.block_table if is_mla else metadata.block_tables,
-                    }
-                )
+                params = {
+                    "layer_name": layer_name,
+                    "actual_seq_lengths": prefill_metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": prefill_metadata.seq_lens_list,
+                    "actual_seq_qlen": prefill_metadata.actual_seq_lengths_q,
+                    "actual_seq_kvlen": prefill_metadata.seq_lens_list,
+                }
+                if rebind_block_table:
+                    params["block_table"] = prefill_metadata.block_table if is_mla else metadata.block_tables
+                prefill_fia_params.append(params)
             return prefill_fia_params
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
@@ -779,16 +789,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name in self.draft_attn_layer_names:
-                fia_params.append(
-                    {
-                        "layer_name": layer_name,
-                        "actual_seq_lengths": query_start_loc,
-                        "actual_seq_lengths_kv": seq_lens,
-                        "actual_seq_qlen": query_start_loc,
-                        "actual_seq_kvlen": seq_lens,
-                        "block_table": block_table,
-                    }
-                )
+                params = {
+                    "layer_name": layer_name,
+                    "actual_seq_lengths": query_start_loc,
+                    "actual_seq_lengths_kv": seq_lens,
+                    "actual_seq_qlen": query_start_loc,
+                    "actual_seq_kvlen": seq_lens,
+                }
+                if rebind_block_table:
+                    params["block_table"] = block_table
+                fia_params.append(params)
         return fia_params
 
     def build_fia_params_dcp(

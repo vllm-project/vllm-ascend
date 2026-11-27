@@ -1,3 +1,4 @@
+import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -568,7 +569,16 @@ class TestAscendAttentionBackendImpl(TestBase):
             )
 
     def test_hnd_layout_is_recorded_during_initialization(self):
-        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
+        """The pre-resolution window: the impl is constructed before the
+        engine core resolves the layout, so it records the env-supplied
+        fallback; the worker rebinds it to the final resolution at
+        adoption (see tests/ut/worker/test_kv_layout_adoption.py). The
+        config context must carry an UNRESOLVED cache config for that
+        window -- a resolved config wins over the env."""
+        with (
+            patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"),
+            patch.object(self.mock_vllm_config.cache_config, "kv_cache_layout", None),
+        ):
             impl = AscendAttentionBackendImpl(
                 num_heads=8,
                 head_size=64,
@@ -652,18 +662,27 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.use_bnsd_kv_cache = False
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
         self.impl.value_cache = torch.empty_like(self.impl.key_cache)
-        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata, capturing=False)
         self.assertEqual(key.shape, (4, 128, 512))
         self.assertEqual(value.shape, (4, 128, 512))
         self.assertEqual(block_size, 128)
 
+        # BNSD (HND) reads feed FIA its page-attention contract: the
+        # head-major blocks are gathered and permuted to token-major 3D
+        # (see TestBnsdPaReadGather); the raw 4D cache crashes the kernel
+        # at the first read (EZ0037).
         self.impl.use_bnsd_kv_cache = True
-        self.impl.key_cache = torch.empty(4, 8, 128, 64)
-        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
-        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
-        self.assertEqual(key.shape, (4, 8, 128, 64))
-        self.assertEqual(value.shape, (4, 8, 128, 64))
+        self.impl.key_cache = torch.zeros(4, 8, 128, 64)
+        self.impl.value_cache = torch.zeros_like(self.impl.key_cache)
+        with patch("vllm_ascend.ascend_forward_context.get_forward_context") as ctx:
+            ctx.return_value = MagicMock(capturing=False)
+            key, value, block_size, block_table, _ = self.impl._get_fia_params(
+                current_key, current_value, metadata, capturing=False
+            )
+        self.assertEqual(key.dim(), 3)
+        self.assertTrue(key.is_contiguous())
         self.assertEqual(block_size, 128)
+        self.assertEqual(block_table.shape, (1, 1))
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
@@ -1218,3 +1237,143 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+
+class TestBnsdPaReadGather(unittest.TestCase):
+    """The head-major (BNSD/HND) cache read must feed FIA its PA contract.
+
+    aclnnFusedInferAttentionScore has no kv-cache layout parameter: in
+    page-attention mode it reads token-major (num_blocks, block_size,
+    num_kv_heads * head_dim) blocks. The HND allocation is head-major
+    (num_blocks, H, block_size, D); handing the 4D cache to the kernel
+    crashes at the first read (EZ0037 "key tensor must be contiguous").
+    The read path must therefore gather the referenced blocks and
+    permute them to the accepted layout, remapping the block table.
+    """
+
+    NUM_HEADS = 2
+    HEAD_SIZE = 16
+    BLOCK_SIZE = 8
+    NUM_BLOCKS = 6
+
+    def _make_impl(self) -> AscendAttentionBackendImpl:
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        impl.use_bnsd_kv_cache = True
+        impl.key_cache = None
+        impl.value_cache = None
+        impl.kv_sharing_target_layer_name = None
+        return impl
+
+    def _make_bnsd_cache(self):
+        cache = torch.zeros(self.NUM_BLOCKS, self.NUM_HEADS, self.BLOCK_SIZE, self.HEAD_SIZE)
+        for block in range(self.NUM_BLOCKS):
+            cache[block].fill_(block)
+        return cache
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_gather_feeds_kernel_contract_and_remaps_table(self, mock_ctx):
+        """Full-table-width gather over one mixed table: repeated,
+        nonconsecutive, and negative ids.
+
+        The gather is intentionally not deduplicated (torch.unique has a
+        data-dependent output shape, forcing the host sync AsyncScheduler
+        must avoid); duplicates read the same content from their own slots.
+        Unfilled table entries can hold negative ids; the gather clamps
+        them to physical block 0, matching how the kernel treats padding.
+        """
+        mock_ctx.return_value = MagicMock(capturing=False)
+        impl = self._make_impl()
+        impl.key_cache = self._make_bnsd_cache()
+        impl.value_cache = self._make_bnsd_cache() + 100
+        block_table = torch.tensor([[0, 3, 5], [3, -1, 1]])
+
+        key, value, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=False)
+
+        self.assertEqual(key.dim(), 3)
+        self.assertEqual(key.shape, (block_table.numel(), self.BLOCK_SIZE, self.NUM_HEADS * self.HEAD_SIZE))
+        self.assertTrue(key.is_contiguous())
+        for row in key:
+            self.assertEqual(row.unique().numel(), 1)
+        # The remap is the identity over the flattened table.
+        self.assertEqual(remapped.tolist(), [[0, 1, 2], [3, 4, 5]])
+        # Every cell reads its own physical block -- negative ids clamped
+        # to block 0 -- with each cache carrying its own distinguishable
+        # payload (K holds the block id, V holds the block id + 100).
+        for row_idx, row in enumerate(block_table):
+            for col_idx, block_id in enumerate(row.tolist()):
+                slot = remapped[row_idx, col_idx]
+                physical = max(block_id, 0)
+                self.assertEqual(key[slot, 0, 0].item(), physical)
+                self.assertEqual(value[slot, 0, 0].item(), physical + 100)
+        # Duplicate cells (block 3 at (0, 1) and (1, 0)) gather identical
+        # content into distinct slots, in both caches.
+        self.assertEqual(key[remapped[0, 1]].tolist(), key[remapped[1, 0]].tolist())
+        self.assertEqual(value[remapped[0, 1]].tolist(), value[remapped[1, 0]].tolist())
+        # The negative id at (1, 1) clamps to physical block 0's content.
+        self.assertEqual(key[remapped[1, 1], 0, 0].item(), 0)
+        self.assertEqual(value[remapped[1, 1], 0, 0].item(), 100)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_capture_mode_gathers_full_table(self, mock_ctx):
+        """Capture uses the same full-width gather as eager, plus one padding row.
+
+        Graph replay can grow the FIA batch by one synthetic padding request
+        beyond the captured request rows (AscendAttentionMetadataBuilder.build
+        appends it when a padded FULL-graph decode query exceeds the last
+        cumulative query length). The gather then carries one extra slot of
+        physical block 0 and one extra remapped row pointing at it, mirroring
+        the physical-side padding ("the dummy request points at block 0").
+        """
+        mock_ctx.return_value = MagicMock(capturing=True)
+        impl = self._make_impl()
+        impl.key_cache = self._make_bnsd_cache()
+        impl.value_cache = self._make_bnsd_cache()
+        block_table = torch.tensor([[0, 0], [0, 0]])
+
+        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=True)
+
+        self.assertEqual(key.shape[0], block_table.numel() + 1)
+        self.assertEqual(remapped.tolist(), [[0, 1], [2, 3], [4, 4]])
+        # The padding slot gathers physical block 0 (the null block).
+        self.assertEqual(key[remapped[2, 0], 0, 0].item(), 0)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_fia_params_routes_bnsd_through_the_gather(self, mock_ctx):
+        """_get_fia_params is the one choke point for every eager FIA call."""
+        mock_ctx.return_value = MagicMock(capturing=False)
+        impl = self._make_impl()
+        impl.key_cache = self._make_bnsd_cache()
+        impl.value_cache = self._make_bnsd_cache()
+        metadata = AscendMetadata(attn_state=AscendAttentionState.DecodeOnly)
+        metadata.block_tables = torch.tensor([[0, 3], [1, 4]])
+        metadata.seq_lens_list = [16, 16]
+
+        with patch.object(impl, "_materialize_bnsd_pa_read", wraps=impl._materialize_bnsd_pa_read) as gather:
+            key, value, block_size, block_table, _ = impl._get_fia_params(
+                torch.empty(0), torch.empty(0), metadata, capturing=False
+            )
+
+        gather.assert_called_once()
+        self.assertEqual(key.dim(), 3)
+        self.assertEqual(block_size, self.BLOCK_SIZE)
+        self.assertEqual(block_table.shape, (2, 2))
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_default_layout_read_stays_zero_copy(self, mock_ctx):
+        """The default layout must not gain a gather."""
+        mock_ctx.return_value = MagicMock(capturing=False)
+        impl = self._make_impl()
+        impl.use_bnsd_kv_cache = False
+        impl.key_cache = torch.zeros(self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_HEADS, self.HEAD_SIZE)
+        impl.value_cache = torch.zeros_like(impl.key_cache)
+        metadata = AscendMetadata(attn_state=AscendAttentionState.DecodeOnly)
+        metadata.block_tables = torch.tensor([[0, 1], [2, 3]])
+        metadata.seq_lens_list = [16, 16]
+
+        with patch.object(impl, "_materialize_bnsd_pa_read") as gather:
+            key, value, block_size, block_table, _ = impl._get_fia_params(
+                torch.empty(0), torch.empty(0), metadata, capturing=False
+            )
+
+        gather.assert_not_called()
+        self.assertIs(block_table, metadata.block_tables)

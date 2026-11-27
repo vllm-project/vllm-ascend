@@ -25,7 +25,7 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionState, full_graph_fia_uses_gathered_kv_read
 from vllm_ascend.compilation.updatable_graph import SharedSource
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -219,7 +219,14 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         UpdatableGraph.resolve_tasks), so emit one entry per draft attention
         layer. All layers share the same batch-level values because the
         three module forwards reuse one metadata.
+
+        The gathered HND KV read captures a constant sequential remapped
+        block table over the compact gather buffers; rebinding it to the
+        raw physical table would index out of those buffers (see
+        AscendAttentionBackendImpl._materialize_bnsd_pa_read), so only the
+        default layout replays with a fresh physical block table.
         """
+        rebind_block_table = not full_graph_fia_uses_gathered_kv_read()
         # AutoRegressiveAclGraphManager passes every draft step's metadata,
         # while the 310P replay override passes only the first step's dict.
         # All modules reuse one metadata, so either way the first step works.
@@ -233,16 +240,16 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             else:
                 decode_metadata = metadata
                 block_table = metadata.block_tables
-            fia_params.append(
-                {
-                    "layer_name": layer_name,
-                    "actual_seq_lengths": decode_metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": decode_metadata.seq_lens_list,
-                    "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
-                    "actual_seq_kvlen": decode_metadata.seq_lens_list,
-                    "block_table": block_table,
-                }
-            )
+            params = {
+                "layer_name": layer_name,
+                "actual_seq_lengths": decode_metadata.actual_seq_lengths_q,
+                "actual_seq_lengths_kv": decode_metadata.seq_lens_list,
+                "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
+                "actual_seq_kvlen": decode_metadata.seq_lens_list,
+            }
+            if rebind_block_table:
+                params["block_table"] = block_table
+            fia_params.append(params)
         return fia_params
 
     def _build_attn_metadata(
