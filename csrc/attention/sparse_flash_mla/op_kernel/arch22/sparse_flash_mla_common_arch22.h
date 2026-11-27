@@ -257,7 +257,8 @@ struct RunInfo {
     uint32_t curTopKIdx = 0;
     bool isOriOnly = true; // 判断当前块是在Ori部分还是Cmp部分
     bool isOriCmpMix = false;
-    uint8_t resv[2];
+    bool splitKvGather = false;
+    uint8_t resv[1];
     uint64_t s2StartPoint = 0;
     int64_t cmpS2IdStart = 0;
     int64_t cmpS2IdLimit = 0;
@@ -270,6 +271,8 @@ struct RunInfo {
 struct ConstInfo {
     // CUBE与VEC核间同步的模式
     static constexpr uint32_t SMLA_SYNC_MODE2 = 2;
+    static constexpr uint32_t KV_GATHER_HALF_ROWS = 256;
+    static constexpr uint32_t SYNC_KV_SECOND_HALF = 11;
     // BUFFER的字节数
     static constexpr uint32_t BUFFER_SIZE_BYTE_32B = 32;
     static constexpr uint32_t BUFFER_SIZE_BYTE_64B = 64;

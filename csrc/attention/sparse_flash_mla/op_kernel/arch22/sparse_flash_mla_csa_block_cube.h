@@ -350,6 +350,10 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, con
 
     // L1 切n切k
     for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) {
+        if (info.splitKvGather && nL1 * N_SPLIT_SIZE == ConstInfo::KV_GATHER_HALF_ROWS) {
+            // The first two 128-column panels can run while AIV gathers the second half.
+            CrossCoreWaitFlag(ConstInfo::SYNC_KV_SECOND_HALF);
+        }
         if (nL1 == (nL1Loops - 1)) {
             // 尾块重新计算size
             nL1Size = nSize - (nL1Loops - 1) * N_SPLIT_SIZE;
