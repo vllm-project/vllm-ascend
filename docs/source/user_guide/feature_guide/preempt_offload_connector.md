@@ -19,7 +19,7 @@ In a typical Decode deployment, `max_num_batched_tokens` is often sized around
 `max_num_seqs * (1 + num_spec_tokens)` so that the Decode node mainly schedules
 one new token, plus speculative tokens if MTP is enabled, per request. This is
 efficient for decode but too small for recomputing long prompts after
-preemption. Recompute CPU offload avoids sending such requests back through the
+preemption. Preempt offload avoids sending such requests back through the
 full prompt recompute path when their KV state can be preserved locally.
 
 ## Key Concepts
@@ -91,6 +91,8 @@ For typical A3 deployments with a large recompute-offload budget, set
 `--shm-size=1024g` when starting the container. The following snippet follows
 the Docker style used by the DeepSeek-V4-Flash tutorial:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
+
 ```bash
 
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -98,31 +100,8 @@ docker run --rm \
     --name vllm-ascend \
     --shm-size=1024g \
     --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
     -it $IMAGE bash
 ```

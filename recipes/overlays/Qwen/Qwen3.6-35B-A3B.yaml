@@ -1,14 +1,42 @@
 # Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3.6-35B-A3B.yaml
 # Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
 meta:
+  date_updated: 2026-11-20
   hardware:
+    ascend_910b: verified
     ascend_910c: verified
     ascend_950dt: supported
+# single_node_tp + variant.tp: 2 (single_node_tep forces TP = GPU count).
+strategy_hardware:
+  single_node_tp:
+    ascend_910b: supported
+  single_node_tep:
+    ascend_910b: unsupported
+  single_node_dep:
+    ascend_910b: unsupported
+  multi_node_tp:
+    ascend_910b: unsupported
+  multi_node_tp_pp:
+    ascend_910b: unsupported
+  multi_node_dep:
+    ascend_910b: unsupported
+  multi_node_tep:
+    ascend_910b: unsupported
+# These core-default features become opt-in (unchecked by default).
+hardware_opt_in_features:
+  ascend_910b:
+    - reasoning
+    - tool_calling
+    - encoder_parallel
 features:
   spec_decoding:
     modes:
       mtp:
         hardware_overrides:
+          ascend_910b:
+            args:
+              - '--speculative-config'
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
           ascend_910c:
             args:
               - '--speculative-config'
@@ -20,9 +48,14 @@ features:
 variants:
   # The base recipe's BF16 `default` variant carries no Ascend image; without
   # this block the renderer falls back to the NVIDIA default image and emits
-  # an unrunnable `vllm serve` for ascend_910c / ascend_950dt.
+  # an unrunnable `vllm serve` for ascend_910c / ascend_950dt / ascend_910b.
   default:
     hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: "vllm serve"
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
         docker_serve_command: "vllm serve"
@@ -33,6 +66,59 @@ variants:
         docker_serve_command: "vllm serve"
         extra_env:
           VLLM_USE_MODELSCOPE: 'True'
+
+  ascend_w8a8_a2:
+    model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8
+    precision: int8
+    label: W8A8 (Ascend A2)
+    vram_minimum_gb: 42
+    supported_hardware:
+      - ascend_910b
+    supported_frontends:
+      - python
+    tp: 2
+    min_vllm_version: 0.32.0rc1
+    default_modes:
+      spec_decoding: mtp
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--enable-expert-parallel'
+      - '--quantization'
+      - ascend
+      - '--max-num-seqs'
+      - '128'
+      - '--max-model-len'
+      - '135168'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--safetensors-load-strategy'
+      - lazy
+      - '--enable-prefix-caching'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      ASCEND_RT_VISIBLE_DEVICES: '0,1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: "vllm serve"
 
   ascend_w8a8_a3:
     model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8
@@ -133,3 +219,26 @@ variants:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: "vllm serve"
+
+hardware_notes:
+  ascend_910b:
+    title: A2 runs on two NPUs with v0.32.0rc1
+    body: >-
+      The A2 config uses quay.io/ascend/vllm-ascend:v0.32.0rc1 and runs the
+      ModelSlim W8A8 checkpoint as TP2 with expert parallelism on two NPUs.
+      The "Ascend A2 deployment" section of the guide covers the feature
+      toggles.
+    link:
+      label: Ascend A2 deployment
+      href: '#ascend-a2-deployment'
+
+guide_sections:
+  ascend: |
+    ## Ascend A2 deployment
+
+    The rendered default for A2 is the verified flag set — only MTP is on. The
+    Qwen tool-call, reasoning and encoder-parallel features are opt-in on
+    ascend_910b because they were not part of the verified launch; turn them on
+    in the Features row when you need them (`--enable-auto-tool-choice
+    --tool-call-parser qwen3_coder`, `--reasoning-parser qwen3`,
+    `--mm-encoder-tp-mode data`).

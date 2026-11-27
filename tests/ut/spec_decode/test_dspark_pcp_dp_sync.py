@@ -14,7 +14,61 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as module
-from vllm_ascend.utils import vllm_version_is
+
+
+@pytest.mark.parametrize("embedding_tp,lmhead_tp", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("skip_drafts", [False, True, None])
+@pytest.mark.parametrize("is_profile,sync_present", [(False, True), (True, True), (False, False)])
+def test_dspark_vocab_tp_agrees_on_query_pass(
+    monkeypatch, embedding_tp, lmhead_tp, skip_drafts, is_profile, sync_present
+):
+    spec = object.__new__(module.AscendDSparkSpeculator)
+    spec.pcp_manager = None
+    spec.use_dcp = False
+    spec.draft_logits = None
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int64))
+    spec.max_num_tokens = 4
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
+    batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.zeros(1, dtype=np.bool_))
+    # A missing field is the supported release lane's pre-skip_drafts state.
+    sync = SimpleNamespace(num_reqs=1)
+    if skip_drafts is not None:
+        sync.skip_drafts = skip_drafts
+    monkeypatch.setattr(module, "embedding_tp_enable", lambda: embedding_tp)
+    monkeypatch.setattr(module, "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(module.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    query_passes = []
+    forwarded_k = []
+
+    def parent(self, *args, **kwargs):
+        # Upstream only skips the query branch for exactly K=0.
+        forwarded_k.append(kwargs["num_speculative_tokens"])
+        query_passes.append(kwargs["num_speculative_tokens"] != 0)
+        return torch.zeros(1, 3, dtype=torch.int64)
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent)
+    applies = (embedding_tp or lmhead_tp) and sync_present and not is_profile
+    # Exercise active K0, active K3, and idle arguments against the shared
+    # decision, including when it overrides a caller's local default.
+    peers = [(0, False), (3, False), (None, True)]
+    for local_k, dummy in peers:
+        spec.propose(
+            batch,
+            {},
+            {},
+            torch.empty(0),
+            None,
+            *[torch.empty(0) for _ in range(6)],
+            dp_sync_state=sync if sync_present else None,
+            dummy_run=dummy,
+            is_profile=is_profile,
+            num_speculative_tokens=local_k,
+        )
+    expected_k: list[int | None] = ([0, 0, 0] if skip_drafts is True else [None, 3, None]) if applies else [0, 3, None]
+    assert forwarded_k == expected_k
+    assert query_passes == [k != 0 for k in expected_k]
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
@@ -38,13 +92,15 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
         idx_mapping=torch.arange(draft_reqs),
         is_prefilling_np=np.zeros(draft_reqs, dtype=np.bool_),
     )
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
+    sync_kwargs = {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([20, 20]), uniform_token_count=5, eager=False, num_reqs=4, **sync_kwargs
     )
     monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
     monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     seen = []
 
     def parent(self, *args, **kwargs):
@@ -72,9 +128,8 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("dummy_run", [False, True])
-@pytest.mark.parametrize("logits_kind", ["none", "tensor", "cache"] if vllm_version_is("0.33.0") else ["none", "cache"])
+@pytest.mark.parametrize("logits_kind", ["none", "cache"])
 def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch, pcp_enabled, dummy_run, logits_kind):
-    upstream_sync = not vllm_version_is("0.33.0")
     spec = object.__new__(module.AscendDSparkSpeculator)
     spec.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     spec.enable_adaptive_verification = False
@@ -108,11 +163,8 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
         return tensor
 
     sync_method = pcp_module.AscendPCPManager.sync_drafts
-    if upstream_sync:
-        assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
-        assert sync_method is pcp_module.PCPManager.sync_drafts
-    else:
-        assert "sync_drafts" in pcp_module.AscendPCPManager.__dict__
+    assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
+    assert sync_method is pcp_module.PCPManager.sync_drafts
     monkeypatch.setitem(sync_method.__globals__, "get_pcp_group", lambda: SimpleNamespace(broadcast=broadcast))
     monkeypatch.setattr(module.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
@@ -121,9 +173,8 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
     result = spec.propose(batch, {}, {}, torch.empty(0), None, *[torch.empty(0) for _ in range(6)], dummy_run=dummy_run)
 
     broadcasts = 1 + int(logits_buffer is not None)
-    fallback_sync = pcp_enabled and not upstream_sync and not dummy_run
-    assert len(calls) == (broadcasts if fallback_sync else 0)
-    if pcp_enabled and upstream_sync and not dummy_run:
+    assert len(calls) == 0
+    if pcp_enabled and not dummy_run:
         # The upstream runner invokes the inherited method after propose returns.
         assert spec.pcp_manager.sync_drafts(result, batch.idx_mapping, spec.draft_logits) is None
     needs_sync = pcp_enabled and not dummy_run

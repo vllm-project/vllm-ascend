@@ -78,7 +78,7 @@ jobs:
     # API access and stays in refresh_ci_gate.py, executed by the bot with
     # live review data.
     if: ${{ github.event.review.user.type != 'Bot' }}
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Package review payload for the refresh bot
         run: |

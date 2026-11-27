@@ -50,6 +50,7 @@ def _runner_connector(connector, multi):
         return connector
     combined = object.__new__(AscendMultiConnector)
     combined._connectors = [connector]
+    combined._draft_host_mirror_save_hook = None
     combined._extra_async_saves = {}
     combined._connector_metadata = None
     combined._configure_layerwise_reuse_completion()

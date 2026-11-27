@@ -26,22 +26,24 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.config.utils import replace
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.models.deepseek_v41.engram import model_state as engram_state
+from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.platform import _setup_worker_and_scheduler
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import aclgraph as aclgraph_module
@@ -120,7 +122,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    assert is_pcp_decode_sharding_enabled(config) is expected_sharding
+    assert config.parallel_config.pcp_shard_decode_requests is expected_sharding
     manager = _make_factory_pcp_manager(config, pcp_size - 1)
     if pcp_size == 1:
         assert manager is None
@@ -130,8 +132,12 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
         assert manager.shard_decode_requests is expected_sharding
 
 
-def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False):
-    config.scheduler_config = SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=64, enable_chunked_prefill=True)
+def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False, batch_capacity=64):
+    config.scheduler_config = SimpleNamespace(
+        enable_chunked_prefill=True,
+        max_num_seqs=8,
+        max_num_batched_tokens=batch_capacity,
+    )
     with (
         patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=SimpleNamespace(rank_in_group=rank)),
         patch("vllm.v1.worker.gpu.pcp_manager.get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
@@ -149,10 +155,10 @@ def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False):
 
 def _make_policy_batch(counts, prefilling):
     counts = np.array(counts, dtype=np.int32)
-    buffers = AscendInputBuffers(max_num_reqs=8, max_num_tokens=64, device=torch.device("cpu"))
+    total = int(counts.sum())
+    buffers = AscendInputBuffers(max_num_reqs=8, max_num_tokens=max(64, total), device=torch.device("cpu"))
     # make_dummy requires at least one token per request. Materialize the
     # scheduled zero-token rows after allocating a valid seed batch.
-    total = int(counts.sum())
     batch = InputBatch.make_dummy(num_reqs=len(counts), num_tokens=max(len(counts), total), input_buffers=buffers)
     batch.num_tokens = batch.num_tokens_after_padding = total
     batch.input_ids = buffers.input_ids[:total]
@@ -172,10 +178,17 @@ def _make_policy_batch(counts, prefilling):
 
 
 @pytest.mark.parametrize("pcp_size", [2, 4])
-@pytest.mark.parametrize("stack_dcp", [False, True])
-@pytest.mark.parametrize("kpool", [False, True])
-@pytest.mark.parametrize("query_len", [1, 6])
-@pytest.mark.parametrize("batch_kind", ["mixed", "empty-owner", "zero"])
+@pytest.mark.parametrize(
+    "stack_dcp,kpool,query_len,batch_kind",
+    [
+        (stack_dcp, kpool, query_len, batch_kind)
+        for stack_dcp in (False, True)
+        for kpool in (False, True)
+        for query_len in (1, 6)
+        for batch_kind in ("mixed", "empty-owner", "zero")
+    ]
+    + [pytest.param(False, True, 6, "unequal", id="kpool-unequal-decode")],
+)
 def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_len, batch_kind):
     """Run the factory and both partition implementations, not mocked layouts.
 
@@ -191,12 +204,14 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
         config.model_config.hf_text_config.index_kpool = 4
     if query_len > 1:
         config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=query_len - 1)
-    sharded = dcp_size == 1 and not kpool
+    sharded = dcp_size == 1
     if batch_kind == "mixed":
         counts, prefilling = (
             [query_len, 0, 32, query_len, 3, query_len, 0],
             [False, False, True, False, True, False, True],
         )
+    elif batch_kind == "unequal":
+        counts, prefilling = [6, 1, 3], [False, False, False]
     else:
         counts, prefilling = [0, query_len if batch_kind == "empty-owner" else 0], [False, False]
     batch = _make_policy_batch(counts, prefilling)
@@ -255,6 +270,55 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
             assert not local.seq_lens_cpu_upper_bound.any()
 
 
+@pytest.mark.parametrize(
+    "length,expected_chunks,expected_charge,expected_peak",
+    [(16, 2, 2, 2), (17, 1, 17, 17), (23, 1, 23, 23), (24, 2, 4, 3), (225, 2, 30, 29), (226, 2, 30, 30)],
+)
+def test_dcp_prefill_chunks_keep_indexer_charge_rank_invariant(length, expected_chunks, expected_charge, expected_peak):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=8, decode_context_parallel_size=8)
+    manager = _make_factory_pcp_manager(config, 0)
+    counts = np.array([length], dtype=np.int32)
+    prefilling = np.array([True])
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == expected_peak
+    for rank in range(8):
+        chunks = list(manager._iter_rank_chunks(rank, counts, prefilling))
+        lengths = [size for _, _, size in chunks]
+        assert len(lengths) == expected_chunks
+        assert min(lengths) > 0
+        assert lengths[0] == max(lengths)
+        assert len(lengths) * max(lengths) == expected_charge
+
+
+def test_dcp_short_prefill_partition_restores_mixed_batch_and_writes_kv_once():
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=8, decode_context_parallel_size=8)
+    # Both decode and the 23-token prefill are replicated. The 225-token
+    # prefill is split into eight 15-token heads, one 14-token tail and seven 13-token tails.
+    batch = _make_policy_batch([1, 23, 225], [False, True, True])
+    scheduled_prefills = np.where(batch.is_prefilling_np, batch.num_scheduled_tokens, 0)
+    batch.prefill_len_np = batch.num_computed_tokens_np + scheduled_prefills
+    local_ids = []
+    for rank in range(8):
+        manager = _make_factory_pcp_manager(config, rank, batch_capacity=batch.num_tokens)
+        with patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu):
+            local = _partition_batch(manager, batch)
+        tail_number = 7 - rank
+        tail_start = 120 + 13 * tail_number + min(tail_number, 1)
+        tail_length = 14 if tail_number == 0 else 13
+        rows = [*range(24), *range(24 + 15 * rank, 24 + 15 * (rank + 1))]
+        rows.extend(range(24 + tail_start, 24 + tail_start + tail_length))
+        assert local.num_tokens == len(rows)
+        assert local.num_tokens_after_padding == 53
+        torch.testing.assert_close(local.input_ids[: local.num_tokens], batch.input_ids[rows])
+        torch.testing.assert_close(local.positions[: local.num_tokens], batch.positions[rows])
+        local_ids.append(local.input_ids.clone())
+
+    gathered = torch.cat(local_ids)
+    torch.testing.assert_close(gathered[manager._hidden_restore_idx], batch.input_ids)
+    torch.testing.assert_close(gathered[manager._gathered_kv_write_mask].sort().values, batch.input_ids)
+
+
 def test_constructor_forwards_decode_sharding_with_release_compatible_arguments():
     manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True, moe_gathers_tokens=True)
     assert manager.shard_decode_requests is True
@@ -267,7 +331,7 @@ def test_hisparse_uses_standard_decode_sharding(pcp_size):
     config.parallel_config.prefill_context_parallel_size = pcp_size
     manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.bind_config(config)
-    assert is_pcp_decode_sharding_enabled(config)
+    assert config.parallel_config.pcp_shard_decode_requests
     assert manager.shard_decode_requests
     counts = np.array([1, 4], dtype=np.int32)
     prefilling = np.array([False, False])
@@ -302,24 +366,135 @@ def test_setup_preserves_upstream_decode_sharding_policy():
         _setup_worker_and_scheduler(config, ascend_config)
     # vLLM main declares this on ParallelConfig itself.
     assert parallel_config.pcp_shard_decode_requests is True
-    replace(parallel_config)
-    assert is_pcp_decode_sharding_enabled(config) is True
+    assert replace(parallel_config).pcp_shard_decode_requests is True
 
 
 @pytest.mark.parametrize("bind_runner_state", [False, True])
 @pytest.mark.parametrize("speculative", [False, True])
-def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, bind_runner_state: bool):
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_kpool_decode_sharding_follows_parallel_config(speculative: bool, bind_runner_state: bool, dcp_size: int):
     config = _make_pcp_config(CUDAGraphMode.NONE)
     config.model_config.hf_text_config.index_kpool = 4
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=dcp_size)
     manager = _make_factory_pcp_manager(config, 1, bind_runner_state=bind_runner_state)
     assert manager.vllm_config is config
-    assert not manager.shard_decode_requests
-    assert config.parallel_config.pcp_shard_decode_requests is True
-    replace(config.parallel_config)
-    assert not is_pcp_decode_sharding_enabled(config)
-    assert not manager.shard_decode_requests
+    sharded = dcp_size == 1
+    assert manager.shard_decode_requests is sharded
+    assert config.parallel_config.pcp_shard_decode_requests is sharded
+    assert replace(config.parallel_config).pcp_shard_decode_requests is sharded
+    query_len = 6 if speculative else 1
+    counts = np.array([query_len, query_len], dtype=np.int32)
+    prefilling = np.array([False, False])
+
+    expected = [(1, 0, query_len)] if sharded else [(0, 0, query_len), (1, 0, query_len)]
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == expected
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("query_len", [1, 6])
+def test_kpool_decode_capture_permutations_are_refreshed_by_partition(rank, query_len):
+    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.model_config.hf_text_config.index_kpool = 4
+    manager = AscendPCPManager(
+        2, rank, torch.device("cpu"), shard_decode_requests=True, max_num_reqs=3, max_num_tokens=32
+    )
+    manager.bind_config(config)
+    manager.global_input_buffers = AscendInputBuffers(3, 32, torch.device("cpu"))
+    manager._block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda num_reqs: (torch.zeros(num_reqs, 1, dtype=torch.int32),)
+    )
+    manager._global_batch_slot_mappings = torch.full((1, 32), -1, dtype=torch.int64)
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        dummy = AscendInputBatch.make_dummy(2, 2 * query_len, manager._input_buffers, max_query_len=query_len)
+        captured = manager.build_attention_context(dummy, (), torch.empty(1, 4 * query_len, dtype=torch.int64))
+        batch = AscendInputBatch.make_dummy(3, 3 * query_len, manager.global_input_buffers, max_query_len=query_len)
+    batch.is_dummy = False
+    batch.is_prefilling_np[:] = False
+    batch.has_prefill = False
+    batch.input_ids.copy_(torch.arange(1, 3 * query_len + 1, dtype=torch.int32))
+    assert captured.padded_gather_idx is None
+    builder = Glm5NextGDNHostMetadataBuilder.__new__(Glm5NextGDNHostMetadataBuilder)
+    builder._pcp_size = 2
+    builder._is_pcp_decode_sharded = True
+    builder._pcp_gather_indices = torch.empty(64, dtype=torch.int64)
+    captured = builder._attach_pcp_permutation(SimpleNamespace(pcp_context=captured)).pcp_context
+    assert captured.global_batch.num_tokens == 3 * query_len
+    assert captured.padded_gather_idx.numel() == 4 * query_len
+    # The global capacity is capped at three requests, so rank padding must
+    # never index a fourth request, even during capture.
+    assert int(captured.padded_gather_idx.max()) < 3 * query_len
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu),
+    ):
+        local = manager.partition_batch(
+            batch, BatchExecutionDescriptor(CUDAGraphMode.FULL, 2 * query_len, 2, query_len)
+        )
+    assert captured.hidden_restore_idx.data_ptr() == manager._hidden_restore_idx.data_ptr()
+    live = replace(
+        captured,
+        global_batch=batch,
+        hidden_restore_idx=manager._hidden_restore_idx,
+        padded_gather_idx=manager._padded_gather_idx,
+    )
+    metadata = builder._attach_pcp_permutation(SimpleNamespace(pcp_context=live))
+    assert captured.padded_gather_idx.data_ptr() == metadata.pcp_context.padded_gather_idx.data_ptr()
+    assert captured.padded_gather_idx.data_ptr() != manager._padded_gather_idx.data_ptr()
+    expected_mapping = torch.cat(
+        [
+            torch.arange(query_len),
+            torch.arange(2 * query_len, 3 * query_len),
+            torch.arange(query_len, 2 * query_len),
+            torch.zeros(query_len, dtype=torch.int64),
+        ]
+    )
+    torch.testing.assert_close(captured.padded_gather_idx, expected_mapping)
+    valid_rows = batch.input_ids[captured.padded_gather_idx].view(2, -1)[rank, : local.num_tokens]
+    torch.testing.assert_close(local.input_ids[: local.num_tokens], valid_rows)
+    gathered = batch.input_ids[captured.padded_gather_idx]
+    torch.testing.assert_close(gathered[captured.hidden_restore_idx], batch.input_ids)
+
+
+@pytest.mark.parametrize("kpool", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_pcp_manager_keeps_upstream_gather_indices(kpool, dcp_size):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    if kpool:
+        config.model_config.hf_text_config.index_kpool = 4
+    manager = AscendPCPManager(
+        2,
+        0,
+        torch.device("cpu"),
+        shard_decode_requests=dcp_size == 1,
+        max_num_reqs=3,
+        max_num_tokens=32,
+        dcp_world_size=dcp_size,
+    )
+    manager.bind_config(config)
+    buffers = AscendInputBuffers(3, 32, torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(3, 3, buffers)
+    batch.is_dummy = False
+    batch.is_prefilling_np[:] = False
+    batch.has_prefill = False
+    before_finalize = []
+    finalize = manager._finalize_partition
+
+    def record_indices(*args):
+        before_finalize.append(manager._padded_gather_idx)
+        return finalize(*args)
+
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch.object(manager, "_finalize_partition", side_effect=record_indices),
+    ):
+        _partition_batch(manager, batch)
+    assert manager._padded_gather_idx is before_finalize[0]
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -535,11 +710,68 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
+@pytest.mark.parametrize("pcp_rank,expected_num_tokens", [(0, 1), (1, 0)])
+def test_partition_batch_assigns_mla_short_prefill_as_sharded_decode(pcp_rank, expected_num_tokens):
+    global_batch = _make_global_pcp_batch()
+    global_batch.num_scheduled_tokens = np.array([1], dtype=np.int32)
+    global_batch.num_tokens = 1
+    global_batch.num_tokens_after_padding = 1
+    global_batch.query_start_loc_np = np.array([0, 1], dtype=np.int32)
+    global_batch.query_start_loc[:2].copy_(torch.tensor([0, 1], dtype=torch.int32))
+    global_batch.num_computed_tokens_np = np.array([127], dtype=np.int32)
+    global_batch.prefill_len_np = np.array([128], dtype=np.int32)
+    global_batch.num_computed_prefill_tokens_np = np.array([127], dtype=np.int32)
+    global_batch.is_prefilling_np = np.array([True])
+    global_batch.has_prefill = True
+    global_batch.prefill_runs_as_decode_np = np.array([True])
+    global_batch.decode_graph_eligible = True
+    global_batch.seq_lens[:1].fill_(128)
+    global_batch.seq_lens_cpu_upper_bound = torch.tensor([128], dtype=torch.int32)
+    global_batch.seq_lens_np = np.array([128], dtype=np.int32)
+    global_batch.positions[:1].fill_(127)
+    global_batch.attn_state = "global-decode-state"
+
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=pcp_rank,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=1,
+        max_num_tokens=4,
+    )
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
+            side_effect=AssertionError("decode-only short prefill must retain the global attention state"),
+        ),
+    ):
+        local_batch = _partition_batch(manager, global_batch)
+
+    assert manager.global_batch is global_batch
+    assert global_batch.is_prefilling_np.tolist() == [True]
+    assert local_batch.num_tokens == expected_num_tokens
+    assert local_batch.is_prefilling_np.tolist() == [True]
+    assert local_batch.prefill_runs_as_decode_np.tolist() == [True]
+    assert local_batch.decode_graph_eligible is True
+    assert local_batch.attn_state == "global-decode-state"
+
+
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     manager = AscendPCPManager.__new__(AscendPCPManager)
     decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
     draft_decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
     prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
+    short_prefill_batch = SimpleNamespace(
+        is_prefilling_np=np.ones(2, dtype=np.bool_),
+        prefill_runs_as_decode_np=np.ones(2, dtype=np.bool_),
+        num_draft_tokens=0,
+    )
 
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     assert manager._full_decode_requests_are_token_sized(decode_batch) is True
@@ -547,6 +779,7 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     # request metadata must stay at the request extent (not the token extent).
     assert manager._full_decode_requests_are_token_sized(draft_decode_batch) is False
     assert manager._full_decode_requests_are_token_sized(prefill_batch) is False
+    assert manager._full_decode_requests_are_token_sized(short_prefill_batch) is True
 
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
     assert manager._full_decode_requests_are_token_sized(decode_batch) is False
@@ -722,6 +955,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
 @pytest.mark.parametrize("is_prefilling", [False, True])
 def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._kernel_block_table_groups = {}
     manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
@@ -809,11 +1043,11 @@ def _make_slot_mapping_case(pcp_size, route, batch_kind, query_len, mode, slot_d
         batch.num_draft_tokens = int(batch.num_draft_tokens_per_req.sum())
 
     # Independent expected rank segments: decodes first, then front/back prefill
-    # chunks. DCP replicates the short prefill; KPool only replicates decodes.
+    # chunks. DCP replicates decodes and the short prefill; KPool uses sharded decodes.
     tokens_by_rank = []
     for rank in range(pcp_size):
         if batch_kind == "mixed":
-            decodes = [0, 36] if route != "sharded" else ([0] if rank == 0 else [36] if rank == 1 else [])
+            decodes = [0, 36] if route == "dcp" else ([0] if rank == 0 else [36] if rank == 1 else [])
             width = 32 // (2 * pcp_size)
             tokens = decodes + list(range(1 + rank * width, 1 + (rank + 1) * width))
             tokens += list(range(1 + (2 * pcp_size - 1 - rank) * width, 1 + (2 * pcp_size - rank) * width))
@@ -824,7 +1058,7 @@ def _make_slot_mapping_case(pcp_size, route, batch_kind, query_len, mode, slot_d
             tokens = [
                 req * query_len + j
                 for req in range(len(counts))
-                if route != "sharded" or req % pcp_size == rank
+                if route == "dcp" or req % pcp_size == rank
                 for j in range(query_len)
             ]
         tokens_by_rank.append(tokens)
@@ -904,7 +1138,7 @@ def test_partition_slot_mappings_and_refresh(pcp_size, route, slot_dtype, mode, 
             pcp_size,
             rank,
             torch.device("cpu"),
-            shard_decode_requests=route == "sharded",
+            shard_decode_requests=route != "dcp",
             max_num_reqs=8,
             max_num_tokens=64,
             block_tables=tables,
@@ -996,7 +1230,7 @@ def test_engram_refresh_preserves_parent_slot_layout(pcp_size, rank, route, slot
         pcp_size,
         rank,
         torch.device("cpu"),
-        shard_decode_requests=route == "sharded",
+        shard_decode_requests=route != "dcp",
         max_num_reqs=8,
         max_num_tokens=64,
         block_tables=tables,
@@ -1367,6 +1601,7 @@ def test_validate_config_allows_supported_speculators(
     ("method", "draft_sample_method", "error"),
     [
         ("draft_model", "greedy", "supports speculative decoding only with"),
+        ("ngram", "greedy", "supports speculative decoding only with"),
     ],
 )
 def test_validate_config_rejects_unsupported_speculator_options(
@@ -1596,6 +1831,30 @@ def test_hisparse_sharded_dummy_preserves_local_request_states(query_len):
     assert context.local_num_tokens == 2 * query_len
 
 
+def test_sharded_dummy_and_replay_share_the_restore_buffer():
+    device = torch.device("cpu")
+    manager = AscendPCPManager(2, 0, device, max_num_reqs=4, max_num_tokens=4)
+    manager.global_input_buffers = AscendInputBuffers(4, 4, device)
+    manager._global_batch_slot_mappings = torch.empty((1, 4), dtype=torch.long)
+    manager._block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda num_reqs: (torch.zeros((num_reqs, 1), dtype=torch.int32),)
+    )
+
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        local_batch = AscendInputBatch.make_dummy(2, 2, manager.input_buffers)
+        capture = manager._build_sharded_dummy_attention_context(local_batch, query_len=1)
+
+    torch.testing.assert_close(capture.hidden_restore_idx, torch.arange(4))
+    manager._hidden_restore_idx = torch.tensor([2, 0])
+    manager._pad_hidden_restore_idx(SimpleNamespace(num_tokens=2, num_tokens_after_padding=4))
+
+    assert capture.hidden_restore_idx.data_ptr() == manager._hidden_restore_idx.data_ptr()
+    torch.testing.assert_close(capture.hidden_restore_idx, torch.tensor([2, 0, 0, 0]))
+
+
 def test_capture_input_uses_upstream_staging_path():
     manager = AscendPCPManager(2, 0, torch.device("cpu"))
     input_batch = SimpleNamespace()
@@ -1680,6 +1939,93 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     assert local.positions.tolist() == batch.positions.tolist()
     assert local.is_prefilling_np.tolist() == [False]
     assert manager._hidden_restore_idx[:4].tolist() == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("kpool", [False, True])
+@pytest.mark.parametrize("num_prefill_tokens", [1, 3, 7])
+def test_short_prefill_uses_decode_request_ownership(num_prefill_tokens, kpool):
+    manager = AscendPCPManager(8, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    manager.vllm_config.parallel_config.prefill_context_parallel_size = 8
+    if kpool:
+        manager.vllm_config.model_config.hf_text_config.index_kpool = 4
+    counts = np.array([4, 4, 4, num_prefill_tokens], dtype=np.int32)
+    prefilling = np.array([False, False, False, True])
+    draft_tokens = np.array([3, 3, 3, num_prefill_tokens - 1], dtype=np.int32)
+    batch_state = vllm_model_runner.BatchReqState(
+        req_ids=[f"req-{index}" for index in range(4)],
+        num_scheduled_tokens=counts,
+        num_tokens=int(counts.sum()),
+        num_draft_tokens_np=draft_tokens,
+        idx_mapping_np=np.arange(4, dtype=np.intp),
+        prefill_len_np=np.array([4, 4, 4, 128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([4, 4, 4, 127], dtype=np.int32),
+        is_prefilling_np=prefilling,
+        has_prefill=True,
+        max_seq_len_np=None,
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+    batch_state = manager.prepare_pcp_batch_req_state(batch_state)
+    manager.set_dispatch_batch_req_state(batch_state)
+    effective_prefilling = prefilling & ~batch_state.prefill_runs_as_decode_np
+
+    for rank in range(8):
+        chunks = list(manager._iter_rank_chunks(rank, counts, effective_prefilling))
+        expected = [(rank, 0, int(counts[rank]))] if rank < 4 else []
+        assert chunks == expected
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(4, num_prefill_tokens)
+
+
+@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh", "dcp"])
+def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    batch_state = vllm_model_runner.BatchReqState(
+        req_ids=["tail", "decode"],
+        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+        num_tokens=2,
+        num_draft_tokens_np=None,
+        idx_mapping_np=np.arange(2, dtype=np.intp),
+        prefill_len_np=np.array([128, 128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127, 128], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        has_prefill=True,
+        max_seq_len_np=None,
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+    classified = manager.prepare_pcp_batch_req_state(batch_state)
+    np.testing.assert_array_equal(classified.prefill_runs_as_decode_np, [True, False])
+    assert manager._dispatch_prefill_runs_as_decode_np is None
+    manager.set_dispatch_batch_req_state(classified)
+
+    if next_step == "dummy":
+        batch_state = None
+    elif next_step == "decode":
+        batch_state = batch_state._replace(is_prefilling_np=np.array([False, False]), has_prefill=False)
+    elif next_step == "fresh":
+        batch_state = batch_state._replace(num_computed_prefill_tokens_np=np.array([0, 128], dtype=np.int32))
+    elif next_step == "dcp":
+        manager.vllm_config.parallel_config.decode_context_parallel_size = 2
+
+    result = manager.prepare_pcp_batch_req_state(batch_state)
+    assert result is batch_state
+    manager.set_dispatch_batch_req_state(result)
+    assert manager._dispatch_prefill_runs_as_decode_np is None
+    if result is not None:
+        assert result.prefill_runs_as_decode_np is None
+        assert result.decode_graph_eligible is False
+    if next_step == "fresh":
+        assert manager.get_num_tokens_for_dispatch(result.num_scheduled_tokens, result.is_prefilling_np) == 2
+
+
+def test_dispatch_rejects_override_with_different_request_shape():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.set_dispatch_batch_req_state(SimpleNamespace(prefill_runs_as_decode_np=np.array([True, False, False])))
+
+    with pytest.raises(RuntimeError, match="Prefill-as-decode mask must match the request phase mask"):
+        manager.get_num_tokens_for_dispatch(np.array([1, 1]), np.array([True, False]))
 
 
 def _hook_manager() -> AscendPCPManager:
@@ -1887,3 +2233,55 @@ def test_draft_prefill_capture_accepts_draft_slot_mappings(dcp_size: int, num_re
     assert slot_mappings.shape == (1, 16)
     assert context.global_slot_mappings.shape == (1, 8)
     assert context.global_block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
+
+
+@pytest.mark.parametrize("kernel_block_size", [128, 640])
+def test_pcp_global_table_uses_attention_group_mapping(kernel_block_size):
+    raw = torch.tensor([[7, 11, 0], [9, 0, 0]], dtype=torch.int32)
+    counts = torch.tensor([[2, 1], [1, 0]], dtype=torch.int32)
+    factor = 640 // kernel_block_size
+    spec = MLAAttentionSpec(block_size=640, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    group = AttentionGroup(
+        backend=MagicMock(),
+        layer_names=["layer.0"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+        kernel_block_size=kernel_block_size if factor > 1 else None,
+        kernel_block_table=torch.empty((1, 4, 3 * factor), dtype=torch.int32),
+        kernel_block_offsets=torch.arange(factor, dtype=torch.int32),
+    )
+    context = AscendPCPAttentionContext(
+        global_batch=SimpleNamespace(),
+        global_block_tables=(raw, raw.clone()),
+        global_slot_mappings=torch.empty(0),
+        hidden_restore_idx=torch.empty(0),
+        global_block_table_num_blocks=counts,
+    )
+
+    view = context.for_attention_group(group)
+
+    expected = (raw.unsqueeze(-1) * factor + torch.arange(factor, dtype=torch.int32)).flatten(1)
+    torch.testing.assert_close(view.global_block_tables[0], expected)
+    torch.testing.assert_close(view.global_block_table_num_blocks[0], counts[0] * factor)
+    torch.testing.assert_close(view.global_block_table_num_blocks[1], counts[1])
+    torch.testing.assert_close(context.global_block_tables[0], raw)
+    torch.testing.assert_close(context.global_block_table_num_blocks, counts)
+    if factor == 1:
+        assert view is context
+        return
+    assert view.global_block_tables[0].data_ptr() != group.kernel_block_table.data_ptr()
+    # Updating local metadata must not overwrite the global dictionary.
+    group.map_to_kernel_block_table(raw[1:])
+    torch.testing.assert_close(view.global_block_tables[0], expected)
+    # Fresh step contexts share storage and start from Manager counts again.
+    second = replace(context, global_block_tables=(raw[:1], raw[:1]), global_block_table_num_blocks=counts[:, :1])
+    refreshed = second.for_attention_group(group)
+    assert refreshed.global_block_tables[0].data_ptr() == view.global_block_tables[0].data_ptr()
+    torch.testing.assert_close(refreshed.global_block_table_num_blocks[0], counts[0, :1] * factor)
+
+
+@pytest.mark.parametrize("capacity", [2, 7, 16])
+def test_local_request_capacity_comes_from_pcp_input_buffers(capacity):
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._input_buffers = SimpleNamespace(max_num_reqs=capacity)
+    assert manager.max_num_local_reqs == capacity

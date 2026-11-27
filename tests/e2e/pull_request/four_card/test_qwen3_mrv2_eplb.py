@@ -133,7 +133,6 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_LOGGING_LEVEL": "INFO",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",

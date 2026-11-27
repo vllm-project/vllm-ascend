@@ -23,7 +23,6 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import WeightFormat
@@ -178,11 +177,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
-        )
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
 
     @staticmethod
     def get_weight(
@@ -227,7 +222,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -328,6 +322,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2)
         g, n, k = layer.w2_weight_scale.shape
+        if k % 2 != 0:
+            # A TP shard can leave intermediate_size_per_partition // group_size odd
+            # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+            # The runtime consumes scale groups in pairs, so append one zero group;
+            # the weight columns it would correspond to are already out of range.
+            layer.w2_weight_scale.data = torch.nn.functional.pad(
+                layer.w2_weight_scale.data, (0, 1), mode="constant", value=0
+            )
+            k += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
@@ -394,9 +397,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
             orig_shapes["w13_weight_scale"]
         )
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(-3, -2).reshape(
-            orig_shapes["w2_weight_scale"]
-        )
+        orig_w2_scale_shape = orig_shapes["w2_weight_scale"]
+        w2_scale = layer.w2_weight_scale.data.transpose(-3, -2).reshape(*orig_w2_scale_shape[:-1], -1)
+        # process_weights_after_loading may have appended one zero scale group to
+        # reach an even count (see the k % 2 != 0 branch above); drop it here so
+        # the reloaded weight matches the checkpoint's real, possibly-odd shape.
+        layer.w2_weight_scale.data = w2_scale[..., : orig_w2_scale_shape[-1]].contiguous()
         layer._mxfp4_transformed = False
 
     def _get_mlp_weights(self, layer):

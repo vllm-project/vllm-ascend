@@ -1,6 +1,6 @@
 # ShortRequestFirst Prefill Scheduling
 
-ShortRequestFirst reduces head-of-line blocking during prefill by letting short prompts run before long prompts. It is designed for mixed prompt-length traffic where a few long requests can otherwise delay many short ones.
+ShortRequestFirst reduces head-of-line blocking during prefill by letting short prompts run before long prompts. ShortRequestFirst is designed for mixed prompt-length traffic where a few long requests can otherwise delay many short ones.
 
 ## When to use it
 
@@ -50,7 +50,7 @@ In short: the right threshold is usually the valley between short-request and lo
 
 ## long_max_wait_ms tuning
 
-`long_max_wait_ms` is a fairness gate, not a throughput-optimization knob. It controls when a long request stops waiting under normal short-first behavior and becomes eligible for anti-starvation promotion.
+`long_max_wait_ms` is a fairness gate, not a throughput-optimization knob. It controls when a long request stops waiting under normal short-first behavior and becomes eligible for aged-long promotion.
 
 Tune `threshold` first. If degradation warnings appear frequently, first suspect that `threshold` is too small for the current traffic mix, then consider increasing `long_max_wait_ms`.
 

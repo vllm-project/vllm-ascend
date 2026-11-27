@@ -154,6 +154,7 @@ class ReqMeta:
     remote_request_id: str
     remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,7 @@ class PushReqMeta:
     local_block_ids: tuple[tuple[int, ...], ...]
     num_computed_tokens: int
     num_external_tokens: int
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +228,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_request_id=kv_transfer_params["remote_request_id"],
             remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
     def add_new_push_req(
@@ -240,6 +243,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             local_block_ids=tuple(tuple(group) for group in local_block_ids),
             num_computed_tokens=kv_transfer_params["num_computed_tokens"],
             num_external_tokens=num_external_tokens,
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
     def add_new_push_send_req(

@@ -1353,3 +1353,110 @@ class TestGetQuantTypeForLayer(TestBase):
         }
         result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.gate_proj", None)
         self.assertEqual(result, "W8A8_DYNAMIC")
+
+
+class TestModelSlimHif8Metadata(TestBase):
+    """HIF8 C8 recipe parsing for ``--kv-cache-dtype hif8``.
+
+    The quant config is constructed once per model load inside
+    ``set_current_vllm_config``; the HIF8 metadata must also survive
+    construction without a current config (bare UT configs, offline tools).
+    """
+
+    _MODELSLIM_MODULE = "vllm_ascend.quantization.configs.modelslim_config"
+    _HIF8_C8_MODULE_REF = "vllm_ascend.quantization.methods.kv_cache.hif8_c8"
+
+    @staticmethod
+    def _hif8_description():
+        return {
+            "model.layers.3.self_attn.quant_type": "QK_HIF8_PER_TENSOR",
+            "model.layers.5.self_attn.quant_type": "QK_HIF8_PER_TENSOR",
+            "model.layers.4.self_attn.quant_type": "W8A8_DYNAMIC",
+        }
+
+    @staticmethod
+    def _hif8_vllm_config(cache_dtype="hif8"):
+        # validate_sparse_sfa_hif8 reads parallel_config for the PCP/DCP guard.
+        return SimpleNamespace(
+            cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        )
+
+    @staticmethod
+    def _hif8_profile():
+        return SimpleNamespace(supports_weight_format=lambda fmt: True)
+
+    def test_constructs_without_current_vllm_config(self):
+        # Outside a set_current_vllm_config context the dtype is not enabled;
+        # construction must not raise and the recipe stays dormant.
+        with patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=None):
+            config = AscendModelSlimConfig(self._hif8_description())
+        self.assertFalse(config.enable_hif8_c8_quant)
+        self.assertEqual(config.hif8_quant_layers, [])
+
+    def test_hif8_layers_parsed_when_enabled(self):
+        with (
+            patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=self._hif8_vllm_config()),
+            patch(f"{self._HIF8_C8_MODULE_REF}.get_current_hardware_profile", return_value=self._hif8_profile()),
+        ):
+            config = AscendModelSlimConfig(self._hif8_description())
+        self.assertTrue(config.enable_hif8_c8_quant)
+        # Only the QK_HIF8_PER_TENSOR recipes are HIF8 layers.
+        self.assertEqual(config.hif8_quant_layers, [3, 5])
+
+    def test_dtype_without_recipes_rejected(self):
+        with (
+            patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=self._hif8_vllm_config()),
+            patch(f"{self._HIF8_C8_MODULE_REF}.get_current_hardware_profile", return_value=self._hif8_profile()),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            AscendModelSlimConfig({"model_quant_type": "W8A8_DYNAMIC"})
+        self.assertIn("recipes", str(ctx.exception))
+
+    def test_fa_quant_stood_down_alongside_hif8(self):
+        # The legacy FAKQuant loader is TP-sharded and cannot consume the
+        # per-tensor HIF8 exports; the HIF8 recipe must own the dispatch.
+        description = self._hif8_description()
+        description["fa_quant_type"] = "FAKQuant"
+        with (
+            patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=self._hif8_vllm_config()),
+            patch(f"{self._HIF8_C8_MODULE_REF}.get_current_hardware_profile", return_value=self._hif8_profile()),
+        ):
+            config = AscendModelSlimConfig(description)
+        self.assertFalse(config.enable_fa_quant)
+        self.assertEqual(config.hif8_quant_layers, [3, 5])
+
+    def test_is_hif8_quant_layer_membership(self):
+        with (
+            patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=self._hif8_vllm_config()),
+            patch(f"{self._HIF8_C8_MODULE_REF}.get_current_hardware_profile", return_value=self._hif8_profile()),
+        ):
+            config = AscendModelSlimConfig(self._hif8_description())
+        self.assertTrue(config.is_hif8_quant_layer("model.layers.3.self_attn"))
+        self.assertFalse(config.is_hif8_quant_layer("model.layers.4.self_attn"))
+
+    def test_cache_scale_mapper_routes_hif8_fa_scales(self):
+        # GLM-5.3-Flash nests the fa modules as
+        # self_attn.mla_attn.mla_attn.fa_*; the checkpoint exports flat
+        # names. With HIF8 recipes present the mapper must rename the
+        # static scales onto the nested module path that create_weights
+        # registered, or the scale lands on no parameter.
+        with (
+            patch(f"{self._MODELSLIM_MODULE}.get_current_vllm_config_or_none", return_value=self._hif8_vllm_config()),
+            patch(f"{self._HIF8_C8_MODULE_REF}.get_current_hardware_profile", return_value=self._hif8_profile()),
+        ):
+            config = AscendModelSlimConfig(self._hif8_description())
+        mapper = config.get_cache_scale_mapper()
+        self.assertEqual(
+            mapper.map_name("model.layers.3.self_attn.fa_q.scale"),
+            "model.layers.3.self_attn.mla_attn.mla_attn.fa_q.scale",
+        )
+        self.assertEqual(
+            mapper.map_name("model.layers.5.self_attn.fa_k.scale"),
+            "model.layers.5.self_attn.mla_attn.mla_attn.fa_k.scale",
+        )
+        # Already-nested names pass through untouched (no double mapping).
+        self.assertEqual(
+            mapper.map_name("model.layers.3.self_attn.mla_attn.mla_attn.fa_q.scale"),
+            "model.layers.3.self_attn.mla_attn.mla_attn.fa_q.scale",
+        )

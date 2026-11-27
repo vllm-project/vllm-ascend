@@ -199,34 +199,23 @@ def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamesp
     )
 
 
-def _make_kv_cache_spec(
-    compressor_ratio: int,
-    *,
-    use_tokens_per_state: bool = False,
-) -> SimpleNamespace:
+def _make_kv_cache_spec(compressor_ratio: int) -> SimpleNamespace:
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
-    # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-    ratio_kwargs = (
-        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
-    )
-    kv_cache_spec = SimpleNamespace(
+    return SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
-        storage_block_size=physical_block_size,
-        **ratio_kwargs,
+        num_states=physical_block_size,
+        tokens_per_state=compressor_ratio,
     )
-    return kv_cache_spec
 
 
 def _make_builder(
     compressor_ratio: int = 4,
     num_speculative_tokens: int | None = None,
-    *,
-    use_tokens_per_state: bool = False,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
     builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio, use_tokens_per_state=use_tokens_per_state),
+        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
         layer_names=["model.layers.0.self_attn.attn"],
         vllm_config=vllm_config,
         device=torch.device("cpu"),
@@ -248,17 +237,15 @@ def _make_builder(
         (mixed_quant_sparse_flash_mla_metadata_turboquant, 2048),
     ],
 )
-@pytest.mark.parametrize("use_tokens_per_state", [False, True])
 def test_sas_metadata_buffers_match_selected_operator(
     metadata_op,
     expected_sas_size: int,
-    use_tokens_per_state: bool,
 ):
     plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_metadata_op=metadata_op)
     plan.requires_block_offset_slots = False
     plan.uses_sparse_flash_mla = False
     with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
-        builder = _make_builder(4, num_speculative_tokens=3, use_tokens_per_state=use_tokens_per_state)
+        builder = _make_builder(4, num_speculative_tokens=3)
 
     assert builder.compressor_ratio == 4
     assert builder.sas_metadata_buffer.numel() == expected_sas_size
@@ -294,13 +281,11 @@ def _build_draft_req_metadata(
     )
 
 
-@pytest.mark.parametrize("use_tokens_per_state", [False, True])
-def test_metadata_builder_accepts_compression_ratio_aliases(
-    use_tokens_per_state: bool,
-):
-    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+def test_metadata_builder_reads_tokens_per_state_and_num_states():
+    builder = _make_builder(4)
 
     assert builder.compressor_ratio == 4
+    assert builder.storage_block_size == 128
 
 
 @pytest.mark.parametrize(
@@ -993,20 +978,21 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths(use_
     assert metadata.sin is sin
 
 
-def _make_req_metadata() -> AscendDSAReqMetadata:
+def _make_req_metadata(layer_name: str = "layer") -> AscendDSAReqMetadata:
     return AscendDSAReqMetadata(
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         seq_lens=torch.ones(2, dtype=torch.int32),
         slot_mapping=None,
         storage_block_size=128,
         query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
-        sin=cast(Any, {"layer": torch.zeros(1)}),
-        cos=cast(Any, {"layer": torch.ones(1)}),
+        sin=cast(Any, {layer_name: torch.zeros(1)}),
+        cos=cast(Any, {layer_name: torch.ones(1)}),
     )
 
 
 def _make_impl(
     impl_cls: type[AscendDSAImpl] = AscendDSAImpl,
+    overlap_enabled: bool = False,
     **extra_kwargs,
 ) -> AscendDSAImpl:
     linear = MagicMock()
@@ -1017,7 +1003,7 @@ def _make_impl(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
-            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap_enabled),
         ),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.enable_pcp_o_proj_weight_sharding",
@@ -1072,6 +1058,9 @@ def _make_impl(
 
 def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     impl = _make_impl()
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     hidden_states = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     unified_output = torch.arange(10, dtype=torch.float32).reshape(5, 1, 2)
     output = torch.empty((5, 2), dtype=torch.float32)
@@ -1080,7 +1069,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         num_decodes=1,
         num_decode_tokens=2,
         num_prefills=1,
-        req_metadata=_make_req_metadata(),
+        req_metadata=_make_req_metadata(layer_name),
     )
     captured_o_proj_input: list[torch.Tensor] = []
 
@@ -1095,10 +1084,11 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     with (
         patch(
             "vllm_ascend.ascend_forward_context.get_forward_context",
-            return_value=SimpleNamespace(num_tokens=5),
+            return_value=SimpleNamespace(num_tokens=5, additional_kwargs={"num_tokens": 5}),
         ),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch.object(
             torch.ops.vllm,
             "maybe_all_gather_and_maybe_unpad",
@@ -1118,14 +1108,17 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
         patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
     ):
         actual = impl.forward(
-            layer_name="layer",
+            layer_name=layer_name,
             hidden_states=hidden_states,
             kv_cache=(torch.empty(0),),
-            attn_metadata={"swa_cache": metadata},
+            attn_metadata={swa_name: metadata},
             output=output,
         )
 
     assert actual is output
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once()
+    assert save.call_args.args[0] == swa_name
     assert len(captured_o_proj_input) == 1
     assert torch.equal(captured_o_proj_input[0], unified_output)
     forward_attention.assert_called_once()
@@ -1134,7 +1127,7 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     assert call.args[3].attention is None
     assert call.args[3].swa is metadata
     assert call.args[4] is False
-    assert not call.kwargs
+    assert call.kwargs == {"prepared_query": None}
 
 
 @pytest.mark.parametrize(
@@ -1825,6 +1818,7 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     )
     gather_block_tables = MagicMock(return_value=global_block_tables)
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
+    pcp_manager._kernel_block_table_groups = {}
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
     pcp_manager._local_batch = SimpleNamespace(
@@ -2091,14 +2085,16 @@ def _attach_parallel_o_proj(impl, pcp_group, *, tp_group=None, decode_sharded=Fa
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
 @pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("overlap_enabled", [False, True])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
     shard_o_proj: bool,
     global_prefill: bool,
     decode_sharded: bool,
+    overlap_enabled: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
-    impl = _make_impl(AscendDSAPCPImpl)
+    impl = _make_impl(AscendDSAPCPImpl, overlap_enabled=overlap_enabled)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
     impl._parallel_o_proj.enabled = shard_o_proj
     impl._parallel_o_proj._weight_switch_enabled = shard_o_proj
@@ -2207,6 +2203,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         )
         return output_tensor
 
+    prepared_query = (object(), object(), object())
     caches = tuple(torch.empty(0) for _ in range(6))
     with (
         patch.object(
@@ -2234,6 +2231,10 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             "_forward_attention",
             return_value=attention_output,
         ) as forward_attention,
+        patch.object(impl, "_mla_prolog_single_stream", return_value=prepared_query) as query_prolog,
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream"),
+        patch("torch.npu.current_stream"),
+        patch("torch.npu.stream"),
         patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
@@ -2256,6 +2257,8 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             if "projection" in events:
                 assert events.index("cache") < events.index("projection")
 
+    overlap = overlap_enabled and global_prefill and local_num_actual_tokens > 0
+    assert query_prolog.call_count == (num_calls if overlap else 0)
     assert actual is output
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
     assert pcp_group.all_gather.call_args.kwargs == {"dim": 0}
@@ -2286,7 +2289,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             hidden_states[:local_num_actual_tokens],
         )
         assert forward_attention.call_args.args[4] is True
-        assert not forward_attention.call_args.kwargs
+        assert forward_attention.call_args.kwargs == {"prepared_query": prepared_query if overlap else None}
         assert len(captured_o_proj_inputs) == num_calls
         assert torch.count_nonzero(captured_o_proj_inputs[0][local_num_actual_tokens:]) == 0
         assert torch.equal(
@@ -2314,19 +2317,20 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
     with (
         patch.object(
             AscendDSAImpl,
-            "_prepare_caches_before_attention",
+            "_prepare_caches_and_query",
             autospec=True,
-            return_value=False,
+            return_value=(False, None),
         ) as prepare_standard_caches,
         impl._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False),
     ):
         assert not impl._parallel_o_proj.uses_full_weight
-        assert not impl._prepare_caches_before_attention(
+        assert impl._prepare_caches_and_query(
             "layer",
             torch.empty((4, 4)),
             (torch.empty(0),),
             attn_metadata,
-        )
+            SimpleNamespace(attention=metadata, swa=metadata),
+        ) == (False, None)
 
     prepare_standard_caches.assert_called_once()
     impl._parallel_o_proj.enable.assert_called_once()
@@ -2681,11 +2685,14 @@ def test_o_proj_capacity_tracks_decode_graph_not_profile_budget(tp_size, decode_
 
 def test_forward_empty_rank_still_participates_in_otp_collectives():
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    layer_name = "model.layers.0.self_attn.attn"
+    swa_name = "model.layers.0.self_attn.swa_cache"
+    impl.swa_cache_layer = SimpleNamespace(prefix=swa_name)
     impl.turboquant = None
     impl._get_o_proj_input_shape = lambda metadata: (4, 1, 2)
-    layer_metadata = SimpleNamespace(attention=SimpleNamespace(num_actual_tokens=0), swa=None)
+    layer_metadata = SimpleNamespace(attention=None, swa=SimpleNamespace(num_actual_tokens=0))
     impl._get_layer_metadata = lambda layer_name, metadata: layer_metadata
-    impl._prepare_caches_before_attention = lambda *args: False
+    impl._prepare_caches_and_query = lambda *args: (False, None)
     impl._forward_o_proj = MagicMock()
     output = torch.ones((4, 2))
 
@@ -2693,14 +2700,17 @@ def test_forward_empty_rank_still_participates_in_otp_collectives():
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.dsa_v1.get_swa_save_layer_name", return_value=swa_name) as save_name,
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector") as save,
         patch("vllm_ascend.attention.dsa_v1.attention_transfer_window", return_value=MagicMock()),
     ):
-        result = impl.forward("layer", torch.zeros((4, 2)), (), {"layer": object()}, output)
+        result = impl.forward(layer_name, torch.zeros((4, 2)), (), {swa_name: layer_metadata.swa}, output)
 
     assert result is output
     assert torch.count_nonzero(output) == 0
     impl._forward_o_proj.assert_called_once()
+    save_name.assert_called_once_with(layer_name, swa_name)
+    save.assert_called_once_with(swa_name, [])
 
 
 def test_reserve_oproj_buffers_initializes_missing_pool():

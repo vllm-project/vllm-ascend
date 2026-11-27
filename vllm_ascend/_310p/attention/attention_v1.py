@@ -100,10 +100,9 @@ class AscendAttentionBackend310(AscendAttentionBackend):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        # Keep the 310P default at 128 rather than selecting the smallest
-        # supported size (64), which regresses paged decode performance.
-        if cls.supports_block_size(default_block_size):
-            return default_block_size
+        # Keep the 310P default at 128 rather than selecting 64 (the upstream
+        # default since vLLM #63231), which regresses paged decode performance.
+        # Explicit --block-size values bypass this hook and remain unaffected.
         return 128
 
 
