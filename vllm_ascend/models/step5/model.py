@@ -3,7 +3,7 @@
 
 The model skeleton (projections, MoE wiring, weight loading, MTP metadata,
 the decoder-layer residual flow) is inherited from the upstream
-implementation shipped in vLLM 0.33 (``vllm.models.step5.nvidia.model``);
+implementation (``vllm.models.step5.nvidia.model``);
 only the compute that upstream pins to CUDA is swapped:
 
 * DSA (full-attention) layers run ``AscendStep5DSAAttention``: the fused
@@ -63,6 +63,10 @@ from vllm.models.step5.common.config import (  # type: ignore[import-not-found]
     Step5SparseConfig,
     get_step5_sparse_config,
 )
+from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
+from vllm.models.step5.common.sparse_summary_cache import (  # type: ignore[import-not-found]
+    Step5SparseSummaryCacheLayer,
+)
 from vllm.models.step5.nvidia.layernorm import (
     Step5IndexerLayerNorm,
     Step5RMSNorm,
@@ -98,10 +102,8 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm_ascend.models.step5.sparse_attention import (
-    AscendStep5CSATailRing,
     AscendStep5DSABackend,
     AscendStep5DSAImpl,
-    AscendStep5SparseSummaryCacheLayer,
 )
 from vllm_ascend.ops.triton.step5.fused_add_rms_norm import (
     can_use_fused_add_rms_norm_cast,
@@ -445,12 +447,12 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         # (one FP8 summary per closed region, sharing this layer's block
         # ids) and the per-request CSA tail ring (deterministic slot
         # addressing derived from the block table).
-        self.sparse_summary_cache = AscendStep5SparseSummaryCacheLayer(
+        self.sparse_summary_cache = Step5SparseSummaryCacheLayer(
             prefix=f"{prefix}.attn.sparse_summary_cache",
             target_impl=self.impl,
             static_forward_context=compilation_config.static_forward_context,
         )
-        self.csa_tail_ring = AscendStep5CSATailRing(
+        self.csa_tail_ring = Step5CSATailRing(
             prefix=f"{prefix}.attn.csa_tail_ring",
             main_layer_name=self.layer_name,
             num_speculative_tokens=num_speculative_tokens,

@@ -29,7 +29,6 @@ from vllm_ascend.models.step5.cache_config import (
     _padded_page,
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
-    get_step5_max_memory_usage,
     get_step5_pool_bytes_per_block,
     is_step5_groups,
     is_step5_kv_cache_spec,
@@ -252,23 +251,6 @@ def test_pool_bytes_per_block_is_widest_group_width() -> None:
     groups = _planned_groups()
     # Merged DSA group: 2 x 96 KiB + 2 x 4 KiB; SW and ring are narrower.
     assert get_step5_pool_bytes_per_block(groups) == 2 * MAIN_PAGE + 2 * SUMMARY_PAGE
-
-
-def test_max_memory_usage_sums_group_demands_times_envelope() -> None:
-    vllm_config = _vllm_config(max_model_len=8192)
-    # DSA/summary group: 64 ids at 8192 tokens; SW saturates at its admission
-    # cap cdiv(min(4095 + 8192, 8192), 128) + 1 = 65; ring holds 1 bucket.
-    expected = (64 + 65 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
-    assert get_step5_max_memory_usage(vllm_config, _planned_groups()) == expected
-
-
-def test_max_memory_usage_skips_host_resident_groups() -> None:
-    vllm_config = _vllm_config(max_model_len=8192)
-    groups = _planned_groups()
-    sw_name, sw_spec = groups[1].layer_names, groups[1].kv_cache_spec
-    groups[1] = KVCacheGroupSpec(sw_name, sw_spec, host_resident=True)
-    expected = (64 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
-    assert get_step5_max_memory_usage(vllm_config, groups) == expected
 
 
 def test_config_from_groups_aliases_one_envelope_backing() -> None:

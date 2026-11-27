@@ -106,10 +106,7 @@ def get_step5_kv_cache_groups(
     and therefore one block-id chain, which is the upstream
     ``Step5SparseSummaryCache`` contract. The tail ring stays a separate
     ``CircularBufferSpec`` group: its one scratch bucket per request must
-    not share ids with the full-sequence caches. Finally the sliding-window
-    groups are re-balanced toward the widest other group (upstream's
-    block-outermost packer lands on 3 x 24 layers via ``_approximate_gcd``;
-    the layer-outer fallback splits 4 x 18, one window admission too many).
+    not share ids with the full-sequence caches.
     """
     if not is_step5_kv_cache_spec(kv_cache_spec):
         return None
@@ -190,36 +187,6 @@ def get_step5_pool_bytes_per_block(
         sorted(widths, reverse=True),
     )
     return envelope
-
-
-def get_step5_max_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    """Per-request worst-case KV memory under the single aliased backing.
-
-    Every id a request holds -- in any group -- pins one envelope slot in
-    the backing, so the worst case is the sum of the per-group id claims
-    (the sliding-window groups saturate at their admission cap, the ring
-    holds one bucket, full attention grows to max_model_len) times the
-    envelope width.
-    """
-    from vllm.utils.math_utils import cdiv
-
-    envelope = _step5_envelope(kv_cache_groups)
-    total_pages = 0
-    for group in kv_cache_groups:
-        if getattr(group, "host_resident", False):
-            continue
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            total_pages += spec.max_memory_usage_pages(vllm_config)
-        else:
-            total_pages += cdiv(
-                spec.max_memory_usage_bytes(vllm_config),
-                spec.page_size_bytes,
-            )
-    return total_pages * envelope
 
 
 def get_step5_kv_cache_config_from_groups(
