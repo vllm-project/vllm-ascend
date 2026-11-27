@@ -27,7 +27,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
@@ -88,7 +87,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     )
     assert spec.page_size_bytes == 2 * capacity * 128 * 4
     assert spec.block_size == spec.compress_ratio == 4
-    assert spec.num_states == spec.get_num_kernel_states(4) == get_storage_block_size(spec) == capacity
+    assert spec.num_states == spec.get_num_kernel_states(4) == capacity
     assert not spec.dcp_sharded
     assert spec.uses_slot_mapping
     kernel_block_size = select_common_block_size(4, [AscendIndexerKPoolTailBackend], [spec])
@@ -318,7 +317,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
     assert isinstance(indexer_spec, AscendMLAAttentionSpec)
     assert indexer_spec.block_size == 256
-    assert get_storage_block_size(indexer_spec) == 16
+    assert indexer_spec.num_states == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
@@ -533,15 +532,16 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
 
 
 @pytest.mark.parametrize(
-    "rank,query_len,num_requests,graph_padding,short_seq_lens",
+    "rank,query_len,num_requests,graph_padding,short_seq_lens,short_prefill",
     [
-        pytest.param(0, 1, 3, False, False, id="single-token-decode"),
-        pytest.param(1, 1, 1, True, False, id="padded-empty-rank"),
-        pytest.param(1, 6, 3, True, True, id="verification-short-seq-lens"),
+        pytest.param(0, 1, 3, False, False, False, id="single-token-decode"),
+        pytest.param(1, 1, 1, True, False, False, id="padded-empty-rank"),
+        pytest.param(1, 6, 3, True, True, False, id="verification-short-seq-lens"),
+        pytest.param(1, 1, 1, True, True, True, id="cached-one-token-prefill"),
     ],
 )
 def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
-    keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens
+    keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens, short_prefill
 ):
     """Route global write metadata and local queries; cache kernels are mocked."""
     global_reqs = 4 if graph_padding else num_requests
@@ -594,8 +594,9 @@ def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
             query_start_loc_np=global_query.numpy(),
             seq_lens=global_seq_lens[:num_requests] if short_seq_lens else global_seq_lens,
             positions=global_positions,
-            is_prefilling_np=np.zeros(num_requests, dtype=np.bool_),
-            has_prefill=False,
+            is_prefilling_np=np.full(num_requests, short_prefill, dtype=np.bool_),
+            prefill_runs_as_decode_np=np.ones(num_requests, dtype=np.bool_) if short_prefill else None,
+            has_prefill=short_prefill,
         ),
         global_block_tables=(global_tables,),
         global_slot_mappings=global_slots[None],

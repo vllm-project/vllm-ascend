@@ -65,7 +65,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.dynamic_eplb = False
 
     def get_weight(
         self,
@@ -123,7 +122,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,

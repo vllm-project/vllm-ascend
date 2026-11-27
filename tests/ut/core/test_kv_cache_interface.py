@@ -28,7 +28,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     declared_kwarg,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
@@ -128,15 +127,13 @@ def test_ascend_mla_memory_uses_spec_dcp_layout(dcp_sharded, expected_blocks):
     assert spec.max_memory_usage_bytes(config) == expected_blocks * spec.page_size_bytes
 
 
-def test_get_storage_block_size_and_dcp_memory():
+def test_num_states_and_dcp_memory():
     spec = _mla_spec()
-    # On main, storage_block_size is an optional dataclass field and may be
-    # None. Ascend derives physical rows from block_size / compression ratio.
     expected = spec.block_size // get_kv_cache_compression_ratio(spec)
-    assert get_storage_block_size(spec) == expected
+    assert spec.num_states == expected
 
     uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
-    assert get_storage_block_size(uniform) == expected
+    assert uniform.first_spec.num_states == expected
 
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=128),
@@ -145,13 +142,9 @@ def test_get_storage_block_size_and_dcp_memory():
     assert spec.max_memory_usage_bytes(vllm_config) > 0
 
 
-def test_get_storage_block_size_for_plain_mla_subclass():
-    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` in both
-    # supported lanes. A plain MLA subclass (HiddenStateCacheSpec) must
-    # resolve to block_size.
+def test_num_states_for_plain_mla_subclass():
     spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    expected = spec.block_size
-    assert get_storage_block_size(spec) == expected
+    assert spec.num_states == spec.block_size
 
 
 def test_sliding_window_mla_storage_and_page_size():
@@ -162,7 +155,7 @@ def test_sliding_window_mla_storage_and_page_size():
         dtype=torch.bfloat16,
         sliding_window=64,
     )
-    assert spec.storage_block_size == 16
+    assert spec.num_states == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
 
 
@@ -415,3 +408,32 @@ def test_a_layer_that_may_replay_warns_about_nothing():
         resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
+
+
+# --- HIF8 C8 spec behavior -------------------------------------------------
+#
+# The hif8 flag changes the main cache's payload dtype (bf16 latents become
+# raw uint8 HIF8 bytes) without repacking the pages, so it must participate in
+# every group-geometry decision: a merged group must not alias HIF8 pages with
+# plain bf16 latent pages.
+
+
+def test_hif8_flag_disqualifies_single_raw_backing():
+    plain = _mla_spec()
+    assert plain.supports_single_raw_backing
+
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    assert not hif8.supports_single_raw_backing
+
+
+def test_hif8_and_plain_mla_specs_cannot_share_a_group():
+    plain = _mla_spec()
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([plain, hif8])
+
+
+def test_uniform_hif8_group_merges_with_flag_preserved():
+    specs = [replace(_mla_spec(), cache_sparse_sfa_hif8=True) for _ in range(2)]
+    merged = AscendMLAAttentionSpec.merge(specs)
+    assert merged.cache_sparse_sfa_hif8

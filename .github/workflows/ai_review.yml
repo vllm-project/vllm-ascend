@@ -73,7 +73,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: python3 .github/workflows/scripts/ai_review.py prepare
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 .github/workflows/scripts/ai_review.py prepare
+
+      - name: Fetch doc-quality rules
+        if: steps.prepare.outputs.doc_quality == 'true'
+        env:
+          DOC_QUALITY_USERNAME: ${{ vars.DOC_QUALITY_USERNAME }}
+          DOC_QUALITY_TOKEN: ${{ secrets.DOC_QUALITY_TOKEN }}
+        run: |
+          revision=9b97d74bb8b35746de34f752973ea834478f532f
+          repo=/tmp/doc-quality
+          trap 'rm -rf "$repo"' EXIT
+          git init -q --bare "$repo"
+          basic_auth=$(printf '%s:%s' "$DOC_QUALITY_USERNAME" "$DOC_QUALITY_TOKEN" | base64 -w0)
+          GITCODE_AUTH="Authorization: Basic $basic_auth" git -C "$repo" --config-env=http.extraHeader=GITCODE_AUTH \
+            fetch --depth=1 https://gitcode.com/ascend-ci/doc-quality.git "$revision"
+          destination="$GITHUB_WORKSPACE/.github/agent-review/L2/doc-quality/upstream"
+          mkdir -p "$destination"
+          git -C "$repo" --work-tree="$destination" checkout 'FETCH_HEAD:skills/01.评估标准' -- .
 
       - uses: actions/checkout@v7
         if: steps.prepare.outputs.review == 'true'

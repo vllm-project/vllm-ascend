@@ -116,14 +116,14 @@ Finally, `token positions` can be obtained as `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`. 
 
 The shape of the current **Token IDs table** is `(max num request, max model len)`.
 
-Why are these `T_3_5`, `T_3_6`, `T_3_7` in this table without being scheduled?
+Why are these `T_2_5`, `T_2_6`, `T_2_7` in this table without being scheduled?
 
 - We fill all Token IDs in one request sequence to this table at once, but we only retrieve the tokens we scheduled this time. Then we retrieve the remaining Token IDs next time.
 
 ```shell
 | T_0_0 | T_0_1 | T_0_2 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 | T_1_0 | T_1_1 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
-| T_2_0 | T_2_1 | T_3_2 | T_3_3 | T_3_4 | T_3_5 | T_3_6 | T_3_7 |   ?   |   ?   |   ?   |   ?   |
+| T_2_0 | T_2_1 | T_2_2 | T_2_3 | T_2_4 | T_2_5 | T_2_6 | T_2_7 |   ?   |   ?   |   ?   |   ?   |
 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 ......
 ......
@@ -146,7 +146,7 @@ input_ids = token_table[token_indices]
 
 As mentioned before, we refer to these `Token IDs` as `Input IDs`.
 
-- `Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_3_2, T_3_3, T_3_4]`
+- `Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_2_2, T_2_3, T_2_4]`
 
 #### Build inputs attention metadata
 
@@ -195,13 +195,13 @@ Details:
 3. (**Token level**) `block offsets` could be computed by `block offsets = positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]`.
 4. Finally, use `block offsets` and `device block number` to create `slot mapping`: `device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`.
 
-(**Request level**) As we know the scheduled token count is `[3, 2, 5]`:
+The per-request scheduled token counts are `[3, 2, 5]`.
 
 - (**Request level**) Use prefix sum to calculate `query start location`: `[0, 3, 5, 10]`.
 - (**Request level**) All tokens in step 1 are in the prefill stage, and the computed tokens count is 0; then `sequence length` = `[3, 2, 5]`.
 - (**Request level**) As mentioned above, `number of computed tokens` are all 0s: `[0, 0, 0]`.
 - `number of requests`: `3`
-- (**Request level**) `number of tokens`: `[3, 2, 5]`
+- `number of tokens`: `10`
 - `max query len`: `5`
 - (**Token level**) `slot mapping`: `[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`
 - `attention mask`: For all requests that initiate a prefill process, we simply create only one mask matrix for reuse across different requests. The shape of this mask matrix is `5 * 5`.
@@ -222,7 +222,7 @@ Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`
       ```shell
       | T_0_0 | T_0_1 | T_0_2 | T_0_3 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
       | T_1_0 | T_1_1 | T_1_2 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
-      | T_2_0 | T_2_1 | T_3_2 | T_3_3 | T_3_4 | T_3_5 | T_3_6 | T_3_7 |   ?   |   ?   |   ?   |   ?   |
+      | T_2_0 | T_2_1 | T_2_2 | T_2_3 | T_2_4 | T_2_5 | T_2_6 | T_2_7 |   ?   |   ?   |   ?   |   ?   |
       |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
       ......
       ......
@@ -232,7 +232,7 @@ Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`
       **Note**: **T_0_3**, **T_1_2** are new Token IDs of **request_0** and **request_1** respectively. They are sampled from the output of the model.
 
 3. `token indices`: `[3, 14, 29, 30, 31]`
-4. `Input IDs`: `[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`
+4. `Input IDs`: `[T_0_3, T_1_2, T_2_5, T_2_6, T_2_7]`
 
 #### Build inputs attention metadata
 
@@ -261,7 +261,7 @@ KV cache block in the device memory:
 3. (**Token level**) `block offsets`: `[1, 0, 1, 0, 1]`
 4. (**Token level**) `slot mapping`: `[5, 14, 13, 16, 17]`
 
-Scheduled token count: `[1, 1, 3]`
+The per-request scheduled token counts are `[1, 1, 3]`.
 
 - `query start location`: `[0, 1, 2, 5]`
 
@@ -270,6 +270,8 @@ Scheduled token count: `[1, 1, 3]`
 - `number of computed tokens`: `[3, 2, 5]`
 
 - `number of requests`: `3`
+
+- `number of tokens`: `5`
 
 - `max query len`: `3`
 
