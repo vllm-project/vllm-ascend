@@ -31,7 +31,7 @@ def _common(query, weights, source_cache, source_metadata, compress_ratio, quant
     query_start_loc = source_metadata.query_start_loc
     return (
         quantized_query,
-        query_scale.unflatten(-1, (2, 2)).contiguous(),
+        query_scale.view(query.shape[0], query.shape[1], 2, 2),
         weights.float().contiguous(),
         source_cache[0],
         source_cache[1].unflatten(-1, (2, 2)),
@@ -232,23 +232,6 @@ def run_a5_indexer(
     )
 
 
-def build_smla_metadata(length_rows: torch.Tensor, cu_seqlens_q: torch.Tensor) -> torch.Tensor:
-    """Build the fixed A5 mixed-quant SMLA launch metadata."""
-    return ops.mixed_quant_sparse_flash_mla_metadata(
-        length_rows,
-        length_rows,
-        cu_seqlens_q=cu_seqlens_q,
-        num_heads_q=64,
-        num_heads_kv=1,
-        head_dim=512,
-        quant_mode=1,
-        layout_q="TND",
-        layout_kv="PA_BBND",
-        has_ori_kv=True,
-        has_cmp_kv=True,
-    )
-
-
 def _resolve_window_indices(q, metadata, window_size):
     indices = metadata.swa.ori_sparse_indices
     lengths = metadata.swa.ori_topk_length
@@ -280,7 +263,11 @@ def qsmla(
     else:
         cmp_indices = None
         cmp_lengths = None
-    task_metadata = metadata.swa.smla_metadata
+    ratio = metadata.attention.compress_ratio if has_cmp else 0
+    plans = metadata.swa.a5_smla_plans
+    if plans is None or ratio not in plans:
+        raise RuntimeError(f"A5 MLA plan c{ratio} was not prepared by the metadata builder")
+    task_metadata = plans[ratio]
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(task_metadata))
     output, _ = ops.mixed_quant_sparse_flash_mla(
         q,
@@ -347,7 +334,6 @@ class MixedQuantPackedCacheOps:
 
     build_packed_cache_slot_mapping = staticmethod(build_packed_cache_slot_mapping)
     build_window_indices = staticmethod(build_window_indices_triton)
-    build_smla_metadata = staticmethod(build_smla_metadata)
     qsmla = staticmethod(qsmla)
     run_a5_indexer = staticmethod(run_a5_indexer)
     write_attention_cache = staticmethod(write_attention_cache)

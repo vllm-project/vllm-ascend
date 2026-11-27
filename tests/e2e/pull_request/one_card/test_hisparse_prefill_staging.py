@@ -3,32 +3,31 @@
 """Resident prefill plans must preserve each host page's physical row mapping."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 
+from vllm_ascend.attention import sfa_hisparse
 from vllm_ascend.attention.sfa_hisparse import build_hisparse_prefill_staging_plan
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.33.0"):
-    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
-
-pytestmark = pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0")
 
 
 @pytest.mark.parametrize("resident_block_size", [128, 64, 32])
 @pytest.mark.parametrize("host_pages", [1, 2])
-def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages):
+def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages, monkeypatch):
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse mapped-host staging currently targets Ascend 950")
     torch.npu.set_device(0)
+    representative_min = Mock(wraps=sfa_hisparse.scatter_min_representatives)
+    monkeypatch.setattr(sfa_hisparse, "scatter_min_representatives", representative_min)
     device = "npu:0"
     block_size, width, layers, blocks = 128, 576, 4, 16
     page_elements = block_size * width
@@ -77,6 +76,8 @@ def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages):
             on_device = payload.to(device)
             scatter_packed_kv(on_device[:, :512], on_device[:, 512:], view.cache, physical.int().to(device))
             plan.ensure_gpu_sources(resident_table, state, resident_block_size)
+            # First resolution uses the real NPU reduction; later layers reuse it.
+            representative_min.assert_called_once()
             torch.testing.assert_close(plan.gpu_row_ids.cpu().flatten(), expected_gpu, rtol=0, atol=0)
             torch.testing.assert_close(plan.miss_mask.cpu().flatten(), expected_mask, rtol=0, atol=0)
             if original_rows is None:

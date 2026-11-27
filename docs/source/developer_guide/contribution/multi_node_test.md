@@ -4,7 +4,7 @@ Multi-Node CI is designed to test distributed scenarios of very large models, fo
 
 ## How it works
 
-The following picture shows the basic deployment view of the multi-node CI mechanism. It shows how the GitHub action interacts with [lws](https://lws.sigs.k8s.io/docs/overview/) (a kind of kubernetes crd resource).
+The following picture shows the basic deployment view of the multi-node CI mechanism. It shows how the GitHub action interacts with [LWS](https://lws.sigs.k8s.io/docs/overview/) (a kind of Kubernetes CRD resource).
 
 ![alt text](../../assets/deployment.png)
 
@@ -61,7 +61,7 @@ job budget:
 
 1. Upload custom weights
 
-    If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome. If you do not have permission to upload, please contact @Potabk
+    If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome. If you do not have permission to upload, please contact @Potabk.
 
 2. Add config yaml
 
@@ -159,7 +159,7 @@ multi-node-tests:
     KUBECONFIG_B64: {% raw %}${{ secrets.KUBECONFIG_B64 }}{% endraw %}
 ```
 
-The matrix above defines all the parameters required to add a multi-machine use
+The matrix above defines all the parameters required to add a multi-node use
 case. The parameters worth noting are `size`, `config_file_path`, and
 `config_base_path`. `size` defines the number of nodes required for your use
 case. `config_file_path` is the yaml file name, and `config_base_path` tells the
@@ -169,13 +169,13 @@ external DP runtime.
 
 ## Run Multi-Node tests locally
 
-### 1. Use kubernetes
+### 1. Use Kubernetes
 
 This section assumes that you already have a [Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment locally. Then you can easily start our test with one click.
 
 - Step 1. Install LWS CRD resources
 
-    See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a reference
+    See <https://lws.sigs.k8s.io/docs/installation/>, which can be used as a reference.
 
 - Step 2. Deploy the following yaml file `lws.yaml` as needed
 
@@ -339,7 +339,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
     Should get something similar to this:
 
-    ```shell
+    ```output
     INFO 12-30 11:00:57 [__init__.py:43] Available plugins for group vllm.platform_plugins:
     INFO 12-30 11:00:57 [__init__.py:45] - ascend -> vllm_ascend:register
     INFO 12-30 11:00:57 [__init__.py:48] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
@@ -423,7 +423,7 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20261113-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
@@ -506,7 +506,7 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20261113-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 

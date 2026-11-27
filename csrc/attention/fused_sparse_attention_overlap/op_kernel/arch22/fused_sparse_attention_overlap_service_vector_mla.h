@@ -15,6 +15,9 @@
 #ifndef FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H
 #define FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H
 
+// Bulk TopK prefetch is disabled because it caused precision failures.
+#define FSAO_PROBE_BULK_TOPK 0
+
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
@@ -92,7 +95,12 @@ public:
     __aicore__ inline void CopyInKv(int64_t &mte2Size, int64_t mte3Size, int64_t mergeMte3Idx, int64_t realS2Idx1,
                                     int64_t realS2Idx2, int64_t selectionTokenOffset1,
                                     int64_t selectionTokenOffset2, int64_t s2IdLimit,
-                                    const RunInfo &runInfo);
+                                    const RunInfo &runInfo,
+                                    int64_t &ubTokenIdx1, int64_t &ubTokenIdx2);
+    __aicore__ inline void FlushDirectSelectionUpdate(
+        const int64_t *updateDstSlot, const int64_t *updateUbIdx, int64_t &updateCount,
+        bool &collectEnabled, int64_t mte3Size, int64_t mte2Size, int64_t mergeMte3Idx,
+        int64_t selectionRow, bool batchCollected);
     __aicore__ inline void CopyInSelectionKvRun(int64_t &mte2Size, int64_t mte3Size,
                                                 int64_t mergeMte3Idx, int64_t selectionTokenOffset,
                                                 int64_t tokenCount);
@@ -218,6 +226,24 @@ public:
     __aicore__ inline void Bmm2FDDataCopyOut(const RunInfo &info, LocalTensor<T> &bmm2ResUb, uint32_t wsMStart,
                                              uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount);
     __aicore__ inline uint64_t CalcAccumOffset(uint32_t bN2Idx, uint32_t gS1Idx);
+    __aicore__ inline void ReduceSplitKV(uint32_t slotBegin, uint32_t partNum, uint32_t mCount,
+                                         uint64_t attenOutOffset);
+    // Idle AICore V0/V1 workers assist MergeKv.
+    __aicore__ inline void InitHelperSync(const GlobalTensor<int32_t> &doneGm,
+                                          const GlobalTensor<int32_t> &creditGm,
+                                          uint32_t pairs);
+    __aicore__ inline void InitHelperV0(const GlobalTensor<KV_T> &targetKvMergeGm, uint32_t pairIdx);
+    __aicore__ inline void SetHelperParts(uint32_t partIdx, uint32_t partCount,
+                                          const GlobalTensor<int32_t> &helperValidSizeGm,
+                                          uint32_t pairIdx);
+    __aicore__ inline bool IsHelperV0() const { return isHelperV0_; }
+    __aicore__ inline void PublishHelperCredit(uint32_t loop);
+    __aicore__ inline void WaitHelperCredit(uint32_t loop);
+    __aicore__ inline void SignalMergeDone(uint32_t loop);
+    __aicore__ inline void WaitMergeDone(uint32_t loop);
+    __aicore__ inline void FixValidSize(const RunInfo &info);
+    __aicore__ inline void ZeroHelperSyncArea();
+
     // Byte sizes of BLOCK and REPEAT
     static constexpr uint64_t BYTE_BLOCK = 32UL;
     static constexpr uint32_t REPEAT_BLOCK_BYTE = 256U;
@@ -226,6 +252,13 @@ public:
     static constexpr uint32_t FP32_REPEAT_ELEMENT_NUM = REPEAT_BLOCK_BYTE / sizeof(float);
     // Repeat stride cannot exceed 256.
     static constexpr uint32_t REPEATE_STRIDE_UP_BOUND = 256;
+
+    // Cross-core helper handshake uses 32-byte ring slots.
+    static constexpr uint32_t HELPER_SYNC_RING = 64;
+    static constexpr uint32_t HELPER_SYNC_SLOT_INT32 = 8;
+    static constexpr uint32_t HELPER_SIGNALS_PER_BLOCK = 2;
+    static constexpr uint32_t HELPER_SYNC_EVENT_ID = 2;
+    static constexpr uint32_t HELPER_POLL_BACKOFF = 128;
 
 private:
     static constexpr bool PAGE_ATTENTION = FusedSparseAttentionOverlapTraits::pageAttention;
@@ -334,6 +367,8 @@ private:
     int64_t selectionDataRow_ = -1;
     int64_t selectionDirectRowStride_ = 0;
     bool selectionPairedCopyActive_ = false;
+    // Bit k marks a 32-token window whose updates were written directly from UB.
+    uint32_t directWrittenWindowMask_ = 0;
 
     // ================================Local Buffer Area====================================
     TBuf<> inputBuff1;            // 64K
@@ -343,6 +378,7 @@ private:
 
     TBuf<> tmpBuff1;              // 32K
     TBuf<> v0ValidSizeBuff;       // 8K
+    TBuf<> helperSyncBuff;        // 2K
 
     TBuf<> nValueBuff;
     TBuf<> cofValueBuff;
@@ -365,6 +401,17 @@ private:
     LocalTensor<KV_T> kvMergUb_;
     LocalTensor<KV_T> ropeMergUb_;
     LocalTensor<int32_t> v0ValidSizeUb_;
+
+    bool isHelperV0_ = false;
+    uint32_t helperPartIdx_ = 0;
+    uint32_t helperPartCount_ = 1;
+    bool mergeSplitActive_ = false;
+    GlobalTensor<int32_t> mergeDoneGm_;
+    GlobalTensor<int32_t> mergeCreditGm_;
+    GlobalTensor<int32_t> helperValidSizeGm_;
+    int32_t helperCreditSeen_ = 0;
+    uint32_t helperSyncPairs_ = 1;
+    uint32_t mergeSyncPairOffset_ = 0;
 };
 
 template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitBuffers(TPipe *pipe)
@@ -376,6 +423,9 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
 
     pipe->InitBuffer(tmpBuff1, ConstInfo::BUFFER_SIZE_BYTE_32K);
     pipe->InitBuffer(v0ValidSizeBuff, ConstInfo::BUFFER_SIZE_BYTE_8K);
+    if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+        pipe->InitBuffer(helperSyncBuff, ConstInfo::BUFFER_SIZE_BYTE_2K);
+    }
 
     // M_MAX = 512/2vector = 256, 256 * sizeof(T) * N_Buffer
     pipe->InitBuffer(nValueBuff, ConstInfo::BUFFER_SIZE_BYTE_1K * constInfo.preLoadNum);
@@ -1186,8 +1236,11 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                                                         int64_t realS2Idx1, int64_t realS2Idx2,
                                                         int64_t selectionTokenOffset1,
                                                         int64_t selectionTokenOffset2, int64_t s2IdLimit,
-                                                        const RunInfo &runInfo)
+                                                        const RunInfo &runInfo,
+                                                        int64_t &ubTokenIdx1, int64_t &ubTokenIdx2)
 {
+    ubTokenIdx1 = -1;
+    ubTokenIdx2 = -1;
     bool validS2Idx1 = realS2Idx1 >= 0 && realS2Idx1 < s2IdLimit;
     bool validS2Idx2 = realS2Idx2 >= 0 && realS2Idx2 < s2IdLimit;
     bool selectionHit1 = selectionTokenOffset1 >= 0 && validS2Idx1;
@@ -1199,22 +1252,37 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         }
         int64_t kvSrcStride = 0;
         int64_t ropeSrcStride = 0;
+        // Sort hit offsets so paired copies always have a positive stride.
+        int64_t pairLo = selectionTokenOffset1;
+        int64_t pairHi = selectionTokenOffset2;
+        if (pairHi < pairLo) {
+            pairLo = selectionTokenOffset2;
+            pairHi = selectionTokenOffset1;
+        }
         if (selectionPairedCopyActive_ && selectionHit1 && selectionHit2 &&
             CanUsePairedSelectionCopy(
-                selectionTokenOffset1, selectionTokenOffset2,
+                pairLo, pairHi,
                 kvSrcStride, ropeSrcStride)) {
             CopyInSelectionKvPair(
-                mte2Size, mte3Size, mergeMte3Idx, selectionTokenOffset1,
+                mte2Size, mte3Size, mergeMte3Idx, pairLo,
                 kvSrcStride, ropeSrcStride);
             return;
         }
 
         int64_t keyOffset1 = selectionHit1 ? -1 : GetKeyGmOffset(realS2Idx1, runInfo, s2IdLimit);
         int64_t keyOffset2 = selectionHit2 ? -1 : GetKeyGmOffset(realS2Idx2, runInfo, s2IdLimit);
+        int64_t singleSlot1 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1,
                        selectionHit1 ? selectionTokenOffset1 : -1, s2IdLimit, runInfo);
+        int64_t singleSlot2 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyOffset2,
                        selectionHit2 ? selectionTokenOffset2 : -1, s2IdLimit, runInfo);
+        if (!selectionHit1 && keyOffset1 >= 0) {
+            ubTokenIdx1 = singleSlot1;
+        }
+        if (!selectionHit2 && keyOffset2 >= 0) {
+            ubTokenIdx2 = singleSlot2;
+        }
         return;
     }
 
@@ -1229,10 +1297,18 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     bool usePairedCopy = CanUsePairedKvCopy(
         realS2Idx1, realS2Idx2, keyOffset1, keyOffset2, s2IdLimit,
         runInfo, keySrcStride, keyRopeSrcStride);
+    int64_t pairBaseSlot = mte2Size - mte3Size;
     if (unlikely(!usePairedCopy)) {
-        // For exceptional cases such as stride overflow, negative stride, or excessive S2 length, restore two copy instructions.
+        int64_t fallbackSlot1 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1, -1, s2IdLimit, runInfo);
+        int64_t fallbackSlot2 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyOffset2, -1, s2IdLimit, runInfo);
+        if (keyOffset1 >= 0) {
+            ubTokenIdx1 = fallbackSlot1;
+        }
+        if (keyOffset2 >= 0) {
+            ubTokenIdx2 = fallbackSlot2;
+        }
     } else {
         DataCopyExtParams intriParams;
         intriParams.blockLen = constInfo.sparseBlockSize * constInfo.headDim * sizeof(KV_T);
@@ -1253,6 +1329,14 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         intriParams.srcStride = keyRopeSrcStride;
         DataCopyPad(ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 + (mte2Size - mte3Size) * constInfo.headDimRope],
                     keyRopeGm_[startGmOffset * constInfo.headDimRope], intriParams, padParams);
+        bool pairTransposed = keyOffset1 > -1 && keyOffset2 > -1 && keyOffset2 < keyOffset1;
+        if (keyOffset1 > -1) {
+            ubTokenIdx1 = pairTransposed ? pairBaseSlot + constInfo.sparseBlockSize : pairBaseSlot;
+        }
+        if (keyOffset2 > -1) {
+            ubTokenIdx2 = (keyOffset1 > -1 && !pairTransposed) ?
+                pairBaseSlot + constInfo.sparseBlockSize : pairBaseSlot;
+        }
         mte2Size += ((keyOffset1 > -1) + (keyOffset2 > -1)) * constInfo.sparseBlockSize;
     }
 }
@@ -1282,6 +1366,82 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 constInfo.headDimRope], ropeMergUb_[mergeMte3Idx % 2 * 32 * 64], dataCopyParams);
 
     (void)runInfo;
+}
+
+// Write selection updates directly from UB for complete 32-token windows.
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::FlushDirectSelectionUpdate(
+    const int64_t *updateDstSlot, const int64_t *updateUbIdx, int64_t &updateCount,
+    bool &collectEnabled, int64_t mte3Size, int64_t mte2Size, int64_t mergeMte3Idx,
+    int64_t selectionRow, bool batchCollected)
+{
+    int64_t count = updateCount;
+    updateCount = 0;
+    collectEnabled = true;
+    // Partial windows use the readback path to avoid skipping updates.
+    if ((mte3Size & 31) != 0 || mte2Size - mte3Size != 32) {
+        return;
+    }
+    int64_t windowIdx = mte3Size >> 5;
+    if (windowIdx >= 32) {
+        return;
+    }
+    if (count <= 0) {
+        // A zero count is authoritative only when this batch was actually collected.
+        if (count == 0 && batchCollected) {
+            directWrittenWindowMask_ |= (1U << static_cast<uint32_t>(windowIdx));
+        }
+        return;
+    }
+
+    int64_t ubBase = mergeMte3Idx % 2 * 32 * 512;
+    int64_t ropeUbBase = mergeMte3Idx % 2 * 32 * 64;
+    DataCopyExtParams kvParams;
+    kvParams.blockLen = constInfo.headDim * sizeof(KV_T);
+    kvParams.srcStride = 0;
+    kvParams.dstStride = 0;
+    DataCopyExtParams ropeParams;
+    ropeParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
+    ropeParams.srcStride = 0;
+    ropeParams.dstStride = 0;
+
+    int64_t idx = 0;
+    while (idx < count) {
+        int64_t destinationSlot = updateDstSlot[idx];
+        int64_t destinationBlockTableIdx = destinationSlot / selectionKvBlockSize_;
+        int64_t destinationBlockOffset = destinationSlot % selectionKvBlockSize_;
+        int32_t destinationBlockNum = selectionKvBlockTableGm_.GetValue(
+            selectionRow * selectionMaxBlockNum_ + destinationBlockTableIdx);
+        int64_t srcStart = updateUbIdx[idx];
+        int64_t runLen = 1;
+        while (idx + runLen < count &&
+               updateDstSlot[idx + runLen] == destinationSlot + runLen &&
+               updateUbIdx[idx + runLen] == srcStart + runLen &&
+               destinationBlockOffset + runLen < selectionKvBlockSize_) {
+            runLen++;
+        }
+        if (destinationBlockNum >= 0) {
+            kvParams.blockCount = runLen;
+            int64_t dstKvAddr =
+                (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ +
+                 destinationBlockOffset) * static_cast<int64_t>(constInfo.headDim);
+            DataCopyPad(selectionKvCacheGm_[dstKvAddr],
+                kvMergUb_[ubBase + srcStart * static_cast<int64_t>(constInfo.headDim)],
+                kvParams);
+
+            if (constInfo.headDimRope > 0) {
+                ropeParams.blockCount = runLen;
+                int64_t dstRopeAddr =
+                    (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ +
+                     destinationBlockOffset) * static_cast<int64_t>(constInfo.headDimRope);
+                DataCopyPad(selectionKRopeGm_[dstRopeAddr],
+                    ropeMergUb_[ropeUbBase + srcStart * static_cast<int64_t>(constInfo.headDimRope)],
+                    ropeParams);
+            }
+        }
+        idx += runLen;
+    }
+    directWrittenWindowMask_ |= (1U << static_cast<uint32_t>(windowIdx));
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -2336,7 +2496,8 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Run
         return;
     }
 
-    uint32_t workerCount = GetBlockNum();
+    // Include both vector subcores when distributing selection rows.
+    uint32_t workerCount = GetBlockNum() * 2;
     uint32_t workerIdx = (GetBlockIdx() / 2) * 2 + GetSubBlockIdx();
     if (workerCount == 0 || workerIdx >= workerCount) {
         return;
@@ -2507,12 +2668,31 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     int64_t membershipBase = logicalSelectionRow * selectionMembershipStride_;
     int64_t s2ProcessSize = runInfo.actualSingleProcessSInnerSize;
     int64_t s2Pair = CeilDiv(s2ProcessSize, 2L * constInfo.sparseBlockSize);
-    int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 :
+    int64_t subBlockStart = GetSubBlockIdx() == 0 ? 0 :
         CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
-    int64_t s2GmLimit = GetSubBlockIdx() == 0 ?
+    int64_t subBlockLimit = GetSubBlockIdx() == 0 ?
         CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize : s2ProcessSize;
-    if (s2GmLimit > s2ProcessSize) {
-        s2GmLimit = s2ProcessSize;
+    if (subBlockLimit > s2ProcessSize) {
+        subBlockLimit = s2ProcessSize;
+    }
+    // Split update writeback using the same partitions as MergeKv.
+    int64_t s2GmStartOffset = subBlockStart;
+    int64_t s2GmLimit = subBlockLimit;
+    if (mergeSplitActive_) {
+        int64_t alignUnit = 2L * constInfo.sparseBlockSize;
+        int64_t subBlockSize = subBlockLimit - subBlockStart;
+        if (subBlockSize < 0) {
+            subBlockSize = 0;
+        }
+        int64_t partSize = CeilDiv(subBlockSize, (int64_t)helperPartCount_ * alignUnit) * alignUnit;
+        s2GmStartOffset = subBlockStart + helperPartIdx_ * partSize;
+        s2GmLimit = subBlockStart + (helperPartIdx_ + 1) * partSize;
+        if (s2GmLimit > subBlockLimit) {
+            s2GmLimit = subBlockLimit;
+        }
+        if (s2GmStartOffset > s2GmLimit) {
+            s2GmStartOffset = s2GmLimit;
+        }
     }
     if (s2GmStartOffset >= s2GmLimit) {
         return;
@@ -2543,6 +2723,13 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         if (writeCount > 32) {
             writeCount = 32;
         }
+        // Skip windows whose updates were already written directly from UB.
+        int64_t directWindowIdx = (localOffset - s2GmStartOffset) >> 5;
+        if (directWindowIdx < 32 &&
+            ((directWrittenWindowMask_ >> static_cast<uint32_t>(directWindowIdx)) & 1U) != 0) {
+            localOffset += writeCount;
+            continue;
+        }
         int64_t updateDstSlot[32];
         int64_t updateSrcIdx[32];
         int64_t updateCount = 0;
@@ -2551,16 +2738,19 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             s2IdLimit = runInfo.curActualSeqLenOri - runInfo.actS1Size +
                         runInfo.gS1Idx / constInfo.gSize + 1;
         }
-        int64_t cachedPackedPlanIdx = -1;
-        uint32_t cachedPackedPlanValue = 0;
-        for (int64_t idx = 0; idx < writeCount; idx++) {
-            int64_t planIdx = localOffset - s2GmStartOffset + idx;
-            int64_t packedPlanIdx = planIdx / 2;
-            if (packedPlanIdx != cachedPackedPlanIdx) {
-                cachedPackedPlanValue = packedPlanLocal.GetValue(packedPlanIdx);
-                cachedPackedPlanIdx = packedPlanIdx;
-            }
-            int16_t planValue = (planIdx & 1) == 0 ?
+        int64_t cachedPairOffset = -1;
+        bool cachedPairTransposed = false;
+        // Decode two packed plan values per read.
+        for (int64_t base = 0; base < writeCount; base += 2) {
+            int64_t basePlanIdx = localOffset - s2GmStartOffset + base;
+            int64_t cachedPackedPlanIdx = basePlanIdx >> 1;
+            uint32_t cachedPackedPlanValue =
+                packedPlanLocal.GetValue(cachedPackedPlanIdx);
+            int64_t pairCount = (base + 1 < writeCount) ? 2 : 1;
+            for (int64_t half = 0; half < pairCount; half++) {
+            int64_t idx = base + half;
+            int64_t planIdx = basePlanIdx + half;
+            int16_t planValue = half == 0 ?
                 static_cast<int16_t>(cachedPackedPlanValue & 0xFFFFU) :
                 static_cast<int16_t>(cachedPackedPlanValue >> 16);
             if (!IsSelectionPlanUpdate(planValue)) {
@@ -2572,6 +2762,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             int64_t pairSize = 2L * static_cast<int64_t>(constInfo.sparseBlockSize);
             int64_t pairOffset = (absoluteOffset / pairSize) * pairSize;
             if (constInfo.sparseBlockSize == 1 && pairOffset + 1 < s2ProcessSize) {
+                bool pairTransposed;
+                if (pairOffset == cachedPairOffset) {
+                    pairTransposed = cachedPairTransposed;
+                } else {
                 bool pairHasSelectionHit = false;
                 int64_t pairPlanIdx = pairOffset - s2GmStartOffset;
                 if (pairPlanIdx >= 0 && pairPlanIdx + 1 < planCount) {
@@ -2587,6 +2781,8 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                     pairHasSelectionHit = IsSelectionPlanHit(pairPlan0) ||
                         IsSelectionPlanHit(pairPlan1);
                 }
+                pairTransposed = false;
+                if (!pairHasSelectionHit) {
                 int64_t realS2Idx0 = -1;
                 int64_t realS2Idx1 = -1;
                 GetRealS2Idx(pairOffset, realS2Idx0, runInfo.topKBaseOffset, runInfo);
@@ -2595,11 +2791,16 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 int64_t keyOffset1 = GetKeyGmOffset(realS2Idx1, runInfo, s2IdLimit);
                 int64_t keySrcStride = 0;
                 int64_t keyRopeSrcStride = 0;
-                bool usedPairedCopy = !pairHasSelectionHit && keyOffset0 >= 0 && keyOffset1 >= 0 &&
+                bool usedPairedCopy = keyOffset0 >= 0 && keyOffset1 >= 0 &&
                     CanUsePairedKvCopy(
                         realS2Idx0, realS2Idx1, keyOffset0, keyOffset1, s2IdLimit,
                         runInfo, keySrcStride, keyRopeSrcStride);
-                if (usedPairedCopy && keyOffset1 < keyOffset0) {
+                pairTransposed = usedPairedCopy && keyOffset1 < keyOffset0;
+                }
+                cachedPairOffset = pairOffset;
+                cachedPairTransposed = pairTransposed;
+                }
+                if (pairTransposed) {
                     int64_t srcAbsoluteOffset = (absoluteOffset == pairOffset) ? pairOffset + 1 : pairOffset;
                     if (srcAbsoluteOffset >= localOffset && srcAbsoluteOffset < localOffset + writeCount) {
                         srcIdx = srcAbsoluteOffset - localOffset;
@@ -2609,6 +2810,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             updateDstSlot[updateCount] = destinationSlot;
             updateSrcIdx[updateCount] = srcIdx;
             updateCount++;
+            }
         }
 
         if (updateCount > 0) {
@@ -2623,17 +2825,43 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             ropeParams.srcStride = 0;
             ropeParams.dstStride = 0;
 
-            kvParams.blockCount = writeCount;
-            DataCopyPad(kvMergUb_,
-                kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
-                            localOffset * static_cast<int64_t>(constInfo.headDim)],
-                kvParams, padParams);
-            ropeParams.blockCount = writeCount;
-            DataCopyPad(ropeMergUb_,
-                kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
-                           512 * static_cast<int64_t>(constInfo.headDim) +
-                           localOffset * static_cast<int64_t>(constInfo.headDimRope)],
-                ropeParams, padParams);
+            // Sparse windows read back only the tokens that need updates.
+            const bool sparseWriteback = (updateCount * 4 <= writeCount);
+            if (sparseWriteback) {
+                kvParams.blockCount = 1;
+                ropeParams.blockCount = 1;
+                for (int64_t i = 0; i < updateCount; i++) {
+                    int64_t srcSlotIdx = updateSrcIdx[i];
+                    DataCopyPad(
+                        kvMergUb_[srcSlotIdx * static_cast<int64_t>(constInfo.headDim)],
+                        kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                   (localOffset + srcSlotIdx) *
+                                       static_cast<int64_t>(constInfo.headDim)],
+                        kvParams, padParams);
+                    if (constInfo.headDimRope > 0) {
+                        DataCopyPad(
+                            ropeMergUb_[srcSlotIdx *
+                                        static_cast<int64_t>(constInfo.headDimRope)],
+                            kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                       512 * static_cast<int64_t>(constInfo.headDim) +
+                                       (localOffset + srcSlotIdx) *
+                                           static_cast<int64_t>(constInfo.headDimRope)],
+                            ropeParams, padParams);
+                    }
+                }
+            } else {
+                kvParams.blockCount = writeCount;
+                DataCopyPad(kvMergUb_,
+                    kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                localOffset * static_cast<int64_t>(constInfo.headDim)],
+                    kvParams, padParams);
+                ropeParams.blockCount = writeCount;
+                DataCopyPad(ropeMergUb_,
+                    kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                               512 * static_cast<int64_t>(constInfo.headDim) +
+                               localOffset * static_cast<int64_t>(constInfo.headDimRope)],
+                    ropeParams, padParams);
+            }
             SetFlag<AscendC::HardEvent::MTE2_MTE3>(0);
             WaitFlag<AscendC::HardEvent::MTE2_MTE3>(0);
             int64_t updateIdx = 0;
@@ -3016,6 +3244,8 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     selectionUpdatePlanCount_ = 0;
     selectionDirectRowStride_ = 0;
     selectionPairedCopyActive_ = false;
+    directWrittenWindowMask_ = 0;
+    mergeSplitActive_ = false;
     bool useSelectionPlanSource = false;
     bool useExternalPlanSource = false;
     int64_t selectionRow = -1;
@@ -3051,7 +3281,9 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 selectionDirectRowStride_ > 0;
         }
         if (!selectionUpdatePlanActive_ && membershipMapReady) {
-            MergeKvFromSelection(runInfo);
+            if (!isHelperV0_) {
+                MergeKvFromSelection(runInfo);
+            }
             return;
         }
         selectionUpdatePlanOffset_ = selectionUpdatePlanActive_ ?
@@ -3060,12 +3292,15 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             static_cast<int32_t>(controlLocal.GetValue(2)) : 0;
         if (selectionSparseUpdatePlanActive_ && selectionUpdatePlanCount_ > 0 &&
             selectionUpdatePlanCount_ <= SELECTION_SYNC_COPY_CAPACITY) {
-            MergeKvFromSelectionWithSparseUpdates(runInfo);
+            if (!isHelperV0_) {
+                MergeKvFromSelectionWithSparseUpdates(runInfo);
+            }
             return;
         }
         useSelectionPlanSource = !selectionSparseUpdatePlanActive_ &&
             selectionUpdatePlanActive_ &&
             controlLocal.GetValue(2) > 0;
+        // Helpers copy plan-source data; targets own all cross-core update side effects.
     }
 
     int64_t s2ProcessSize = runInfo.actualSingleProcessSInnerSize;
@@ -3086,10 +3321,44 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     int64_t s2IdxArray0 = -1;
     int64_t s2IdxArray1 = -1;
     bool needWaitMte3ToMte2 = true;
+    bool directWritebackActive = useSelectionPlanSource && IsSelectionUpdateEnabled() &&
+        constInfo.sparseBlockSize == 1 && selectionKvBlockSize_ > 0 && selectionMaxBlockNum_ > 0 &&
+        !isHelperV0_;
+    int64_t directSelectionRow = selectionDataRow_ >= 0 ? selectionDataRow_ : selectionRow;
+    int64_t directUpdateDstSlot[32];
+    int64_t directUpdateUbIdx[32];
+    int64_t directUpdateCount = 0;
+    bool directCollectEnabled = directWritebackActive;
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-    int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
-    int64_t s2GmLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize: s2ProcessSize;
+    // Align helper partitions to token pairs.
+    mergeSplitActive_ = helperPartCount_ > 1;
+    int64_t s2GmStartOffset;
+    int64_t s2GmLimit;
+    if (mergeSplitActive_) {
+        int64_t subBlockStart = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
+        int64_t subBlockLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize : s2ProcessSize;
+        if (subBlockLimit > s2ProcessSize) {
+            subBlockLimit = s2ProcessSize;
+        }
+        int64_t alignUnit = 2L * constInfo.sparseBlockSize;
+        int64_t subBlockSize = subBlockLimit - subBlockStart;
+        if (subBlockSize < 0) {
+            subBlockSize = 0;
+        }
+        int64_t partSize = CeilDiv(subBlockSize, (int64_t)helperPartCount_ * alignUnit) * alignUnit;
+        s2GmStartOffset = subBlockStart + helperPartIdx_ * partSize;
+        s2GmLimit = subBlockStart + (helperPartIdx_ + 1) * partSize;
+        if (s2GmLimit > subBlockLimit) {
+            s2GmLimit = subBlockLimit;
+        }
+        if (s2GmStartOffset > s2GmLimit) {
+            s2GmStartOffset = s2GmLimit;
+        }
+    } else {
+        s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
+        s2GmLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize: s2ProcessSize;
+    }
     if (s2GmLimit > s2ProcessSize) {
         s2GmLimit = s2ProcessSize;
     }
@@ -3123,6 +3392,180 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     if (constInfo.sparseMode == 3) {
         s2IdLimit = runInfo.curActualSeqLenOri - runInfo.actS1Size + runInfo.gS1Idx / constInfo.gSize + 1;
     }
+#if FSAO_PROBE_BULK_TOPK
+    LocalTensor<int32_t> topkBatchUb = v0ValidSizeUb_[1024];
+    bool useBulkTopk = (constInfo.sparseBlockSize == 1) && (s2GmStartOffset < s2GmLimit);
+    if (useBulkTopk) {
+        int64_t batchTopkStart = topkGmBaseOffset +
+            static_cast<int64_t>(runInfo.s2Idx) * static_cast<int64_t>(constInfo.s2BaseSize) +
+            s2GmStartOffset;
+        int64_t batchTopkCount = s2GmLimit - s2GmStartOffset;
+        DataCopy(topkBatchUb, topkGm_[batchTopkStart],
+                 static_cast<uint32_t>(batchTopkCount));
+    }
+#endif
+    if (constInfo.sparseBlockSize == 1) {
+    // Process each 32-token window in decode, copy, and flush phases.
+    const int32_t s2Start32 = (int32_t)s2GmStartOffset;
+    const int32_t s2Limit32 = (int32_t)s2GmLimit;
+    const int32_t sparseBlockSize32 = (int32_t)constInfo.sparseBlockSize;
+    // Plan sign distinguishes hits, updates, and ordinary misses.
+    int32_t slotBuf[32];
+    bool mergeStopped = false;
+    for (int32_t winStart = s2Start32; winStart < s2Limit32 && !mergeStopped; winStart += 32) {
+        if (needWaitMte3ToMte2) {
+            WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+            needWaitMte3ToMte2 = false;
+        }
+        int32_t winCount = s2Limit32 - winStart;
+        if (winCount > 32) {
+            winCount = 32;
+        }
+        // Phase A: decode packed plan values for this window.
+        int32_t localBase = winStart - s2Start32;
+        for (int32_t j = 0; j < winCount; j += 2) {
+            int32_t plan0 = 0;
+            int32_t plan1 = 0;
+            if (useSelectionPlanSource) {
+                uint32_t packedPlanValue =
+                    packedSelectionPlanLocal.GetValue((localBase + j) / 2);
+                plan0 = static_cast<int16_t>(packedPlanValue & 0xFFFFU);
+                plan1 = static_cast<int16_t>(packedPlanValue >> 16);
+            }
+            slotBuf[j] = plan0;
+            if (j + 1 < winCount) {
+                slotBuf[j + 1] = plan1;
+            }
+        }
+        // Phase B: copy hits and misses in logical token order.
+        int32_t cur = 0;
+        while (cur < winCount && !mergeStopped) {
+            int32_t tokenPos = winStart + cur;
+            if (slotBuf[cur] > 0) {
+                int64_t selectionTokenOffset = GetSelectionSlotTokenOffset(
+                    selectionDataRow_, slotBuf[cur] - 1, cachedSelectionBlockTableIdx,
+                    cachedSelectionBlockNum);
+                if (selectionTokenOffset < 0) {
+                    mergeStopped = true;
+                    break;
+                }
+                if (!useExternalPlanSource) {
+                    GetRealS2Idx(tokenPos, s2IdxArray0, topkGmBaseOffset, runInfo);
+                    if (s2IdxArray0 < 0 || s2IdxArray0 >= s2IdLimit) {
+                        mergeStopped = true;
+                        break;
+                    }
+                }
+                int32_t runLen = 1;
+                while (cur + runLen < winCount &&
+                       slotBuf[cur + runLen] == slotBuf[cur] + runLen) {
+                    runLen++;
+                }
+                if (selectionDirectRowStride_ <= 0 && selectionKvBlockSize_ > 0) {
+                    // Keep runs within a selection block in paged layouts.
+                    int32_t inBlock = (int32_t)(selectionKvBlockSize_ -
+                        (slotBuf[cur] - 1) % selectionKvBlockSize_);
+                    if (runLen > inBlock) {
+                        runLen = inBlock;
+                    }
+                }
+                if (runLen >= 2) {
+                    CopyInSelectionKvRun(
+                        mte2Size, mte3Size, mergeMte3Idx, selectionTokenOffset, runLen);
+                    cur += runLen;
+                    continue;
+                }
+                // Sort isolated hits before attempting a paired copy.
+                if (cur + 1 < winCount && slotBuf[cur + 1] > 0 &&
+                    slotBuf[cur + 1] != slotBuf[cur] + 1 && selectionPairedCopyActive_) {
+                    int64_t selectionTokenOffset2 = GetSelectionSlotTokenOffset(
+                        selectionDataRow_, slotBuf[cur + 1] - 1, cachedSelectionBlockTableIdx,
+                        cachedSelectionBlockNum);
+                    if (selectionTokenOffset2 >= 0) {
+                        int64_t pairLo = selectionTokenOffset;
+                        int64_t pairHi = selectionTokenOffset2;
+                        if (pairHi < pairLo) {
+                            pairLo = selectionTokenOffset2;
+                            pairHi = selectionTokenOffset;
+                        }
+                        int64_t kvSrcStride = 0;
+                        int64_t ropeSrcStride = 0;
+                        if (CanUsePairedSelectionCopy(pairLo, pairHi,
+                                kvSrcStride, ropeSrcStride)) {
+                            CopyInSelectionKvPair(mte2Size, mte3Size, mergeMte3Idx,
+                                pairLo, kvSrcStride, ropeSrcStride);
+                            cur += 2;
+                            continue;
+                        }
+                    }
+                }
+                CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, 0, -1,
+                               selectionTokenOffset, s2IdLimit, runInfo);
+                cur += 1;
+            } else {
+                GetRealS2Idx(tokenPos, s2IdxArray0, topkGmBaseOffset, runInfo);
+                if (unlikely(s2IdxArray0 < 0 || s2IdxArray0 >= s2IdLimit)) {
+                    mergeStopped = true;
+                    break;
+                }
+                int64_t ubTokenIdx0 = -1;
+                int64_t ubTokenIdx1 = -1;
+                if (cur + 1 < winCount && slotBuf[cur + 1] <= 0) {
+                    GetRealS2Idx(tokenPos + sparseBlockSize32, s2IdxArray1,
+                                 topkGmBaseOffset, runInfo);
+                    CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1,
+                             -1, -1, s2IdLimit, runInfo, ubTokenIdx0, ubTokenIdx1);
+                    if (directCollectEnabled && directUpdateCount >= 0) {
+                        bool takeUpdate0 = slotBuf[cur] < 0 && ubTokenIdx0 >= 0;
+                        bool takeUpdate1 = slotBuf[cur + 1] < 0 && ubTokenIdx1 >= 0;
+                        if (directUpdateCount + (int64_t)takeUpdate0 + (int64_t)takeUpdate1 > 32) {
+                            directUpdateCount = -1;
+                        } else {
+                            if (takeUpdate0) {
+                                directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                                directUpdateDstSlot[directUpdateCount] = -slotBuf[cur] - 1;
+                                directUpdateCount++;
+                            }
+                            if (takeUpdate1) {
+                                directUpdateUbIdx[directUpdateCount] = ubTokenIdx1;
+                                directUpdateDstSlot[directUpdateCount] = -slotBuf[cur + 1] - 1;
+                                directUpdateCount++;
+                            }
+                        }
+                    }
+                    if (s2IdxArray1 < 0 || s2IdxArray1 >= s2IdLimit) {
+                        mergeStopped = true;
+                    }
+                    cur += 2;
+                } else {
+                    CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, -1,
+                             -1, -1, s2IdLimit, runInfo, ubTokenIdx0, ubTokenIdx1);
+                    if (directCollectEnabled && directUpdateCount >= 0) {
+                        bool takeUpdate0 = slotBuf[cur] < 0 && ubTokenIdx0 >= 0;
+                        if (directUpdateCount + (int64_t)takeUpdate0 > 32) {
+                            directUpdateCount = -1;
+                        } else if (takeUpdate0) {
+                            directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                            directUpdateDstSlot[directUpdateCount] = -slotBuf[cur] - 1;
+                            directUpdateCount++;
+                        }
+                    }
+                    cur += 1;
+                }
+            }
+        }
+        // Phase C: flush this window and its collected selection updates.
+        CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+        bool batchCollected = directCollectEnabled && useSelectionPlanSource;
+        FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+            directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+            mergeMte3Idx, directSelectionRow, batchCollected);
+        mte3Size = mte2Size;
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+        mergeMte3Idx++;
+        needWaitMte3ToMte2 = true;
+    }
+    } else {
     for (int64_t s2GmOffsetArray = s2GmStartOffset; s2GmOffsetArray < s2GmLimit;
          s2GmOffsetArray += 2 * constInfo.sparseBlockSize) {
         if (needWaitMte3ToMte2) {
@@ -3196,6 +3639,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 if (mte2Size - mte3Size >= 32 ||
                     s2GmOffsetArray + selectionRunCount >= s2GmLimit) {
                     CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+                    bool batchCollected = directCollectEnabled && useSelectionPlanSource;
+                    FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                        directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                        mergeMte3Idx, directSelectionRow, batchCollected);
                     mte3Size = mte2Size;
                     SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
                     mergeMte3Idx++;
@@ -3229,31 +3676,78 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             selectionTokenOffset1 >= 0;
         if (externalHit0) {
             s2IdxArray0 = 0;
-        } else {
+        }
+#if FSAO_PROBE_BULK_TOPK
+        else if (useBulkTopk) {
+            s2IdxArray0 = topkBatchUb.GetValue(s2GmOffsetArray - s2GmStartOffset);
+        }
+#endif
+        else {
             GetRealS2Idx(s2GmOffsetArray, s2IdxArray0, topkGmBaseOffset, runInfo);
         }
         if (unlikely(s2IdxArray0 < 0)) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+            bool batchCollected = directCollectEnabled && useSelectionPlanSource;
+            FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                mergeMte3Idx, directSelectionRow, batchCollected);
             SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
             mergeMte3Idx++;
             break;
         }
         if (externalHit1) {
             s2IdxArray1 = 0;
-        } else {
+        }
+#if FSAO_PROBE_BULK_TOPK
+        else if (useBulkTopk) {
+            s2IdxArray1 = topkBatchUb.GetValue(
+                s2GmOffsetArray + constInfo.sparseBlockSize - s2GmStartOffset);
+        }
+#endif
+        else {
             GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize,
                          s2IdxArray1, topkGmBaseOffset, runInfo);
         }
+        int64_t ubTokenIdx0 = -1;
+        int64_t ubTokenIdx1 = -1;
         CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1,
-                 selectionTokenOffset0, selectionTokenOffset1, s2IdLimit, runInfo);
+                 selectionTokenOffset0, selectionTokenOffset1, s2IdLimit, runInfo,
+                 ubTokenIdx0, ubTokenIdx1);
+        if (directCollectEnabled && directUpdateCount >= 0) {
+            bool takeUpdate0 = ubTokenIdx0 >= 0 && IsSelectionPlanUpdate(currentPlanValue0);
+            bool takeUpdate1 = s2GmOffsetArray + constInfo.sparseBlockSize < s2GmLimit &&
+                ubTokenIdx1 >= 0 && IsSelectionPlanUpdate(currentPlanValue1);
+            if (directUpdateCount + takeUpdate0 + takeUpdate1 > 32) {
+                // Invalidate overflowing batches so readback remains the fallback.
+                directUpdateCount = -1;
+            } else {
+                if (takeUpdate0) {
+                    directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                    directUpdateDstSlot[directUpdateCount] =
+                        DecodeSelectionPlanSlot(currentPlanValue0);
+                    directUpdateCount++;
+                }
+                if (takeUpdate1) {
+                    directUpdateUbIdx[directUpdateCount] = ubTokenIdx1;
+                    directUpdateDstSlot[directUpdateCount] =
+                        DecodeSelectionPlanSlot(currentPlanValue1);
+                    directUpdateCount++;
+                }
+            }
+        }
         if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > 32) ||
             s2GmOffsetArray + 2 * constInfo.sparseBlockSize >= s2GmLimit) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+            bool batchCollected = directCollectEnabled && useSelectionPlanSource;
+            FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                mergeMte3Idx, directSelectionRow, batchCollected);
             mte3Size = mte2Size;
             SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
             mergeMte3Idx++;
             needWaitMte3ToMte2 = true;
         }
+    }
     }
 
     if (unlikely(s2GmStartOffset + mte2Size < s2GmLimit)) {
@@ -3347,6 +3841,97 @@ __aicore__ inline uint64_t FusedSparseAttentionOverlapVectorService<FusedSparseA
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::ReduceSplitKV(
+    uint32_t slotBegin, uint32_t partNum, uint32_t mCount, uint64_t attenOutOffset)
+{
+    if constexpr (FLASH_DECODE) {
+    if (partNum <= 1 || mCount == 0) {
+        return;
+    }
+    if ((GetBlockIdx() % 2) != 0) {
+        return;
+    }
+    uint32_t mStart = 0;
+    uint32_t mNum = mCount;
+
+    const uint32_t hd = static_cast<uint32_t>(constInfo.headDim);
+    const uint32_t rowsPerSlot = static_cast<uint32_t>(constInfo.kvHeadNum) * constInfo.mBaseSize;
+    uint32_t mBatch = static_cast<uint32_t>(ConstInfo::BUFFER_SIZE_BYTE_32K / sizeof(T)) / hd;
+    if (mBatch == 0) {
+        mBatch = 1;
+    }
+
+    LocalTensor<T> accUb = tmpBuff1.Get<T>();
+    LocalTensor<T> partUb = inputBuff1.Get<T>();
+    LocalTensor<OUT_T> outUb = inputBuff2.Get<OUT_T>();
+    LocalTensor<T> lseBuf = outputBuff1.Get<T>();
+
+    for (uint32_t m0 = 0; m0 < mNum; m0 += mBatch) {
+        uint32_t rows = ((mNum - m0) < mBatch) ? (mNum - m0) : mBatch;
+        uint32_t lseLen = rows * FP32_BLOCK_ELEMENT_NUM;
+        LocalTensor<T> curMax = lseBuf;
+        LocalTensor<T> curSum = lseBuf[lseLen];
+        LocalTensor<T> gMax = lseBuf[lseLen * 2];
+        LocalTensor<T> dSum = lseBuf[lseLen * 3];
+        LocalTensor<T> wTmp = lseBuf[lseLen * 4];
+        uint64_t rowBase = static_cast<uint64_t>(slotBegin) * rowsPerSlot + mStart + m0;
+        uint64_t lseBase = rowBase * FP32_BLOCK_ELEMENT_NUM;
+        uint64_t outBase = rowBase * hd;
+        uint64_t lseStride = static_cast<uint64_t>(rowsPerSlot) * FP32_BLOCK_ELEMENT_NUM;
+        uint64_t outStride = static_cast<uint64_t>(rowsPerSlot) * hd;
+
+        for (uint32_t s = 0; s < partNum; s++) {
+            DataCopy(curMax, lseMaxFdGm[lseBase + s * lseStride], lseLen);
+            pipe_barrier(PIPE_ALL);
+            if (s == 0) {
+                Adds(gMax, curMax, ConstInfo::FLOAT_ZERO, lseLen);
+            } else {
+                Max(gMax, gMax, curMax, lseLen);
+            }
+            pipe_barrier(PIPE_ALL);
+        }
+
+        Duplicate(accUb, ConstInfo::FLOAT_ZERO, rows * hd);
+        Duplicate(dSum, ConstInfo::FLOAT_ZERO, lseLen);
+        pipe_barrier(PIPE_V);
+        for (uint32_t s = 0; s < partNum; s++) {
+            DataCopy(curMax, lseMaxFdGm[lseBase + s * lseStride], lseLen);
+            DataCopy(curSum, lseSumFdGm[lseBase + s * lseStride], lseLen);
+            DataCopy(partUb, accumOutGm[outBase + s * outStride], rows * hd);
+            pipe_barrier(PIPE_ALL);
+            Sub(wTmp, curMax, gMax, lseLen);
+            pipe_barrier(PIPE_V);
+            Exp(wTmp, wTmp, lseLen);
+            pipe_barrier(PIPE_V);
+            Mul(curSum, curSum, wTmp, lseLen);
+            pipe_barrier(PIPE_V);
+            Add(dSum, dSum, curSum, lseLen);
+            RowMuls(partUb, partUb, curSum, rows, hd, hd);
+            pipe_barrier(PIPE_V);
+            Add(accUb, accUb, partUb, rows * hd);
+            pipe_barrier(PIPE_ALL);
+        }
+
+        RowDivs(partUb, accUb, dSum, rows, hd, hd);
+        pipe_barrier(PIPE_V);
+        if constexpr (IsSameType<OUT_T, bfloat16_t>::value) {
+            Cast(outUb, partUb, AscendC::RoundMode::CAST_RINT, rows * hd);
+        } else {
+            Cast(outUb, partUb, AscendC::RoundMode::CAST_ROUND, rows * hd);
+        }
+        pipe_barrier(PIPE_ALL);
+        DataCopyExtParams copyParams;
+        copyParams.blockCount = rows;
+        copyParams.blockLen = hd * sizeof(OUT_T);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        DataCopyPad(attentionOutGm[attenOutOffset + (mStart + m0) * hd], outUb, copyParams);
+        pipe_barrier(PIPE_ALL);
+    }
+    }  // if constexpr (FLASH_DECODE)
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::ProcessVec2SingleBuf(const RunInfo &info,
                                                                                   const MSplitInfo &mSplitInfo)
 {
@@ -3421,7 +4006,7 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Bmm
                       info.tndCoreStartKVSplitPos * constInfo.kvHeadNum * constInfo.mBaseSize * constInfo.headDim + // Partition offset
                       wsMStart * actualColumnCount;                                                                 // M-axis offset
     GlobalTensor<T> dst = accumOutGm[offset];
-    if (info.actualSingleProcessSInnerSize== 0) {
+    if (info.actualSingleProcessSInnerSize != 0) {
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = dealRowCount;
         dataCopyParams.blockLen = actualColumnCount * sizeof(T);
@@ -3654,6 +4239,196 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
             }
         }
     }
+}
+
+// Helper protocol: credit releases merge slots and done signals completion.
+// Credit provides backpressure and prevents helpers from overwriting active merge slots.
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitHelperSync(
+    const GlobalTensor<int32_t> &doneGm, const GlobalTensor<int32_t> &creditGm, uint32_t pairs)
+{
+    mergeDoneGm_ = doneGm;
+    mergeCreditGm_ = creditGm;
+    helperSyncPairs_ = pairs > 0 ? pairs : 1;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitHelperV0(
+    const GlobalTensor<KV_T> &targetKvMergeGm, uint32_t pairIdx)
+{
+    isHelperV0_ = true;
+    helperPartIdx_ = 1;
+    helperPartCount_ = 2;
+    kvMergeGm_ = targetKvMergeGm;
+    mergeSyncPairOffset_ = pairIdx * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::SetHelperParts(
+    uint32_t partIdx, uint32_t partCount, const GlobalTensor<int32_t> &helperValidSizeGm,
+    uint32_t pairIdx)
+{
+    helperPartIdx_ = partIdx;
+    helperPartCount_ = partCount;
+    helperValidSizeGm_ = helperValidSizeGm;
+    mergeSyncPairOffset_ = pairIdx * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::PublishHelperCredit(uint32_t loop)
+{
+    if (GetSubBlockIdx() != 0) {
+        return;
+    }
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[(loop & 3) * HELPER_SYNC_SLOT_INT32];
+    scratch.SetValue(0, static_cast<int32_t>(loop + 1));
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPad(mergeCreditGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32], scratch, params);
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::WaitHelperCredit(uint32_t loop)
+{
+    int32_t expected = static_cast<int32_t>(loop + 1);
+    if (helperCreditSeen_ >= expected) {
+        return;
+    }
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>();
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    uint32_t spinsink = 0;
+    while (true) {
+        DataCopyPad(scratch, mergeCreditGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32],
+                    params, padParams);
+        SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        helperCreditSeen_ = scratch.GetValue(0);
+        if (helperCreditSeen_ >= expected) {
+            break;
+        }
+        // Back off between GM polls to reduce MTE2 traffic.
+        for (uint32_t i = 0; i < HELPER_POLL_BACKOFF; ++i) {
+            spinsink = spinsink * 1664525 + 1013904223;
+        }
+        scratch.SetValue(1, spinsink);
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::SignalMergeDone(uint32_t loop)
+{
+    // Wait for MergeKv data and valid counts to reach GM before signaling.
+    pipe_barrier(PIPE_ALL);
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[HELPER_SYNC_SLOT_INT32];
+    scratch.SetValue(0, 1);
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t) / 32;
+    params.srcStride = 0;
+    params.dstStride = 0;
+    SetAtomicAdd<int32_t>();
+    DataCopy(mergeDoneGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32], scratch, params);
+    SetAtomicNone();
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::WaitMergeDone(uint32_t loop)
+{
+    uint32_t slot = loop % HELPER_SYNC_RING;
+    int32_t expected = static_cast<int32_t>((loop / HELPER_SYNC_RING + 1) * HELPER_SIGNALS_PER_BLOCK);
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[4 * HELPER_SYNC_SLOT_INT32];
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    uint32_t spinsink = 0;
+    while (true) {
+        DataCopyPad(scratch, mergeDoneGm_[mergeSyncPairOffset_ + slot * HELPER_SYNC_SLOT_INT32], params, padParams);
+        SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        if (scratch.GetValue(0) >= expected) {
+            break;
+        }
+        for (uint32_t i = 0; i < HELPER_POLL_BACKOFF; ++i) {
+            spinsink = spinsink * 1664525 + 1013904223;
+        }
+        scratch.SetValue(1, spinsink);
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::FixValidSize(
+    const RunInfo &info)
+{
+    if (!mergeSplitActive_) {
+        return;
+    }
+    // Merge helper counts before publishing the slot to Vec1.
+    uint32_t mergeSlot = info.loop % MERGE_CACHE_GM_BUF_NUM;
+    uint32_t blockBase = mergeSlot * (128 * 2) + GetSubBlockIdx() * 128;
+    LocalTensor<int32_t> helperChunk = helperSyncBuff.Get<int32_t>()[5 * HELPER_SYNC_SLOT_INT32];
+    LocalTensor<int32_t> writeChunk = helperSyncBuff.Get<int32_t>()[6 * HELPER_SYNC_SLOT_INT32];
+    DataCopyExtParams fixParams;
+    fixParams.blockCount = 1;
+    fixParams.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    fixParams.srcStride = 0;
+    fixParams.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(HELPER_SYNC_EVENT_ID);
+    DataCopyPad(helperChunk, helperValidSizeGm_[blockBase], fixParams, padParams);
+    SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+    int32_t merged = v0ValidSizeUb_.GetValue(mergeSlot) + helperChunk.GetValue(mergeSlot);
+    writeChunk.SetValue(mergeSlot, merged);
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyPad(kvValidSizeGm_[blockBase], writeChunk, fixParams);
+}
+
+// Clear each done/credit ring with MTE3 writes before helper processing starts.
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::ZeroHelperSyncArea()
+{
+    LocalTensor<int32_t> zeroLocal = helperSyncBuff.Get<int32_t>();
+    Duplicate(zeroLocal, static_cast<int32_t>(0), HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32);
+    SetFlag<AscendC::HardEvent::V_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::V_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    for (uint32_t pair = 0; pair < helperSyncPairs_; pair++) {
+        uint32_t pairOffset = pair * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+        DataCopyPad(mergeDoneGm_[pairOffset], zeroLocal, params);
+        DataCopyPad(mergeCreditGm_[pairOffset], zeroLocal, params);
+    }
+    SetFlag<AscendC::HardEvent::MTE3_V>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE3_V>(HELPER_SYNC_EVENT_ID);
 }
 
 #endif // FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H

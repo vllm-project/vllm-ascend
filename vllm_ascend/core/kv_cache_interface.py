@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -25,24 +26,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+@dataclass(kw_only=True)
+class AlignedKVCacheTensor(KVCacheTensor):
+    """Allocator padding carried explicitly through copies of the base descriptor."""
+
+    logical_size: int
+    alignment: int
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
-
-
-def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
-    """Return the physical token rows represented by one scheduler block."""
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
-        assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
-        return storage_block_sizes.pop()
-    # vLLM #53906 added an optional MLA storage-view override. It is not
-    # Ascend's derived number of physical rows per logical block.
-    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-        return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
-        return kv_cache_spec.block_size
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
 def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -181,11 +175,28 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
         return False
 
-    connector_name = getattr(kv_transfer_config, "kv_connector", None)
-    if connector_name == "MooncakeConnectorV2":
-        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {})
-        return not extra_config.get("use_layerwise", False)
-    return connector_name == "MooncakePullConnector"
+    connector = getattr(kv_transfer_config, "kv_connector", None)
+    extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+    if connector == "MultiConnector":
+        # A single child receives the original cache tensors unchanged. Keep
+        # composite/nested/custom connectors on the legacy layout until their
+        # transfer and completion contracts have been validated separately.
+        if not isinstance(extra, dict):
+            return False
+        children = extra.get("connectors")
+        if not isinstance(children, list) or len(children) != 1:
+            return False
+        child = children[0]
+        if not isinstance(child, dict) or child.get("kv_connector_module_path") is not None:
+            return False
+        connector = child.get("kv_connector")
+        extra = child.get("kv_connector_extra_config", {})
+
+    if connector == "MooncakeConnectorV2":
+        # The layerwise worker has a separate transfer contract; preserve the
+        # same exclusion for direct and wrapped connectors.
+        return isinstance(extra, dict) and not extra.get("use_layerwise", False)
+    return connector == "MooncakePullConnector"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -210,6 +221,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    # HIF8 C8 (Ascend 950PR/950DT) marks layers whose latent KV cache is
+    # per-tensor-quantized to HIF8 with a static scale. Unlike C8/TQ above it
+    # does NOT repack the cache: the geometry stays the plain MLA latent
+    # layout (kv_lora_rank bytes per token, no embedded scale, empty RoPE
+    # view for NoPE models); only the payload dtype becomes uint8 HIF8
+    # bytes. The flag exists for group-merge uniformity checks.
+    cache_sparse_sfa_hif8: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -239,12 +257,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             and self.model_version is None
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
+            and not self.cache_sparse_sfa_hif8
         )
 
     @property
     def real_page_size_bytes(self) -> int:
         return (
-            get_storage_block_size(self)
+            self.num_states
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
@@ -267,6 +286,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.cache_sparse_sfa_hif8,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -292,6 +312,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
             # A merged mixed group must remain in the target lookup. Per-layer
@@ -395,7 +416,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1
     model_version: str | None = None
     indexes_kv_by_block_stride: bool = False
     bounded_replay: bool = False
@@ -411,62 +431,17 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     def __post_init__(self):
         pass
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
-        model_version_set = set(spec.model_version for spec in specs)
-        sliding_window_set = set(spec.sliding_window for spec in specs)
-        assert len({spec.dcp_sharded for spec in specs}) == 1
-        # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
-        # ``bounded_replay`` arrives with vLLM #56227. This override builds the
-        # merged spec from scratch rather than through the parent's ``merge``,
-        # so it has to carry both across itself, and dropping either is silent:
-        # the first leaves a multi-layer group with a narrower window than its
-        # layers asked for, the second leaves it replaying nothing. ``None`` is
-        # what a lane without the field reads back, and is not carried.
-        extra_retained_set = set(getattr(spec, "extra_retained_tokens", None) for spec in specs)
-        bounded_replay_set = set(getattr(spec, "bounded_replay", None) for spec in specs)
-        assert (
-            len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
-            and len(model_version_set) == 1
-            and len(sliding_window_set) == 1
-            and len(extra_retained_set) == 1
-            and len(bounded_replay_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, sliding "
-            "window size, retained token count and replay policy."
-        )
-        carried_kwargs: dict[str, Any] = {}
-        if None not in bounded_replay_set:
-            carried_kwargs.update(declared_kwarg(cls, "bounded_replay", bounded_replay_set.pop()))
-        if None not in extra_retained_set:
-            carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
-        return cls(
-            block_size=specs[0].block_size,
-            dcp_sharded=specs[0].dcp_sharded,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=specs[0].dtype,
-            page_size_padded=specs[0].page_size_padded,
-            sliding_window=sliding_window_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
-            model_version=model_version_set.pop(),
-            **carried_kwargs,
+        assert len({spec.alignment for spec in specs}) == 1
+        assert len({spec.indexes_kv_by_block_stride for spec in specs}) == 1
+        return replace(
+            super().merge(specs),
+            alignment=specs[0].alignment,
+            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
         )
 
 
@@ -493,10 +468,6 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     @property
     def prefix_cacheable(self) -> bool:
         return False
-
-    @property
-    def storage_block_size(self) -> int:
-        return self.ring_capacity
 
     def get_num_kernel_states(self, kernel_block_size: int) -> int:
         # One logical pool block owns the whole ring, including lookahead.

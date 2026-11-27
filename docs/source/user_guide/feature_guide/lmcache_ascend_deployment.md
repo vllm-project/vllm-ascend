@@ -4,7 +4,7 @@
 
 LMCache-Ascend is a community maintained plugin for running LMCache on the Ascend NPU.
 
-We provide a simple deployment guide here. For further info about deployment notes, please refer to [LMCache-Ascend doc](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)
+We provide a simple deployment guide here. For further info about deployment notes, please refer to [LMCache-Ascend documentation](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)
 
 ## Getting Started
 
@@ -29,7 +29,6 @@ Once that is built, run it with the following cmd
 ```bash
 DEVICE_LIST="0,1,2,3,4,5,6,7"
 docker run -it \
-    --privileged \
     --cap-add=SYS_RESOURCE \
     --cap-add=IPC_LOCK \
     -p 8000:8000 \
@@ -41,8 +40,13 @@ docker run -it \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/localtime:/etc/localtime \
     -v /var/log/npu:/var/log/npu \
-    -v /dev/davinci_manager:/dev/davinci_manager \
-    -v /dev/devmm_svm:/dev/devmm_svm \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    --device /dev/davinci0 --device /dev/davinci1 \
+    --device /dev/davinci2 --device /dev/davinci3 \
+    --device /dev/davinci4 --device /dev/davinci5 \
+    --device /dev/davinci6 --device /dev/davinci7 \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
     lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler \
@@ -51,7 +55,7 @@ docker run -it \
 
 ### Manual Installation
 
-Assuming your working directory is `/workspace` and vllm/vllm-ascend have already been installed.
+Assuming your working directory is `/workspace` and vLLM/vllm-ascend have already been installed.
 
 1. Install LMCache Repo
 

@@ -17,7 +17,6 @@ import vllm_ascend.ops.vocab_parallel_embedding as vocab_module
 import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as spec_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
@@ -26,10 +25,12 @@ def test_global_draft_batch_negotiates_its_own_capacity(monkeypatch, pcp_enabled
     spec = object.__new__(spec_module.AscendDFlashSpeculator)
     spec.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     spec.draft_logits = None
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     num_reqs = 32 if pcp_enabled else 4
     batch = SimpleNamespace(num_reqs=num_reqs, idx_mapping=torch.arange(num_reqs))
-    kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
+    kwargs = {"max_query_len": None}
     sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([8, 8]), uniform_token_count=2, eager=False, num_reqs=4, **kwargs
     )
@@ -195,9 +196,8 @@ def test_candidate_topk_lmhead_tp_preserves_each_dp_request(monkeypatch, rank, d
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("dummy_run", [False, True])
-@pytest.mark.parametrize("logits_kind", ["none", "tensor", "cache"] if vllm_version_is("0.33.0") else ["none", "cache"])
+@pytest.mark.parametrize("logits_kind", ["none", "cache"])
 def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enabled, dummy_run, logits_kind):
-    upstream_sync = not vllm_version_is("0.33.0")
     spec = object.__new__(spec_module.AscendDFlashSpeculator)
     spec.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     logits_buffer = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if logits_kind != "none" else None
@@ -224,19 +224,15 @@ def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enab
         tensor.copy_(shared_tokens if len(calls) == 1 else torch.full((2, 2, 2), 0.5))
 
     sync_method = pcp_module.AscendPCPManager.sync_drafts
-    if upstream_sync:
-        assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
-        assert sync_method is pcp_module.PCPManager.sync_drafts
-    else:
-        assert "sync_drafts" in pcp_module.AscendPCPManager.__dict__
+    assert "sync_drafts" not in pcp_module.AscendPCPManager.__dict__
+    assert sync_method is pcp_module.PCPManager.sync_drafts
     monkeypatch.setitem(sync_method.__globals__, "get_pcp_group", lambda: SimpleNamespace(broadcast=broadcast))
     monkeypatch.setattr(spec_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(DFlashSpeculator, "propose", parent)
     result = spec.propose(batch, *[None] * 10, dummy_run=dummy_run)
     broadcasts = 1 + int(logits_buffer is not None)
-    fallback_sync = pcp_enabled and not upstream_sync and not dummy_run
-    assert len(calls) == (broadcasts if fallback_sync else 0)
-    if pcp_enabled and upstream_sync and not dummy_run:
+    assert len(calls) == 0
+    if pcp_enabled and not dummy_run:
         # ModelRunner ignores the return value and retains this proposal view.
         assert spec.pcp_manager.sync_drafts(result, batch.idx_mapping, spec.draft_logits) is None
     needs_sync = pcp_enabled and not dummy_run
@@ -251,3 +247,79 @@ def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enab
         if needs_sync:
             initial_logits[batch.idx_mapping] = 0.5
         torch.testing.assert_close(logits_buffer, initial_logits)
+
+
+@pytest.mark.parametrize("rank", range(4))
+def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
+    """With standard TP composed into the fine-grained head, the candidate
+    union must span all fine-grained x TP columns before the global TopK."""
+    fg_world, tp_world, capacity, hidden_size, shard_size, top_k = 4, 2, 3, 4, 5, 3
+    counts = [0, 1, 3, 2]
+    generator = torch.Generator().manual_seed(42)
+    hidden = torch.randn(fg_world, capacity, hidden_size, generator=generator)
+    for dp, count in enumerate(counts):
+        hidden[dp, count:] = 0
+    weight = torch.randn(fg_world * tp_world * shard_size, hidden_size, generator=generator)
+    all_hidden = hidden.flatten(0, 1)
+    full_logits = all_hidden @ weight.T
+    full_logits[:, -1] = -float("inf")
+    shard_values, shard_ids = [], []
+    for shard in range(fg_world * tp_world):
+        vals, ids = full_logits[:, shard * shard_size : (shard + 1) * shard_size].topk(top_k, dim=-1)
+        shard_values.append(vals)
+        shard_ids.append(ids + shard * shard_size)
+    group = SimpleNamespace(world_size=fg_world, device_group=object())
+
+    def gather(rows, dim):
+        assert dim == 0
+        torch.testing.assert_close(rows, hidden[rank])
+        return all_hidden
+
+    def all_to_all(output, input_, *, group):
+        candidates = [
+            torch.stack((v.float(), i.float()), dim=-1).flatten(1)
+            for v, i in zip(shard_values[:fg_world], shard_ids[:fg_world])
+        ]
+        torch.testing.assert_close(input_, candidates[rank].view(fg_world, capacity, -1))
+        for source in range(fg_world):
+            output[source].copy_(candidates[source][rank * capacity : (rank + 1) * capacity])
+
+    group.all_gather = gather
+    col_values = torch.cat(shard_values[fg_world:], dim=-1)
+    col_ids = torch.cat(shard_ids[fg_world:], dim=-1)
+    rows = slice(rank * capacity, (rank + 1) * capacity)
+    tp_calls: list[int] = []
+
+    def tp_all_gather(t, *, dim):
+        tp_calls.append(dim)
+        if t.ndim == 3:
+            # The packed (score, ID) exchange completes both in one collective.
+            col = torch.stack((col_values[rows], col_ids[rows]), dim=-1)
+        else:
+            col = col_ids[rows] if t.dtype == torch.int64 else col_values[rows]
+        return torch.cat((t, col), dim=dim)
+
+    monkeypatch.setattr(vocab_module, "get_lmhead_tp_group", lambda: group)
+    monkeypatch.setattr(vocab_module.dist, "all_to_all_single", all_to_all)
+    head = SimpleNamespace(
+        weight=weight[rank * shard_size : (rank + 1) * shard_size],
+        quant_method=UnquantizedEmbeddingMethod(),
+        parallel_mode=VocabParallelMode.FINE_GRAINED,
+        # The composed layout publishes the group that completes the TP columns.
+        output_gather_group=SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather),
+        num_embeddings_padded=fg_world * tp_world * shard_size,
+        shard_indices=SimpleNamespace(num_org_vocab_padding=0, org_vocab_start_index=rank * shard_size),
+    )
+    model = SimpleNamespace(
+        lm_head=head,
+        lmhead_tp_candidate_capacity=capacity,
+        model=SimpleNamespace(candidate_selector=SimpleNamespace(top_k=top_k)),
+        output_multiplier=1.25,
+        final_logit_softcapping=2.0,
+    )
+    ids, values = model_module.DFlash2Qwen3ForCausalLM.compute_candidates(model, hidden[rank, : counts[rank]])
+    expected_values, expected_ids = full_logits[rank * capacity : rank * capacity + counts[rank]].topk(top_k, dim=-1)
+    torch.testing.assert_close(ids, expected_ids)
+    torch.testing.assert_close(values, torch.tanh(expected_values.float() * 1.25 / 2.0) * 2.0)
+    # Packed scores and IDs cross the TP group in a single exchange.
+    assert tp_calls == [-2]

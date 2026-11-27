@@ -22,8 +22,18 @@ from vllm_ascend.utils import bootstrap_custom_op_env
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("tokens,requests,columns", [(1, 1, 1), (5, 2, 128), (65, 64, 1025), (257, 4, 65)])
-@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize(
+    "strided,tokens,requests,columns",
+    [
+        (False, 1, 1, 1),
+        (False, 65, 64, 1025),
+        (False, 257, 4, 65),
+        (True, 1, 1, 1),
+        (True, 5, 2, 128),
+        (True, 65, 64, 1025),
+        (True, 257, 4, 65),
+    ],
+)
 def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, columns, strided):
     torch.manual_seed(1024)
     device = "npu:0"

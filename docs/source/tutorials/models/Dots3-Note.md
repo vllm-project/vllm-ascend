@@ -4,7 +4,7 @@
 
 Dots3 Note is a large language model based on the Dots3 Note MoE + MLA architecture, with audio and vision multimodal encoders. The text, image, and audio forms are not mutually exclusive and can be enabled simultaneously; when device memory is limited, it is recommended to enable the required forms on demand. The forms cannot be switched dynamically within the same process, and the service must be restarted when switching.
 
-| Form | Input | Typical scenario | Modal configuration |
+| Form | Input | Typical scenario | Modality configuration |
 |---|---|---|---|
 | text-only | Text | Long-context dialogue, text reasoning | `--language-model-only` |
 | image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` |
@@ -20,7 +20,7 @@ Dots3 Note supports the following features on vLLM-Ascend:
 
 | Feature | Support | Description |
 |---|---|---|
-| Model architecture | Dots3 Note MoE + MLA | MoE mixture of experts + multi-head latent attention |
+| Model architecture | Dots3 Note MoE + MLA | MoE (Mixture of Experts) + multi-head latent attention |
 | Multimodal | audio + vision | Audio / vision encoders, enabled per form (see §5.1) |
 | MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (Model Runner V1 limitation) |
 | FusedMC2 | ✅ | Fused `dispatch_ffn_combine` / `mega_moe` operators for MoE (`--additional-config`) |
@@ -39,7 +39,7 @@ The validation environment of this document is as follows:
 | Item | Specification |
 |---|---|
 | Server | Single-node Atlas A3 inference series (Atlas 800I A3, board model `IT22HMDA_4_S`) |
-| NPU | Atlas A3 products (8 cards, each dual-die (2 chips)), 16 chips in total, corresponding to `/dev/davinci[0-15]` |
+| NPU | Atlas A3 products (8 cards, each dual-die (2 chips)), 16 chips in total, selected with `ASCEND_VISIBLE_DEVICES=0-15` |
 | Memory | 64 GB device memory per chip |
 | Chip software version | SOC_VERSION = `ascend910_9391` (A3 series) |
 | Host form | Single-node deployment (not multi-node) |
@@ -51,7 +51,7 @@ npu-smi info
 ls -l /dev/davinci{0..15} /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc
 ```
 
-Pass criteria: `npu-smi info` recognizes 8 cards with 16 chips in total, and all chips report normal device memory status; the device files required for container startup all exist. If the number of devices or device files differs from this document, adjust the device mapping in Section 4.2 and the subsequent parallel parameters accordingly; the TP16 configuration cannot be applied directly.
+Pass criteria: `npu-smi info` recognizes 8 cards with 16 chips in total, and all chips report normal device memory status; the device files required for container startup all exist. If the number of devices or device files differs from this document, adjust `ASCEND_VISIBLE_DEVICES` in Section 4.2 and the subsequent parallel parameters accordingly; the TP16 configuration cannot be applied directly.
 
 ### 3.2 Driver Version Requirements
 
@@ -101,7 +101,9 @@ This chapter provides a single installation method: use the official prebuilt im
 
 > This document recommends the all-in-one image `quay.io/ascend/vllm-ascend:dots3-note-prev-a3-openeuler`. The image bundles vLLM, vLLM-Ascend, torch-npu, and CANN, so no separate installation is required.
 
-### 4.2 Image Acquisition and Build
+### 4.2 Image Acquisition
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 The runtime uses the official vLLM-Ascend all-in-one image, which already contains vLLM, vLLM-Ascend, torch-npu, CANN, and NNAL. Choose the image matching your hardware series and OS:
 
@@ -128,38 +130,15 @@ export HOST_MODEL_PATH=/path/to/dots3_note
 test -d "$HOST_MODEL_PATH"
 ```
 
-Atlas A3 requires mapping all 16 `davinci` devices and mounting the drivers. The command below has expanded all devices and can be copied directly; if the host directories differ, adjust the mount source paths first:
+Atlas A3 exposes 16 DIE devices. With [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) installed, `ASCEND_VISIBLE_DEVICES=0-15` selects all of them and the runtime mounts the driver libraries, so the command below can be copied directly; if the host directories differ, adjust the mount source paths first:
 
 ```bash
 docker run -it --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     --name vllm-ascend \
     --shm-size=1g \
     --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -v "$HOST_MODEL_PATH":/models/dots3_note:ro \
     "$IMAGE" bash
@@ -217,11 +196,11 @@ This chapter starts one service form at a time. For the first deployment, it is 
 
 The three deployment forms are compared as follows:
 
-| Form | Input | Typical scenario | Modal configuration | Context | KV cache | MTP | Weight per worker |
+| Form | Input | Typical scenario | Modality configuration | Context | KV cache | MTP | Weight per worker |
 |---|---|---|---|---|---|---|---|
 | text-only | Text | Long-context dialogue, text reasoning | `--language-model-only` | 32768 | `--gpu-memory-utilization 0.92` | ✅ MTP3 | 36.26 GB |
-| image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` | 32768 | `--kv-cache-memory-bytes 2816M` | ❌ | ~48.8 GB (+12.5 GB) |
-| audio | Text + audio | MMAR and other audio tasks | `--limit-mm-per-prompt '{"image":0,"video":0,"audio":1}'` | 4096 | `--kv-cache-memory-bytes 4G` | ✅ MTP3 | 37.88 GB (+1.62 GB) |
+| image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` | 32768 | `--kv-cache-memory-bytes 2816MB` | ❌ | ~48.8 GB (+12.5 GB) |
+| audio | Text + audio | MMAR and other audio tasks | `--limit-mm-per-prompt '{"image":0,"video":0,"audio":1}'` | 4096 | `--kv-cache-memory-bytes 4GB` | ✅ MTP3 | 37.88 GB (+1.62 GB) |
 
 All three forms share 16 chips with TP16 + MoE expert parallelism (EP16). Before startup, confirm:
 
@@ -242,7 +221,7 @@ pkill -9 -f VLLM::Worker
 
 After confirming that the old process has exited and port 8000 is released, start another form to avoid residual processes occupying NPU memory.
 
-> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2816MB KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3072MB will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
+> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2.816GB KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3.072GB will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
 
 ### 5.2 text-only Online Deployment
 
@@ -395,8 +374,8 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | Form | KV cache | Reason |
 |---|---|---|
 | text-only | `--gpu-memory-utilization 0.92` | Automatic profiling, validated |
-| image | `--kv-cache-memory-bytes 2816M` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3328MB) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
-| audio | `--kv-cache-memory-bytes 4G` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1GB provides only 2,220 tokens, insufficient, while 4GB provides 8,956 tokens (2.19x) |
+| image | `--kv-cache-memory-bytes 2816MB` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3.328GB) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
+| audio | `--kv-cache-memory-bytes 4GB` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1GB provides only 2,220 tokens, insufficient, while 4GB provides 8,956 tokens (2.19x) |
 
 > **Why image/audio use explicit `--kv-cache-memory-bytes` (measured)**: automatic profiling under v0.22.1 can allocate a large KV (audio gets 21,565 tokens at 0.92 and 25,686 tokens at 0.95), but the actual peak memory during graph capture exceeds the limit and causes the worker to exit, with logs showing `Worker proc VllmWorker-* died unexpectedly`. Explicit KV is more conservative than automatic profiling and reserves headroom for the about 3.76 GiB peak of graph capture, so it is the currently validated stable approach.
 >
@@ -416,7 +395,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 
 Do not judge startup success only by process existence. First wait for model loading and graph capture to complete; the success log should contain:
 
-```text
+```output
 GPU KV cache size: <tokens>
 Maximum concurrency for ... tokens per request: ...
 Graph capturing finished ...

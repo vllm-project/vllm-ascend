@@ -23,7 +23,6 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
     HCCLWeightTransferUpdateInfo,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +55,7 @@ def _make_engine():
 def test_start_weight_update_initializes_layerwise_reload():
     engine = _make_engine()
 
-    start = "initialize_layerwise_reload" if vllm_version_is("0.33.0") else "start_reload"
+    start = "start_reload"
     with patch(f"vllm.model_executor.model_loader.reload.{start}") as initialize:
         engine.start_weight_update()
 
@@ -66,13 +65,11 @@ def test_start_weight_update_initializes_layerwise_reload():
 def test_finish_weight_update_finalizes_layerwise_reload():
     engine = _make_engine()
 
-    finish = "finalize_layerwise_reload" if vllm_version_is("0.33.0") else "finish_reload"
+    finish = "finish_reload"
     with patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize:
         engine.finish_weight_update()
 
-    args: tuple[Any, ...] = (engine.model, engine.model_config)
-    if not vllm_version_is("0.33.0"):
-        args += (engine.device,)
+    args: tuple[Any, ...] = (engine.model, engine.model_config, engine.device)
     finalize.assert_called_once_with(*args)
 
 
@@ -122,8 +119,7 @@ def test_init_info_preserves_upstream_payload_contract():
     assert isinstance(init_info, NCCLWeightTransferInitInfo)
     assert HCCLWeightTransferEngine.init_info_cls is HCCLWeightTransferInitInfo
     expected = dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
-    if not vllm_version_is("0.33.0"):
-        expected["use_load_plan"] = False
+    expected["use_load_plan"] = False
     assert worker_init_payload(init_info) == expected
     restored = HCCLWeightTransferInitInfo(**worker_init_payload(init_info))
     assert restored == init_info
@@ -236,11 +232,8 @@ def test_trainer_normalizes_source_for_both_modes(packed):
         patch.object(engine, "_checked_iter", return_value=iter(pairs)),
         patch(f"{namespace}.packed_broadcast_producer", side_effect=pack),
     ):
-        if vllm_version_is("0.33.0"):
-            engine._broadcast(pairs, [])
-        else:
-            # Main passes the metadata slice and the broadcasting group rank.
-            engine._broadcast([], 0)
+        # Main passes the metadata slice and the broadcasting group rank.
+        engine._broadcast([], 0)
     tensor.detach.return_value.to.assert_called_once_with(engine.device)
     if not packed:
         assert torch.equal(engine.model_update_group.broadcast.call_args.args[0], torch.ones(1))
@@ -282,20 +275,16 @@ def test_non_sender_drains_source_without_validating_placeholder_tensors():
     iter_source = MagicMock()
     iter_source.iter_full.return_value = source()
     iter_source.__iter__.return_value = source()
-    if vllm_version_is("0.33.0"):
-        with patch.object(torch, "npu", SimpleNamespace(device=lambda _: nullcontext()), create=True):
-            engine._broadcast(iter_source, [])
-    else:
-        # Main drains ranks outside the transfer group inside send_weights,
-        # before any _broadcast call.
-        engine.source = iter_source
-        iter_source.metadata = []
-        engine.rank = 1
-        with (
-            patch.object(torch, "npu", SimpleNamespace(device=lambda _: nullcontext()), create=True),
-            patch.object(engine, "_post_send_sync"),
-        ):
-            engine.send_weights()
+    # Main drains ranks outside the transfer group inside send_weights,
+    # before any _broadcast call.
+    engine.source = iter_source
+    iter_source.metadata = []
+    engine.rank = 1
+    with (
+        patch.object(torch, "npu", SimpleNamespace(device=lambda _: nullcontext()), create=True),
+        patch.object(engine, "_post_send_sync"),
+    ):
+        engine.send_weights()
     assert seen == [True]
     engine.client.start_weight_update.assert_not_called()
 
@@ -337,18 +326,12 @@ def test_worker_update_binds_assigned_device_for_base_sync():
 def test_send_reuses_real_upstream_round_trip(sender):
     engine = _trainer(sender)
     param = ParamMeta(name="w", dtype=torch.float32, shape=(1,))
-    if vllm_version_is("0.33.0"):
-        engine.source.metadata = []
-    else:
-        # vLLM main exposes WeightSource.metadata as a property and sends one
-        # slice per broadcasting rank.
-        engine.source.metadata = [param]
+    # vLLM main exposes WeightSource.metadata as a property and sends one
+    # slice per broadcasting rank.
+    engine.source.metadata = [param]
     with patch.object(engine, "_broadcast") as broadcast, patch.object(engine, "_post_send_sync") as sync:
         engine.send_weights()
-    if vllm_version_is("0.33.0"):
-        broadcast.assert_called_once_with(engine.source, [])
-    else:
-        broadcast.assert_called_once_with([param], 0)
+    broadcast.assert_called_once_with([param], 0)
     sync.assert_called_once_with()
     if sender:
         assert [call[0] for call in engine.client.method_calls] == [

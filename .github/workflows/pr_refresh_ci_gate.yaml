@@ -19,8 +19,8 @@ name: Refresh CI Gate
 
 # Review-event trigger for the ci-gate retrigger (PR #22106 design): a
 # state-changing review from a CODEOWNERS owner of the changed files
-# re-runs the gate jobs (codeowner-approval and its dependent ci-gate) of
-# the original E2E pull_request run, so the required
+# re-runs the gate jobs of the original E2E pull_request run (ci-gate,
+# which contains the CODEOWNERS gate), so the required
 # `E2E / ci-gate (pull_request)` check itself flips green in place once a
 # (then missing) owner approval arrives, and re-arms red on a veto. See
 # refresh_ci_gate.py for the exact conditions; COMMENTED reviews, bot
@@ -67,7 +67,7 @@ concurrency:
   # review state anyway, and the incoming run ships a fresh payload. The
   # latest review therefore always wins, even when several land in quick
   # succession. This group is separate from the E2E workflow's, so a review
-  # never cancels the pull_request CI run the retrigger is waiting on.
+  # never cancels the pull_request CI run being judged.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
@@ -78,7 +78,7 @@ jobs:
     # API access and stays in refresh_ci_gate.py, executed by the bot with
     # live review data.
     if: ${{ github.event.review.user.type != 'Bot' }}
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Package review payload for the refresh bot
         run: |

@@ -13,11 +13,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
-from vllm_ascend.patch.platform.patch_speculative_config import (
-    _ascend_verify_with_parallel_config,
-    _normalize_deepseek_dspark_draft,
-)
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.patch.platform.patch_speculative_config import _normalize_deepseek_dspark_draft
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -104,6 +100,9 @@ class _DraftModelConfig(SimpleNamespace):
     def get_total_num_kv_heads(self):
         return self.model_arch_config.total_num_kv_heads
 
+    def get_sliding_window(self):
+        return getattr(self.hf_text_config, "sliding_window", None)
+
     def get_model_arch_config(self):
         return replace(
             self.model_arch_config,
@@ -114,7 +113,7 @@ class _DraftModelConfig(SimpleNamespace):
 
 @pytest.fixture
 def initialize_dspark(monkeypatch):
-    def initialize(hf_config, *, dcp_size=8, model="/test/local-draft", num_heads=8):
+    def initialize(hf_config, *, dcp_size=8, pcp_size=1, tp_size=8, model="/test/local-draft", num_heads=8):
         arch = ModelArchitectureConfig(
             architectures=hf_config.architectures,
             model_type=hf_config.model_type,
@@ -147,7 +146,8 @@ def initialize_dspark(monkeypatch):
         )
         draft.registry.inspect_model_cls.side_effect = lambda architectures, _: ("model-info", architectures[0])
         target_pc = ParallelConfig(
-            tensor_parallel_size=8,
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
             distributed_executor_backend="mp",
         )
@@ -166,7 +166,7 @@ def initialize_dspark(monkeypatch):
         # normalization, draft parallel-config creation, and after-validator.
         # vLLM #63205 moves draft construction to a method that imports
         # ModelConfig from vllm.config rather than vllm.config.speculative.
-        model_config_module = patch_speculative_config.speculative_config if vllm_version_is("0.33.0") else vllm_config
+        model_config_module = vllm_config
         monkeypatch.setattr(model_config_module, "ModelConfig", lambda **_: draft)
         create_draft_pc = SpeculativeConfig.create_draft_parallel_config
         created = []
@@ -191,7 +191,8 @@ def initialize_dspark(monkeypatch):
         assert created == [target_pc]
         assert config.target_parallel_config is target_pc
         assert config.draft_parallel_config is not target_pc
-        assert config.draft_parallel_config.tensor_parallel_size == 8
+        assert config.draft_parallel_config.tensor_parallel_size == tp_size
+        assert config.draft_parallel_config.prefill_context_parallel_size == 1
         assert config.draft_parallel_config.decode_context_parallel_size == 1
         assert validated == [(list(draft.architectures), draft.use_mla, 1)]
         return config
@@ -199,14 +200,17 @@ def initialize_dspark(monkeypatch):
     return initialize
 
 
-@pytest.mark.parametrize("dcp_size", [1, 8])
-def test_k3_dspark_preserves_target_dcp_during_real_initialization(initialize_dspark, dcp_size):
+@pytest.mark.parametrize("tp_size,pcp_size,dcp_size", [(8, 1, 1), (8, 1, 8), (1, 2, 2), (1, 8, 1), (1, 8, 8)])
+def test_k3_dspark_preserves_target_topology_during_real_initialization(initialize_dspark, tp_size, pcp_size, dcp_size):
     config = initialize_dspark(
         PretrainedConfig(architectures=["K3DSparkModel"], model_type="k3_dspark", dspark_noise_token_id=1023),
+        tp_size=tp_size,
+        pcp_size=pcp_size,
         dcp_size=dcp_size,
     )
     assert config.draft_model_config.use_mla
     assert config.draft_model_config.hf_config.ptd_token_id == 1023
+    assert config.target_parallel_config.prefill_context_parallel_size == pcp_size
     assert config.target_parallel_config.decode_context_parallel_size == dcp_size
 
 
@@ -256,81 +260,6 @@ def test_glm_speculators_rejects_malformed_mla_dimensions(initialize_dspark, glm
     hf_config.q_lora_rank = q_lora_rank
     with pytest.raises(ValueError, match="cannot use GQA"):
         initialize_dspark(hf_config, model=str(glm_dspark_checkpoint))
-
-
-def test_gqa_pcp_dcp_preserves_other_upstream_checks(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=2,
-        decode_context_parallel_size=2,
-    )
-    validated = []
-
-    def validate_config(model, config):
-        validated.append((model, config))
-        assert config is not parallel_config
-        assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 1
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
-    _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert len(validated) == 1
-    assert validated[0][0] is model_config
-    assert parallel_config.decode_context_parallel_size == 2
-
-
-def test_non_moe_draft_keeps_original_parallel_validation_bypass(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=False, runner_type="draft")
-    parallel_config = SimpleNamespace(enable_expert_parallel=True)
-    validated = []
-    monkeypatch.setattr(
-        patch_speculative_config, "_orig_verify_with_parallel_config", lambda *args: validated.append(args)
-    )
-    assert _ascend_verify_with_parallel_config(model_config, parallel_config) is None
-    assert not validated
-
-
-def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=2,
-        decode_context_parallel_size=2,
-    )
-
-    def fail(model, config):
-        assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 1
-        raise ValueError("other upstream validation failed")
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", fail)
-    with pytest.raises(ValueError, match="other upstream validation failed"):
-        _ascend_verify_with_parallel_config(model_config, parallel_config)
-
-    assert parallel_config.enable_expert_parallel is True
-    assert parallel_config.decode_context_parallel_size == 2
-
-
-def test_gqa_tp_only_dcp_keeps_upstream_validation(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=2,
-    )
-    validated = []
-
-    def validate_config(model, config):
-        validated.append((model, config))
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
-
-    _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert validated == [(model_config, parallel_config)]
 
 
 @pytest.mark.parametrize("flattened", [False, True])
@@ -461,102 +390,3 @@ def test_minimax_dspark_draft_config_short_circuits_the_generic_override(monkeyp
     target = SimpleNamespace(model_type="minimax_m3_vl", architectures=["MiniMaxM3SparseForConditionalGeneration"])
     patch_speculative_config.SpeculativeConfig.hf_config_override(target)
     assert seen == [target]
-
-
-@pytest.mark.parametrize("derived_quant", [None, {"quant_method": "ascend"}])
-def test_core_dspark_rewrite_is_restored_for_the_minimax_draft(monkeypatch, tmp_path, derived_quant):
-    # Core's dspark normalization rewrites unknown draft architectures into
-    # the generic DeepSeek DSpark draft; the wrapper must restore the MiniMax
-    # identity afterwards.
-    (tmp_path / "dspark").mkdir()
-    (tmp_path / "dspark" / "config.json").write_text("{}")
-    arch_rebuilds = []
-
-    def fake_core_post_init(self):
-        hf = self.draft_model_config.hf_config
-        hf.model_type = "deepseek_v4"
-        hf.architectures = ["DSparkDraftModel"]
-        self.draft_model_config.quantization = self.target_model_config.quantization
-
-    spec = SimpleNamespace(
-        method="dspark",
-        model=None,
-        target_model_config=SimpleNamespace(
-            model=str(tmp_path),
-            hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForConditionalGeneration"]),
-            quantization="ascend",
-        ),
-        target_parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_dspark=lambda: False,
-    )
-
-    def fake_update_arch():
-        arch_rebuilds.append(
-            (spec.draft_model_config.hf_config.model_type, spec.draft_model_config.hf_config.architectures)
-        )
-
-    spec.update_arch_ = fake_update_arch
-    draft_hf = SimpleNamespace(
-        model_type="minimax_m3_text",
-        architectures=["DSparkMiniMaxDraftModel"],
-        quantization_config=derived_quant,
-    )
-    draft_hf.update = lambda values: draft_hf.__dict__.update(values)
-    spec.draft_model_config = SimpleNamespace(hf_config=draft_hf, quantization=None)
-    monkeypatch.setattr(patch_speculative_config, "_orig_post_init", fake_core_post_init)
-
-    patch_speculative_config._dspark_post_init(spec)
-
-    hf_config = spec.draft_model_config.hf_config
-    assert hf_config.model_type == "minimax_m3_text"
-    assert hf_config.architectures == ["DSparkMiniMaxDraftModel"]
-    assert spec.model == str(tmp_path / "dspark")
-    assert arch_rebuilds == [("minimax_m3_text", ["DSparkMiniMaxDraftModel"])]
-    # Quantization: the core rewrite inherits the target's; the restore resets
-    # it and only the derived ascend config re-pins the method.
-    assert spec.draft_model_config.quantization == ("ascend" if derived_quant else None)
-
-
-def test_minimax_dspark_defaults_to_dspark_subfolder(tmp_path):
-    (tmp_path / "dspark").mkdir()
-    (tmp_path / "dspark" / "config.json").write_text("{}")
-    target = SimpleNamespace(model=str(tmp_path))
-
-    draft = patch_speculative_config._get_minimax_m3_dspark_draft(target)
-
-    assert draft == tmp_path / "dspark"
-
-
-def test_minimax_dspark_without_subfolder_raises(tmp_path):
-    target = SimpleNamespace(model=str(tmp_path))
-
-    with pytest.raises(ValueError, match="found no draft checkpoint in the 'dspark/' subfolder"):
-        patch_speculative_config._get_minimax_m3_dspark_draft(target)
-
-
-def test_minimax_dspark_default_gate_skips_foreign_requests(tmp_path):
-    m3_target = SimpleNamespace(
-        model=str(tmp_path), hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForCausalLM"])
-    )
-    other_target = SimpleNamespace(model=str(tmp_path), hf_config=SimpleNamespace(architectures=["Qwen3ForCausalLM"]))
-
-    # No dspark/ subfolder exists under tmp_path: the gate must stay silent
-    # (return None) for non-matching requests instead of raising.
-    assert (
-        patch_speculative_config._default_minimax_m3_dspark_draft(
-            SimpleNamespace(method="eagle", target_model_config=m3_target, model=None)
-        )
-        is None
-    )
-    assert (
-        patch_speculative_config._default_minimax_m3_dspark_draft(
-            SimpleNamespace(method="dspark", target_model_config=other_target, model=None)
-        )
-        is None
-    )
-    assert (
-        patch_speculative_config._default_minimax_m3_dspark_draft(
-            SimpleNamespace(method="dspark", target_model_config=m3_target, model=str(tmp_path / "other-draft"))
-        )
-        is None
-    )

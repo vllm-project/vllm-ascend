@@ -26,7 +26,7 @@ _server_cmd: &server_cmd
   - "--gpu-memory-utilization"
   - "0.9"
   - "--additional-config"
-  - '{"enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": true}}'
+  - '{"enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
 
 _benchmarks: &benchmarks
   acc:

@@ -202,7 +202,11 @@ def build_qwen4_kv_cache_layout(
 
     if not role_members[QSA_RAW]:
         return None
-    required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
+    # PLE belongs to only the pipeline stage that owns the PLE layer, so it is
+    # optional in a per-stage layout.  When present it still receives its
+    # private allocation and owner mapping below.
+    required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN)
+    owner_roles = (*required, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
         details = [(name, type(spec).__name__) for name, spec in unknown]
@@ -228,7 +232,7 @@ def build_qwen4_kv_cache_layout(
 
     dtype_sizes = {
         get_dtype_size(dtype)
-        for role in required
+        for role in owner_roles
         for _, spec in role_members[role]
         for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
     }
@@ -296,11 +300,21 @@ def build_qwen4_kv_cache_layout(
         cursor += page_size * num_blocks
     slot_backing_size = round_up(cursor, alignment)
 
-    # Each QSA layer needs one slot. State groups reuse those slots with
-    # separate scheduler block tables, so live groups own disjoint block IDs.
-    slot_count = len(role_members[QSA_MAIN])
+    # PP can expose QSA owners from only one stage while one state group
+    # contains owners aggregated across stages.  State groups have disjoint
+    # block IDs and can reuse slots, so only the largest individual group must
+    # fit alongside the globally indexed QSA owners.
+    state_group_sizes: dict[tuple[str, int], int] = {}
+    for role in (GDN, PLE):
+        for layer_name, _ in role_members[role]:
+            key = (role, owner_group_ids[layer_name])
+            state_group_sizes[key] = state_group_sizes.get(key, 0) + 1
+    slot_count = max(
+        len(role_members[QSA_MAIN]),
+        max(state_group_sizes.values(), default=0),
+    )
     owners: list[CacheOwner] = []
-    for role in required:
+    for role in owner_roles:
         group_slots: dict[int, int] = {}
         for ordinal, (layer_name, spec) in enumerate(role_members[role]):
             group_id = owner_group_ids[layer_name]
@@ -568,8 +582,11 @@ def _merge_mamba_state_groups(
     for members in buckets.values():
         first = members[0][0]
         drop.update(index for index, _, _ in members)
-        for start in range(0, len(members), slot_count):
-            chunk = members[start : start + slot_count]
+        # Interleave layers in model order while keeping each group within the slot limit.
+        members.sort(key=lambda member: _owner_sort_key(member[1]))
+        num_groups = cdiv(len(members), slot_count)
+        for i in range(num_groups):
+            chunk = members[i::num_groups]
             specs = {name: spec for _, name, spec in chunk}
             uniform = UniformTypeKVCacheSpecs.from_specs(specs)
             assert uniform is not None
@@ -602,21 +619,6 @@ def get_qwen4_exp_pool_bytes_per_block(
         return None
     private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
     return layout.slot_count * layout.slot_backing_size + private_bytes
-
-
-def get_qwen4_exp_max_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
-    if bytes_per_block is None:
-        return None
-    required_blocks = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
-        for group in kv_cache_groups
-    )
-    return required_blocks * bytes_per_block
 
 
 def get_qwen4_exp_kv_cache_groups(

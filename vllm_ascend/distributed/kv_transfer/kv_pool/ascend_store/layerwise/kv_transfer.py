@@ -462,9 +462,9 @@ class LayerBatchBuilder:
             layer_object_offset = int(self._block_len_np[:base_offset].sum())
             offsets = (layer_object_offset + layer_inner_offsets).tolist()
             sizes = layer_block_len.tolist()
-            all_buffers = [
-                (layer_base_addrs + block_id * layer_block_stride).tolist() for block_id in shared.block_ids_arr
-            ]
+            # Build the whole layer's address table in one NumPy operation.
+            # A prefix read may carry hundreds of block IDs in this hot path.
+            all_buffers = (layer_base_addrs + shared.block_ids_arr[:, None] * layer_block_stride).tolist()
             return LayerRangeReqMeta(
                 req_ids=shared.req_ids,
                 layer_id=layer_id,
@@ -930,16 +930,26 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         assert self._active_load_indices is not None
         # Read the abort flag once: this comprehension covers every key of the
         # layer, so an is_set() per key is pure overhead in the receive thread.
-        aborted = self._load_abort_event.is_set()
-        active_indices = [
-            index for index in range(len(req_meta.keys)) if not aborted and index in self._active_load_indices
-        ]
-        active_keys = [req_meta.keys[index] for index in active_indices]
-        if active_keys:
-            self._stagger_h2d_submit(layer_id)
+        active_indices: range | list[int]
+        if self._load_abort_event.is_set():
+            active_indices = []
+            active_keys = []
+        elif len(self._active_load_indices) == len(req_meta.keys):
+            # The shared row ordering is fixed for the group in this step.
+            # Keep all rows together until a failed read removes an index.
+            active_indices = range(len(req_meta.keys))
+            active_keys = req_meta.keys
+            active_buffers = req_meta.all_buffers
+            active_sizes = req_meta.all_sizes
+            active_offsets = req_meta.all_offsets
+        else:
+            active_indices = [index for index in range(len(req_meta.keys)) if index in self._active_load_indices]
+            active_keys = [req_meta.keys[index] for index in active_indices]
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
+        if active_keys:
+            self._stagger_h2d_submit(layer_id)
             results: list[int] = []
             for keys, buffers, sizes, offsets in self._range_transfer_batches(
                 active_keys,
@@ -968,20 +978,28 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     self.set_finished_request(req_id)
             self._active_load_indices = None
 
+    def _wait_for_reuse_saves(self, data: LayerLoadTask) -> bool:
+        for source in data.wait_for_save_layers:
+            if not self._wait_for_event(self.layer_save_finished_events[source], self.save_failure_checker):
+                return False
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
+            # CPU completion on a non-writing rank only records the NPU event.
+            self.sync_save_events[source].synchronize()
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(source)
+        return True
+
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
-            wait_for_save = data.wait_for_save_layer
-            if wait_for_save is not None:
-                if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                    return
-                if self.save_failure_checker is not None:
-                    self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
-                self.layer_save_finished_events[wait_for_save].clear()
+            if data.compute_boundary is not None:
+                data.compute_boundary.synchronize()
+            if not self._wait_for_reuse_saves(data):
+                return
 
-            if data.attention_start_gate is not None:
-                if not self._wait_for_event(data.attention_start_gate):
+            if data.load_gate is not None:
+                if not self._wait_for_event(data.load_gate):
                     return
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
@@ -1043,22 +1061,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _copy_gva_layers(self, data: LayerLoadTask) -> bool:
         # Layerwise threads only run when the worker-side
         # protocol gate is on; every store call below sits on the Backend ABC.
-        wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
-        attention_start_gate = data.attention_start_gate
-
-        if wait_for_save is not None:
-            if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                return False
-            if self.save_failure_checker is not None:
-                self.save_failure_checker()
-            # Non-saving TP ranks have no D2H task to synchronize the event.
-            # Their CPU save-finished signal only means the event was recorded;
-            # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
+        load_gate = data.load_gate
+        if not self._wait_for_reuse_saves(data):
+            return False
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:
@@ -1097,8 +1104,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.debug("Layer load event set: layer %d", layer_id)
             return True
 
-        if attention_start_gate is not None:
-            if not self._wait_for_event(attention_start_gate):
+        if load_gate is not None:
+            if not self._wait_for_event(load_gate):
                 return False
 
         all_req_ids: set[str] = set()

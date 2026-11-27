@@ -126,7 +126,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=QuantType.NONE,
-                dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -167,6 +166,8 @@ class AscendMoERunner310(AscendMoERunner):
         routed_output_transform=None,
         routed_scaling_factor=1,
         n_shared_experts: int = 0,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         super().__init__(
             layer_name=layer_name,
@@ -180,6 +181,8 @@ class AscendMoERunner310(AscendMoERunner):
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
             routed_scaling_factor=routed_scaling_factor,
+            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=routed_scale_mode,
         )
         gate_weight = getattr(gate, "weight", None)
         if isinstance(gate_weight, torch.Tensor) and gate_weight.dtype == torch.float16:

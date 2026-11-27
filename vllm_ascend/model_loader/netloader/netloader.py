@@ -49,8 +49,6 @@ class _FallbackCleanupContext:
     context_keys: dict[int, set[Any]]
     static_all_moe_layers: dict[int, tuple[list[Any], list[Any]]]
     rope_cache: dict[Any, Any] | None
-    eplb_layers: list[nn.Module]
-    eplb_layer_count: int
     memory_baseline: tuple[int, int] | None
 
 
@@ -89,7 +87,9 @@ def pre_transfer_weight_processing(model: nn.Module):
 
     for module in model.modules():
         if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
-            _unwrap_quant_method(module._quant_method)
+            # Accept both attribute spellings across baselines.
+            quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+            _unwrap_quant_method(quant_method)
 
     try:
         yield
@@ -201,6 +201,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _is_draft_model(model_config: ModelConfig) -> bool:
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
+
+    @staticmethod
+    def _is_eplb_enabled(vllm_config: VllmConfig) -> bool:
+        """EPLB rebinding invalidates the donor's cached transfer manifest (same policy as rfork)."""
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        return bool(getattr(parallel_config, "enable_eplb", False))
 
     @staticmethod
     def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
@@ -357,7 +363,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             for module in model.modules():
                 if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                    module.cleanup()
+                    # cleanup() is optional on some wrapper versions; call it only if present.
+                    cleanup = getattr(module, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
         except Exception as exc:
             logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
 
@@ -367,15 +376,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-
-        eplb_layers = VllmEplbAdaptor._registered_moe_layers
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
             static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
             rope_cache=cls._snapshot_rope_cache(),
-            eplb_layers=eplb_layers,
-            eplb_layer_count=len(eplb_layers),
             memory_baseline=cls._get_npu_memory_usage(device_type),
         )
 
@@ -392,7 +396,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
         cls._remove_new_static_forward_context_keys(vllm_config, context.context_keys, model)
         cls._restore_static_all_moe_layers(context.static_all_moe_layers)
         cls._restore_rope_cache(context.rope_cache)
-        del context.eplb_layers[context.eplb_layer_count :]
         return model_ref
 
     @staticmethod
@@ -478,6 +481,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 "Target netloader already fell back to DefaultModelLoader; "
                 "skip draft elastic load and use DefaultModelLoader"
             )
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
+        elif self._is_eplb_enabled(vllm_config):
+            # EPLB rebalancing rebinds weight storages, staling the donor's
+            # registered manifest; fall back to the default loader.
+            logger.warning("Netloader transfer is disabled when EPLB is enabled; using the default model loader.")
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
             )

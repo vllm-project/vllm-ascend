@@ -210,6 +210,9 @@ run_pytest_target() {
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
+  elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
+    # A collection skip can yield exit 5 even when the target is valid.
+    test_results+=("${target}|SKIPPED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")

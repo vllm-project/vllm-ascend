@@ -34,6 +34,8 @@ def init_speculator(
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
     """
+    # TODO: Align init_speculator dispatch with upstream vLLM by mapping the
+    # resolved speculator class to its Ascend implementation.
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.enforce_eager:

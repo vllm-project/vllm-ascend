@@ -4,7 +4,7 @@
 
 import json
 from contextlib import nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -25,14 +25,13 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
-from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator_module
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
@@ -41,6 +40,16 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_confi
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
     speculator as speculator_module,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_pp_group(monkeypatch):
+    # v0.34.0's draft loader resolves the PP-safe load config via get_pp_group().
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+        raising=False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -118,8 +127,6 @@ def eplb_worker_config(tmp_path):
             "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
             return_value=(model_info, model_info.architecture),
         ),
-        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
-        patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
         # Keep the model dtype float-compatible with the bfloat16 KV cache the
@@ -232,6 +239,43 @@ def test_dspark_draft_config_leaves_dcp_to_upstream(eplb_worker_config):
     assert config.parallel_config.enable_eplb
 
 
+def test_dspark_loader_reconstructs_physical_topology_then_exposes_query_view(eplb_worker_config, monkeypatch):
+    parallel = replace(
+        eplb_worker_config.parallel_config,
+        decode_context_parallel_size=8,
+        cp_kv_cache_interleave_size=4,
+        dcp_kv_cache_interleave_size=4,
+        enable_eplb=False,
+        eplb_config=dataclass_replace(eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=0),
+    )
+    config = replace(eplb_worker_config, parallel_config=parallel)
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.draft_model_config.hf_config.model_type = "k3_dspark"
+    spec.target_parallel_config = parallel
+    assert spec.draft_parallel_config.prefill_context_parallel_size == 1
+    assert spec.draft_parallel_config.decode_context_parallel_size == 1
+
+    # The loader receives the PCP=1 query view created by DFlash's constructor.
+    config.parallel_config = copy(parallel)
+    config.parallel_config.prefill_context_parallel_size = 1
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model", side_effect=RuntimeError("reached model construction")
+        ) as get_model,
+        pytest.raises(RuntimeError, match="reached model construction"),
+    ):
+        patch_dspark.speculator_module.load_dspark_model(torch.nn.Module(), config)
+
+    loaded = get_model.call_args.kwargs["vllm_config"].parallel_config
+    assert loaded.pipeline_parallel_size == loaded.prefill_context_parallel_size == 1
+    assert loaded.decode_context_parallel_size == 8
+    assert loaded.cp_kv_cache_interleave_size == loaded.dcp_kv_cache_interleave_size == 4
+    assert parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 8
+    with pytest.raises(ValueError, match="must be divisible"):
+        patch_dspark.dspark_utils.replace(parallel, prefill_context_parallel_size=1)
+
+
 def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     """Sharded MTP drafts attend with the target's PCP partition (upstream #56107)."""
     speculator = object.__new__(AscendMTPSpeculator)
@@ -267,11 +311,11 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
         raise RuntimeError("reached model construction")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
         patch.object(eagle_utils, "get_model", side_effect=get_draft_model) as get_model,
         pytest.raises(RuntimeError, match="reached model construction"),
     ):
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     loading_config = get_model.call_args.kwargs["vllm_config"]
     assert loading_config.parallel_config.enable_eplb
     assert loading_config.parallel_config.enable_expert_parallel
@@ -279,7 +323,7 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
     assert loading_config.kernel_config.moe_backend == "auto"
     assert loading_config.cache_config.cache_dtype == "bfloat16"
     assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
-    assert loading_config.load_config.load_format == "auto"
+    assert loading_config.load_config.load_format == "fastsafetensors"
     assert speculator.draft_vllm_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
@@ -432,9 +476,12 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
     attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     dp_sync = DPSyncState(
-        num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16, **sync_kwargs
+        num_tokens_across_dp=torch.tensor([64, 64]),
+        uniform_token_count=4,
+        eager=True,
+        num_reqs=16,
+        max_query_len=None,
     )
 
     def parent_propose(*args, **kwargs):
@@ -530,6 +577,8 @@ def test_capture_follows_upstream_contract() -> None:
 def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.vllm_config = eplb_worker_config
+    speculator.draft_model_config = eplb_worker_config.speculative_config.draft_model_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
     original_tag = backends.model_tag
     seen = []
 
@@ -541,10 +590,10 @@ def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_conf
         raise RuntimeError("observed actual inherited EAGLE loader")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
         patch.object(eagle_utils, "get_model", side_effect=inspect_construction),
         pytest.raises(RuntimeError, match="observed actual inherited EAGLE loader"),
     ):
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     assert seen == ["eagle_head"]
     assert backends.model_tag == original_tag

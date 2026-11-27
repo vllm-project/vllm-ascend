@@ -59,7 +59,6 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
-
 templates:
   - node_index: 0
     envs:
@@ -94,8 +93,10 @@ templates:
       - "133120"
       - --attention_config.indexer_kv_dtype
       - "int8"
+      - --kv-cache-dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -161,8 +162,10 @@ templates:
       - "133120"
       - --attention_config.indexer_kv_dtype
       - "int8"
+      - --kv-cache-dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -230,8 +233,10 @@ templates:
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --attention_config.indexer_kv_dtype
       - "int8"
+      - --kv-cache-dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -296,8 +301,10 @@ templates:
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --attention_config.indexer_kv_dtype
       - "int8"
+      - --kv-cache-dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -350,5 +357,5 @@ benchmarks:
         max_out_len: 1024
         batch_size: 128
         request_rate: 3.15
-        baseline: 2722.60
+        baseline: 2257.1258
         threshold: 0.97
