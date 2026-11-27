@@ -222,8 +222,9 @@ accepts these opt-in options; the defaults keep the previous behavior:
 
 - The reference proxy makes up to three attempts per stage request: the
   initial attempt plus up to two retries.
-- Connection errors map to 502, stage timeouts to 504, and downstream 5xx
-  responses to 502; all of them are retried. Every 2xx response is success.
+- Connection errors, stage timeouts and downstream 5xx responses are retried;
+  they are classified internally as 502 (connection error, downstream 5xx) and
+  504 (timeout). Every 2xx response is success.
 - Downstream 4xx responses keep their status and are not retried.
 - When several encoder URLs are configured, connection/timeout/5xx failures
   remove the encoder URL from selection for
@@ -234,10 +235,12 @@ accepts these opt-in options; the defaults keep the previous behavior:
 - Streaming requests are not retried after the first chunk is forwarded;
   non-streaming requests are retried normally. Encoder and prefill stages are
   never streamed, so they are always retried as non-streaming requests.
-- When the attempts are exhausted, a non-streaming request receives HTTP 500
-  (or the mapped stage status). A streaming request has already been handed to
-  Starlette as a 200 response before the encoder and prefill stages run, so an
-  exhausted stage can only abort the stream, not change the status code.
+- When every attempt of a stage fails, a non-streaming request receives HTTP
+  500: the retry wrapper maps exhaustion to 500, so the per-attempt 502/504 are
+  not preserved (a downstream 4xx is returned unchanged instead). A streaming
+  request has already been handed to Starlette as a 200 response before the
+  encoder and prefill stages run, so an exhausted stage can only abort the
+  stream, not change the status code.
 
 ### Timeouts
 
@@ -344,15 +347,22 @@ machine without vLLM installed.
   JSON list of `{stage, seconds}` rows (`--stage-metrics-json`).
 - **Reporting rules**: a value that was not measured renders as `未采集`. A
   missing histogram, a missing `+Inf` bucket or an unparsable field is never
-  replaced by a mean, and a parsed report states whether its benchmark command
-  was executed. P50/P99 read from `/metrics` are Prometheus histogram bucket
-  upper bounds because the endpoint does not expose individual durations; the
-  report says so. `ec_transfer_bytes` from `--ec-shared-storage-path` is the
-  sum of `*.safetensors` file sizes at report time (the ExampleConnector does
-  not clean up), not the bytes moved by this run.
+  replaced by a mean. P50/P99 read from `/metrics` are Prometheus histogram
+  bucket upper bounds because the endpoint does not expose individual
+  durations; the report says so. `ec_transfer_bytes` from
+  `--ec-shared-storage-path` is the sum of `*.safetensors` file sizes at report
+  time (the ExampleConnector does not clean up), not the bytes moved by this
+  run.
+- **Provenance**: `benchmark_outcome` records how the numbers were obtained:
+  `completed`, `failed`, `timeout`, `dry_run` (command recorded, nothing ran),
+  or `parsed_output` (a saved `--bench-output` stdout file; no command is
+  recorded). A failed or timed-out run still writes the report with empty
+  numbers and a note, so read this field instead of inferring from the command.
 - **Exit codes**: `0` report written; `1` a regression exceeded `--tolerance`
   with `--fail-on-regression`; `2` the harness could not produce a trustworthy
-  report (unusable input path, benchmark failure or timeout).
+  report. Invalid input and report-write failures return `2` without a report;
+  a benchmark failure or timeout returns `2` with the report and a note, and `2`
+  takes precedence over `1`.
 
 ## Limitations
 

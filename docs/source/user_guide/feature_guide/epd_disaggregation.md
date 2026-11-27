@@ -934,9 +934,10 @@ disconnects before the first streamed chunk. Stop in this order:
 
 - **Stage attempts**: each stage request gets up to three attempts in total
   (the initial attempt plus up to two retries).
-- **Retryable failures**: connection errors are mapped to HTTP 502, stage
-  timeouts to HTTP 504, and downstream 5xx responses to HTTP 502; all of them
-  are retried. Every 2xx response is treated as success.
+- **Retryable failures**: connection errors, stage timeouts and downstream
+  5xx responses are retried up to the stage limit; internally they are
+  classified as 502 (connection error, downstream 5xx) and 504 (timeout).
+  Every 2xx response is treated as success.
 - **Downstream 4xx**: the 4xx status is preserved and the request is **not**
   retried.
 - **Multi-encoder routing**: when several encoder URLs are configured, an
@@ -948,14 +949,16 @@ disconnects before the first streamed chunk. Stop in this order:
   failing the proxy falls back to the full list (best effort). 4xx responses
   and other client-side errors do not mark an encoder unhealthy. With a single
   encoder the selection is unchanged.
-- **Exhaustion**: a non-streaming request whose attempts all fail returns the
-  mapped 5xx status (HTTP 500 when no stage status applies). A streaming
-  request is handed back as a 200 response before the encoder and prefill
-  stages run, so an exhausted stage cannot change the status code: the stream
-  is aborted and the failure is logged instead.
-- **P stage failure**: a prefill failure returns its mapped status (4xx
-  preserved, otherwise 502/504) and D is not started, so no partial output is
-  produced.
+- **Exhaustion**: a non-streaming request whose attempts all fail receives
+  HTTP 500: the retry wrapper maps exhaustion to 500, so the per-attempt
+  502/504 classification is not preserved. A downstream 4xx is returned
+  unchanged instead. A streaming request is handed back as a 200 response
+  before the encoder and prefill stages run, so an exhausted stage cannot
+  change the status code: the stream is aborted and the failure is logged
+  instead.
+- **P stage failure**: a prefill 4xx is returned unchanged and D is not
+  started. Retryable prefill failures are retried like any other stage, and an
+  exhausted prefill returns HTTP 500 without starting D.
 - **D stage**: non-streaming requests use the same attempt rule. Streaming
   requests are retried only before the first chunk is forwarded; once
   streaming has started, an error is surfaced to the client instead of being
