@@ -28,6 +28,14 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_dp_supervisor.py:
+#   Target: vllm.entrypoints.launchers.dp_supervisor._build_device_ids.
+#   Why: Multi-port external load balancing assigns too few devices to each
+#        local DP rank when prefill context parallelism is enabled.
+#   How: Size each child's device slice using TP * PP * PCP.
+#   Related PR: https://github.com/vllm-project/vllm/pull/69664
+#   Future plan: Remove once both the release and verified-main pins include the fix.
+# --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
