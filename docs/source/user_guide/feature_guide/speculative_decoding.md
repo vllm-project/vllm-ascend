@@ -882,6 +882,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
 
 !!! warning
 
+    **Shared requirements**
+
     RecoverSSM is experimental. Validate accuracy and performance on your
     workload before deployment. Enable speculative decoding, disable stochastic
     rounding, and use Mamba cache mode `align` with prefix caching or `none`
@@ -891,6 +893,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     `MooncakePullConnector`. Enable RecoverSSM on both roles and match the model
     weights, speculative method and window, draft checkpoint if used,
     prefix-caching settings, state dtypes, and convolution layout.
+
+    **Model-specific limits**
 
     - **GLM-5.3-Flash (KDA)** runs on A3 and A5. Set `PP=1` and `DCP=1`.
       `PCP>1` is supported only on prefill KV producers, where the KDA head
