@@ -259,6 +259,19 @@ def test_sending_thread_uses_configured_kvpp_when_worker_layers_match() -> None:
     assert decoded.use_kv_pp
 
 
+def test_shared_host_only_rank_zero_publishes_main():
+    common = dict(hisparse_host_layers=("main",), hisparse_shared_host=True)
+    rank0 = replace(make_transfer_metadata(layer_names=["index", "main"], base_addrs=[[10], [20]]), **common)
+    rank1 = replace(make_transfer_metadata(layer_names=["index"], base_addrs=[[30]]), **common)
+    thread = make_sending_thread({0: rank0, 1: rank1}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    pp = decoded.metadata_by_pp_rank[0]
+    assert pp.hisparse_host_layers == ("main",)
+    ranks = pp.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert ranks[0].kv_caches_base_addr == [[10], [20]]
+    assert ranks[1].kv_caches_base_addr == [[30], []]
+
+
 def test_sending_thread_rejects_layer_split_when_kvpp_is_disabled() -> None:
     tp0 = make_transfer_metadata(layer_names=["layer.0"])
     tp1 = make_transfer_metadata(layer_names=["layer.1"], te_rpc_port=9001)

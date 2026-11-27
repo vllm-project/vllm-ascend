@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheT
 from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
     _HiSparsePDWorker,
     _HiSparsePullThread,
+    _MemFabricPushWorker,
     validate_hisparse_pd_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_worker
@@ -239,22 +240,25 @@ def test_memfabric_layout_validation_distinguishes_p_and_d():
 
 
 @pytest.mark.parametrize(
-    "extra,protocol",
+    "extra,protocol,server_role",
     [
-        ({}, "device_urma"),
-        ({"memfabric_transfer_protocol": "device_rdma"}, "device_rdma"),
-        ({"memfabric_transfer_protocol": "sdma"}, "sdma"),
+        ({}, "device_urma", "Prefill"),
+        ({"memfabric_transfer_protocol": "device_rdma"}, "device_rdma", "Prefill"),
+        ({"memfabric_transfer_protocol": "sdma"}, "sdma", "Prefill"),
+        ({"use_layerwise": True, "memfabric_transfer_protocol": "device_urma"}, "device_urma", "Decode"),
     ],
 )
 @pytest.mark.parametrize("is_consumer,role", [(False, "Prefill"), (True, "Decode")])
-def test_memfabric_worker_configures_direct_engine(monkeypatch, extra, protocol, is_consumer, role):
+def test_memfabric_worker_configures_direct_engine(monkeypatch, extra, protocol, server_role, is_consumer, role):
     worker = _HiSparsePDWorker.__new__(_HiSparsePDWorker)
     worker.kv_transfer_config = NS(kv_connector_extra_config=extra, is_kv_consumer=is_consumer)
     worker.side_channel_host = "192.0.2.1"
     monkeypatch.setattr(torch.npu, "current_device", lambda: 3)
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.global_memfabric_te") as engine:
         assert worker._get_transfer_engine(None) is engine.get_transfer_engine.return_value
-        engine.configure.assert_called_once_with(role=role, device_id=3, transfer_protocol=protocol)
+        engine.configure.assert_called_once_with(
+            role=role, device_id=3, transfer_protocol=protocol, store_server_role=server_role
+        )
         engine.get_transfer_engine.assert_called_once_with("192.0.2.1")
 
 
@@ -288,3 +292,41 @@ def test_pull_unpacks_flat_component_major_mla_slot():
     assert local == [106, 110]
     assert peer == [1006, 1010]
     assert sizes == [4, 2]
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_push_writes_only_valid_host_rows(packed):
+    worker = _MemFabricPushWorker.__new__(_MemFabricPushWorker)
+    width = 3
+    tokens = 4
+    target = ctypes.create_string_buffer(bytes([255]) * 48)
+    nope = bytes(range(16))
+    rope = bytes(range(80, 88))
+    rows = [nope[2 * i : 2 * i + 2] + rope[i : i + 1] for i in range(8)]
+    buffers = (
+        [ctypes.create_string_buffer(b"".join(rows))]
+        if packed
+        else [ctypes.create_string_buffer(nope), ctypes.create_string_buffer(rope)]
+    )
+    worker._layer_indices = {"main": 0}
+    worker.layer_name_to_spec_index = {"main": 0}
+    worker.kv_cache_specs = [NS(block_size=tokens)]
+    worker.vllm_config = NS(model_config=NS())
+    worker.transfer_metadata = NS(
+        kv_caches_base_addr=[[ctypes.addressof(buf) for buf in buffers]],
+        block_lens=[[12] if packed else [8, 4]],
+        block_strides=[[12] if packed else [8, 4]],
+        block_shapes=[[(4, 3)] if packed else [(4, 2), (4, 1)]],
+        layer_block_sizes=[tokens],
+        block_size_scales=[[1]],
+    )
+    pp = NS(layer_names=["main"], hisparse_host_layers=("main",), block_lens=[[12]], block_strides=[[16]])
+    dest = NS(kv_caches_base_addr=[[ctypes.addressof(target)]])
+    req = NS(local_block_ids=(1, 0), remote_block_ids=(2, 1), start_token=2, end_token=5)
+    addresses = worker._get_write_addresses(NS(layer_name="main", requests=[req]), pp, dest)
+    for src, dst, size in zip(*addresses, strict=True):
+        ctypes.memmove(dst, src, size)
+    expected = bytearray([255] * 48)
+    expected[32 + 2 * width : 32 + 4 * width] = rows[6] + rows[7]
+    expected[16 : 16 + width] = rows[0]
+    assert target.raw[:48] == expected

@@ -79,6 +79,23 @@ def test_memfabric_configuration_is_idempotent_but_role_bound():
         manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=1, transfer_protocol="device_urma")
     with pytest.raises(RuntimeError, match="already configured"):
         manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="sdma")
+    with pytest.raises(RuntimeError, match="already configured"):
+        manager.configure(
+            role=MEMFABRIC_ROLE_DECODE,
+            device_id=0,
+            transfer_protocol="device_urma",
+            store_server_role=MEMFABRIC_ROLE_DECODE,
+        )
+
+
+def test_push_initializes_decode_as_session_server():
+    raw_engine = MagicMock()
+    raw_engine.initialize.return_value = 0
+    manager = GlobalMemfabricTE()
+    manager.configure(role=MEMFABRIC_ROLE_PREFILL, device_id=0, store_server_role=MEMFABRIC_ROLE_DECODE)
+    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
+        manager.get_transfer_engine("127.0.0.1")
+    assert raw_engine.initialize.call_args.kwargs["store_server_role"] == MEMFABRIC_ROLE_DECODE
 
 
 def test_memfabric_engine_is_bound_to_initial_hostname():
