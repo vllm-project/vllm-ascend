@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import subprocess
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
 
 
 _STATIC_KERNEL_SHUTDOWN_TIMEOUT = timedelta(seconds=3)
+_NPU_SMI_TIMEOUT_SECONDS = timedelta(seconds=10).total_seconds()
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -1373,29 +1375,62 @@ class NPUWorker(GPUWorker):
         self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
-        import subprocess
-
         logger.debug("check_health starting for rank %s...", self.local_rank)
+        card_id, reason = resolve_card_id_for_health(self.device.index)
+        if card_id is None:
+            logger.warning("Skipping NPU health query for rank %s: %s", self.local_rank, reason)
+            return
         try:
             result = subprocess.run(
-                ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
+                ["npu-smi", "info", "-i", str(card_id), "-t", "health"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_NPU_SMI_TIMEOUT_SECONDS,
             )
 
             if result.returncode == 0:
                 parse_text_output(result.stdout)
-                logger.debug("check_health success for rank %s.", self.local_rank)
+                logger.debug("check_health success for rank %s, NPU card %s.", self.local_rank, card_id)
             else:
-                logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
+                logger.warning(
+                    "query NPU card %s for rank %s fail (return_code=%s): %s",
+                    card_id,
+                    self.local_rank,
+                    result.returncode,
+                    result.stderr,
+                )
         except subprocess.TimeoutExpired:
-            logger.warning("query NPU card %s timeout.", self.local_rank)
+            logger.warning("query NPU card %s for rank %s timeout.", card_id, self.local_rank)
         except FileNotFoundError:
-            logger.warning("npu-smi tool not found.")
+            logger.warning("npu-smi tool not found for rank %s, NPU card %s.", self.local_rank, card_id)
         except Exception as e:
-            logger.error("query NPU card %s fail: %s", self.local_rank, e)
+            logger.error("query NPU card %s for rank %s fail: %s", card_id, self.local_rank, e)
         return
+
+
+def resolve_card_id_for_health(visible_device_id: int) -> tuple[int | None, str | None]:
+    """Map the bound device's chip Phy-ID to the card ID used by npu-smi."""
+    try:
+        chip_phy_id = current_platform.visible_device_id_to_physical_device_id(visible_device_id)
+        result = subprocess.run(
+            ["npu-smi", "info", "-m"],
+            capture_output=True,
+            text=True,
+            timeout=_NPU_SMI_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            return None, f"npu-smi mapping failed (return_code={result.returncode}): {result.stderr or result.stdout}"
+        rows = [line for line in result.stdout.splitlines() if line.strip()]
+        header = [column.strip() for column in rows[0].split("  ") if column.strip()]
+        card_idx = header.index("NPU ID")
+        phy_idx = header.index("Chip Phy-ID")
+        for row in rows[1:]:
+            parts = row.split()
+            if len(parts) > max(card_idx, phy_idx) and parts[phy_idx] == str(chip_phy_id) and parts[card_idx].isdigit():
+                return int(parts[card_idx]), None
+        return None, f"No npu-smi card mapping for chip Phy-ID {chip_phy_id}"
+    except Exception as exc:
+        return None, f"Cannot resolve NPU card: {exc}"
 
 
 def parse_text_output(output) -> None:

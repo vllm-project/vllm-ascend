@@ -1,0 +1,8 @@
+pr: 23272
+entries:
+  - category: bugfix
+    text: >-
+      Fixed worker health checks querying the wrong NPU card on multi-chip
+      hosts and with `ASCEND_RT_VISIBLE_DEVICES` remapping. When the bound
+      device cannot be mapped to a card, the check logs a warning and skips
+      the query instead of checking a guessed card.
