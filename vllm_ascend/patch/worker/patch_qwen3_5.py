@@ -256,7 +256,13 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states = sp_reduce_scatter(hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        else:
+            hidden_states, residual = self.post_attention_layernorm.forward_fused(
+                hidden_states, residual, self.mlp.gate_up_proj, use_sp, False,
+            )
+
         if use_sp:
             if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
                 hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
