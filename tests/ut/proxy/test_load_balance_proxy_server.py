@@ -671,10 +671,17 @@ def test_worker_connections_restart_and_shutdown(tmp_path, shared_listener):
     script = tmp_path / "probe.py"
     script.write_text(
         "import os, sys, signal, threading, time\n"
+        "from contextlib import asynccontextmanager\n"
         "from pathlib import Path\n"
         "from fastapi import FastAPI\n"
         "import load_balance_proxy_server_example as proxy\n"
-        "app = FastAPI()\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app):\n"
+        "    ready = Path(sys.argv[4]) / str(os.getpid())\n"
+        "    ready.touch()\n"
+        "    try: yield\n"
+        "    finally: ready.unlink()\n"
+        "app = FastAPI(lifespan=lifespan)\n"
         "@app.get('/')\n"
         "def pid(): return {'pid': os.getpid()}\n"
         "def create_app(): return app\n"
@@ -691,7 +698,16 @@ def test_worker_connections_restart_and_shutdown(tmp_path, shared_listener):
         available.bind(("127.0.0.1", 0))
         port = available.getsockname()[1]
     stop_file = tmp_path / "stop"
-    command = [sys.executable, str(script), str(port), str(stop_file), "shared" if shared_listener else "auto"]
+    ready_dir = tmp_path / "ready"
+    ready_dir.mkdir()
+    command = [
+        sys.executable,
+        str(script),
+        str(port),
+        str(stop_file),
+        "shared" if shared_listener else "auto",
+        str(ready_dir),
+    ]
 
     def request_pid():
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
@@ -714,13 +730,18 @@ def test_worker_connections_restart_and_shutdown(tmp_path, shared_listener):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         children = []
+
+        def started_workers():
+            # Shared-socket scheduling need not send requests to every worker.
+            child_pids = {child.pid for child in psutil.Process(proc.pid).children(recursive=True)}
+            return {int(path.name) for path in ready_dir.iterdir()} & child_pids
+
         try:
             deadline = time.monotonic() + 30
             workers: set[int] = set()
             while len(workers) != 4 and time.monotonic() < deadline:
                 assert proc.poll() is None, log_path.read_text()
-                with contextlib.suppress(OSError, http.client.HTTPException):
-                    workers.add(request_pid())
+                workers = started_workers()
                 time.sleep(0.05)
             assert len(workers) == 4, log_path.read_text()
             served_workers = {request_pid() for _ in range(200)}
@@ -732,13 +753,13 @@ def test_worker_connections_restart_and_shutdown(tmp_path, shared_listener):
             deadline = time.monotonic() + 30
             replacement = None
             while time.monotonic() < deadline:
-                with contextlib.suppress(OSError, http.client.HTTPException):
-                    pid = request_pid()
-                    if pid not in workers:
-                        replacement = pid
-                        break
+                current_workers = started_workers()
+                if len(current_workers) == 4 and killed not in current_workers and current_workers - workers:
+                    replacement = next(iter(current_workers - workers))
+                    break
                 time.sleep(0.1)
             assert replacement is not None, log_path.read_text()
+            assert request_pid() in current_workers
             children = psutil.Process(proc.pid).children(recursive=True)
             stop_file.touch()
             proc.wait(timeout=15)
