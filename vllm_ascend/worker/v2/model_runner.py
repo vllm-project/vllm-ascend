@@ -75,6 +75,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
+from vllm_ascend.attention.host_seq_lens import backend_needs_exact_host_seq_lens
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
@@ -298,6 +299,9 @@ class NPUModelRunner(GPUModelRunner):
         # The authoritative host state is the shared NumPy/torch RequestState view.
         self.num_computed_tokens_event = torch.npu.Event()
         self.num_computed_tokens_stream = torch.npu.Stream()
+        # Conservative until initialize_spec_cpu_length_sync() flips it once
+        # the target and draft backends exist.
+        self._legacy_exact_host_seq_lens = True
         self.num_computed_tokens_cpu = torch.empty(
             self.max_num_reqs,
             dtype=torch.int32,
@@ -1403,6 +1407,35 @@ class NPUModelRunner(GPUModelRunner):
             for backend in draft_backends
         )
 
+        self._legacy_exact_host_seq_lens = self._detect_legacy_exact_host_seq_lens()
+
+    def _detect_legacy_exact_host_seq_lens(self) -> bool:
+        """Decide once, after attention setup, whether the exact-host seq-lens
+        mirror must stay synchronized for this execution.
+
+        The default is device-native (skip the mirror); only these guards and
+        a registered legacy backend force the sync path.
+        """
+        if self.sync_spec_pp_cpu_counts:
+            return True
+        parallel_config = self.parallel_config
+        # PCP consumes the NumPy view of the CPU mirror; DCP drafts consume
+        # target host lengths.
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            return True
+        if self.ascend_config.force_exact_host_seq_lens:
+            return True
+
+        scanned = [group.backend for groups in self.attn_groups for group in groups]
+        scanned.extend(group.backend for groups in getattr(self.speculator, "attn_groups", []) for group in groups)
+        scanned.extend(getattr(self.speculator, "attn_backends", {}).values())
+        legacy = sorted({backend.__name__ for backend in scanned if backend_needs_exact_host_seq_lens(backend)})
+        if legacy:
+            logger.info("Spec CPU length sync kept on (legacy consumers: %s)", legacy)
+        else:
+            logger.info("Spec CPU length sync skipped: target and draft backends are device-native.")
+        return bool(legacy)
+
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
@@ -1565,6 +1598,9 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
+        # Device-native stacks keep lengths on device; no snapshot to stage.
+        if not self._legacy_exact_host_seq_lens:
+            return
         if self._can_skip_spec_cpu_length_sync():
             return
 
@@ -1589,7 +1625,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
+        if (
+            (self.speculator is not None or self.sync_spec_pp_cpu_counts)
+            and self._legacy_exact_host_seq_lens
+            and not self._can_skip_spec_cpu_length_sync()
+        ):
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
