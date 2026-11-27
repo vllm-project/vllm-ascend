@@ -106,6 +106,18 @@ PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 768
 PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
 
+def _quantize_flashmla_query(q_nope, q_rope, kv_descale):
+    # The cache stores RoPE at unit scale. Compensate before computing one
+    # dynamic scale per token/head across all latent and positional channels.
+    q_rope = (q_rope.float() / kv_descale).to(q_nope.dtype)
+    return torch_npu.npu_dynamic_quant(torch.cat((q_nope, q_rope), dim=-1), dst_type=torch.float8_e4m3fn)
+
+
+def _quantize_flashmla_kv_rows(pages, num_tokens, scale):
+    rows = pages.flatten(0, 1)[:num_tokens]
+    return torch_npu.npu_quantize(rows.flatten(1).float(), scale, None, torch.float8_e4m3fn, -1, False).view_as(rows)
+
+
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -993,6 +1005,7 @@ class DecodeMLAPreprocessResult(NamedTuple):
     dequant_scale_q_nope: torch.Tensor | None = None
     current_k_nope: torch.Tensor | None = None
     current_k_pe: torch.Tensor | None = None
+    packed_query: torch.Tensor | None = None
 
 
 class PrefillMLAPreprocessResult(NamedTuple):
@@ -1177,6 +1190,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_a3_mla_sink = self.a3_mla_adapter is not None
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._quant_flashmla_prolog_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def _supports_flashmla(self, supported_q_heads: frozenset[int]) -> bool:
         return (
@@ -1358,6 +1372,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._prepare_strided_kv_workspace()
         if self.use_flashmla and (self.supports_prolog_v3_writer() or (self.use_quant_flashmla and self.use_mla_rope)):
             self._prepare_flashmla_writer_buffers()
+            if self.use_quant_flashmla and self._quant_flashmla_prolog_workspace is None:
+                self._prepare_quant_flashmla_prolog_workspace()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
         """Keep a bounded dense PROLOG workspace alive across graph replay."""
@@ -1405,6 +1421,37 @@ class AscendMLAImpl(MLAAttentionImpl):
         nope, rope, indices = buffers
         num_blocks = cdiv(num_tokens, nope.shape[1])
         return (nope[:num_blocks], rope[:num_blocks]), indices[:num_tokens], True
+
+    def _prepare_quant_flashmla_prolog_workspace(self) -> None:
+        """Prepare dense BF16 staging for native-weight C8 decode."""
+        if (
+            self.dcp_q_replicate_enabled
+            or self.is_pcp_decode_sharded
+            or not self._mlapo_uses_native_weights
+            or not self._supports_prolog_v3_ops()
+            or not self._supports_prolog_v3_input_size()
+            or not isinstance(get_offloader(), NoopOffloader)
+            or not hasattr(torch_npu, "npu_quantize")
+        ):
+            return
+        assert self.fused_qkv_a_proj is not None
+        if self.fused_qkv_a_proj.weight.dtype != torch.bfloat16 or self.q_proj.weight.dtype != torch.bfloat16:
+            return
+
+        assert self.speculative_config is not None
+        assert self._flashmla_writer_buffers is not None
+        nope, rope, indices = self._flashmla_writer_buffers
+        capacity = min(
+            indices.numel(),
+            self.vllm_config.scheduler_config.max_num_seqs * (1 + self.speculative_config.num_speculative_tokens),
+        )
+        blocks = cdiv(capacity, nope.shape[1])
+        self._prepare_prolog_v3_weights()
+        self._quant_flashmla_prolog_workspace = (
+            torch.empty_like(nope[:blocks], dtype=torch.bfloat16),
+            torch.empty_like(rope[:blocks], dtype=torch.bfloat16),
+            indices[:capacity],
+        )
 
     def _prepare_prolog_v3_weights_after_loading(self) -> None:
         """Create persistent writer projections inside the loader memory profile."""
@@ -1992,6 +2039,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         """
         return self.dtype == torch.bfloat16
 
+    def _supports_prolog_v3_ops(self) -> bool:
+        return (
+            hasattr(torch_npu, "npu_mla_prolog_v3")
+            and self.supports_prolog_v3_projection()
+            and not getattr(self, "qkv_a_gate_fused", False)
+            and not getattr(self.q_proj, "_chunk_size", 0)
+        )
+
+    def _supports_prolog_v3_input_size(self) -> bool:
+        return getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
+
     def _supports_strided_mla_projection(self) -> bool:
         """Shared projection, dtype and quantization requirements for MLA writers."""
         return (
@@ -2000,18 +2058,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.supports_prolog_v3_dtype()
             and not self.fa_quant_layer
             and not self.enable_kv_nz
-            and hasattr(torch_npu, "npu_mla_prolog_v3")
-            and self.supports_prolog_v3_projection()
+            and self._supports_prolog_v3_ops()
             and self.supports_prolog_v3_quantization()
-            and not getattr(self, "qkv_a_gate_fused", False)
-            and not getattr(self.q_proj, "_chunk_size", 0)
         )
 
     def supports_prolog_v3_writer(self) -> bool:
         """Check the actual A-projection width, including Eagle3's concatenation."""
-        return self._supports_strided_mla_projection() and (
-            getattr(self.fused_qkv_a_proj, "input_size", None) in PROLOG_V3_SUPPORTED_INPUT_SIZES
-        )
+        return self._supports_strided_mla_projection() and self._supports_prolog_v3_input_size()
 
     def _uses_strided_kv_adapter(self) -> bool:
         """A5 drafts with unsupported He retain their strided cache via scatter.
@@ -2452,6 +2505,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         *,
         quantize_query: bool,
+        quantize_kv: bool | None = None,
     ):
         if cos is None or sin is None:
             raise RuntimeError("PROLOG_V3 MLA preprocessing requires cos/sin tables.")
@@ -2462,6 +2516,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         rope_sin = self._flatten_prolog_rope_table(sin, num_tokens)
         rope_cos = self._flatten_prolog_rope_table(cos, num_tokens)
         writer_cache, writer_slots, scatter_history = self._prolog_v3_writer_workspace(num_tokens, kv_cache, slots)
+        if quantize_kv is None:
+            quantize_kv = self.fa_quant_layer
         outputs = torch_npu.npu_mla_prolog_v3(
             token_x=token_x,
             weight_dq=weights["weight_dq"],
@@ -2480,14 +2536,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_mode="PA_BSND",
             query_norm_flag=False,
             query_quant_mode=1 if (quantize_query and self.fa_quant_layer) else 0,
-            kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
+            kv_cache_quant_mode=int(quantize_kv),
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
             # PROLOG quantization tiles are independent of KV cache page size.
             tile_size=128,
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
-                if self.fa_quant_layer
+                if quantize_kv
                 else None
             ),
             **branch,
@@ -2505,6 +2561,69 @@ class AscendMLAImpl(MLAAttentionImpl):
                 slot_mapping=slots,
             )
         return outputs
+
+    def _unpack_prolog_decode_q(self, q_nope, q_rope, num_tokens):
+        heads = self._prolog_v3_weights["num_heads"]
+        q_nope = q_nope.view(num_tokens, heads, self.kv_lora_rank)
+        q_rope = q_rope.view(num_tokens, heads, self.qk_rope_head_dim)
+        if heads > self.num_heads:
+            q_nope = q_nope[:, : self.num_heads]
+            q_rope = q_rope[:, : self.num_heads]
+        return q_nope, q_rope
+
+    def _preprocess_quant_flashmla_with_prolog(self, hidden_states, kv_cache, attn_metadata, workspace):
+        """Fuse the BF16 projection and RoPE, then encode the Q and KV for C8."""
+        scales = self._quant_flashmla_writer_scales
+        assert scales is not None
+        assert self.layer_name is not None
+        self._validate_mla_cache_layout(kv_cache)
+        wait_for_kv_layer_from_connector(self.layer_name)
+        if self.layerwise_kv_cache_hook is not None:
+            self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
+
+        num_tokens = attn_metadata.num_decode_tokens
+        nope, rope, slots = workspace
+        pages = cdiv(num_tokens, nope.shape[1])
+        q_nope, q_rope, *_ = self._run_prolog_v3(
+            hidden_states[:num_tokens],
+            attn_metadata.decode.cos,
+            attn_metadata.decode.sin,
+            (nope[:pages], rope[:pages]),
+            slots[:num_tokens],
+            quantize_query=False,
+            quantize_kv=False,
+        )
+        q_nope, q_rope = self._unpack_prolog_decode_q(q_nope, q_rope, num_tokens)
+        if self.use_dcp:
+            # Gather the rotated heads before quantization so each history head
+            # and its descale follow the same ordering as the split DCP attention.
+            q_nope, q_rope = self.reorg_decode_q(q_nope, q_rope)
+        packed_query, q_descale = _quantize_flashmla_query(q_nope, q_rope, self.fak_descale_float)
+
+        # PROLOG already normalized and rotated the BF16 KV in staging.
+        rope_scale, latent_scale = scales
+        current_nope = _quantize_flashmla_kv_rows(nope, num_tokens, latent_scale)
+        current_rope = _quantize_flashmla_kv_rows(rope, num_tokens, rope_scale)
+        DeviceOperator.reshape_and_cache(
+            key=current_nope,
+            value=current_rope,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=attn_metadata.external_flashmla.slots,
+        )
+        notify_kv_cache_written(self.layer_name)
+        if self.use_dcp:
+            # The history cache only owns this rank's slots. Causal current
+            # attention consumes the entire quantized chunk, including non-owned rows.
+            q_nope, q_rope = packed_query.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
+            return DecodeMLAPreprocessResult(
+                ql_nope=q_nope,
+                q_pe=q_rope,
+                dequant_scale_q_nope=q_descale,
+                current_k_nope=current_nope,
+                current_k_pe=current_rope,
+            )
+        return DecodeMLAPreprocessResult(packed_query=packed_query, dequant_scale_q_nope=q_descale)
 
     @staticmethod
     def _gather_current_kv_from_cache(
@@ -2591,12 +2710,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 quantize_query=True,
             )
             decode_q_nope, decode_q_pe, decode_dequant_scale = prolog_outputs[:3]
-            prolog_num_heads = self._prolog_v3_weights["num_heads"]
-            decode_q_nope = decode_q_nope.view(num_decode_tokens, prolog_num_heads, self.kv_lora_rank)
-            decode_q_pe = decode_q_pe.view(num_decode_tokens, prolog_num_heads, self.qk_rope_head_dim)
-            if prolog_num_heads > self.num_heads:
-                decode_q_nope = decode_q_nope[:, : self.num_heads]
-                decode_q_pe = decode_q_pe[:, : self.num_heads]
+            decode_q_nope, decode_q_pe = self._unpack_prolog_decode_q(decode_q_nope, decode_q_pe, num_decode_tokens)
             decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
             if decode_requires_current_kv:
                 DeviceOperator.reshape_and_cache(
@@ -3091,24 +3205,29 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
+        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+        quant_kwargs = {}
         if getattr(self, "use_a3_mla_sink", False):
             query = (preprocessed.ql_nope, preprocessed.q_pe)
             output_kwargs = {"output_mask": flash.output_mask, "return_softmax_lse": False}
         else:
             output_kwargs = {}
-            flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-            flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
-            query = flash.query
+            packed_query = getattr(preprocessed, "packed_query", None)
+            if packed_query is None:
+                # Pack separate NoPE and RoPE outputs into the retained TND buffer.
+                packed_query = flash.query
+                packed_query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+                packed_query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+            if self.use_quant_flashmla:
+                q_descale = preprocessed.dequant_scale_q_nope
+                if q_descale is None:
+                    raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")
+                quant_kwargs = {
+                    "q_descale": q_descale.view(packed_query.shape[0], self.num_heads),
+                    "k_descale": self.fak_descale_float.view(1),
+                }
+            query = packed_query
         record_attention_compute_start()
-        quant_kwargs = {}
-        if self.use_quant_flashmla:
-            q_descale = preprocessed.dequant_scale_q_nope
-            if q_descale is None:
-                raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")
-            quant_kwargs = {
-                "q_descale": q_descale.view(flash.query.shape[0], self.num_heads),
-                "k_descale": self.fak_descale_float.view(1),
-            }
         latent, _ = flash.adapter.attention(
             query,
             fused_cache,
@@ -3320,12 +3439,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         dequant_scale_q_nope = None
         if self.fa_quant_layer and self.support_fp8_attention:
             if self.use_quant_flashmla:
-                # QuantFlashMLA applies one descale to all 576 query channels.
-                joint_query = torch.cat(
-                    (decode_ql_nope.float(), decode_q_pe.float() / self.fak_descale_float), dim=-1
-                ).to(decode_ql_nope.dtype)
-                joint_query, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
-                    joint_query, dst_type=torch.float8_e4m3fn
+                joint_query, dequant_scale_q_nope = _quantize_flashmla_query(
+                    decode_ql_nope, decode_q_pe, self.fak_descale_float
                 )
                 decode_ql_nope, decode_q_pe = joint_query.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
             else:
@@ -3556,7 +3671,21 @@ class AscendMLAImpl(MLAAttentionImpl):
             and not self.enable_kv_nz
             and attn_metadata.num_decode_tokens > 0
         )
-        if use_prolog_v3_strided_cache:
+        quant_prolog_workspace = getattr(self, "_quant_flashmla_prolog_workspace", None)
+        if (
+            quant_prolog_workspace is not None
+            and fused_mla_cache
+            and attn_metadata.external_flashmla is not None
+            and (not decode_requires_current_kv or self.use_dcp)
+            and attn_metadata.num_prefills == 0
+            and 0 < num_decode_tokens <= quant_prolog_workspace[2].numel()
+            and hidden_states.dtype == torch.bfloat16
+        ):
+            decode_preprocess_res = self._preprocess_quant_flashmla_with_prolog(
+                hidden_states, kv_cache, attn_metadata, quant_prolog_workspace
+            )
+            prefill_preprocess_res = None
+        elif use_prolog_v3_strided_cache:
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_prolog_v3(
                 hidden_states, kv_cache, attn_metadata
             )

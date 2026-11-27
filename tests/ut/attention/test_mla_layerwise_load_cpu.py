@@ -188,7 +188,7 @@ def make_forward(path, batch, wait):
         _forward_prefill=lambda *_args: torch.ones(prefill_tokens, 2),
         o_proj=lambda x, **_kwargs: (x,),
     )
-    for name in ("forward", "_mla_preprocess", "mla_preprocess_prolog_v3"):
+    for name in ("forward", "_mla_preprocess", "mla_preprocess_prolog_v3", "_unpack_prolog_decode_q"):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
     return impl, metadata, cache, writes, scope
 
