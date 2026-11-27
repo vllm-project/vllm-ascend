@@ -640,11 +640,16 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -657,6 +662,7 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
     export HCCL_BUFFSIZE=8192
+    export HCCL_BUFFSIZE_EP=4096
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -690,11 +696,15 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -706,7 +716,7 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
-    export HCCL_BUFFSIZE=512
+    export HCCL_BUFFSIZE=1024
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -716,6 +726,7 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
+        --data-parallel-address "${local_ip}" \
         --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -799,7 +810,10 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -814,6 +828,7 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -865,7 +880,10 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -879,6 +897,7 @@ For 950DT products, basic PD, the image-and-text 10k case, and the long-context 
     export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+    unset VLLM_USE_FASTOKENS
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800

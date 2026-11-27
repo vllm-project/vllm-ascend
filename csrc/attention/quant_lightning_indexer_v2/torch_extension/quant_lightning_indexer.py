@@ -19,11 +19,7 @@ QLI_METADATA_OP_NAME = "quant_lightning_indexer_metadata"
 
 
 def _arch22_score_is_fp32():
-    """910B/910_93(arch22) 的 score 输出为 FP32, 950(arch35) 为 BF16。
-
-    Meta 实现要与 C++ 适配层的 score 分配 dtype 保持一致;
-    查不到芯片型号时按 arch22 处理 (score 输出主要用于 DCP 跨 rank 归并)。
-    """
+    """Use FP32 for A3 local candidates (return_value=2); A5 keeps BF16."""
     try:
         import torch_npu  # noqa: F401
 
@@ -148,17 +144,17 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
                     device="meta",
                 )
             if return_value:
-                value_dtype = torch.float32 if _arch22_score_is_fp32() else torch.bfloat16
+                score_dtype = torch.float32 if return_value == 2 and _arch22_score_is_fp32() else torch.bfloat16
                 if layout_q == "BSND":
                     sparse_values_out = torch.empty(
                         [query.shape[0], query.shape[1], key_head_num, topk],
-                        dtype=value_dtype,
+                        dtype=score_dtype,
                         device="meta",
                     )
                 else:
                     sparse_values_out = torch.empty(
                         [query.shape[0], key_head_num, topk],
-                        dtype=value_dtype,
+                        dtype=score_dtype,
                         device="meta",
                     )
             else:
