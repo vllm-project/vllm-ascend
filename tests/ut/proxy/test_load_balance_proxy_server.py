@@ -228,7 +228,7 @@ def _create_mock_backend_app():
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
     async def handle(req: Request):
-        received_requests.append({"body": await req.json(), "grid_header": req.headers.get("x-pd-image-grid")})
+        received_requests.append({"body": await req.json()})
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -382,7 +382,7 @@ def test_image_grids_preserve_order_and_raw_prefill(proxy_server):
     assert status == 200 and b"answer" in body
     prefill = _received(MOCK_PREFILL_PORT)[0]
     assert prefill["body"]["messages"] == original["messages"]
-    assert prefill["grid_header"] == "1"
+    assert prefill["body"]["kv_transfer_params"]["return_image_grids"] is True
     decode = _received(MOCK_DECODE_PORT)[0]["body"]
     assert decode["kv_transfer_params"] == {"do_remote_prefill": True}
     assert decode["messages"][0]["content"][0] == original["messages"][0]["content"][0]

@@ -1,68 +1,77 @@
 # Forwarding image grids to decode
 
-The load-balancing proxy can replace image URLs with image-grid metadata
-returned by a compatible prefill server. This avoids loading and preprocessing
-the original images again on the decode server.
+The load-balancing proxy can replace original image URLs with processed image
+grids returned by the Mooncake KV connector. Decode then constructs multimodal
+placeholders from the grids, avoiding repeated image decoding and pixel
+preprocessing.
 
-The current integration targets requests served as `qwen3.6-35b`, using the
-Qwen3-VL image processor and a KV consumer that accepts `image_embeds` with
-`image_grid_thw` and omitted embedding tensors. The model-name restriction
-matches the validated deployment. Other served names use the original payload.
+The current proxy integration targets requests served as `qwen3.6-35b`, using
+the Qwen3-VL image processor. The decode KV consumer must accept
+`image_embeds` with `image_grid_thw` and omitted embedding tensors. Other
+served names use the original payload.
 
-## Prefill dependency
+## Deployment
 
-The companion [vLLM patch](patches/pd_image_grid.patch) contains the prefill
-implementation used for validation with vLLM revision
-`4ba787ec9959e566d3b587a796dff07673324da5`. Apply it to a compatible vLLM
-source checkout and restart the prefill server. Review the patch context when
-using another revision.
+Update vllm-ascend on the prefill instance and restart prefill and the proxy.
+The implementation uses vLLM's existing connector completion callback and
+`kv_transfer_params` response field. The vLLM source files need no edits.
 
-```bash
-git -C /path/to/vllm apply --check /path/to/vllm-ascend/examples/disaggregated_prefill_v1/patches/pd_image_grid.patch
-git -C /path/to/vllm apply /path/to/vllm-ascend/examples/disaggregated_prefill_v1/patches/pd_image_grid.patch
-```
+This requires a vLLM version with metadata-only image embedding support on
+KV consumers. The frontend capability was validated with vLLM revision
+`4ba787ec9959e566d3b587a796dff07673324da5`. Check that capability before using
+older versions.
 
-The proxy requests metadata with the internal `x-pd-image-grid: 1` header.
-A compatible prefill server adds `pd_image_grids` to its response's
-`kv_transfer_params`. Each item contains the processed image's hash and a
-three-element positive integer grid, in image order. The proxy removes this
-extension before forwarding KV parameters.
+The proxy sets `return_image_grids: true` in the prefill request's
+`kv_transfer_params`. On successful prefill completion, the Mooncake connector
+reads each image's `image_grid_thw` from `request.mm_features` and adds
+`pd_image_grids` to the returned KV metadata. Each entry contains the image
+hash and three positive integer grid dimensions, in feature order.
 
-The companion patch keeps an API-process-local bounded cache of 8192 grids to
-handle processor-cache hits that omit tensors. Entries are accessed
-synchronously on the API event loop and are lost on restart. If a needed grid
-has been evicted or cannot be obtained, the prefill response omits the hint.
+The engine's multimodal receiver cache restores cached input data before
+scheduling. The connector reads available CPU tensors directly at completion.
+Missing cache data, unresolved shared-memory handles, device tensors, and
+unsupported modalities cause the connector to omit the hint. Metadata belongs
+to the completed request and adds no connector-side cache.
 
-The proxy preserves the original request for prefill and recomputation.
-Missing or malformed metadata, mixed non-image media, and image-count
-mismatches use the original request. If the decode server rejects a rewritten
-request with HTTP 400, 422, 500, 502, or 503 before response streaming begins,
-the proxy performs one fresh prefill and retries decode with the original
-images.
-
-The companion vLLM interface and its long-term integration need upstream
-review. This proxy change alone takes the original-image path when its
-prefill server does not return the extension.
+The proxy validates grid count and dimensions, then creates the decode request.
+It preserves original messages for prefill and recomputation. Missing or
+malformed metadata and mixed non-image media use the original payload.
+If decode rejects a rewritten request with HTTP 400, 422, 500, 502, or 503
+before response streaming begins, the proxy performs one fresh prefill and
+retries decode with the original images.
 
 ## Validation
 
-The deployed prototype was tested on Ascend A5 with one TP1 prefill instance
-and one TP1 decode instance, using Qwen3.6 W8A8C8 and a 500-request multimodal
-workload averaging approximately 10K input tokens with 300 output tokens.
-Of those requests, 499 had identical prompt token IDs and image-placeholder
-ranges through the original-image and metadata paths. One AVIF image failed
-to decode in the environment in both cases.
+Connector tests cover both completion callbacks, metadata ordering, missing
+cache data, repeated reads of restored data, invalid dimensions, request opt-in,
+failed completion, and non-CPU tensor fallback. Proxy HTTP tests cover message
+ordering, original-message preservation, invalid metadata, and fresh prefill
+after a decode rejection.
 
-Excluding the first call and the failed request, isolated frontend rendering
-averaged 55.71 ms with original images and 6.08 ms with metadata. A full run
-at a fixed 300 ms dispatch interval changed output throughput from
-743.26 to 746.94 tokens/s and mean TTFT from 25.77 to 25.12 seconds.
-The throughput difference is small and comes from a single pair of runs.
-A3 and other models have not been measured.
-
-The HTTP tests cover metadata ordering, preserved prefill messages,
-malformed metadata fallback, and fresh prefill after a decode rejection.
+An isolated integration run also exercised the real renderer, input processor,
+and LRU receiver cache with 20 dataset requests repeated twice and a cache
+reset before request 11. All 40 comparisons matched prompt token IDs and
+image-placeholder ranges, including 265 image items restored from cache.
 
 ```bash
-python -m pytest --confcutdir=tests/ut/proxy tests/ut/proxy/test_load_balance_proxy_server.py
+python -m pytest --confcutdir=tests/ut/kv_offload/mooncake_v2 \
+  tests/ut/kv_offload/mooncake_v2/test_image_grid.py
+python -m pytest --confcutdir=tests/ut/proxy \
+  tests/ut/proxy/test_load_balance_proxy_server.py
 ```
+
+The earlier frontend prototype was evaluated on Ascend A5 with one TP1 prefill
+instance and one TP1 decode instance using Qwen3.6 W8A8C8. All 499 decodable
+requests from a 500-request multimodal dataset produced identical prompt
+token IDs and image-placeholder ranges through the original-image and
+metadata paths. One AVIF request failed decoding in both paths.
+
+Excluding the first call and failed request, isolated frontend rendering
+averaged 55.71 ms with original images and 6.08 ms with metadata. A full run at
+a fixed 300 ms dispatch interval changed output throughput from 743.26 to
+746.94 tokens/s and mean TTFT from 25.77 to 25.12 seconds.
+
+Those measurements used frontend metadata extraction. The Connector
+implementation requires a new end-to-end hardware run before claiming the
+same performance. A3, other models and other deployment modes have not been
+hardware-validated for this change.

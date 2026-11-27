@@ -901,6 +901,7 @@ def decode_payload(req_data: dict, image_grids: list | None) -> dict:
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
+        "return_image_grids": True,
         "do_remote_decode": True,
         "do_remote_prefill": False,
         "remote_engine_id": None,
@@ -926,7 +927,7 @@ async def send_request_to_service(
     base_delay: float = 0.2,
 ):
     req_data = build_prefill_request(req_data)
-    headers = {**auth_headers(request_id), "x-pd-image-grid": "1"}
+    headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:

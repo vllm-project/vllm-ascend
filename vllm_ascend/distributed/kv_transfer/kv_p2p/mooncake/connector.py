@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.image_grid import get_image_grids
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
 )
@@ -145,8 +146,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, (block_ids,))
+        return self.request_finished_all_groups(request, (block_ids,))
 
     def request_finished_all_groups(
         self,
@@ -154,7 +154,13 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        delay_free_blocks, metadata = self.connector_scheduler.request_finished(request, block_ids)
+        params = request.kv_transfer_params or {}
+        if metadata and params.get("do_remote_decode") and params.get("return_image_grids") is True:
+            grids = get_image_grids(request)
+            if grids:
+                metadata = {**metadata, "pd_image_grids": grids}
+        return delay_free_blocks, metadata
 
     def set_xfer_handshake_metadata(
         self,
