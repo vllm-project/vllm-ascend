@@ -246,13 +246,16 @@ class CaMemAllocator(CuMemAllocator):
 
     def _put_to_sleep(self, ptr: int, data: AllocationData, offload: bool) -> None:
         if offload:
-            if data.cpu_backup_tensor is None:
-                data.cpu_backup_tensor = self._create_cpu_backup(data.handle[1])
             size_in_bytes = data.handle[1]
-            cpu_ptr = data.cpu_backup_tensor.data_ptr()
+            backup = data.cpu_backup_tensor
+            if backup is None:
+                backup = self._create_cpu_backup(size_in_bytes)
+            cpu_ptr = backup.data_ptr()
             ACL_MEMCPY_DEVICE_TO_HOST = 2
-            dest_max = cpu_ptr + size_in_bytes * 2
-            memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+            ret = memcpy(cpu_ptr, size_in_bytes, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+            if ret != 0:
+                raise RuntimeError(f"ACL device-to-host memcpy failed with error code {ret}")
+            data.cpu_backup_tensor = backup
         elif data.cpu_backup_tensor is not None:
             self._release_cpu_backup(data.cpu_backup_tensor)
             data.cpu_backup_tensor = None
@@ -275,13 +278,15 @@ class CaMemAllocator(CuMemAllocator):
             if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 handle = data.handle
                 create_and_map(handle)
-                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     size_in_bytes = handle[1]
                     cpu_ptr = data.cpu_backup_tensor.data_ptr()
                     ACL_MEMCPY_HOST_TO_DEVICE = 1
-                    dest_max = ptr + size_in_bytes * 2
-                    memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                    ret = memcpy(ptr, size_in_bytes, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                    if ret != 0:
+                        unmap_and_release(handle)
+                        raise RuntimeError(f"ACL host-to-device memcpy failed with error code {ret}")
+                data.is_asleep = False
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
