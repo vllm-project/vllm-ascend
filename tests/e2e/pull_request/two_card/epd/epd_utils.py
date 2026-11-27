@@ -65,11 +65,6 @@ def snapshot_ec_files(shared_storage_path: str) -> set[Path]:
     return set(root.glob(f"**/{EC_FILE_GLOB}"))
 
 
-def count_ec_files(shared_storage_path: str) -> int:
-    """Return the number of EC cache files currently stored on disk."""
-    return len(snapshot_ec_files(shared_storage_path))
-
-
 def assert_ec_files(
     shared_storage_path: str,
     before: set[Path],
@@ -291,11 +286,16 @@ def post_chat(
 ) -> str:
     """POST one chat-completions payload and return the generated text."""
     response = post_chat_request(url, payload, request_id=request_id, timeout=timeout)
-    body = response.json()
+    assert response.status_code == 200, f"chat completion from {url} returned {response.status_code}: {response.text}"
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise AssertionError(f"chat completion from {url} returned a non-JSON body: {response.text!r}") from exc
+    assert isinstance(body, dict), f"chat completion from {url} returned {type(body).__name__}: {body!r}"
     choices = body.get("choices") or []
-    assert choices, f"no choices in response from {url}: status={response.status_code} body={body!r}"
+    assert choices, f"no choices in response from {url}: body={body!r}"
     content = (choices[0].get("message") or {}).get("content") or ""
-    assert content, f"empty completion from {url}: status={response.status_code} body={body!r}"
+    assert content, f"empty completion from {url}: body={body!r}"
     return content
 
 
@@ -312,19 +312,15 @@ def assert_outputs_equal(actual: str, expected: str, context: str = "") -> None:
 def collect_baseline(
     payloads: list[dict[str, Any]],
     model: str = MODEL,
-    env_dict: dict[str, str] | None = None,
 ) -> list[str]:
     """Serve the model on a single instance and collect the non-EPD outputs."""
     port = get_open_port()
-    env = {"ASCEND_RT_VISIBLE_DEVICES": "0"}
-    if env_dict is not None:
-        env.update(env_dict)
     with RemoteOpenAIServer(
         model,
         baseline_server_args(port),
         server_port=port,
         auto_port=False,
-        env_dict=env,
+        env_dict={"ASCEND_RT_VISIBLE_DEVICES": "0"},
     ):
         url = chat_completions_url(port)
         return [post_chat(url, payload) for payload in payloads]
@@ -359,7 +355,6 @@ def epd_pair(
     shared_storage_path: str,
     mm_limit: int = 2,
     model: str = MODEL,
-    env_dict: dict[str, str] | None = None,
 ) -> Iterator[EpdCluster]:
     """Start E + PD instances and the reference proxy; always clean them up."""
     clean_shared_storage(shared_storage_path)
@@ -371,11 +366,8 @@ def epd_pair(
         pd_server_args(model, decode_port, shared_storage_path, mm_limit=mm_limit),
     ]
     with (
-        RemoteEPDServer(vllm_serve_args=server_args, env_dict=env_dict) as servers,
-        DisaggEpdProxy(
-            proxy_args=reference_proxy_args(encode_port, decode_port, proxy_port),
-            env_dict=env_dict,
-        ) as proxy,
+        RemoteEPDServer(vllm_serve_args=server_args) as servers,
+        DisaggEpdProxy(proxy_args=reference_proxy_args(encode_port, decode_port, proxy_port)) as proxy,
     ):
         yield EpdCluster(
             servers=servers,
