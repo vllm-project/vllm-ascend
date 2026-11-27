@@ -6,10 +6,31 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, _split_head_first_conv_output
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+
+
+def test_split_head_first_conv_output_returns_storage_views():
+    tokens, num_k_heads, num_v_heads, dim = 7, 2, 4, 16
+    output = torch.arange((2 * num_k_heads + num_v_heads) * tokens * dim).reshape(
+        2 * num_k_heads + num_v_heads, tokens, dim
+    )
+    expected = tuple(
+        part.transpose(0, 1).unsqueeze(0) for part in output.split((num_k_heads, num_k_heads, num_v_heads), dim=0)
+    )
+
+    actual = _split_head_first_conv_output(output, num_k_heads, num_v_heads)
+
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, want)
+        assert got.untyped_storage().data_ptr() == output.untyped_storage().data_ptr()
+
+
+def test_split_head_first_conv_output_rejects_wrong_head_count():
+    with pytest.raises(ValueError, match="Expected convolution output"):
+        _split_head_first_conv_output(torch.empty(7, 3, 4), 2, 4)
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
