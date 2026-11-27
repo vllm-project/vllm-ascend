@@ -18,25 +18,96 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable, MutableMapping
 from dataclasses import fields
+from functools import wraps
+from threading import RLock
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
 from vllm.distributed.parallel_state import _groups, get_world_group, init_model_parallel_group
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.device_allocator.graph_reuse import SleepGraphReuse, release_aclgraph_pool
+from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
 from vllm_ascend.utils import SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME
 
 
+def serialized_sleep_transition(method):
+    """Serialize control RPCs, including allocator and buffer restoration."""
+
+    @wraps(method)
+    def wrapped(worker, *args, **kwargs):
+        manager = getattr(worker, "sleep_wakeup_manager", None)
+        if not isinstance(manager, SleepWakeupManager) or manager.graph_reuse is None:
+            return method(worker, *args, **kwargs)
+        with manager.transition_lock:
+            try:
+                return method(worker, *args, **kwargs)
+            except Exception:
+                manager.graph_reuse.state = "ERROR"
+                raise
+
+    return wrapped
+
+
+def serialized_model_execution(method):
+    """Drain enqueued work before sleep and reject work during partial wake."""
+
+    @wraps(method)
+    def wrapped(worker, *args, **kwargs):
+        manager = getattr(worker, "sleep_wakeup_manager", None)
+        if not isinstance(manager, SleepWakeupManager) or manager.graph_reuse is None:
+            # Sleep pools also exist with reuse disabled. Do not instantiate
+            # an allocator for ordinary workers, but never continue inference
+            # after an existing pool's void deleter reported a terminal error.
+            allocator = CaMemAllocator.instance
+            if allocator is not None:
+                allocator._check_memory_state()
+            result = method(worker, *args, **kwargs)
+            if allocator is not None:
+                allocator._check_memory_state()
+            return result
+        with manager.transition_lock:
+            if manager.graph_reuse.state != "READY":
+                raise RuntimeError(f"Inference is unavailable during sleep graph state {manager.graph_reuse.state}")
+            try:
+                # A native void free callback reports terminal failures via a
+                # sticky query instead of unwinding through tensor destruction.
+                # No rank collective is added to the per-step hot path.
+                allocator = CaMemAllocator.get_instance()
+                allocator._check_memory_state()
+                result = method(worker, *args, **kwargs)
+                allocator._check_memory_state()
+                return result
+            except Exception:
+                manager.graph_reuse.state = "ERROR"
+                raise
+
+    return wrapped
+
+
 class SleepWakeupManager:
-    def __init__(self, vllm_config: VllmConfig, worker: Any, model_runner_getter: Callable[[], Any]):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        worker: Any,
+        model_runner_getter: Callable[[], Any],
+        *,
+        graph_reuse_enabled: bool = False,
+    ):
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
         self.hccl = HcclSleepWakeupManager(vllm_config, worker)
         self._model_runner_getter = model_runner_getter
+        self.transition_lock = RLock()
+        self.graph_reuse = SleepGraphReuse(vllm_config, model_runner_getter) if graph_reuse_enabled else None
+        self._communicators_need_wake = False
 
     @staticmethod
     def _measure_memory_released(cleanup: Callable[[], None]) -> int:
@@ -45,8 +116,42 @@ class SleepWakeupManager:
         free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
         return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
 
-    def sleep(self) -> None:
+    def _discard_sleep_graphs(self) -> None:
+        self.acl_graph.sleep()
+        if self.graph_reuse is not None:
+            gc.collect()
+            self.graph_reuse.resource_owners = ()
+        runner = self._model_runner_getter()
+        manager = getattr(runner, "cudagraph_manager", None)
+        if manager is not None:
+            manager.hidden_states = None
+            manager.aux_hidden_states = []
+            manager.sleep_reuse_capture_ready = False
+        release_aclgraph_pool(CaMemAllocator.get_instance())
+
+    def shutdown(self) -> None:
+        """Retire captured resources before the worker releases its tensors."""
+        if self.graph_reuse is not None:
+            self.graph_reuse.state = "CLOSED"
+            self.graph_reuse.signature = None
+        torch.npu.synchronize()
+        self._discard_sleep_graphs()
+
+    def sleep(
+        self, level: int = 1, *, backend: SleepModeBackend | None = None, cleanup_communicators: bool = True
+    ) -> None:
         model_runner = self._model_runner_getter()
+        if self.graph_reuse is not None:
+            if not isinstance(backend, CaMemBackend):
+                raise RuntimeError("ACL graph offload requires the CaMem sleep backend")
+            self._communicators_need_wake = False
+            groups = tuple(self.hccl.iter_alive_group_coordinators())
+            if not self.graph_reuse.prepare_sleep(level, groups):
+                self._discard_sleep_graphs()
+            if cleanup_communicators and not backend.preserves_communicators_for_sleep(self.graph_reuse):
+                self.hccl.sleep()
+                self._communicators_need_wake = True
+            return
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
         if model_runner.use_aclgraph:
             self.acl_graph.sleep()
@@ -58,7 +163,48 @@ class SleepWakeupManager:
             free_mem / GiB_bytes,
         )
 
+    def restore_graph_resources(
+        self, backend: SleepModeBackend, tags: list[str] | None, reregister_buffer: Callable[[], None]
+    ) -> None:
+        reuse = self.graph_reuse
+        assert reuse is not None
+        if not isinstance(backend, CaMemBackend):
+            raise RuntimeError("ACL graph offload requires the CaMem sleep backend")
+        restore_error = None
+        try:
+            backend.resume(tags, graph_reuse=reuse)
+            if tags is None or "kv_cache" in tags:
+                reregister_buffer()
+        except Exception as error:
+            restore_error = error
+            logger.exception("Sleep allocation restore failed on this rank")
+        if not reuse.unanimous(restore_error is None):
+            raise RuntimeError(
+                "Sleep allocation restore failed on at least one rank; restart all workers"
+            ) from restore_error
+        self.wakeup(tags)
+        if not reuse.pending_tags:
+            backend.finish_graph_recovery()
+
     def wakeup(self, tags: list[str] | None = None) -> None:
+        reuse = self.graph_reuse
+        if reuse is not None:
+            reuse.note_restored(tags)
+            if self._communicators_need_wake:
+                self.hccl.wakeup()
+            if reuse.pending_tags:
+                return
+            if reuse.reusing and reuse.can_replay(tuple(self.hccl.iter_alive_group_coordinators())):
+                reuse.finish(True)
+                return
+            if reuse.reusing:
+                self._discard_sleep_graphs()
+            self.acl_graph.wakeup(None)
+            if self._communicators_need_wake:
+                self.hccl.release_lifecycle_anchor()
+                self._communicators_need_wake = False
+            reuse.finish(False)
+            return
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:

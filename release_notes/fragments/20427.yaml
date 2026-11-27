@@ -1,0 +1,12 @@
+pr: 20427
+entries:
+  - category: feature
+    text: Added opt-in in-place ACL graph restoration after sleep for validated A5 MRV2 BF16 Qwen configurations, with collective recapture fallback when graph dependencies change.
+    hardware: [A5]
+  - category: bugfix
+    text: Made sleep allocator mapping ownership explicit across repeated sleep and wake, asleep-object destruction, partial restore failures, and worker shutdown.
+  - category: bugfix
+    text: Restored caller termination handlers after worker backend initialization and compilation so backend imports do not consume EngineCore shutdown requests.
+    hardware: [A5]
+  - category: bugfix
+    text: Prevented allocator free errors from escaping tensor destructors, retained allocation records until successful cleanup, rejected null handles, and blocked further inference after a terminal cleanup failure.

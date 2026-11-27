@@ -19,10 +19,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
+from typing import TYPE_CHECKING
 
 from vllm.device_allocator.sleep_mode_backend import CuMemBackend, SleepModeBackendFactory
 
-from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.device_allocator.camem import ACL_GRAPH_TAG, CaMemAllocator
+
+if TYPE_CHECKING:
+    from vllm_ascend.device_allocator.graph_reuse import SleepGraphReuse
 
 
 class CaMemBackend(CuMemBackend):
@@ -40,10 +44,44 @@ class CaMemBackend(CuMemBackend):
         self._state = "SUSPENDED"
         self._allocator().sleep(("weights", "runtime", "cudagraph"), discardable)
 
-    def resume(self, tags: list[str] | None = None) -> None:
+    def resume(self, tags: list[str] | None = None, *, graph_reuse: SleepGraphReuse | None = None) -> None:
+        if graph_reuse is not None:
+            self._resume_graph_resources(tags, graph_reuse)
+            return
         self._state = "RESUMING"
         self._allocator().wake_up(tags)
         self._state = "RUNNING"
+
+    def _resume_graph_resources(self, tags: list[str] | None, graph_reuse: SleepGraphReuse) -> None:
+        self._state = "RESUMING"
+        allocator = self._allocator()
+        if not graph_reuse.reusing:
+            allocator.wake_up(tags)
+            return
+
+        # Restore graph memory only once all model and cache tags are ready.
+        allocator.wake_up(tags, defer_cudagraph=True)
+        if not graph_reuse.complete_after(tags):
+            return
+        try:
+            allocator.wake_up([ACL_GRAPH_TAG])
+        except RuntimeError:
+            # Native unmap errors leave ownership indeterminate; all ranks must stop.
+            allocator._check_memory_state()
+            graph_reuse.reason = "graph_pool_restore_failed"
+            graph_reuse.signature = None
+
+    def finish_graph_recovery(self) -> None:
+        """Publish RUNNING after graph replay or recapture has been decided."""
+        allocator = self._allocator()
+        allocator._check_memory_state()
+        if any(data.is_asleep for data in allocator.pointer_to_data.values()):
+            raise RuntimeError("CaMem still has asleep allocations after graph recovery")
+        self._state = "RUNNING"
+
+    def preserves_communicators_for_sleep(self, graph_reuse: SleepGraphReuse) -> bool:
+        """A certified graph keeps its communicator identities for this cycle."""
+        return graph_reuse.reusing or self.preserves_communicators()
 
     def discard(self, tags: tuple[str, ...]) -> None:
         self._allocator().discard(tags)

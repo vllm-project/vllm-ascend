@@ -229,7 +229,7 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 
 <span id="rl_config"></span>**rl_config**
 
-`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
+`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, other sub-fields remain inactive.
 
 When RL mode is enabled, its fixed NZ setting takes precedence over the top-level `weight_nz_mode` configuration. `VLLM_BATCH_INVARIANT=1` remains enabled when `rl_config.enable_batch_invariant` is false.
 

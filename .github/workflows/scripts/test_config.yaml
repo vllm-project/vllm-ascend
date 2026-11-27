@@ -49,6 +49,7 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_graph_reuse.py
     - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
     - tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py
     - tests/e2e/pull_request/one_card/test_hisparse_attention.py
@@ -129,6 +130,8 @@ runner_mapping:
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_graph_reuse\.py$:
+    default: a5-4
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
