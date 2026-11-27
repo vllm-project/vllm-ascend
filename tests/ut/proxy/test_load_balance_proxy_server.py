@@ -190,6 +190,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    received_requests = []
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -205,7 +206,12 @@ def _create_mock_backend_app():
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
+        received_requests.clear()
         return {"ok": True}
+
+    @app.get("/__requests__")
+    async def requests():
+        return received_requests
 
     async def _gen_stream(item: ScriptItem):
         emitted = 0
@@ -222,6 +228,7 @@ def _create_mock_backend_app():
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
     async def handle(req: Request):
+        received_requests.append({"body": await req.json(), "grid_header": req.headers.get("x-pd-image-grid")})
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -327,6 +334,108 @@ def proxy_server():
 # --------------------------------------------------------------------------- #
 # Tests — HTTP behavior only (no internal function calls)
 # --------------------------------------------------------------------------- #
+def _image_request() -> dict:
+    return {
+        **_chat_req(),
+        "model": "qwen3.6-35b",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Compare these images"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,first"}},
+                ],
+            },
+            {"role": "assistant", "content": "Please provide the second image."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,second"}},
+                ],
+            },
+        ],
+    }
+
+
+def _grid_prefill(grids):
+    return {
+        "kind": "json",
+        "body": {
+            "kv_transfer_params": {
+                "do_remote_prefill": True,
+                "pd_image_grids": grids,
+            }
+        },
+    }
+
+
+def _received(port):
+    return httpx.get(f"http://127.0.0.1:{port}/__requests__", timeout=5).json()
+
+
+def test_image_grids_preserve_order_and_raw_prefill(proxy_server):
+    grids = [{"hash": "first", "grid": [1, 16, 20]}, {"hash": "second", "grid": [1, 24, 32]}]
+    _set_script(MOCK_PREFILL_PORT, [_grid_prefill(grids)])
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": [_sse("answer"), DONE]}])
+    original = _image_request()
+    status, body = _post(proxy_server, original)
+    assert status == 200 and b"answer" in body
+    prefill = _received(MOCK_PREFILL_PORT)[0]
+    assert prefill["body"]["messages"] == original["messages"]
+    assert prefill["grid_header"] == "1"
+    decode = _received(MOCK_DECODE_PORT)[0]["body"]
+    assert decode["kv_transfer_params"] == {"do_remote_prefill": True}
+    assert decode["messages"][0]["content"][0] == original["messages"][0]["content"][0]
+    assert decode["messages"][1] == original["messages"][1]
+    assert decode["messages"][0]["content"][1] == {
+        "type": "image_embeds",
+        "uuid": "pd-grid-v1:first",
+        "image_embeds": {"image_grid_thw": [1, 16, 20]},
+    }
+    assert decode["messages"][2]["content"][0]["image_embeds"]["image_grid_thw"] == [1, 24, 32]
+
+
+@pytest.mark.parametrize(
+    "grids",
+    [
+        None,
+        [],
+        {"unexpected": "mapping"},
+        [{"hash": "only-one", "grid": [1, 16, 20]}],
+        [{"hash": "bad", "grid": [True, 16, 20]}] * 2,
+        [{"hash": "bad", "grid": [0, 16, 20]}] * 2,
+        [{"hash": "bad", "grid": [1, 16]}] * 2,
+    ],
+)
+def test_invalid_image_grids_use_original_request(proxy_server, grids):
+    _set_script(MOCK_PREFILL_PORT, [_grid_prefill(grids)])
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": [_sse("answer"), DONE]}])
+    original = _image_request()
+    assert _post(proxy_server, original)[0] == 200
+    assert _received(MOCK_DECODE_PORT)[0]["body"]["messages"] == original["messages"]
+
+
+def test_grid_rejection_reprefills_original_images(proxy_server):
+    grids = [{"hash": "first", "grid": [1, 16, 20]}, {"hash": "second", "grid": [1, 24, 32]}]
+    _set_script(MOCK_PREFILL_PORT, [_grid_prefill(grids), _grid_prefill(grids)])
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "json", "status": 400, "body": {"error": "unsupported image metadata"}},
+            {"kind": "stream", "chunks": [_sse("recovered"), DONE]},
+        ],
+    )
+    original = _image_request()
+    status, body = _post(proxy_server, original)
+    assert status == 200 and b"recovered" in body
+    prefills = _received(MOCK_PREFILL_PORT)
+    decodes = _received(MOCK_DECODE_PORT)
+    assert len(prefills) == len(decodes) == 2
+    assert all(p["body"]["messages"] == original["messages"] for p in prefills)
+    assert decodes[0]["body"]["messages"][0]["content"][1]["type"] == "image_embeds"
+    assert decodes[1]["body"]["messages"] == original["messages"]
+
+
 def test_normal_nonstream(proxy_server):
     """Normal non-streaming request returns 200 + content."""
     _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "status": 200, "chunks": [_sse("hello"), DONE]}])

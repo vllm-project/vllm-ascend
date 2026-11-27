@@ -171,6 +171,7 @@ class InstanceInfo:
     decoder_port: int
     prefiller_cached_tokens: int | None = None
     decoder_released: bool = False
+    pd_image_grids: list | None = None
 
 
 TAINT_PRIORITY = 1e15
@@ -859,6 +860,44 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
+def decode_payload(req_data: dict, image_grids: list | None) -> dict:
+    """Copy only rewritten messages. Keep raw media for P and recompute."""
+    if not isinstance(image_grids, list) or not image_grids or req_data.get("model") != "qwen3.6-35b":
+        return req_data
+    parts = [p for m in req_data.get("messages", []) if isinstance(m.get("content"), list) for p in m["content"]]
+    if any(p.get("type") not in {"text", "image_url"} for p in parts):
+        return req_data
+    if sum(p["type"] == "image_url" for p in parts) != len(image_grids):
+        return req_data
+    if not all(
+        isinstance(g, dict)
+        and isinstance(g.get("hash"), str)
+        and isinstance(g.get("grid"), list)
+        and len(g["grid"]) == 3
+        and all(type(n) is int and n > 0 for n in g["grid"])
+        for g in image_grids
+    ):
+        return req_data
+    grids = iter(image_grids)
+    messages = []
+    for msg in req_data["messages"]:
+        if not isinstance(msg.get("content"), list):
+            messages.append(msg)
+            continue
+        content = []
+        for part in msg["content"]:
+            if part["type"] == "image_url":
+                meta = next(grids)
+                part = {
+                    "type": "image_embeds",
+                    "uuid": "pd-grid-v1:" + meta["hash"],
+                    "image_embeds": {"image_grid_thw": meta["grid"]},
+                }
+            content.append(part)
+        messages.append({**msg, "content": content})
+    return {**req_data, "messages": messages}
+
+
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
@@ -887,7 +926,7 @@ async def send_request_to_service(
     base_delay: float = 0.2,
 ):
     req_data = build_prefill_request(req_data)
-    headers = auth_headers(request_id)
+    headers = {**auth_headers(request_id), "x-pd-image-grid": "1"}
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1020,6 +1059,7 @@ async def assign_instances(
 
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
+    pd_image_grids = (kv_transfer_params or {}).pop("pd_image_grids", None)
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
@@ -1046,6 +1086,7 @@ async def assign_instances(
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
         prefiller_cached_tokens=prefiller_cached_tokens,
+        pd_image_grids=pd_image_grids,
     )
 
 
@@ -1110,30 +1151,59 @@ async def handle_completions_impl(api: str, request: Request):
         preopened_gen = None
         preopened_first = b""
         decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+        decode_data = decode_payload(req_data, instance_info.pd_image_grids)
+        if decode_data is not req_data:
+            logger.info(
+                "D metadata-only request %s, %d images", instance_info.request_id, len(instance_info.pd_image_grids)
+            )
         preopened_gen = stream_service_response(
             decoder_client,
             api,
-            req_data,
+            decode_data,
             request_id=instance_info.request_id,
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
         try:
-            preopened_first = await preopened_gen.__anext__()
+            try:
+                preopened_first = await preopened_gen.__anext__()
+            except httpx.HTTPStatusError as exc:
+                if decode_data is req_data or exc.response.status_code not in {400, 422, 500, 502, 503}:
+                    raise
+                # A failed decode may have consumed the first P allocation.
+                # Retry once with a fresh prefill before sending anything to the client.
+                logger.warning("D rejected grid request %s; retrying with original images", instance_info.request_id)
+                await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+                request_released = True
+                instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+                request_released = False
+                decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+                preopened_gen = stream_service_response(
+                    decoder_client,
+                    api,
+                    req_data,
+                    request_id=instance_info.request_id,
+                    max_retries=args.max_retries,
+                    base_delay=args.retry_delay,
+                )
+                preopened_first = await preopened_gen.__anext__()
         except asyncio.CancelledError:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            if not request_released:
+                await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
             raise
         except StopAsyncIteration:
             preopened_first = b""
         except httpx.HTTPStatusError as exc:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            if not request_released:
+                await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
             return Response(
                 content=exc.response.content, status_code=exc.response.status_code, media_type="application/json"
             )
         except httpx.RequestError as exc:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            if not request_released:
+                await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
             return JSONResponse(
                 status_code=502,
