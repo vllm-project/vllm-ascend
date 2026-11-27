@@ -292,6 +292,31 @@ def test_is_decode_only_node_false_without_recompute_scheduler(monkeypatch):
     assert afc._is_decode_only_node(vllm_config) is False
 
 
+@pytest.mark.parametrize("enable_fused_mc2", [0, 1])
+def test_select_moe_comm_method_with_moonep_skips_native_selection(monkeypatch, enable_fused_mc2):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A3)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_moonep=True, enable_fused_mc2=enable_fused_mc2),
+    )
+    monkeypatch.setattr(afc, "get_moonep_tokens_capacity", lambda: 128)
+    native_policy = MagicMock(side_effect=AssertionError("MoonEP used the native communication policy"))
+    monkeypatch.setattr(afc, "get_current_hardware_profile", native_policy)
+
+    assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.MOONEP_SHMEM
+
+
+@pytest.mark.parametrize("capacity", [None, 128])
+def test_select_moe_comm_method_with_moonep_requires_capacity(monkeypatch, capacity):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A3)
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_moonep=True))
+    monkeypatch.setattr(afc, "get_moonep_tokens_capacity", lambda: capacity)
+
+    with pytest.raises(RuntimeError, match=f"MoonEP step has 129 tokens, SHMEM capacity is {capacity}"):
+        afc.select_moe_comm_method(129, _make_vllm_config())
+
+
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

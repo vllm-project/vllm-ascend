@@ -46,9 +46,9 @@ numerical-equivalence, sparse-offload feature, or performance qualification.
 - `AscendRoutedExperts` registers the actual owner of expert Parameters.
   Runtime allocation and weight publication occur after model weight loading
   in Model Runner V2, before the first forward.
-- `MoECommType.MOONEP_SHMEM` registers `MoonEPCommImpl` when enabled. The
-  hardware policy selects the native backend when MoonEP is off. With
-  `MOONEP_KEEP_MC2=1`, eligible native MC2 and Fused MC2 steps are retained.
+- With `enable_moonep` enabled, MoE steps use `MoonEPCommImpl`
+  (`MoECommType.MOONEP_SHMEM`). With MoonEP disabled, the hardware policy
+  selects the native backend.
 - MoonEP selects a common capacity across EP ranks and dispatches the actual
   token count through the SDK. Weighted combine uses the source rank's FP32
   Top-K weights and Home/Slot group counts to process valid rows.
@@ -109,15 +109,14 @@ Enable the integration with:
 --additional-config '{"enable_moonep": true}'
 ```
 
-The engine switch defaults to false. Existing environment parameter names and
-defaults are retained:
+The engine switch defaults to false. MoonEP also reads these environment
+parameters:
 
 | Parameter | Default / meaning |
 | --- | --- |
 | MOONEP_TRANSPORT_TYPE | mte; mte or udma |
 | MOONEP_SHMEM_BOOTSTRAP_TYPE | ipport; ipport or uid |
 | MOONEP_SHMEM_BOOTSTRAP_PORT | 28765 |
-| MOONEP_KEEP_MC2 | 0; retain eligible native MC2 steps when enabled |
 | MOONEP_REDUNDANT_EXPERT_SLOT_COUNT | unset; resolved from local expert count |
 | MOONEP_CACHED_REDUNDANT_EXPERT_COUNT | 0; persistent remote-expert cache disabled |
 | MOONEP_PREFETCH_SIDE_STREAM_OVERLAP | dispatch; none, dispatch, dispatch\|home_gemm1 |

@@ -115,13 +115,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Non-sensitive; set before worker startup. Home GEMM1 requires cache off
     # and an already-supported Home GEMM backend/operator library.
     "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP": _moonep_prefetch_side_stream_overlap,
-    # MoonEP small-step policy: when enable_moonep is on, keep the steps whose
-    # SoC-default selection is MC2 (num_tokens <= mc2_tokens_capacity) on MC2 and
-    # replace only the all-gather / all-to-all selections with SHMEM. Default
-    # off: every step within the SHMEM capacity S goes to MoonEP. MC2 needs the
-    # HCCL UB_MEM link, which a cross-UB-domain card group does not have
-    # (aclnnMoeDistributeDispatchV4 561000), so enable this only on one UB domain.
-    "MOONEP_KEEP_MC2": lambda: bool(int(os.getenv("MOONEP_KEEP_MC2", "0"))),
     # Redundant expert prefetch slots per EP rank, not the persistent cache size.
     # Unset is resolved per layer as E/EP; the current planner requires B == E/EP.
     # Runtime accepts integer values in [1, E/EP] before that planner check.
