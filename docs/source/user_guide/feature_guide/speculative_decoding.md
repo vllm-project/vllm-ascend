@@ -892,24 +892,22 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     For direct prefill/decode (P/D) transfer, use `MooncakeConnectorV2` or
     `MooncakePullConnector`. Enable RecoverSSM on both roles and match the model
     weights, speculative method and window, draft checkpoint if used,
-    prefix-caching settings, state dtypes, and convolution layout.
+    prefix-caching settings, state dtypes, and convolution layout. Use the
+    default `SD` layout on both roles for Kimi or for GLM deployments with
+    different KDA head-shard counts.
 
     **Model-specific limits**
 
     - **GLM-5.3-Flash (KDA)** requires `PP=1` and `DCP=1`.
       `PCP>1` is supported only on prefill KV producers, where the KDA head
-      count must be divisible by `TP × PCP`. Use the `SD` convolution layout
-      on both roles if their KDA head-shard counts differ. For external prefix
-      caching, use AscendStore with Memcache or Mooncake. Use `MultiConnector`
-      to combine it with direct P/D transfer.
+      count must be divisible by `TP × PCP`. For external prefix caching,
+      use AscendStore with Memcache or Mooncake. Use `MultiConnector` to
+      combine it with direct P/D transfer.
     - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
-      disabled. For P/D, use the same integration version and TP size on both
-      roles and set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both.
+      disabled. For P/D, match the integration version and TP size across roles.
     - **Qwen3.x (GDN)** requires a Qwen3.5-compatible GDN architecture for
-      Qwen3.8 checkpoints. Ascend 310P is unsupported.
-      Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`, BF16 activations and
-      convolution state, and BF16 or FP32 SSM state. The TP size must divide
-      both the key- and value-head counts, and the value-head count must be
-      divisible by the key-head count. In `align` mode, use a Mamba block size
-      of at least `K + 1`. For P/D, match the TP size and use Mooncake pull mode
-      (`use_layerwise=false`).
+      Qwen3.8 checkpoints. Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`.
+      The TP size must divide both the key- and value-head counts. The value-head
+      count must be divisible by the key-head count. In `align` mode, use a Mamba
+      block size of at least `K + 1`. For P/D, match the TP size and use Mooncake
+      pull mode (`use_layerwise=false`).
