@@ -1146,9 +1146,8 @@
 #    How：
 #       override triton ops in vLLM with ascend implementation
 #       re-write apply_penalties kernel with minimum change to support large input shape.
-#       Bind compute_topk_scores in the defining module and its sampler, prompt,
-#       and rejection-sampler imports; preserve logits_mode, custom candidates,
-#       and tensor output metadata from the upstream score interface.
+#       Bind compute_topk_scores in the sampler, prompt-logprob, and rejection
+#       sampler modules while preserving the upstream score interface.
 #    Test:
 #       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
 #    Related PR (if no, explain why):

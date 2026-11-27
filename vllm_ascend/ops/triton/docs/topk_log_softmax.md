@@ -5,17 +5,17 @@
 ## Description
 
 - **Function**: Computes the log-probability of a selected set of token ids per request. It fuses `log_softmax` over the whole vocabulary with the gather at the requested token positions, so the `[num_reqs, vocab_size]` intermediate that a `log_softmax` + `gather` pair would materialize is never written to global memory. It backs the model-runner-v2 sampler logprob path (`compute_token_logprobs`) and, through `compute_topk_scores`, the sampler / prompt-logprob / rejection-sampler logprob outputs.
-- **Formula**: for request `i` and slot `k`, with `t = token_ids[i, k]`:
+- **Formula**: for logits row `i` and candidate slot `k`, with `t = token_ids[i, k]`:
     - `m_i = max_j logits[i, j]`
     - `lse_i = log(sum_j exp(logits[i, j] - m_i))`
     - `output[i, k] = logits[i, t] - lse_i - m_i`
 
   The max subtraction is the standard numerically stable form: the reduction is accumulated in fp32 even when `logits` is fp16/bf16, so `exp` never overflows for the value ranges produced by a language-model head.
 - **Algorithm flow** (processed row by row, independently):
-  1. Grid is `(num_reqs,)`: one program per request, each owning one full logits row (`row_ptr = logits_ptr + req_idx * logits_stride`).
+  1. Launch one program per logits row. A request can contribute multiple rows during speculative decoding. Each program reads its row at `row_ptr = logits_ptr + req_idx * logits_stride`.
   2. Pass 1 — running max: loop over the vocabulary in `BLOCK_SIZE` tiles, load each tile masked with `other=-inf`, and fold it into the running maximum with `tl.maximum(..., propagate_nan=tl.PropagateNan.ALL)` followed by `tl.max`. The result is cast to fp32.
   3. Pass 2 — sum of exponentials: loop over the same tiles again, cast to fp32, accumulate `sum(exp(logits - m_i))`, then take `lse_i = log(se)`.
-  4. Gather: loop over candidates in blocks of at most 8192 columns, load `TOPK_BLOCK_SIZE` token ids for the request under the mask `k_offset < topk`, gather `logits[i, t]` at those ids, compute `logits - lse_i - m_i` in fp32 and store the `topk` valid lanes.
+  4. Gather: loop over candidates in blocks of at most 8192 columns. Use `candidate_offsets < topk` when loading token IDs and logits and storing the resulting fp32 logprobs.
 
   The row is read twice from global memory rather than staged in UB, which keeps UB usage bounded by `BLOCK_SIZE` instead of by `vocab_size`. `multibuffer=False` is passed at launch for the same reason.
 - **Supported devices**: Atlas A2, Atlas A3, and 950PR/950DT. The large-candidate update was validated on A3 and 950DT in the MRV2 eager service. The direct kernel was also tested in NPU graph replay with changing candidate IDs and logits.
