@@ -27,8 +27,8 @@ Each API should return HTTP 200 at `/health`. The proxy is a separate service:
 it must route P port 8100 and D ports 8200-8203 before clients use port 19383.
 Starting P/D alone does not start that proxy. Check its `/healthcheck` endpoint.
 
-The candidate's only HY4 optimization boolean is `hy4flash_dfly_dp_graph=true`
-on D. General Ascend settings and communication environment variables are
-retained from the completed PD compatibility run. See
+The D example enables `hy4flash_dfly_dp_graph` and the three optional CANN
+Decode controls. General Ascend settings and communication environment variables
+are retained from the PD compatibility run. See
 [the integration notes](../../../docs/source/developer_guide/hy4_decode_integration.md)
-for the complete-run evidence and the later manual launch limitations.
+for dependencies, supported configuration and validation steps.

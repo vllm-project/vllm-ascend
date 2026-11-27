@@ -1,4 +1,0 @@
-pr: null
-entries:
-  - category: performance
-    text: HY4 Flash Decode reads stable-packed C8 attention candidates directly into FIA inputs, avoiding a second copy of decoded KV. DFly selects fused graph-external input preparation automatically for supported layouts. Only hy4flash_dfly_dp_graph controls Draft graph execution; operator rollback switches are removed.

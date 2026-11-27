@@ -34,9 +34,17 @@ def engram_gate_epilogue(dot, gates, channel, scale):
         enable_fp_fusion=False,
     )
 
+
 @triton.jit(do_not_specialize=["rows"])
 def _engram_gates(
-    dot0, dot1, dot2, dot3, gates, rows, SCALE: tl.constexpr, BLOCK: tl.constexpr,
+    dot0,
+    dot1,
+    dot2,
+    dot3,
+    gates,
+    rows,
+    SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     channel = tl.program_id(1)
@@ -122,19 +130,39 @@ def engram_residual(hidden, hashes, gates, scales, signal, *, gamma=None, invers
     )
     return output
 
+
 @triton.jit(do_not_specialize=["tokens"])
 def _engram_gate_residual(
-    hidden, hashes, dot0, dot1, dot2, dot3, scales, signal, gamma, inverse, output, tokens,
-    WIDTH: tl.constexpr, HEADS: tl.constexpr, HASH_ROW: tl.constexpr, HASH_COL: tl.constexpr,
-    GATE_SCALE: tl.constexpr, ROWS: tl.constexpr, COLS: tl.constexpr,
+    hidden,
+    hashes,
+    dot0,
+    dot1,
+    dot2,
+    dot3,
+    scales,
+    signal,
+    gamma,
+    inverse,
+    output,
+    tokens,
+    WIDTH: tl.constexpr,
+    HEADS: tl.constexpr,
+    HASH_ROW: tl.constexpr,
+    HASH_COL: tl.constexpr,
+    GATE_SCALE: tl.constexpr,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     channel = tl.program_id(1)
     col = tl.program_id(2) * COLS + tl.arange(0, COLS)
     head = tl.arange(0, triton.next_power_of_2(HEADS))
     valid_row = row < tokens
-    h = tl.load(hashes + row[:, None] * HASH_ROW + head[None, :] * HASH_COL,
-                valid_row[:, None] & (head[None, :] < HEADS), other=-1)
+    h = tl.load(
+        hashes + row[:, None] * HASH_ROW + head[None, :] * HASH_COL,
+        valid_row[:, None] & (head[None, :] < HEADS),
+        other=-1,
+    )
     active = tl.sum((h >= 0).to(tl.int32), 1) > 0
 
     dot = tl.where(channel < 2, tl.where(channel == 0, dot0, dot1), tl.where(channel == 2, dot2, dot3))
@@ -163,8 +191,22 @@ def engram_gate_residual(hidden, hashes, dots, scales, value, gamma, inverse, sc
     result = torch.empty_like(hidden)
     rows, cols = 8, 1024
     _engram_gate_residual[(triton.cdiv(tokens, rows), channels, triton.cdiv(width, cols))](
-        hidden, hashes, *dots, scales, value, gamma, inverse, result, tokens,
-        width, hashes.shape[1], *hashes.stride(), scale, rows, cols, enable_fp_fusion=False,
+        hidden,
+        hashes,
+        *dots,
+        scales,
+        value,
+        gamma,
+        inverse,
+        result,
+        tokens,
+        width,
+        hashes.shape[1],
+        *hashes.stride(),
+        scale,
+        rows,
+        cols,
+        enable_fp_fusion=False,
     )
     return result
 
@@ -249,9 +291,7 @@ def gather_mrope_factors(cache, positions, channel_bits):
 
 
 @triton.jit
-def _split_rope_projection(
-    projection, main, rotary, rows, MAIN: tl.constexpr, ROPE: tl.constexpr, BLOCK: tl.constexpr
-):
+def _split_rope_projection(projection, main, rotary, rows, MAIN: tl.constexpr, ROPE: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     a = tl.arange(0, triton.next_power_of_2(MAIN))
     b = tl.arange(0, ROPE)
@@ -264,9 +304,19 @@ def _split_rope_projection(
 
 @triton.jit(do_not_specialize=["rows"])
 def _pack_attention_projections(
-    q, kv, q_nope, q_pe, kv_latent, k_pe, rows,
-    HEADS: tl.constexpr, NOPE: tl.constexpr, LATENT: tl.constexpr,
-    ROPE: tl.constexpr, Q_TILE: tl.constexpr, KV_TILE: tl.constexpr,
+    q,
+    kv,
+    q_nope,
+    q_pe,
+    kv_latent,
+    k_pe,
+    rows,
+    HEADS: tl.constexpr,
+    NOPE: tl.constexpr,
+    LATENT: tl.constexpr,
+    ROPE: tl.constexpr,
+    Q_TILE: tl.constexpr,
+    KV_TILE: tl.constexpr,
 ):
     if tl.program_id(1) == 0:
         _split_rope_projection(q, q_nope, q_pe, rows * HEADS, NOPE, ROPE, Q_TILE)
@@ -285,6 +335,18 @@ def pack_attention_projections(query, kv, rope_dim):
     q_tile = heads * 8
     kv_tile = 8
     _pack_attention_projections[(triton.cdiv(rows, kv_tile), 2)](
-        query, kv, q_nope, q_pe, latent, k_pe, rows, heads, nope_dim, latent_dim, rope_dim, q_tile, kv_tile,
+        query,
+        kv,
+        q_nope,
+        q_pe,
+        latent,
+        k_pe,
+        rows,
+        heads,
+        nope_dim,
+        latent_dim,
+        rope_dim,
+        q_tile,
+        kv_tile,
     )
     return q_nope, q_pe, latent, k_pe

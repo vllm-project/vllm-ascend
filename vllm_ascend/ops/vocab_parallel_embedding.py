@@ -45,7 +45,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import is_950
-
 from vllm_ascend.distributed.parallel_state import (
     GroupCoordinator,
     get_embed_tp_group,
@@ -229,11 +228,14 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         vllm_config = get_current_vllm_config()
         model = vllm_config.model_config
         self._use_hy4_vocab_indices = (
-            HAS_TRITON and model is not None and model.enforce_eager
+            HAS_TRITON
+            and model is not None
+            and model.enforce_eager
             and model.hf_text_config.model_type == "hy_v4_flash"
             and uses_prefill_ops(vllm_config)
             and self.parallel_mode == VocabParallelMode.STANDARD
-            and self.tp_size > 1 and is_950()
+            and self.tp_size > 1
+            and is_950()
         )
         quant_method = None
         if quant_config is not None:
@@ -424,8 +426,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         shard = self.shard_indices
         added_local = shard.org_vocab_end_index - shard.org_vocab_start_index + shard.num_org_vocab_padding
         return (
-            shard.org_vocab_start_index, shard.org_vocab_end_index,
-            shard.added_vocab_start_index, shard.added_vocab_end_index, added_local, self.weight.shape[0],
+            shard.org_vocab_start_index,
+            shard.org_vocab_end_index,
+            shard.added_vocab_start_index,
+            shard.added_vocab_end_index,
+            added_local,
+            self.weight.shape[0],
         )
 
     def embed_hy4_local_indices(self, indices):
@@ -438,7 +444,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self._use_hy4_vocab_indices
             and type(self.quant_method) is UnquantizedEmbeddingMethod
             and input_.device.type == "npu"
-            and input_.ndim == 1 and input_.numel() and input_.is_contiguous()
+            and input_.ndim == 1
+            and input_.numel()
+            and input_.is_contiguous()
             and input_.dtype in (torch.int32, torch.int64)
             and self.weight.dtype in (torch.bfloat16, torch.float16)
             and self.weight.is_contiguous()
@@ -570,12 +578,18 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        if (getattr(self, "use_npu_fp32_head", False) and self.head_dtype == torch.float32
-                and hidden_states.device.type == "npu" and hidden_states.dtype == torch.bfloat16
-                and hidden_states.ndim >= 2 and hidden_states.numel() > 0
-                and isinstance(lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod))
-                and lm_head.weight.dtype == torch.bfloat16
-                and lm_head.weight.device == hidden_states.device and lm_head.weight.is_contiguous()):
+        if (
+            getattr(self, "use_npu_fp32_head", False)
+            and self.head_dtype == torch.float32
+            and hidden_states.device.type == "npu"
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim >= 2
+            and hidden_states.numel() > 0
+            and isinstance(lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod))
+            and lm_head.weight.dtype == torch.bfloat16
+            and lm_head.weight.device == hidden_states.device
+            and lm_head.weight.is_contiguous()
+        ):
             # Preserve FP32 accumulation and output without expanding vocabulary weights every step.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = torch.mm(flat, lm_head.weight.t(), out_dtype=torch.float32)

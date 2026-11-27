@@ -21,9 +21,19 @@ class PrefetchedEngramRows:
 
 @triton.jit
 def _flash_engram_mapped_rows_kernel(
-    hashes, weight_ptrs, scale_ptrs, output, vocab_start, vocab_end,
-    HASH_STRIDE: tl.constexpr, HEAD_START: tl.constexpr, LOCAL_HEADS: tl.constexpr,
-    WIDTH: tl.constexpr, BLOCK: tl.constexpr, CHUNK: tl.constexpr, FP8: tl.constexpr,
+    hashes,
+    weight_ptrs,
+    scale_ptrs,
+    output,
+    vocab_start,
+    vocab_end,
+    HASH_STRIDE: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+    CHUNK: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     row = tl.program_id(0)
     token = row // LOCAL_HEADS
@@ -58,8 +68,18 @@ def gather_mapped_rows(hashes, weight, scale, head_start, head_end, vocab_start,
     if output.numel():
         init_device_properties_triton()
         _flash_engram_mapped_rows_kernel[(tokens * local_heads,)](
-            hashes, weight.ptrs, weight.ptrs if scale is None else scale.ptrs, output,
-            vocab_start, vocab_end, hashes.stride(0), head_start, local_heads,
-            width, triton.next_power_of_2(width), CHUNK_ROWS, scale is not None,
+            hashes,
+            weight.ptrs,
+            weight.ptrs if scale is None else scale.ptrs,
+            output,
+            vocab_start,
+            vocab_end,
+            hashes.stride(0),
+            head_start,
+            local_heads,
+            width,
+            triton.next_power_of_2(width),
+            CHUNK_ROWS,
+            scale is not None,
         )
     return output

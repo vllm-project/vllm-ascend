@@ -16,13 +16,29 @@ def rank_local_vocab_index(token, org_start, org_end, added_start, added_end, ad
 
 @triton.jit(do_not_specialize=["rows", "org_start", "org_end", "added_start", "added_end", "added_local"])
 def _hy4_vocab_indices(
-    tokens, indices, padding, rows, org_start, org_end, added_start, added_end, added_local, invalid_index,
-    TILE: tl.constexpr, WRITE_MASK: tl.constexpr,
+    tokens,
+    indices,
+    padding,
+    rows,
+    org_start,
+    org_end,
+    added_start,
+    added_end,
+    added_local,
+    invalid_index,
+    TILE: tl.constexpr,
+    WRITE_MASK: tl.constexpr,
 ):
     row = tl.program_id(0) * TILE + tl.arange(0, TILE)
     token = tl.load(tokens + row, row < rows, other=-1)
     index, valid = rank_local_vocab_index(
-        token, org_start, org_end, added_start, added_end, added_local, invalid_index,
+        token,
+        org_start,
+        org_end,
+        added_start,
+        added_end,
+        added_local,
+        invalid_index,
     )
     tl.store(indices + row, index, row < rows)
     if WRITE_MASK:
@@ -37,7 +53,17 @@ def vocab_indices(tokens, shard, *, padding_index=None):
     added_local = shard.org_vocab_end_index - shard.org_vocab_start_index + shard.num_org_vocab_padding
     tile = 512
     _hy4_vocab_indices[(triton.cdiv(rows, tile),)](
-        tokens, indices, padding, rows, shard.org_vocab_start_index, shard.org_vocab_end_index,
-        shard.added_vocab_start_index, shard.added_vocab_end_index, added_local, 0 if write_mask else padding_index, tile, write_mask,
+        tokens,
+        indices,
+        padding,
+        rows,
+        shard.org_vocab_start_index,
+        shard.org_vocab_end_index,
+        shard.added_vocab_start_index,
+        shard.added_vocab_end_index,
+        added_local,
+        0 if write_mask else padding_index,
+        tile,
+        write_mask,
     )
     return indices, padding

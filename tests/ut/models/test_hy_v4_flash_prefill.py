@@ -27,7 +27,6 @@ def test_prefill_attention_uses_current_layer_metadata(monkeypatch, other_layer_
     layer.layer_name = layer_name
     layer.native_decode_attention = False
     layer.use_cann_prefill = True
-    layer.use_cannbot_prolog = False
     layer.use_eager_prefill_rotary = False
     layer.fuse_attn_output_gate = False
     layer.overlap_attn_output_gate = False
@@ -42,7 +41,7 @@ def test_prefill_attention_uses_current_layer_metadata(monkeypatch, other_layer_
     layer._project_output_gate = lambda hidden, fuse: hidden[:, :2]
     layer.o_proj = lambda output: (output,)
 
-    def forward_paged(*args, absorbed, reuse_prefill_output=False):
+    def forward_paged(*args, reuse_prefill_output=False):
         assert reuse_prefill_output
         return torch.full_like(args[-1], 3)
 
@@ -84,7 +83,6 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
     model.kv_storage_width = 656
     model.use_fp8_cache = True
     model.batch_verify_attention = False
-    model.use_triton_mla_logits = False
     model.incremental_index_pool = False
     model.scale = 576**-0.5
     model.learnable_sink_param = torch.randn(heads, generator=generator)

@@ -23,6 +23,11 @@ def _fused_engram_hash_kernel(
     primes,
     offsets,
     output,
+    rope_positions,
+    rope_prefill,
+    rope_delta,
+    prefill_lens,
+    packed_output,
     ALL_STRIDE: tl.constexpr,
     OUT_LAYER_STRIDE: tl.constexpr,
     OUT_TOKEN_STRIDE: tl.constexpr,
@@ -39,6 +44,11 @@ def _fused_engram_hash_kernel(
     VISUAL_IDS: tl.constexpr,
     BLOCK: tl.constexpr,
     PAD_BLOCK: tl.constexpr,
+    WITH_ROPE: tl.constexpr,
+    ROPE_DIMS: tl.constexpr,
+    ROPE_STRIDE: tl.constexpr,
+    PREFILL_STRIDE: tl.constexpr,
+    WITH_PACKED_OUTPUT: tl.constexpr,
 ):
     layer = tl.program_id(0)
     req = tl.program_id(1)
@@ -53,6 +63,10 @@ def _fused_engram_hash_kernel(
             -1,
             (token >= end) & (token < NTOK),
         )
+        if WITH_PACKED_OUTPUT:
+            tl.store(
+                packed_output + (layer * NTOK + token) * TOTAL_HEADS + pad_head, -1, (token >= end) & (token < NTOK)
+            )
     else:
         first = tl.load(starts + req)
         stop = tl.load(starts + req + 1)
@@ -63,6 +77,24 @@ def _fused_engram_hash_kernel(
         head = lane % TOTAL_HEADS
         position = first + local
         live = (local < MAX_QUERY) & (position < stop) & (position < NTOK)
+        if WITH_ROPE:
+            if layer == 0:
+                # Exactly one head lane owns each output position. This keeps
+                # RoPE outside the Target graph and avoids inter-program writes.
+                rope_live = live & (head == 0)
+                prefill_len = tl.load(prefill_lens + state)
+                delta = tl.load(rope_delta + state)
+                orig_pos = num_computed + local
+                for dim in tl.static_range(ROPE_DIMS):
+                    if num_computed < prefill_len:
+                        pos = tl.load(
+                            rope_prefill + (state * ROPE_DIMS + dim) * PREFILL_STRIDE + tl.maximum(orig_pos, 0),
+                            rope_live,
+                            other=0,
+                        )
+                    else:
+                        pos = orig_pos + delta
+                    tl.store(rope_positions + dim * ROPE_STRIDE + position, pos, rope_live)
         current = tl.load(ids + tl.maximum(position, 0), live, other=-1).to(tl.int64)
         invalid = (current < 0) | (current >= VOCAB) | (current == PAD_TOKEN)
         for visual in tl.static_range(len(VISUAL_IDS)):
@@ -103,6 +135,8 @@ def _fused_engram_hash_kernel(
                     value,
                     write,
                 )
+                if WITH_PACKED_OUTPUT:
+                    tl.store(packed_output + (layer * NTOK + position) * TOTAL_HEADS + head, value, write)
 
 
 def fused_engram_hashes(
@@ -122,6 +156,9 @@ def fused_engram_hashes(
     *,
     num_reqs=None,
     max_query_len=6,
+    rope_state=None,
+    prefill_lens=None,
+    packed_output=None,
 ):
     """Write integer-exact hashes including -1 padding in one kernel launch.
 
@@ -147,8 +184,27 @@ def fused_engram_hashes(
         raise ValueError("Engram metadata must be contiguous")
     if all_token_ids.stride(1) != 1:
         raise ValueError("Token histories need contiguous rows")
+    if packed_output is not None and (
+        packed_output.shape != output.shape
+        or packed_output.dtype != output.dtype
+        or packed_output.device != output.device
+        or not packed_output.is_contiguous()
+    ):
+        raise ValueError("Packed hash destination must match shape/dtype/device and be contiguous")
     if layers == 0 or ntok == 0:
         return output
+    if rope_state is not None:
+        if prefill_lens is None or not prefill_lens.is_contiguous():
+            raise ValueError("RoPE fusion needs contiguous device prefill lengths")
+        positions = rope_state.positions
+        prefill = rope_state.prefill_positions.gpu
+        delta = rope_state.prefill_delta.gpu
+        if positions.stride(1) != 1 or not prefill.is_contiguous() or not delta.is_contiguous():
+            raise ValueError("Unsupported RoPE buffer strides")
+        dims, pos_stride, prefill_stride = rope_state.num_dims, positions.stride(0), rope_state.max_model_len
+    else:
+        positions = prefill = delta = prefill_lens = input_ids
+        dims, pos_stride, prefill_stride = 0, 0, 0
     _fused_engram_hash_kernel[(layers, nreq + 1)](
         input_ids,
         query_start_loc,
@@ -160,6 +216,11 @@ def fused_engram_hashes(
         primes,
         offsets,
         output,
+        positions,
+        prefill,
+        delta,
+        prefill_lens,
+        output if packed_output is None else packed_output,
         all_token_ids.stride(0),
         *output.stride(),
         nreq,
@@ -174,5 +235,10 @@ def fused_engram_hashes(
         tuple(visual_ids),
         triton.next_power_of_2(max_query_len * total_heads),
         triton.next_power_of_2(ntok * total_heads),
+        rope_state is not None,
+        dims,
+        pos_stride,
+        prefill_stride,
+        packed_output is not None,
     )
     return output

@@ -1,11 +1,34 @@
 pr: 22839
 entries:
-  - category: feature
-    text: Added HY4 Flash (HY4 Next) serving on Ascend 950DT with Model Runner V2, FP8 KV cache, and DFly speculative decoding. Apply the companion vLLM patch and follow the HY4 Flash launch example to deploy the model.
-    highlight: true
-    model: hy4-flash
-    hardware: [950DT]
-  - category: performance
-    text: Added opt-in paged IndexPool selection and compact C8 sparse/sliding-window attention for HY4 Flash PD Decode on Ascend 950DT with CANN 9.3 and DFly 5. Enable hy4flash_cann_indexer_decode, hy4flash_cann_c8_decode and hy4flash_cann_c8_swa_decode in additional-config to reduce explicit score-matrix and FP32 KV intermediates; all three default to false.
-    model: hy4-flash
-    hardware: [950DT]
+- category: feature
+  text: Added HY4 Flash (HY4 Next) serving on Ascend 950DT with Model Runner V2, FP8 KV cache, and DFly speculative decoding.
+    Apply the companion vLLM patch and follow the HY4 Flash launch example to deploy the model.
+  highlight: true
+  model: hy4-flash
+  hardware:
+  - 950DT
+- category: performance
+  text: Added opt-in paged IndexPool selection and compact C8 sparse/sliding-window attention for HY4 Flash PD Decode on Ascend
+    950DT with CANN 9.3 and DFly 5. Enable hy4flash_cann_indexer_decode, hy4flash_cann_c8_decode and hy4flash_cann_c8_swa_decode
+    in additional-config to reduce explicit score-matrix and FP32 KV intermediates; all three default to false.
+  model: hy4-flash
+  hardware:
+  - 950DT
+- category: feature
+  text: Dedicated HY4 Flash Prefill supports TP2/PP2 in eager mode on Ascend 950DT. Apply the updated companion vLLM patch
+    and configure matching Prefill topology at both Mooncake endpoints.
+  model: hy4-flash
+  hardware:
+  - 950DT
+- category: feature
+  text: Enable hy4flash_dfly_dp_graph for supported local TP1/DP Draft graph capture with DFly and FULL_DECODE_ONLY. Draft
+    input preparation remains outside the graph; other supported Decode fusions are selected automatically.
+  model: hy4-flash
+  hardware:
+  - 950DT
+- category: bugfix
+  text: Preserve HY4 Flash Target attention KV and learned-sink normalization in FP32, retain rounded MoE expert sums, and
+    restore IndexPool position encoding and complete short-context history during batched Decode.
+  model: hy4-flash
+  hardware:
+  - 950DT

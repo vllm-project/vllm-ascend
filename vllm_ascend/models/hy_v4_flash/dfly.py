@@ -8,7 +8,6 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -23,12 +22,15 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w8a8.fp8_block import AscendFp8BlockLinearMethod
 
-from .attention import AscendFp8BlockLinearMethod, AscendHYV4FlashAttention
+from .attention import AscendHYV4FlashAttention
+from .attention_common import _head_bmm
 from .dfly_fusions import compact_draft_c8_rows, dual_rms_concat, gated_residual, rounded_add_rms_norm
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 CHECKPOINT_PREFIX = "model.dfly_layers."
 MODEL_PREFIX = "dfly"
@@ -47,7 +49,7 @@ def draft_swiglu_quant(gate_up, scale_alg):
     )
 
 
-def draft_c8_attention(query, rows, selected, sink, scale, candidate_offsets=None):
+def draft_c8_attention(query, rows, selected, sink, scale):
     """Fuse packed C8 dequantization and attention on gathered draft candidates."""
     from cann_ops_transformer import kv_quant_sparse_flash_attention
 
@@ -91,11 +93,6 @@ def draft_add_rms_norm(hidden, residual, norm):
     return rounded_add_rms_norm(hidden, residual, norm)
 
 
-def draft_shared_c8_attention(query, rows, selected, sink, scale, candidate_offsets):
-    """Share history gathering while preserving the native single-query ABI."""
-    return draft_c8_attention(query, rows, selected, sink, scale, candidate_offsets)
-
-
 class DFlyAttention(AscendHYV4FlashAttention):
     def __init__(self, vllm_config, config, layer_idx, prefix):
         super().__init__(vllm_config, config, layer_idx, prefix, reuse_target=True)
@@ -113,7 +110,7 @@ class DFlyAttention(AscendHYV4FlashAttention):
         # part of draft weight traversal and post-processing.
         self.target_attention = ref(source)
 
-    def _forward_paged(self, hidden, q_c, q_nope, q_pe, kv_c, k_pe, positions, out, *, absorbed=False):
+    def _forward_paged(self, hidden, q_c, q_nope, q_pe, kv_c, k_pe, positions, out):
         if self.context is None:
             return
         block_size, block_table, indices, query_positions = self.context
@@ -122,7 +119,7 @@ class DFlyAttention(AscendHYV4FlashAttention):
         cache = source.kv_cache
         cache = cache.view(-1, source.cache_width)
         batch, width = query_positions.shape
-        query, wv = self._absorb_query(q_nope, q_pe, absorbed=absorbed)
+        query, wv = self._absorb_query(q_nope, q_pe)
         query_kv = self._pack_kv(kv_c, k_pe).reshape(batch, width, -1)
         flat_query_kv = query_kv.flatten(0, 1)
         share_history = (
@@ -144,16 +141,7 @@ class DFlyAttention(AscendHYV4FlashAttention):
                 history = selected[:, 0, :-width].clamp_min(0)
                 history_rows = self._gather(cache, block_table[first:last], block_size, history, slice(C8_ROW_BYTES))
                 rows = torch.cat((history_rows, query_kv[first:last]), dim=1)
-                candidate_key = ("shared_candidate_offsets", selected.shape[-1], query.device)
-                candidate_offsets = self._decode_index_constants.get(candidate_key)
-                if candidate_offsets is None:
-                    candidate_offsets = torch.arange(selected.shape[-1], device=query.device, dtype=torch.int32)
-                    self._decode_index_constants[candidate_key] = candidate_offsets
-                context = draft_shared_c8_attention(
-                    query[tokens], rows, selected, self.learnable_sink_param, self.scale, candidate_offsets
-                )
-                from .attention import _head_bmm
-
+                context = draft_c8_attention(query[tokens], rows, selected, self.learnable_sink_param, self.scale)
                 out[tokens].copy_(_head_bmm(context, wv).reshape_as(out[tokens]))
                 continue
             start = query_positions[first:last, :1, None]
@@ -173,11 +161,6 @@ class DFlyAttention(AscendHYV4FlashAttention):
                 self._decode_index_constants[row_key] = row_offsets
             local = row_offsets + offsets
             draft_rows = flat_query_kv.index_select(0, local.flatten()).reshape_as(rows)
-            candidate_key = ("candidate_offsets", selected.shape[-1], query.device)
-            candidate_offsets = self._decode_index_constants.get(candidate_key)
-            if candidate_offsets is None:
-                candidate_offsets = torch.arange(selected.shape[-1], device=query.device, dtype=torch.int32)
-                self._decode_index_constants[candidate_key] = candidate_offsets
             rows = torch.where(is_query[..., None], draft_rows, rows)
             if not (
                 is_950() and query.device.type == "npu" and rows.dtype == torch.uint8 and rows.shape[-1] == C8_ROW_BYTES
@@ -190,10 +173,7 @@ class DFlyAttention(AscendHYV4FlashAttention):
                 selected.flatten(0, 1),
                 self.learnable_sink_param,
                 self.scale,
-                candidate_offsets,
             )
-            from .attention import _head_bmm
-
             out[tokens].copy_(_head_bmm(context, wv).reshape_as(out[tokens]))
 
 

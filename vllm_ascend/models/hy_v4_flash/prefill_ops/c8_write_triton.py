@@ -97,12 +97,28 @@ def _write_c8_rows(
 
 @triton.jit(do_not_specialize=["tokens", "position_axis_stride"])
 def _write_c8_segments(
-    cache, slots, latent, rope, scales, keys, positions, tokens,
-    position_axis_stride, POSITION_TOKEN_STRIDE: tl.constexpr,
-    HAS_INDEXER: tl.constexpr, ROW_WIDTH: tl.constexpr, ROWS: tl.constexpr,
-    LATENT_WORDS: tl.constexpr, ROPE_END: tl.constexpr, C8_END: tl.constexpr,
-    INDEX_END: tl.constexpr, POSITIONS_END: tl.constexpr,
-    norm_weight, norm_inverse, normalized_keys, APPLY_NORM: tl.constexpr,
+    cache,
+    slots,
+    latent,
+    rope,
+    scales,
+    keys,
+    positions,
+    tokens,
+    position_axis_stride,
+    POSITION_TOKEN_STRIDE: tl.constexpr,
+    HAS_INDEXER: tl.constexpr,
+    ROW_WIDTH: tl.constexpr,
+    ROWS: tl.constexpr,
+    LATENT_WORDS: tl.constexpr,
+    ROPE_END: tl.constexpr,
+    C8_END: tl.constexpr,
+    INDEX_END: tl.constexpr,
+    POSITIONS_END: tl.constexpr,
+    norm_weight,
+    norm_inverse,
+    normalized_keys,
+    APPLY_NORM: tl.constexpr,
 ):
     token = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     present = token < tokens
@@ -131,8 +147,9 @@ def _write_c8_segments(
             index_key = tl.load(keys + coord, present[:, None], other=0).to(tl.float32)
             weight = tl.load(norm_weight + channel).to(tl.float32)
             inverse = tl.load(norm_inverse + token, present, other=0)
-            index_key = tl.cast((index_key * inverse[:, None]) * weight[None, :],
-                                tl.bfloat16, fp_downcast_rounding="rtne")
+            index_key = tl.cast(
+                (index_key * inverse[:, None]) * weight[None, :], tl.bfloat16, fp_downcast_rounding="rtne"
+            )
             tl.store(normalized_keys + coord, index_key, present[:, None])
             low, high = tl.split(tl.reshape(index_key, (ROWS, INDEX_END - C8_END, 2)))
             low = low.to(tl.uint16, bitcast=True).to(tl.uint32)
@@ -152,6 +169,7 @@ def _write_c8_segments(
         else:
             tail_bits = 0
         tl.store(dst + INDEX_END + tail, tail_bits, live & (tail < ROW_WIDTH - INDEX_END))
+
 
 def write_c8_rows(cache, slots, latent, rope, scales, keys=None, positions=None, *, index_norm=None):
     """Pack the quantizer outputs and token metadata directly into unique cache slots."""

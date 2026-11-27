@@ -33,14 +33,14 @@ def native_rms_norm(value, norm):
     return torch_npu.npu_rms_norm(value, gamma, eps)[0].to(dtype)
 
 
-def native_mla_context(query, selected, kv, sink, scale, *, length_provider, metadata, scores=None, query_fp32=None):
+def native_mla_context(query, selected, kv, sink, scale, *, scores=None, query_fp32=None):
     """Keep FP32 KV and sink normalization in the fused attention calculation.
 
     The CANN MLA FIA ABI accepts only low-precision KV/output and cannot consume
     a sink for this head dimension. Use the FP32 fusion instead of rounding KV
     or correcting an already-rounded context. Reader fusion remains enabled.
     """
-    from .fia_lengths import CompactFIAKV
+    from .kv_compaction import CompactKV
     from .precision_attention import fused_fp32_mla_context
 
     invalid_mask = None
@@ -48,7 +48,7 @@ def native_mla_context(query, selected, kv, sink, scale, *, length_provider, met
         nope, rope, mask = kv
         values = torch.cat((nope[:, :, 0].float(), rope[:, :, 0].float()), dim=-1)
         invalid_mask = mask
-        if isinstance(kv, CompactFIAKV) and scores is not None:
+        if isinstance(kv, CompactKV) and scores is not None:
             order = torch.argsort((selected < 0).to(torch.int32), dim=-1, stable=True)
             scores = scores.gather(-1, order[:, None].expand(-1, scores.shape[1], -1))
     else:

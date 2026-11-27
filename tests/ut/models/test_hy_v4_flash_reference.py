@@ -22,23 +22,6 @@ from vllm_ascend.models.hy_v4_flash.attention import AscendHYV4FlashAttention, F
 from vllm_ascend.models.hy_v4_flash.dfly_speculator import build_reuse_indices
 
 
-def test_gpu_c8_scale_packs_per_tile_fp8_and_preserves_rope():
-    attention = AscendHYV4FlashAttention.__new__(AscendHYV4FlashAttention)
-    attention.use_fp8_cache = True
-    attention.use_gpu_c8_scale = True
-    latent = torch.zeros((1, 512), dtype=torch.bfloat16)
-    latent[0, :2] = torch.tensor([3, 1])
-    latent[0, 128:131] = torch.tensor([-7, 2, -1])
-    latent[0, 384] = 2**-20
-    rope = torch.arange(64, dtype=torch.bfloat16).unsqueeze(0)
-
-    packed = attention._pack_kv(latent, rope)
-    _, _, scales = packed.split((512, 128, 16), dim=-1)
-    expected_scales = torch.tensor([[2**-7, 2**-6, 2**-13, 2**-13]])
-    torch.testing.assert_close(scales.view(torch.float32), expected_scales, rtol=0, atol=0)
-    torch.testing.assert_close(dequantize_c8_rows(packed), torch.cat((latent, rope), dim=-1).float(), rtol=0, atol=0)
-
-
 def test_flat_vl_config_resolves_architecture_and_per_layer_geometry():
     config = HYV4FlashConfig.from_dict(
         {
@@ -207,8 +190,9 @@ def test_full_swa_shared_read_preserves_windows_and_ignores_padding_pages():
     attention.use_fp8_cache = True
     attention.use_pd_decode = False
     attention.use_cann_prefill = False
+    attention.cann_c8_swa_decode = False
+    attention.cann_c8_decode = False
     attention.kv_storage_width = C8_ROW_BYTES
-    attention.use_triton_mla_logits = False
     attention.batch_verify_attention = True
     attention.learnable_sink_param = torch.zeros(heads)
     attention.topk_snapshot = torch.empty(query.shape[0], window, dtype=torch.long)

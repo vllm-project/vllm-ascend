@@ -191,10 +191,3 @@ def select_pool_candidates(scores, visible, max_groups, ratio, budget):
     dense = torch.arange(sparse.shape[-1], device=visible.device).expand_as(sparse)
     dense = dense.masked_fill(dense > visible[:, None], -1)
     return torch.where((cutoff > budget)[:, None], sparse, dense)
-
-
-def select_paged_pool(query, weights, cache, table, visible, page_size, max_groups, ratio, budget):
-    """Score six verification queries against the BF16 keys in paged IndexPool."""
-    scores = torch.empty((_QUERIES, max_groups), dtype=torch.float32, device=query.device)
-    write_pool_scores(query, weights, cache, table, visible, page_size, max_groups, ratio, budget, scores)
-    return select_pool_candidates(scores, visible, max_groups, ratio, budget)

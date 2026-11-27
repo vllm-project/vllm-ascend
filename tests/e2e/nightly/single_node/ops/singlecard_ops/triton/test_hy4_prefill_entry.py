@@ -60,6 +60,33 @@ def test_hy4_prefill_cache_mapping_matches_mrv2(fusion_first):
         ((0, 2), (3, 2), (130, 652, 64, 0)),
         ((2,), (1,), (133, 652, 66, 0)),
     ]
+
+    def prepare(fused, *, previous_rows, stale_rows, mapping, starts, positions, requests, num_tokens):
+        # Exercise each path starting with the same stale rows and address buffer.
+        tables._num_dirty_rows = previous_rows
+        for table in tables.input_block_tables:
+            table[stale_rows].fill_(-7)
+        tables.slot_mappings.fill_(-7)
+        if fused:
+            _, _, (block_tables, slots), _ = prepare_hy4_prefill_inputs(
+                buffers, states, mapping, starts, tables=tables, num_tokens=num_tokens
+            )
+        else:
+            prepare_pos_seq_lens(mapping, starts, states.num_computed_tokens.gpu, positions, buffers.seq_lens)
+            batch = SimpleNamespace(
+                idx_mapping=mapping,
+                query_start_loc=starts,
+                positions=positions,
+                num_reqs_after_padding=len(requests),
+                num_tokens_after_padding=num_tokens,
+            )
+            block_tables, slots = GPUModelRunner.prepare_attn(runner, batch)
+        assert tables._num_dirty_rows == len(requests)
+        for table in tables.input_block_tables:
+            assert torch.count_nonzero(table[stale_rows].cpu()) == 0
+        assert torch.all(tables.slot_mappings[:, num_tokens:].cpu() == PAD_SLOT_ID)
+        return tuple(table.to("cpu", copy=True) for table in block_tables), slots.to("cpu", copy=True)
+
     for step, (requests, lengths, computed) in enumerate(steps):
         num_tokens = sum(lengths)
         mapping = torch.tensor(requests, dtype=torch.int32, device=device)
@@ -69,35 +96,18 @@ def test_hy4_prefill_cache_mapping_matches_mrv2(fusion_first):
         previous_rows = len(steps[step - 1][0]) if step else 0
         stale_rows = slice(len(requests), previous_rows)
 
-        def prepare(fused):
-            # Exercise each path starting with the same stale rows and address buffer.
-            tables._num_dirty_rows = previous_rows
-            for table in tables.input_block_tables:
-                table[stale_rows].fill_(-7)
-            tables.slot_mappings.fill_(-7)
-            if fused:
-                _, _, (block_tables, slots), _ = prepare_hy4_prefill_inputs(
-                    buffers, states, mapping, starts, tables=tables, num_tokens=num_tokens
-                )
-            else:
-                prepare_pos_seq_lens(mapping, starts, states.num_computed_tokens.gpu, positions, buffers.seq_lens)
-                batch = SimpleNamespace(
-                    idx_mapping=mapping,
-                    query_start_loc=starts,
-                    positions=positions,
-                    num_reqs_after_padding=len(requests),
-                    num_tokens_after_padding=num_tokens,
-                )
-                block_tables, slots = GPUModelRunner.prepare_attn(runner, batch)
-            assert tables._num_dirty_rows == len(requests)
-            for table in tables.input_block_tables:
-                assert torch.count_nonzero(table[stale_rows].cpu()) == 0
-            assert torch.all(tables.slot_mappings[:, num_tokens:].cpu() == PAD_SLOT_ID)
-            return tuple(table.to("cpu", copy=True) for table in block_tables), slots.to("cpu", copy=True)
-
         fused = fusion_first if step % 2 == 0 else not fusion_first
-        first_tables, first_slots = prepare(fused)
-        second_tables, second_slots = prepare(not fused)
+        arguments = dict(
+            previous_rows=previous_rows,
+            stale_rows=stale_rows,
+            mapping=mapping,
+            starts=starts,
+            positions=positions,
+            requests=requests,
+            num_tokens=num_tokens,
+        )
+        first_tables, first_slots = prepare(fused, **arguments)
+        second_tables, second_slots = prepare(not fused, **arguments)
         for first, second in zip(first_tables, second_tables):
             torch.testing.assert_close(first, second, rtol=0, atol=0)
         torch.testing.assert_close(first_slots, second_slots, rtol=0, atol=0)

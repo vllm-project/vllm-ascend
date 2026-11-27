@@ -46,13 +46,15 @@ def _expand_group_tile(groups, tail, output, rows, sentinel, ROW_TILE: tl.conste
     row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     column = tl.arange(0, 512)
     lane = tl.arange(0, 4)
-    group = tl.load(groups + row[:, None] * 511 + column[None, :],
-                    (row[:, None] < rows) & (column[None, :] < 511), other=sentinel).to(tl.int32)
+    group = tl.load(
+        groups + row[:, None] * 511 + column[None, :], (row[:, None] < rows) & (column[None, :] < 511), other=sentinel
+    ).to(tl.int32)
     current = tl.load(tail + row[:, None] * 4 + lane[None, :], row[:, None] < rows, other=-1)
     history = tl.where(group[:, :, None] == sentinel, -1, group[:, :, None] * 4 + lane[None, None, :])
     index = tl.where(column[None, :, None] < 511, history, current[:, None, :])
     out = row[:, None, None] * 2048 + column[None, :, None] * 4 + lane[None, None, :]
     tl.store(output + out, index, row[:, None, None] < rows)
+
 
 @triton.jit(do_not_specialize=["rows", "sentinel"])
 def _expand_group_rows(groups, tail, output, rows, sentinel, TILE: tl.constexpr):
@@ -75,7 +77,6 @@ def _expand_group_rows(groups, tail, output, rows, sentinel, TILE: tl.constexpr)
     packed = tl.join(tl.join(p0, p2), tl.join(p1, p3)).reshape(TILE, 2048)
     lane = tl.arange(0, 2048)
     tl.store(output + row[:, None] * 2048 + lane[None, :], packed, valid_row[:, None])
-
 
 
 def expand_sorted_group_ids(groups, sentinel, tail):

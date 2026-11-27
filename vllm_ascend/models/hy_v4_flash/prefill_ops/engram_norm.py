@@ -98,10 +98,20 @@ def engram_value_inverse(value, epsilon):
     _engram_value_squares[(triton.cdiv(value.numel(), tile),)](value, square, value.numel(), tile)
     return (square.mean(-1, keepdim=True) + epsilon).rsqrt()
 
+
 @triton.jit(do_not_specialize=["rows"])
 def _engram_qk_squares(
-    key0, key1, key2, key3, query, squares, rows, WIDTH: tl.constexpr, CHANNELS: tl.constexpr,
-    TILE_ROWS: tl.constexpr, TILE_COLS: tl.constexpr,
+    key0,
+    key1,
+    key2,
+    key3,
+    query,
+    squares,
+    rows,
+    WIDTH: tl.constexpr,
+    CHANNELS: tl.constexpr,
+    TILE_ROWS: tl.constexpr,
+    TILE_COLS: tl.constexpr,
 ):
     channel = tl.program_id(2)
     key = tl.where(channel < 2, tl.where(channel == 0, key0, key1), tl.where(channel == 2, key2, key3))
@@ -110,8 +120,7 @@ def _engram_qk_squares(
     index = row[:, None] * WIDTH + col[None, :]
     mask = row[:, None] < rows
     k = tl.load(key + index, mask, other=0).to(tl.float32)
-    q = tl.load(query + (row[:, None] * CHANNELS + channel) * WIDTH + col[None, :],
-                mask, other=0).to(tl.float32)
+    q = tl.load(query + (row[:, None] * CHANNELS + channel) * WIDTH + col[None, :], mask, other=0).to(tl.float32)
     offset = squares + channel * (2 * rows * WIDTH) + index
     tl.store(offset, k * k, mask)
     tl.store(offset + rows * WIDTH, q * q, mask)
@@ -119,9 +128,23 @@ def _engram_qk_squares(
 
 @triton.jit(do_not_specialize=["rows"])
 def _engram_qk_products(
-    key0, key1, key2, key3, query, key_weight, query_weight, inv0, inv1, inv2, inv3, output, rows,
-    WIDTH: tl.constexpr, CHANNELS: tl.constexpr,
-    TILE_ROWS: tl.constexpr, TILE_COLS: tl.constexpr,
+    key0,
+    key1,
+    key2,
+    key3,
+    query,
+    key_weight,
+    query_weight,
+    inv0,
+    inv1,
+    inv2,
+    inv3,
+    output,
+    rows,
+    WIDTH: tl.constexpr,
+    CHANNELS: tl.constexpr,
+    TILE_ROWS: tl.constexpr,
+    TILE_COLS: tl.constexpr,
 ):
     channel = tl.program_id(2)
     key = tl.where(channel < 2, tl.where(channel == 0, key0, key1), tl.where(channel == 2, key2, key3))
@@ -130,8 +153,7 @@ def _engram_qk_products(
     index = row[:, None] * WIDTH + col[None, :]
     mask = row[:, None] < rows
     k = tl.load(key + index, mask, other=0).to(tl.float32)
-    q = tl.load(query + (row[:, None] * CHANNELS + channel) * WIDTH + col[None, :],
-                mask, other=0).to(tl.float32)
+    q = tl.load(query + (row[:, None] * CHANNELS + channel) * WIDTH + col[None, :], mask, other=0).to(tl.float32)
     inverse = tl.where(channel < 2, tl.where(channel == 0, inv0, inv1), tl.where(channel == 2, inv2, inv3))
     inv_offset = inverse + row
     ik = tl.load(inv_offset, row < rows, other=0)
@@ -155,16 +177,33 @@ def engram_batched_dots(keys, query, key_weight, query_weight):
     del squares
     products = query.new_empty((channels, rows, width))
     _engram_qk_products[grid](
-        *keys, query, key_weight, query_weight, *inverses, products,
-        rows, width, channels, tile_rows, tile_cols, enable_fp_fusion=False,
+        *keys,
+        query,
+        key_weight,
+        query_weight,
+        *inverses,
+        products,
+        rows,
+        width,
+        channels,
+        tile_rows,
+        tile_cols,
+        enable_fp_fusion=False,
     )
     return tuple(channel.sum(-1) for channel in products.unbind(0))
 
 
 @triton.jit(do_not_specialize=["tokens"])
 def _apply_lookup_norm_with_inverse(
-    rows, inverse, gamma, output, tokens,
-    HEADS: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr, CORES: tl.constexpr,
+    rows,
+    inverse,
+    gamma,
+    output,
+    tokens,
+    HEADS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+    CORES: tl.constexpr,
 ):
     tiles = tl.cdiv(tokens, BLOCK)
     tiles_per_core = tl.cdiv(tiles, CORES)
@@ -184,8 +223,15 @@ def _apply_lookup_norm_with_inverse(
 
 @triton.jit(do_not_specialize=["groups"])
 def _apply_lookup_norm(
-    rows, gamma, output, groups, EPS: tl.constexpr,
-    HEADS: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr, CORES: tl.constexpr,
+    rows,
+    gamma,
+    output,
+    groups,
+    EPS: tl.constexpr,
+    HEADS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+    CORES: tl.constexpr,
 ):
     tiles = tl.cdiv(groups, BLOCK)
     tiles_per_core = tl.cdiv(tiles, CORES)
@@ -193,8 +239,7 @@ def _apply_lookup_norm(
     stop = tl.minimum(start + tiles_per_core, tiles)
     col = tl.arange(0, triton.next_power_of_2(WIDTH))
     group_lane = tl.arange(0, BLOCK)
-    weight = tl.load(gamma + (group_lane[:, None] % HEADS) * WIDTH + col[None, :],
-                     col[None, :] < WIDTH, other=0)
+    weight = tl.load(gamma + (group_lane[:, None] % HEADS) * WIDTH + col[None, :], col[None, :] < WIDTH, other=0)
     for tile in range(start, stop):
         group = tile * BLOCK + group_lane
         valid = (group[:, None] < groups) & (col[None, :] < WIDTH)
@@ -219,12 +264,12 @@ def apply_lookup_norm(rows, gamma, dtype, eps, *, inverse=None):
         groups = tokens * heads
         block = 64
         cores = min(triton.cdiv(groups, block), get_vectorcore_num())
-        _apply_lookup_norm[(cores,)](rows, gamma, out, groups, eps, heads, width, block, cores,
-                                     enable_fp_fusion=False)
+        _apply_lookup_norm[(cores,)](rows, gamma, out, groups, eps, heads, width, block, cores, enable_fp_fusion=False)
     else:
         # The kernel spans all local heads per token. Bound its live tile as TP shrinks.
         block = min(16, max(1, 4096 // triton.next_power_of_2(heads * width)))
         cores = min(triton.cdiv(tokens, block), get_vectorcore_num())
-        _apply_lookup_norm_with_inverse[(cores,)](rows, inverse, gamma, out, tokens, heads, width, block, cores,
-                                                  enable_fp_fusion=False)
+        _apply_lookup_norm_with_inverse[(cores,)](
+            rows, inverse, gamma, out, tokens, heads, width, block, cores, enable_fp_fusion=False
+        )
     return out

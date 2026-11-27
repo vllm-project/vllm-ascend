@@ -1,8 +1,0 @@
-fixes:
-  - |
-    Preserve HY4 Target C8 dequantization and sink normalization in FP32
-    with fused sink-softmax/PV, and retain the rounded expert-sum boundary
-    before the CANN MoE AddRMSNorm call. Keep the remaining Decode and Draft
-    fusions enabled. Restore IndexPool key position encoding and complete
-    short-context history during batched Decode. Dataset accuracy and
-    performance require separate validation.

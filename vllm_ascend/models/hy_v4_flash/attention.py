@@ -33,8 +33,6 @@ from vllm.models.hy_v4_flash.reference import (
     indexpool_fp8,
     mla_attention_probs,
     pooled_keys,
-    sparse_candidates,
-    window_candidates,
 )
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -57,60 +55,30 @@ from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 from vllm_ascend.utils import attention_calculation_stream, npu_stream_switch
 
 from . import triton_ops
+from .attention_common import (
+    ACL_FORMAT_ND,
+    BF16_QUERY_PROJECTION_LAYER,
+    MAX_FUSED_C8_READ_ROWS,
+    MAX_FUSED_C8_WRITE_TOKENS,
+    MAX_FUSED_INDEXPOOL_ROWS,
+    MAX_FUSED_OUTPUT_GATE_ELEMENTS,
+    POSITION_LANES,
+    _head_bmm,
+)
+from .attention_decode import DecodeAttentionMixin
+from .attention_eager import EagerAttentionMixin
 from .attention_fusions import fused_output_gate
-from .c8_kvqsfa import BANDED_HEADS, attend_c8_v2, attend_c8_window, supports_banded_window
-from .c8_read import supports_c8_qk_heads
 from .decode_fusions import (
     is_decode_batch,
     native_indexpool_rope,
-    native_indexpool_select,
     native_mla_context,
     native_rms_norm,
-    prepare_indexpool_selection,
     uses_decode_fusions,
 )
-from .index_pool_select import select_pool_candidates, write_pool_scores
-from .mla_prolog import CANNBotBf16MlaProlog
 from .pd_role import uses_prefill_ops
-from .prefill_metadata import logical_positions, reuse_prefill_metadata
+from .prefill_metadata import reuse_prefill_metadata
 
 logger = init_logger_ascend(__name__)
-
-ACL_FORMAT_ND = 2
-C8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
-C8_GPU_MIN_SCALE = 1e-4
-BF16_QUERY_PROJECTION_LAYER = 1
-QUERY_CHUNK = 16
-C8_PREFILL_MAX_HEADS = 16
-TRANSPOSE_BMM_MAX_TOKENS = 65536
-# Larger gathers benefit from the bulk CANN copy/cast path.
-MAX_FUSED_C8_READ_ROWS = 4096
-# The bulk CANN writer has lower latency for large sparse prefill batches.
-MAX_FUSED_C8_WRITE_TOKENS = 4096
-# 512 captured decode tokens with 16 index heads fit in this bound.
-MAX_FUSED_INDEXPOOL_ROWS = 8192
-# Bound the vector kernel to the decode tensor sizes measured on 950DT.
-MAX_FUSED_OUTPUT_GATE_ELEMENTS = 96 * 2048
-# Equal-width CANN shapes verified on 950DT at TP8.
-BATCH_VERIFY_MAX_QUERIES = 6
-BATCH_VERIFY_SWA_SHAPE = (8, 512)
-BATCH_VERIFY_SPARSE_SHAPE = (4, 2048)
-# Queries, index heads, compression ratio, and complete groups recalled.
-PAGED_POOL_DECODE_SHAPE = (6, 16, 4, 511)
-# Store three int64 MRoPE coordinates in the BF16 sidecar by bit reinterpretation.
-POSITION_LANES = 3 * torch.int64.itemsize // torch.bfloat16.itemsize
-
-
-def _head_bmm(tokens: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    # [tokens, heads, in] x [heads, in, out] -> [tokens, heads, out].
-    if (
-        tokens.device.type == "npu"
-        and tokens.dtype == weight.dtype == torch.bfloat16
-        and 0 < tokens.shape[0] < TRANSPOSE_BMM_MAX_TOKENS
-        and hasattr(torch_npu, "npu_transpose_batchmatmul")
-    ):
-        return torch_npu.npu_transpose_batchmatmul(tokens, weight, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-    return torch.bmm(tokens.transpose(0, 1).contiguous(), weight).transpose(0, 1)
 
 
 @dataclass
@@ -483,7 +451,7 @@ class FlashIndexPool(nn.Module):
         return self._encode_fp8(pooled, full_graph=full_graph)
 
 
-class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
+class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Module, AttentionLayerBase):
     supports_dcp = False
 
     def __init__(self, vllm_config, config, layer_idx, prefix, *, reuse_target=False):
@@ -524,8 +492,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.scale = (self.nope_dim + self.rope_dim) ** -0.5
         self.kv_width = self.latent_dim + self.rope_dim
         self.use_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8"
-        # Preserve the checkpoint's established C8 scaling contract.
-        self.use_gpu_c8_scale = False
         has_fused_ops = self.use_cann_prefill or HAS_TRITON
         use_a5_c8 = has_fused_ops and self.use_fp8_cache and get_ascend_device_type() is AscendDeviceType.A5
         self.shard_prefill_li = (
@@ -559,15 +525,13 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             not reuse_target and has_fused_ops and get_ascend_device_type() is AscendDeviceType.A5
         )
         self.overlap_attn_output_gate = not reuse_target and get_ascend_device_type() is AscendDeviceType.A5
-        self.use_cannbot_prolog = False
         self.use_eager_prefill_rotary = (
             self.use_cann_prefill
             and use_a5_c8
             and vllm_config.model_config.enforce_eager
             and hasattr(torch_npu, "npu_apply_rotary_pos_emb")
         )
-        self.use_triton_mla_logits = False
-        self.batch_verify_attention = use_a5_c8 and not self.use_triton_mla_logits
+        self.batch_verify_attention = use_a5_c8
         self.kv_storage_width = C8_ROW_BYTES if self.use_fp8_cache else self.kv_width
         # Indexer keys and position lanes remain BF16 in either layout.
         index_element_width = 2 if self.use_fp8_cache else 1
@@ -650,7 +614,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             rope_parameters=rope_parameters,
             is_neox_style=False,
         )
-        self._cannbot_prolog = None
         self._mrope_channel_bits = None
         if self.use_eager_prefill_rotary and HAS_TRITON and getattr(self.rotary_emb, "mrope_interleaved", False):
             from .prefill_ops.small_aiv import mrope_channel_bits
@@ -842,7 +805,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         return self._forward_existing(positions, hidden_states)
 
     def _forward_native_decode(self, positions, hidden_states):
-        absorbed = False
         q, q_c = self._project_query(hidden_states)
         q = q.reshape(-1, self.local_heads, self.nope_dim + self.rope_dim)
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split((self.latent_dim, self.rope_dim), -1)
@@ -884,7 +846,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             k_pe,
             positions,
             out,
-            absorbed=absorbed,
         )
         if overlap_gate:
             main_stream.wait_stream(gate_stream)
@@ -923,54 +884,29 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             and all(meta.prefill_reqs)
             and meta.query_start_loc[0] == 0
         )
-        absorbed = (
-            self.use_cannbot_prolog
-            and hidden_states.shape[0] > 0
-            and self.q_a_proj.weight.dtype
-            == self.q_b_proj.weight.dtype
-            == self.kv_a_proj_with_mqa.weight.dtype
-            == torch.bfloat16
-        )
-        if absorbed:
-            if self._cannbot_prolog is None:
-                wk, _ = self._kv_b_weights()
-                self._cannbot_prolog = CANNBotBf16MlaProlog(
-                    self.layer_name,
-                    self.q_a_proj.weight,
-                    self.q_b_proj.weight,
-                    self.kv_a_proj_with_mqa.weight,
-                    wk,
-                    self.q_a_layernorm.weight,
-                    self.kv_a_layernorm.weight,
-                    self.kv_a_layernorm.variance_epsilon,
-                )
-            q_c, q, kv = self._cannbot_prolog(hidden_states)
-            q_nope, q_pe = q.split((self.latent_dim, self.rope_dim), dim=-1)
-            kv_c, k_pe = kv.split((self.latent_dim, self.rope_dim), dim=-1)
-        else:
-            q, q_c = self._project_query(hidden_states)
-            q = q.reshape(-1, self.local_heads, self.nope_dim + self.rope_dim)
-            kv = self.kv_a_proj_with_mqa(hidden_states)[0]
-            if (
-                full_prefill
-                and meta.query_start_loc[-1] == q.shape[0] > 0
-                and self.use_eager_prefill_rotary
-                and HAS_TRITON
-                and q.device.type == "npu"
-                and q.dtype == kv.dtype == torch.bfloat16
-                and q.is_contiguous()
-                and kv.is_contiguous()
-                and 512 <= q.shape[0] <= 4096
-                and self.local_heads in (4, 8, 16)
-                and (self.nope_dim, self.latent_dim, self.rope_dim) == (192, 512, 64)
-            ):
-                from .prefill_ops.small_aiv import pack_attention_projections
+        q, q_c = self._project_query(hidden_states)
+        q = q.reshape(-1, self.local_heads, self.nope_dim + self.rope_dim)
+        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        if (
+            full_prefill
+            and meta.query_start_loc[-1] == q.shape[0] > 0
+            and self.use_eager_prefill_rotary
+            and HAS_TRITON
+            and q.device.type == "npu"
+            and q.dtype == kv.dtype == torch.bfloat16
+            and q.is_contiguous()
+            and kv.is_contiguous()
+            and 512 <= q.shape[0] <= 4096
+            and self.local_heads in (4, 8, 16)
+            and (self.nope_dim, self.latent_dim, self.rope_dim) == (192, 512, 64)
+        ):
+            from .prefill_ops.small_aiv import pack_attention_projections
 
-                q_nope, q_pe, kv_c, k_pe = pack_attention_projections(q, kv, self.rope_dim)
-            else:
-                kv_c, k_pe = kv.split((self.latent_dim, self.rope_dim), -1)
-                q_nope, q_pe = q.split((self.nope_dim, self.rope_dim), dim=-1)
-            kv_c = self.kv_a_layernorm(kv_c)
+            q_nope, q_pe, kv_c, k_pe = pack_attention_projections(q, kv, self.rope_dim)
+        else:
+            kv_c, k_pe = kv.split((self.latent_dim, self.rope_dim), -1)
+            q_nope, q_pe = q.split((self.nope_dim, self.rope_dim), dim=-1)
+        kv_c = self.kv_a_layernorm(kv_c)
         q_pe, k_pe = self._rotate_qk(positions, q_pe.reshape(q.shape[0], -1).contiguous(), k_pe.contiguous())
         q_pe = q_pe.reshape(-1, self.local_heads, self.rope_dim)
         full_prefill = full_prefill and meta.query_start_loc[-1] == q.shape[0] > 0
@@ -997,7 +933,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 k_pe,
                 positions,
                 out,
-                absorbed=absorbed,
                 reuse_prefill_output=True,
             )
         else:
@@ -1010,7 +945,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 k_pe,
                 positions,
                 out,
-                absorbed=absorbed,
             )
         if overlap_gate:
             main_stream.wait_stream(gate_stream)
@@ -1049,7 +983,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         positions,
         out,
         *,
-        absorbed=False,
         reuse_prefill_output=False,
     ):
         metadata = get_forward_context().attn_metadata
@@ -1075,7 +1008,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             num_tokens,
             full_graph=full_graph,
         )
-        query, wv = self._absorb_query(q_nope[:num_tokens], q_pe[:num_tokens], absorbed=absorbed)
+        query, wv = self._absorb_query(q_nope[:num_tokens], q_pe[:num_tokens])
         if (
             self.cann_indexer_decode
             and self.use_pd_decode
@@ -1151,7 +1084,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             else:
                 keys = (native_rms_norm(keys, norm) if is_decode_batch(meta) else norm(keys)).bfloat16()
         if use_fused_write:
-            payload, scales = self._quantize_c8(kv_c[:num_tokens], gpu_scale=self.use_gpu_c8_scale)
+            payload, scales = self._quantize_c8(kv_c[:num_tokens])
             if index_norm is not None:
                 return self.ops.write_c8_rows(
                     cache,
@@ -1180,1012 +1113,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 rows = torch.where(slots[:, None] >= 0, rows, cache[:1])
             cache.index_copy_(0, slots.long().clamp_min(0), rows)
         return keys
-
-    def _attend_decode_request(
-        self,
-        meta,
-        request,
-        seq_len,
-        cache,
-        block_size,
-        query,
-        wv,
-        out,
-        index_query,
-        index_weight,
-    ):
-        start, stop = meta.query_start_loc[request : request + 2]
-        count = stop - start
-        visible = torch.arange(seq_len - count, seq_len, device=query.device)
-        table = meta.block_table[request]
-        if self.indexer is None:
-            selected = window_candidates(visible, min(self.window, self.max_model_len))
-        elif (seq_len - 1) // self.indexer.ratio > self.indexer.budget:
-            ratio = self.indexer.ratio
-            groups = seq_len // ratio
-            pool = torch.empty(
-                (groups, INDEX_DIM),
-                dtype=torch.bfloat16 if self.decode_data_fusions else torch.float32,
-                device=query.device,
-            )
-            self.ops.copy_pool_keys(cache, table, pool, 0, block_size, ratio, write=False)
-            selected = native_indexpool_select(
-                index_query[start:stop],
-                index_weight[start:stop],
-                pool,
-                visible,
-                fuse_postprocess=self.decode_data_fusions,
-            )
-            dense = self._dense_decode_candidates(visible, selected.shape[-1])
-            selected = torch.where((visible // ratio > self.indexer.budget)[:, None], selected, dense)
-        else:
-            width = min(seq_len, (self.indexer.budget + 1) * self.indexer.ratio)
-            selected = self._dense_decode_candidates(visible, width)
-        if self.topk_snapshot is not None:
-            self.topk_snapshot[start:stop, : selected.shape[-1]].copy_(selected)
-        if self._can_gather_decode_fia_rows(cache, query.dtype):
-            from .c8_read import gather_compact_c8_fia_rows as gather_c8_fia_rows
-
-            rows = gather_c8_fia_rows(cache, table, block_size, selected)
-        else:
-            rows = self._gather_attention_rows(cache, table, block_size, selected, mask_padding=True)
-        context = native_mla_context(
-            query[start:stop],
-            selected,
-            rows,
-            self.learnable_sink_param,
-            self.scale,
-            length_provider=self._fia_length_provider(selected, start),
-            metadata=meta,
-        )
-        out[start:stop].copy_(_head_bmm(context, wv).reshape_as(out[start:stop]))
-
-    def _attend_eager(self, meta, cache, block_size, hidden, q_c, positions, query, wv, out, *, reuse_output=False):
-        parts = [] if reuse_output else None
-
-        def write_output(start, stop, value):
-            value = value.reshape_as(out[start:stop])
-            if parts is None:
-                out[start:stop].copy_(value)
-            else:
-                parts.append((start, stop, value))
-
-        num_tokens = query.shape[0]
-        snapshot = self.topk_snapshot
-        uses_indexpool = self.indexer is not None and any(
-            (length - 1) // self.indexer.ratio > self.indexer.budget for length in meta.seq_lens
-        )
-        index_query = index_weight = None
-        all_prefill = uses_indexpool and self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
-        if uses_indexpool:
-            # Whole indexer chunks can store the FP8 bins in the dtype consumed by LI.
-            can_store_bf16 = (
-                all_prefill
-                and self.fuse_c8_qk
-                and query.dtype == torch.bfloat16
-                and cache.dtype == torch.uint8
-                and all(
-                    (stop - start) % QUERY_CHUNK == 0
-                    and seq_len - (stop - start) >= (self.indexer.budget + 1) * self.indexer.ratio
-                    for seq_len, start, stop in zip(meta.seq_lens, meta.query_start_loc, meta.query_start_loc[1:])
-                    if stop > start
-                )
-            )
-            index_inputs = (hidden[:num_tokens], q_c[:num_tokens], positions[..., :num_tokens])
-            if all_prefill:
-                index_query, index_weight = self.indexer.encode_queries(
-                    *index_inputs,
-                    shared_positions=positions,
-                    output_dtype=torch.bfloat16 if can_store_bf16 else torch.float32,
-                )
-            else:
-                index_query, index_weight = self.indexer.encode_queries(*index_inputs)
-        for i, seq_len in enumerate(meta.seq_lens):
-            start, stop = meta.query_start_loc[i : i + 2]
-            if start == stop:
-                continue
-            if getattr(self, "native_decode_attention", False) and meta.prefill_reqs and not meta.prefill_reqs[i]:
-                self._attend_decode_request(
-                    meta,
-                    i,
-                    seq_len,
-                    cache,
-                    block_size,
-                    query,
-                    wv,
-                    out,
-                    index_query,
-                    index_weight,
-                )
-                continue
-            num_queries = stop - start
-            verify = num_queries > 1 and bool(meta.precise_decode_reqs and meta.precise_decode_reqs[i])
-            batch_verify = (
-                self.batch_verify_attention
-                and verify
-                and num_queries <= BATCH_VERIFY_MAX_QUERIES
-                and query.device.type == "npu"
-            )
-            is_prefill = not verify and bool(meta.prefill_reqs and meta.prefill_reqs[i])
-            block_table = meta.block_table[i]
-            may_score_groups = uses_indexpool and (seq_len - 1) // self.indexer.ratio > self.indexer.budget
-            pooled_history = None
-            fallback_pool = None
-            if may_score_groups:
-                if self.incremental_index_pool:
-                    ratio = self.indexer.ratio
-                    groups = seq_len // ratio
-                    if (
-                        is_prefill
-                        and self.use_cann_prefill
-                        and cache.device.type == "npu"
-                        and cache.dtype == torch.uint8
-                        and cache.is_contiguous()
-                        and block_table.dtype in (torch.int32, torch.int64)
-                        and block_table.is_contiguous()
-                        and block_size == 64
-                        and ratio == 4
-                    ):
-                        pooled_history = self.ops.read_prefill_pool(cache, block_table, groups, block_size, ratio)
-                    else:
-                        pooled_history = torch.empty((groups, INDEX_DIM), dtype=torch.float32, device=hidden.device)
-                        self.ops.copy_pool_keys(cache, block_table, pooled_history, 0, block_size, ratio, write=False)
-                else:
-                    history = torch.arange(seq_len, device=hidden.device)
-                    raw_keys, key_pos = self._read_index_rows(cache, block_table, block_size, history, positions.ndim)
-            loop_stop = stop
-            if (
-                self.fuse_c8_prefill_window
-                and is_prefill
-                and self.indexer is None
-                and self.window == 512
-                and query.device.type == "npu"
-                and query.dtype == torch.bfloat16
-                and query.is_contiguous()
-                and cache.dtype == torch.uint8
-                and cache.is_contiguous()
-                and block_table.is_contiguous()
-            ):
-                early = max(0, self.window - 1 - (seq_len - num_queries))
-                early = ((early + QUERY_CHUNK - 1) // QUERY_CHUNK) * QUERY_CHUNK
-                if num_queries - early >= QUERY_CHUNK:
-                    # Preserve the existing C8 path for small head counts. A
-                    # 32-head suffix can use two 16-head calls when each query
-                    # already has a full causal window.
-                    suffix = query[start + early : stop]
-                    if 0 < query.shape[1] <= C8_PREFILL_MAX_HEADS or (
-                        query.shape[1] == 2 * BANDED_HEADS
-                        and supports_banded_window(suffix, self.learnable_sink_param, self.window)
-                    ):
-                        loop_stop = start + early
-            reuse_window = is_prefill and self.indexer is None and num_queries > QUERY_CHUNK and loop_stop > start
-            batch_early_window = (
-                reuse_window
-                and loop_stop - start > QUERY_CHUNK
-                and snapshot is None
-                and query.device.type == "npu"
-                and query.dtype == torch.bfloat16
-                and query.is_contiguous()
-                and cache.dtype == torch.uint8
-                and self.batch_prefill_window
-            )
-            fuse_sparse_prefill = (
-                is_prefill
-                and may_score_groups
-                and query.device.type == "npu"
-                and self.fuse_c8_qk
-                and query.dtype == torch.bfloat16
-                and query.is_contiguous()
-                and cache.dtype == torch.uint8
-                and cache.is_contiguous()
-                and cache.shape[-1] % 4 == 0
-                and block_table.is_contiguous()
-                and (
-                    0 < query.shape[1] <= C8_PREFILL_MAX_HEADS
-                    if self.use_cann_prefill
-                    else supports_c8_qk_heads(query.shape[1])
-                )
-            )
-            use_cann_sparse = self.use_cann_prefill and fuse_sparse_prefill
-            prefill_c8_v2_rows = []
-            history_start = max(0, seq_len - num_queries + 1 - self.window) if self.indexer is None else 0
-            shared_kv = None
-            if (
-                reuse_window
-                or verify
-                and (not may_score_groups or seq_len <= (stop - start) * self.indexer.ratio * (self.indexer.budget + 1))
-            ):
-                # The sliding-window union is bounded by this step's query
-                # count plus the window width, independent of the prefix length.
-                shared_end = seq_len - (stop - loop_stop)
-                if batch_early_window:
-                    shared_positions = logical_positions(history_start, shared_end, hidden.device)
-                else:
-                    shared_positions = torch.arange(history_start, shared_end, device=hidden.device)
-                if (
-                    batch_early_window
-                    and self.use_cann_prefill
-                    and self.use_fp8_cache
-                    and HAS_TRITON
-                    and get_ascend_device_type() is AscendDeviceType.A5
-                    and cache.ndim == 2
-                    and cache.is_contiguous()
-                    and cache.shape[-1] >= C8_ROW_BYTES
-                    and cache.shape[-1] % 4 == 0
-                    and cache.storage_offset() % 4 == 0
-                    and block_size == 64
-                    and block_table.ndim == 1
-                    and block_table.is_contiguous()
-                    and block_table.device == cache.device
-                    and block_table.dtype in (torch.int32, torch.int64)
-                    and 0 < shared_positions.numel() <= MAX_FUSED_C8_READ_ROWS
-                    and shared_end <= block_table.numel() * block_size
-                ):
-                    # Reuse the FP32 C8 reader without changing SWA reduction shapes.
-                    shared_kv = triton_ops.gather_c8_rows(cache, block_table, block_size, shared_positions)
-                else:
-                    shared_kv = self._gather_attention_rows(cache, block_table, block_size, shared_positions)
-            prefill_query = query[start:loop_stop].float() if reuse_window else None
-            first_position = seq_len - num_queries
-            end_position = seq_len - (stop - loop_stop)
-            if use_cann_sparse:
-                prefill_logical = logical_positions(first_position, end_position, hidden.device)
-            elif reuse_window and not batch_early_window:
-                prefill_logical = torch.arange(first_position, end_position, device=hidden.device)
-            else:
-                prefill_logical = None
-            if (
-                batch_verify
-                and self.indexer is None
-                and (self.local_heads, self.window) == BATCH_VERIFY_SWA_SHAPE
-                and seq_len - num_queries + 1 >= self.window
-            ):
-                # Every query has a complete window, one row wider in history
-                # than the preceding query. Use overlapping views of the gather.
-                selected = shared_positions.unfold(0, self.window, 1)
-                kv_selected = shared_kv.unfold(0, self.window, 1).transpose(1, 2)
-                if snapshot is not None:
-                    snapshot[start:stop, : self.window].copy_(selected)
-                value = self._attend_decoded(query[start:stop], selected, kv_selected, wv, token_start=start)
-                write_output(start, stop, value)
-                continue
-            batch_sparse = (
-                batch_verify
-                and may_score_groups
-                and (seq_len - num_queries) // self.indexer.ratio > self.indexer.budget
-                and (self.local_heads, (self.indexer.budget + 1) * self.indexer.ratio) == BATCH_VERIFY_SPARSE_SHAPE
-                and cache.shape[-1] % 4 == 0
-            )
-            candidate_rows = []
-            # Match the candidate and reduction widths of a single-token decode
-            # for each verification query. Keep the batched projection and MoE.
-            cached_groups = -1
-            li_cache = None
-            li_tail = None
-            processed_until = start
-            if batch_early_window:
-                from .prefill_ops.swa_early import attend_window_chunks
-
-                early_contexts = attend_window_chunks(
-                    prefill_query,
-                    shared_kv,
-                    first_position,
-                    history_start,
-                    min(self.window, seq_len),
-                    self.learnable_sink_param,
-                    self.scale,
-                    self.latent_dim,
-                    QUERY_CHUNK,
-                    query.dtype,
-                )
-                for offset, context in early_contexts:
-                    lo = start + offset
-                    write_output(lo, lo + context.size(0), _head_bmm(context, wv))
-                processed_until = loop_stop
-            chunk = 1 if verify else QUERY_CHUNK
-            early_fusion = (
-                os.getenv("HY4_PREFILL_CAUSAL_PREFIX") == "1"
-                and is_prefill
-                and snapshot is None
-                and query.device.type == "npu"
-                and is_950()
-            )
-            if early_fusion and use_cann_sparse:
-                from .prefill_ops.early_recall import build_full_recall_rows
-
-                history_budget = self.indexer.budget
-                ratio = self.indexer.ratio
-                first = seq_len - num_queries
-                full_recall_end = (history_budget + 1) * ratio
-                full_recall_rows = max(0, min(loop_stop - start, full_recall_end - first))
-                if full_recall_rows != loop_stop - start:
-                    # Preserve the original 16-row groups at the LI boundary.
-                    full_recall_rows = full_recall_rows // chunk * chunk
-                if full_recall_rows:
-                    dtype = torch.int32 if first >= history_budget * ratio else torch.int64
-                    selected = reuse_prefill_metadata(
-                        query.device,
-                        ("full_recall", first, full_recall_rows, history_budget, ratio, dtype),
-                        lambda first=first,
-                        full_recall_rows=full_recall_rows,
-                        history_budget=history_budget,
-                        ratio=ratio,
-                        dtype=dtype: build_full_recall_rows(
-                            first,
-                            full_recall_rows,
-                            history_budget,
-                            ratio,
-                            query.device,
-                            dtype,
-                        ),
-                    )
-                    prefill_c8_v2_rows.append(selected)
-                    processed_until += full_recall_rows
-            for lo in range(processed_until, loop_stop, chunk):
-                if lo < processed_until:
-                    continue
-                hi = min(lo + chunk, loop_stop)
-                visible_len = seq_len - (stop - hi)
-                history_len = visible_len if verify else seq_len
-                score_groups = may_score_groups and (history_len - 1) // self.indexer.ratio > self.indexer.budget
-                scores = None
-                if shared_kv is not None and not score_groups and not reuse_window:
-                    first = max(0, visible_len - self.window) if self.indexer is None else 0
-                    selected_slice = slice(first - history_start, visible_len - history_start)
-                    selected = shared_positions[selected_slice].unsqueeze(0)
-                    kv_selected = shared_kv[selected_slice].unsqueeze(0)
-                else:
-                    logical = (
-                        prefill_logical[lo - start : hi - start]
-                        if prefill_logical is not None
-                        else torch.arange(visible_len - (hi - lo), visible_len, device=hidden.device)
-                    )
-                    if self.indexer is None:
-                        selected = window_candidates(logical, min(self.window, history_len))
-                    elif score_groups:
-                        groups = history_len // self.indexer.ratio
-                        if groups != cached_groups:
-                            if pooled_history is not None:
-                                pool = pooled_history[:groups]
-                            else:
-                                end = groups * self.indexer.ratio
-                                pool = self.indexer.encode_keys(raw_keys[:end], key_pos[..., :end])
-                            cached_groups = groups
-                        q_index, w_index = index_query[lo:hi], index_weight[lo:hi]
-                        if use_cann_sparse and self.li_prefill.eligible(
-                            q_index,
-                            w_index,
-                            pool,
-                            visible_len,
-                            hi - lo,
-                            self.indexer.ratio,
-                            self.indexer.budget,
-                        ):
-                            if li_cache is None or li_cache.shape[0] != pool.shape[0]:
-                                li_cache = pool.to(torch.bfloat16).contiguous()
-                            if li_tail is None:
-                                li_tail = reuse_prefill_metadata(
-                                    hidden.device,
-                                    ("li_tail", first_position, end_position),
-                                    lambda prefill_logical=prefill_logical: self.li_prefill.prepare_tail(
-                                        prefill_logical
-                                    ),
-                                )
-                            # Full Prefill chunks share the same key pool. Only their causal lengths vary.
-                            rows = min(
-                                self.li_prefill.BATCH_ROWS,
-                                (loop_stop - lo) // chunk * chunk,
-                            )
-                            if rows > chunk:
-                                end = lo + rows
-                                selected = self.li_prefill.select_many(
-                                    index_query[lo:end],
-                                    index_weight[lo:end],
-                                    li_cache,
-                                    visible_len,
-                                    tail=li_tail[lo - start : end - start],
-                                    tp_shard=self.shard_prefill_li and all_prefill,
-                                )
-                                prefill_c8_v2_rows.append(selected)
-                                processed_until = end
-                                continue
-                            selected = self.li_prefill.select(
-                                q_index,
-                                w_index,
-                                li_cache,
-                                visible_len,
-                                tail=li_tail[lo - start : hi - start],
-                            )
-                        else:
-                            score_pool = pool
-                            if pooled_history is not None and pooled_history.dtype == torch.bfloat16:
-                                if fallback_pool is None:
-                                    fallback_pool = pooled_history.float()
-                                score_pool = fallback_pool[:groups]
-                            select_candidates = sparse_candidates
-                            if use_cann_sparse:
-                                from .prefill_ops.index_pool_select import select_partial_prefill_pool
-
-                                select_candidates = select_partial_prefill_pool
-                                q_index = q_index.float()
-                            selected = select_candidates(
-                                q_index,
-                                w_index,
-                                score_pool,
-                                logical,
-                                self.indexer.ratio,
-                                self.indexer.budget,
-                            )
-                            if use_cann_sparse and seq_len - num_queries >= self.indexer.budget * self.indexer.ratio:
-                                # LightningIndexer emits int32. Cast just the fallback rows so
-                                # the mixed batch stays int32 through concatenation and CANN.
-                                selected = selected.to(torch.int32)
-                        if batch_sparse:
-                            candidate_rows.append(selected)
-                            continue
-                    else:
-                        # Every complete group fits the recall budget, so only causality matters.
-                        visible = torch.arange(visible_len, device=hidden.device)
-                        selected = visible.expand(hi - lo, -1).masked_fill(visible > logical[:, None], -1)
-                    if use_cann_sparse:
-                        prefill_c8_v2_rows.append(selected)
-                        continue
-                    if fuse_sparse_prefill:
-                        scores, kv_selected = self.ops.gather_c8_qk(
-                            query[lo:hi], cache, block_table, block_size, selected
-                        )
-                    elif shared_kv is None:
-                        kv_selected = self._gather_attention_rows(cache, block_table, block_size, selected.clamp_min(0))
-                    else:
-                        valid_indices = (selected - history_start).clamp_min(0)
-                        kv_selected = shared_kv.index_select(0, valid_indices.flatten()).view(*selected.shape, -1)
-                if snapshot is not None:
-                    snapshot[lo:hi, : selected.shape[-1]].copy_(selected)
-                value = self._attend_decoded(
-                    query[lo:hi],
-                    selected,
-                    kv_selected,
-                    wv,
-                    scores=scores,
-                    token_start=lo,
-                    query_fp32=prefill_query[lo - start : hi - start] if reuse_window else None,
-                    fuse_prefill_logits=early_fusion and reuse_window,
-                )
-                write_output(lo, hi, value)
-            if loop_stop < stop:
-                context = attend_c8_window(
-                    query[loop_stop:stop],
-                    cache,
-                    block_table,
-                    block_size,
-                    seq_len,
-                    self.learnable_sink_param,
-                    self.scale,
-                    window=self.window,
-                )
-                if snapshot is not None:
-                    logical = torch.arange(seq_len - (stop - loop_stop), seq_len, device=query.device)
-                    snapshot[loop_stop:stop, : self.window].copy_(window_candidates(logical, self.window))
-                value = _head_bmm(context, wv)
-                write_output(loop_stop, stop, value)
-                logger.info_once(
-                    "HYV4 Prefill uses CANN KvQuantSparseFlashAttentionV2 for sliding windows. "
-                    "seq_len=%d prefill_queries=%d fused_queries=%d",
-                    seq_len,
-                    num_queries,
-                    stop - loop_stop,
-                )
-            if prefill_c8_v2_rows:
-                selected = (
-                    prefill_c8_v2_rows[0] if len(prefill_c8_v2_rows) == 1 else torch.cat(prefill_c8_v2_rows, dim=0)
-                )
-                context = attend_c8_v2(
-                    query[start:stop],
-                    cache,
-                    block_table,
-                    block_size,
-                    selected,
-                    seq_len,
-                    self.learnable_sink_param,
-                    self.scale,
-                    compact_prefix=max(
-                        0,
-                        min(
-                            num_queries,
-                            self.indexer.budget * self.indexer.ratio - (seq_len - num_queries),
-                        ),
-                    ),
-                )
-                if snapshot is not None:
-                    snapshot[start:stop, : selected.size(-1)].copy_(selected)
-                value = _head_bmm(context, wv)
-                write_output(start, stop, value)
-                logger.info_once(
-                    "HYV4 Prefill used aclnnKvQuantSparseFlashAttentionV2: queries=%d topk=%d seq_len=%d",
-                    num_queries,
-                    selected.size(-1),
-                    seq_len,
-                )
-            if batch_sparse:
-                selected = torch.cat(candidate_rows, dim=0)
-                valid_indices = selected.clamp_min(0)
-                if shared_kv is None:
-                    kv_selected = self.ops.gather_c8_rows(cache, meta.block_table[i], block_size, valid_indices)
-                else:
-                    kv_selected = shared_kv.index_select(0, valid_indices.flatten()).view(*selected.shape, -1)
-                if snapshot is not None:
-                    snapshot[start:stop, : selected.shape[-1]].copy_(selected)
-                value = self._attend_decoded(
-                    query[start:stop], selected, kv_selected, wv, split_pv=True, token_start=start
-                )
-                write_output(start, stop, value)
-
-        if parts:
-            # Keep the projection output directly when it covers the batch.
-            # If several adjacent pieces cover it, materialize the final layout once.
-            cursor = 0
-            for start, stop, _ in parts:
-                if start != cursor:
-                    break
-                cursor = stop
-            else:
-                if cursor == out.shape[0]:
-                    if len(parts) == 1:
-                        return parts[0][2]
-                    if len(parts) <= 32:
-                        return torch.cat([value for _, _, value in parts], dim=0)
-            for start, stop, value in parts:
-                out[start:stop].copy_(value)
-        return out
-
-    def _forward_decode_graph(self, meta, cache, block_size, hidden, q_c, positions, query, wv, out):
-        seq_lens = meta.decode_seq_lens
-        num_tokens = query.shape[0]
-        num_queries = num_tokens // seq_lens.shape[0]
-        geometry = {}
-        if self.use_pd_decode and query.device.type == "npu":
-            # Cache only read-only tensors within this forward and stream.
-            context = get_forward_context()
-            stream = torch.npu.current_stream(query.device).npu_stream
-            key = (id(meta), num_tokens, query.device, stream)
-            geometry = context.additional_kwargs.setdefault("hy4_decode_geometry", {}).setdefault(key, {})
-        layout = geometry.get("logical")
-        if layout is None:
-            live = meta.slot_mapping[:num_tokens].view(-1, num_queries) >= 0
-            seq_lens = seq_lens.long().masked_fill(~live[:, 0], 0)
-            offsets = torch.arange(num_queries, device=query.device)
-            logical = (seq_lens[:, None] - num_queries + offsets).masked_fill(~live, -1)
-            layout = geometry["logical"] = (live, seq_lens, offsets, logical)
-        else:
-            logger.info_once("HYV4 Flash reuses Decode query geometry within a forward.")
-        live, seq_lens, offsets, logical = layout
-        snapshot = self.topk_snapshot
-        window = min(self.window, self.max_model_len)
-        shared_positions = None
-        if (
-            self.share_swa_c8_reads
-            and self.indexer is None
-            and num_queries == BATCH_VERIFY_MAX_QUERIES
-            and window == BATCH_VERIFY_SWA_SHAPE[1]
-            and (self.use_pd_decode or self.local_heads == BATCH_VERIFY_SWA_SHAPE[0])
-            and cache.shape[-1] % torch.int32.itemsize == 0
-        ):
-            key = ("window_positions", window)
-            shared_positions = geometry.get(key)
-            if shared_positions is None:
-                # The union of consecutive windows has window + num_queries - 1 rows.
-                history_offsets = torch.arange(1 - window - num_queries, 0, device=query.device)
-                shared_positions = seq_lens[:, None] + history_offsets
-                shared_positions.masked_fill_(shared_positions > logical.amax(dim=1, keepdim=True), -1)
-                geometry[key] = shared_positions
-
-        batch_size = seq_lens.shape[0]
-        if (
-            self.cann_c8_swa_decode
-            and self.use_pd_decode
-            and self.use_fp8_cache
-            and self.indexer is None
-            and num_queries == BATCH_VERIFY_MAX_QUERIES
-            and window == 512
-            and self.local_heads == 64
-            and query.dtype == torch.bfloat16
-            and query.device.type == "npu"
-        ):
-            from .c8_decode import attend_compact_c8
-
-            lane = torch.arange(window, device=query.device)
-            lengths = (logical + 1).clamp(0, window)
-            selected = (logical + 1 - window).clamp_min(0)[..., None] + lane
-            selected.masked_fill_(lane >= lengths[..., None], -1)
-            packed_rows = [
-                self._gather(
-                    cache, meta.block_table[request], block_size, selected[request].clamp_min(0), slice(C8_ROW_BYTES)
-                )
-                for request in range(batch_size)
-            ]
-            selected = selected.flatten(0, 1)
-            packed = torch.cat(packed_rows, dim=0)
-            context = attend_compact_c8(query, packed, selected, self.learnable_sink_param, self.scale)
-            value = _head_bmm(context, wv)
-            out[:num_tokens].copy_(value.reshape_as(out[:num_tokens]))
-            out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
-            if snapshot is not None:
-                snapshot[:num_tokens, :window].copy_(selected)
-            logger.info_once("HYV4 Flash uses compact CANN C8 attention for sliding-window Decode.")
-            return
-        if (
-            shared_positions is not None
-            and self.use_pd_decode
-            and self.use_fp8_cache
-            and query.device.type == "npu"
-            and self.local_heads == 64
-            and query.shape[-1] == 576
-            and batch_size in (2, 3, 4, 5, 8)
-        ):
-            logger.info_once("HYV4 Flash batches sliding-window Decode attention across requests.")
-            if batch_size == 8:
-                logger.info_once("HYV4 Flash batches sliding-window Decode attention for eight requests.")
-            key = ("window_selection", window)
-            selection = geometry.get(key)
-            if selection is None:
-                selected = window_candidates(logical.flatten(), window)
-                window_rows = (offsets[:, None] + torch.arange(window, device=query.device)).flatten()
-                selection = geometry[key] = (selected, window_rows)
-            selected, window_rows = selection
-            if snapshot is not None:
-                snapshot[:num_tokens, :window].copy_(selected)
-            direct_fia = self._can_gather_decode_fia_rows(cache, query.dtype)
-            if direct_fia:
-                from .c8_read import (
-                    empty_compact_c8_fia_rows as empty_c8_fia_rows,
-                )
-                from .c8_read import (
-                    gather_compact_c8_fia_rows as gather_c8_fia_rows,
-                )
-
-                rows = empty_c8_fia_rows(num_tokens, window, query.device)
-                for request in range(batch_size):
-                    start = request * num_queries
-                    stop = start + num_queries
-                    gather_c8_fia_rows(
-                        cache,
-                        meta.block_table[request],
-                        block_size,
-                        selected[start:stop],
-                        output=tuple(tensor[start:stop] for tensor in rows),
-                    )
-            else:
-                rows = torch.empty(
-                    (num_tokens, window, query.shape[-1]),
-                    dtype=torch.float32,
-                    device=query.device,
-                )
-                for request in range(batch_size):
-                    history = self._gather_attention_rows(
-                        cache,
-                        meta.block_table[request],
-                        block_size,
-                        shared_positions[request],
-                        mask_padding=True,
-                    )
-                    start = request * num_queries
-                    target = rows[start : start + num_queries].view(-1, rows.shape[-1])
-                    torch.index_select(history, 0, window_rows, out=target)
-            self._attend_decoded(query, selected, rows, wv, out[:num_tokens], graph_queries=num_queries)
-            out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
-            return
-
-        score_groups = (
-            self.indexer is not None
-            and not self._short_indexpool_capture
-            and self.max_model_len > (self.indexer.budget + 1) * self.indexer.ratio
-        )
-        use_paged_pool = False
-        if score_groups:
-            index_query, index_weight = self.indexer.encode_queries(
-                hidden[:num_tokens],
-                q_c[:num_tokens],
-                positions[..., :num_tokens],
-                full_graph=True,
-            )
-            use_paged_pool = (
-                self.fuse_indexpool_select
-                and self.incremental_index_pool
-                and (self.use_pd_decode or self.local_heads == BATCH_VERIFY_SPARSE_SHAPE[0])
-                and (
-                    num_queries,
-                    self.indexer.num_heads,
-                    self.indexer.ratio,
-                    self.indexer.budget,
-                )
-                == PAGED_POOL_DECODE_SHAPE
-                and cache.device.type == "npu"
-                and meta.block_table.stride(-1) == 1
-                and index_query.is_contiguous()
-                and index_weight.is_contiguous()
-            )
-        batch_sparse = (
-            use_paged_pool
-            and self.use_pd_decode
-            and self.use_fp8_cache
-            and self.ops is triton_ops
-            and cache.shape[-1] % torch.int32.itemsize == 0
-            and self.local_heads == 32
-            and query.shape[-1] == 576
-            and (self.indexer.budget + 1) * self.indexer.ratio == 2048
-            and batch_size in (2, 4, 8)
-        )
-        if batch_sparse:
-            logger.info_once("HYV4 Flash batches sparse Decode attention across requests.")
-            sparse_selected = []
-        batched_selected = None
-        if use_paged_pool and self.use_pd_decode and self.ops is triton_ops and batch_size in (2, 4, 8):
-            logger.info_once("HYV4 Flash batches Decode IndexPool selection across requests.")
-            if batch_size == 8:
-                logger.info_once("HYV4 Flash batches Decode IndexPool selection for eight requests.")
-            ratio = self.indexer.ratio
-            budget = self.indexer.budget
-            max_groups = self.max_model_len // ratio
-            scores = (
-                None
-                if self.decode_index_pages is not None
-                else torch.empty((batch_size, num_queries, max_groups), dtype=torch.float32, device=query.device)
-            )
-            for request in range(batch_size):
-                start = request * num_queries
-                stop = start + num_queries
-                table = meta.block_table[request]
-                self._update_decode_pool(cache, table, block_size, seq_lens[request], num_queries, positions.ndim)
-                if scores is not None:
-                    write_pool_scores(
-                        index_query[start:stop],
-                        index_weight[start:stop],
-                        cache,
-                        table,
-                        logical[request],
-                        block_size,
-                        max_groups,
-                        ratio,
-                        budget,
-                        scores[request],
-                    )
-            if self.decode_index_pages is not None:
-                from .index_pool_decode import select_pages
-
-                batched_selected = select_pages(
-                    index_query,
-                    index_weight,
-                    self.decode_index_pages,
-                    meta.block_table[:batch_size],
-                    logical,
-                    max_groups,
-                )
-                logger.info_once("HYV4 Flash uses paged CANN LightningIndexerV2 for Decode verification.")
-            else:
-                batched_selected = select_pool_candidates(
-                    scores.flatten(0, 1), logical.flatten(), max_groups, ratio, budget
-                ).view(batch_size, num_queries, -1)
-        for request in range(seq_lens.shape[0]):
-            start = request * num_queries
-            stop = start + num_queries
-            table = meta.block_table[request]
-            visible = logical[request]
-            if self.indexer is None:
-                candidate_key = ("window_candidates", window)
-                candidates = geometry.get(candidate_key)
-                if candidates is None:
-                    candidates = window_candidates(logical.flatten(), window).view(batch_size, num_queries, -1)
-                    geometry[candidate_key] = candidates
-                selected = candidates[request]
-            else:
-                if self.incremental_index_pool and batched_selected is None:
-                    self._update_decode_pool(
-                        cache,
-                        table,
-                        block_size,
-                        seq_lens[request],
-                        num_queries,
-                        positions.ndim,
-                    )
-                if batched_selected is not None:
-                    selected = batched_selected[request]
-                elif score_groups:
-                    ratio = self.indexer.ratio
-                    pool = self._read_decode_pool(cache, table, block_size, seq_lens[request], positions.ndim)
-                    selection_key = (
-                        "indexpool_selection",
-                        request,
-                        num_queries,
-                        pool.shape[0],
-                    )
-                    selection_state = geometry.get(selection_key)
-                    if selection_state is None:
-                        selection_state = prepare_indexpool_selection(visible, num_queries, pool.shape[0])
-                        geometry[selection_key] = selection_state
-                    selected = native_indexpool_select(
-                        index_query[start:stop],
-                        index_weight[start:stop],
-                        pool,
-                        visible,
-                        selection_state,
-                        fuse_postprocess=self.decode_data_fusions,
-                    )
-                    candidate_key = ("dense_candidates", selected.shape[-1])
-                    dense = geometry.get(candidate_key)
-                    if dense is None:
-                        dense = self._dense_decode_candidates(logical.flatten(), selected.shape[-1]).view(
-                            batch_size, num_queries, -1
-                        )
-                        geometry[candidate_key] = dense
-                    mask_key = ("sparse_candidate_rows", ratio, self.indexer.budget)
-                    sparse_rows = geometry.get(mask_key)
-                    if sparse_rows is None:
-                        sparse_rows = logical // ratio > self.indexer.budget
-                        geometry[mask_key] = sparse_rows
-                    selected = torch.where(sparse_rows[request, :, None], selected, dense[request])
-                else:
-                    width = min(
-                        self.max_model_len,
-                        (self.indexer.budget + 1) * self.indexer.ratio,
-                    )
-                    candidate_key = ("dense_candidates", width)
-                    candidates = geometry.get(candidate_key)
-                    if candidates is None:
-                        candidates = self._dense_decode_candidates(logical.flatten(), width).view(
-                            batch_size, num_queries, -1
-                        )
-                        geometry[candidate_key] = candidates
-                    selected = candidates[request]
-            if snapshot is not None:
-                snapshot[start:stop, : selected.shape[-1]].copy_(selected)
-            if batch_sparse:
-                sparse_selected.append(selected)
-                continue
-            if (
-                self.cann_c8_decode
-                and self.use_pd_decode
-                and self.use_fp8_cache
-                and self.indexer is not None
-                and query.dtype == torch.bfloat16
-                and query.device.type == "npu"
-                and self.local_heads == 32
-                and num_queries == BATCH_VERIFY_MAX_QUERIES
-                and selected.shape[-1] == 2048
-            ):
-                from .c8_decode import attend_compact_c8
-
-                packed = self._gather(cache, table, block_size, selected.clamp_min(0), slice(C8_ROW_BYTES))
-                context = attend_compact_c8(query[start:stop], packed, selected, self.learnable_sink_param, self.scale)
-                value = _head_bmm(context, wv)
-                out[start:stop].copy_(value.reshape_as(out[start:stop]))
-                logger.info_once("HYV4 Flash uses compact CANN C8 attention for sparse Decode verification.")
-                continue
-            q = query[start:stop]
-            if self._can_gather_decode_fia_rows(cache, q.dtype):
-                from .c8_read import gather_compact_c8_fia_rows as gather_c8_fia_rows
-
-                rows = gather_c8_fia_rows(cache, table, block_size, selected)
-            elif shared_positions is None:
-                rows = self._gather_attention_rows(cache, table, block_size, selected, mask_padding=True)
-            else:
-                history = self._gather_attention_rows(
-                    cache,
-                    table,
-                    block_size,
-                    shared_positions[request],
-                    mask_padding=True,
-                )
-                rows = history.unfold(0, window, 1).transpose(1, 2)
-            self._attend_decoded(
-                q,
-                selected,
-                rows,
-                wv,
-                out[start:stop],
-                token_start=start,
-                graph_queries=num_queries,
-            )
-        if batch_sparse:
-            logger.info_once("HYV4 Flash gathers sparse Decode C8 cache rows for the whole rank with CANN.")
-            selected = torch.stack(sparse_selected)
-            selected = selected.flatten(0, 1)
-            if self.cann_c8_decode:
-                from .c8_decode import attend_compact_c8
-
-                packed = self._gather(
-                    cache,
-                    meta.block_table[:batch_size],
-                    block_size,
-                    selected.view(batch_size, -1).clamp_min(0),
-                    slice(C8_ROW_BYTES),
-                ).view(num_tokens, selected.shape[-1], C8_ROW_BYTES)
-                context = attend_compact_c8(query, packed, selected, self.learnable_sink_param, self.scale)
-                value = _head_bmm(context, wv)
-                out[:num_tokens].copy_(value.reshape_as(out[:num_tokens]))
-                logger.info_once("HYV4 Flash uses batched compact CANN C8 attention for sparse Decode verification.")
-                return
-            if self._can_gather_decode_fia_rows(cache, query.dtype):
-                from .c8_read import (
-                    empty_compact_c8_fia_rows as empty_c8_fia_rows,
-                )
-                from .c8_read import (
-                    gather_compact_c8_fia_rows as gather_c8_fia_rows,
-                )
-
-                rows = empty_c8_fia_rows(num_tokens, selected.shape[-1], query.device)
-                for request in range(batch_size):
-                    start = request * num_queries
-                    stop = start + num_queries
-                    gather_c8_fia_rows(
-                        cache,
-                        meta.block_table[request],
-                        block_size,
-                        selected[start:stop],
-                        output=tuple(tensor[start:stop] for tensor in rows),
-                    )
-            else:
-                logical = selected.view(batch_size, -1).clamp_min(0)
-                packed = self._gather(
-                    cache,
-                    meta.block_table[:batch_size],
-                    block_size,
-                    logical,
-                    slice(self.kv_storage_width),
-                )
-                rows = dequantize_c8_rows(packed).view(num_tokens, selected.shape[-1], query.shape[-1])
-                rows = rows.masked_fill(selected[..., None] < 0, 0)
-            self._attend_decoded(query, selected, rows, wv, out[:num_tokens], graph_queries=num_queries)
-        if shared_positions is not None:
-            # Inactive queries may overlap live KV rows in the unfolded view.
-            out[:num_tokens].masked_fill_(~live.reshape(-1, 1), 0)
-
-    @staticmethod
-    def _dense_decode_candidates(visible, width):
-        history = torch.arange(width, device=visible.device).expand(visible.shape[0], -1)
-        return history.masked_fill(history > visible[:, None], -1)
-
-    def _update_decode_pool(self, cache, table, block_size, seq_len, num_queries, position_ndim):
-        ratio = self.indexer.ratio
-        first = (seq_len - num_queries).clamp_min(0) // ratio
-        end = seq_len // ratio
-        # A width-q decode can close at most ceil(q / ratio) groups.
-        width = ((num_queries + ratio - 1) // ratio) * ratio
-        history = first * ratio + torch.arange(width, device=seq_len.device)
-        history = history.masked_fill(history >= end * ratio, 0)
-        raw, key_pos = self._read_index_rows(cache, table, block_size, history, position_ndim)
-        keys = self.indexer.encode_keys(raw, key_pos, full_graph=True)
-        self.ops.copy_pool_keys(cache, table, keys, first, block_size, ratio, write=True, end_group=end)
-        if self.decode_index_pages is not None:
-            from .index_pool_decode import write_pages
-
-            write_pages(keys, self.decode_index_pages, table, first, end, block_size)
-
-    def _read_decode_pool(self, cache, table, block_size, seq_len, position_ndim):
-        ratio = self.indexer.ratio
-        groups = self.max_model_len // ratio
-        end = seq_len // ratio
-        if self.incremental_index_pool:
-            keys = torch.empty(
-                (groups, INDEX_DIM),
-                dtype=torch.bfloat16 if self.decode_data_fusions else torch.float32,
-                device=cache.device,
-            )
-            self.ops.copy_pool_keys(cache, table, keys, 0, block_size, ratio, write=False, end_group=end)
-            return keys
-        history = torch.arange(groups * ratio, device=cache.device)
-        history = history.masked_fill(history >= end * ratio, 0)
-        raw, key_pos = self._read_index_rows(cache, table, block_size, history, position_ndim)
-        return self.indexer.encode_keys(raw, key_pos, full_graph=True)
-
-    def _can_gather_decode_fia_rows(self, cache, output_dtype):
-        return (
-            getattr(self, "decode_data_fusions", False)
-            and self.fuse_c8_qk
-            and output_dtype == torch.bfloat16
-            and cache.is_contiguous()
-            and cache.shape[-1] % torch.int32.itemsize == 0
-            and cache.storage_offset() % torch.int32.itemsize == 0
-        )
 
     def _gather_attention_rows(self, cache, block_table, block_size, positions, *, mask_padding=False):
         # Keep small reads fused, including shared sliding-window histories.
@@ -2377,18 +1304,11 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
     def _pack_kv(self, latent, rope):
         if not self.use_fp8_cache:
             return torch.cat((latent, rope), dim=-1)
-        payload, scales = self._quantize_c8(latent, gpu_scale=self.use_gpu_c8_scale)
+        payload, scales = self._quantize_c8(latent)
         return pack_c8_components(payload, rope.contiguous(), scales)
 
     @staticmethod
-    def _quantize_c8(latent, *, gpu_scale=False):
-        if gpu_scale:
-            # Match the CUDA fp8_ds_mla writer's power-of-two tile scale.
-            tiles = latent.float().unflatten(-1, (-1, SFA_QSFA_TILE_SIZE))
-            amax = tiles.abs().amax(-1)
-            scales = (amax / C8_E4M3_MAX).clamp_min(C8_GPU_MIN_SCALE).log2().ceil().exp2()
-            payload = (tiles / scales.unsqueeze(-1)).clamp(-C8_E4M3_MAX, C8_E4M3_MAX).to(torch.float8_e4m3fn)
-            return payload.flatten(-2).unsqueeze(1).contiguous(), scales.unsqueeze(1).contiguous()
+    def _quantize_c8(latent):
         return torch_npu.npu_dynamic_block_quant(
             latent.contiguous().unsqueeze(1),
             dst_type=torch.float8_e4m3fn,
@@ -2418,34 +1338,20 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             self._decode_key_projection.copy_(wk)
             self._decode_value_projection.copy_(wv)
 
-    def _absorb_query(self, q_nope, q_pe, *, absorbed=False):
+    def _absorb_query(self, q_nope, q_pe):
         wk = self._decode_key_projection
         wv = self._decode_value_projection
         if wk is None:
             wk, wv = self._kv_b_weights()
-            wk = wk if absorbed else wk.contiguous()
+            wk = wk.contiguous()
             wv = wv.transpose(1, 2).contiguous()
-        q_latent = q_nope if absorbed else _head_bmm(q_nope, wk)
+        q_latent = _head_bmm(q_nope, wk)
         return torch.cat((q_latent, q_pe), dim=-1), wv
 
     def _attend(self, query, selected, kv_selected, wv, out):
         if self.use_fp8_cache:
             kv_selected = dequantize_c8_rows(kv_selected)
         self._attend_decoded(query, selected, kv_selected, wv, out)
-
-    def _fia_length_provider(self, selected, token_start, graph_queries=None):
-        from .fia_lengths import FIALengthProvider
-
-        return FIALengthProvider(
-            self.layer_name,
-            token_start,
-            selected.shape[0],
-            selected.shape[1],
-            min(self.window, self.max_model_len) if self.indexer is None else None,
-            self.indexer.ratio if self.indexer is not None else 4,
-            self.indexer.budget if self.indexer is not None else 511,
-            graph_queries,
-        )
 
     def _attend_decoded(
         self,
@@ -2458,8 +1364,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         split_pv=False,
         scores=None,
         query_fp32=None,
-        token_start=0,
-        graph_queries=None,
         fuse_prefill_logits=False,
     ):
         if getattr(self, "native_decode_attention", False) and is_decode_batch(get_flash_attention_metadata()):
@@ -2469,8 +1373,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 kv_selected,
                 self.learnable_sink_param,
                 self.scale,
-                length_provider=self._fia_length_provider(selected, token_start, graph_queries),
-                metadata=get_flash_attention_metadata(),
                 scores=scores,
                 query_fp32=query_fp32,
             )
@@ -2489,13 +1391,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             logits = build_mla_logits(scores, selected, self.learnable_sink_param, self.scale)
             # Keep the same FP32 softmax and PV reductions as the eager path.
             probs = logits.softmax(dim=-1)[..., :-1]
-        elif scores is not None or (
-            self.use_triton_mla_logits and query.device.type == "npu" and query.shape[0] == 1 and selected.shape[-1] > 0
-        ):
-            if scores is None:
-                scores = torch.bmm(attention_query.float(), kv_selected.float().transpose(1, 2))
-                if torch_npu.get_npu_format(scores) != ACL_FORMAT_ND:
-                    scores = torch_npu.npu_format_cast(scores, ACL_FORMAT_ND)
+        elif scores is not None:
             logits = self.ops.build_mla_logits(scores, selected, self.learnable_sink_param, self.scale)
             # Use the reference FP32 softmax reduction before discarding the sink.
             probs = logits.softmax(dim=-1)[..., :-1]

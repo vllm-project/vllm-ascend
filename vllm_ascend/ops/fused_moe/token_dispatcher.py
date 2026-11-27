@@ -474,7 +474,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
 
             # MXFP8's second expert projection returns BF16 on this dispatch path.
             bf16_combine = quant_type == QuantType.W8A8MXFP and sorted_hidden_states.dtype in (
-                torch.bfloat16, torch.float8_e4m3fn,
+                torch.bfloat16,
+                torch.float8_e4m3fn,
             )
             weight_dtype = torch.bfloat16 if bf16_combine else topk_weights.dtype
             topk_weights = mask_local_experts(expert_map, topk_ids, topk_weights, dtype=weight_dtype)

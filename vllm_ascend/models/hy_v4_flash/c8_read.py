@@ -6,10 +6,12 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
 
+from .kv_compaction import CompactKV, compact_kv_rows
+
 _LATENT = 512
 _ROPE = 64
 _ROWS_PER_PROGRAM = 8
-_MAX_FIA_COMPACT_CANDIDATES = 8192
+_MAX_COMPACT_CANDIDATES = 8192
 _QK_HEAD_TILE = 16
 _QK_CANDIDATE_TILE = 32
 
@@ -167,7 +169,7 @@ def read_c8_banded(cache, block_table, block_size, rows):
 
 
 @triton.jit(do_not_specialize=["count"])
-def _read_c8_fia_rows(
+def _read_c8_split_rows(
     cache,
     rope_cache,
     scale_cache,
@@ -212,9 +214,7 @@ def _read_c8_fia_rows(
 
 
 @triton.jit
-def _compact_fia_positions(
-    positions, output, candidates: tl.constexpr, input_stride: tl.constexpr, block: tl.constexpr
-):
+def _compact_kv_positions(positions, output, candidates: tl.constexpr, input_stride: tl.constexpr, block: tl.constexpr):
     row = tl.program_id(0)
     col = tl.arange(0, block)
     value = tl.load(positions + row * input_stride + col, col < candidates, -1)
@@ -227,63 +227,59 @@ def _compact_fia_positions(
     tl.store(output + row * candidates + destination, value, valid)
 
 
-def compact_fia_positions(positions):
+def compact_kv_positions(positions):
     """Stable-pack integer indices before decoding the much larger C8 rows."""
     if positions.ndim != 2 or positions.stride(1) != 1 or positions.dtype not in (torch.int32, torch.int64):
-        raise ValueError("FIA index compaction requires 2D integer indices with unit column stride")
+        raise ValueError("KV index compaction requires 2D integer indices with unit column stride")
     queries, candidates = positions.shape
     output = torch.empty((queries, candidates), dtype=positions.dtype, device=positions.device)
     if queries and candidates:
-        _compact_fia_positions[(queries,)](
+        _compact_kv_positions[(queries,)](
             positions, output, candidates, positions.stride(0), triton.next_power_of_2(candidates), num_warps=1
         )
     return output
 
 
-def empty_c8_fia_rows(queries, candidates, device, *, dtype=torch.bfloat16):
+def empty_c8_split_rows(queries, candidates, device, *, dtype=torch.bfloat16):
     latent = torch.empty((queries, candidates, 1, _LATENT), dtype=dtype, device=device)
     rope = torch.empty((queries, candidates, 1, _ROPE), dtype=dtype, device=device)
     mask = torch.empty((queries, 1, 1, candidates), dtype=torch.bool, device=device)
     return latent, rope, mask
 
 
-def empty_compact_c8_fia_rows(queries, candidates, device):
-    from .fia_lengths import CompactFIAKV
-
-    return CompactFIAKV(*empty_c8_fia_rows(queries, candidates, device, dtype=torch.float32))
+def empty_compact_c8_rows(queries, candidates, device):
+    return CompactKV(*empty_c8_split_rows(queries, candidates, device, dtype=torch.float32))
 
 
-def gather_compact_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
+def gather_compact_c8_rows(cache, block_table, block_size, positions, *, output=None):
     """Read stable-packed C8 in FP32, retaining the original dequantization."""
-    from .fia_lengths import CompactFIAKV, compact_fia_rows
-
     if (
         positions.device.type != "npu"
         or positions.ndim != 2
         or positions.stride(1) != 1
         or positions.dtype not in (torch.int32, torch.int64)
-        or not 0 < positions.shape[1] <= _MAX_FIA_COMPACT_CANDIDATES
+        or not 0 < positions.shape[1] <= _MAX_COMPACT_CANDIDATES
     ):
-        rows = gather_c8_fia_rows(cache, block_table, block_size, positions, output=output, dtype=torch.float32)
-        nope, rope = compact_fia_rows(positions, rows[0], rows[1])
+        rows = gather_c8_split_rows(cache, block_table, block_size, positions, output=output, dtype=torch.float32)
+        nope, rope = compact_kv_rows(positions, rows[0], rows[1])
         rows[0].copy_(nope)
         rows[1].copy_(rope)
         count = (positions >= 0).sum(dim=-1)
         rows[2].copy_((torch.arange(positions.shape[1], device=positions.device) >= count[:, None])[:, None, None])
-        return CompactFIAKV(*rows)
-    packed = compact_fia_positions(positions)
-    rows = gather_c8_fia_rows(cache, block_table, block_size, packed, output=output, dtype=torch.float32)
-    return CompactFIAKV(*rows)
+        return CompactKV(*rows)
+    packed = compact_kv_positions(positions)
+    rows = gather_c8_split_rows(cache, block_table, block_size, packed, output=output, dtype=torch.float32)
+    return CompactKV(*rows)
 
 
-def gather_c8_fia_rows(cache, block_table, block_size, positions, *, output=None, dtype=torch.bfloat16):
-    """Gather sparse rows directly into contiguous BF16 FIA K/rope and mask."""
+def gather_c8_split_rows(cache, block_table, block_size, positions, *, output=None, dtype=torch.bfloat16):
+    """Gather sparse rows into split latent/RoPE buffers and a padding mask."""
     queries, candidates = positions.shape
     if output is None:
-        output = empty_c8_fia_rows(queries, candidates, cache.device, dtype=dtype)
+        output = empty_c8_split_rows(queries, candidates, cache.device, dtype=dtype)
     count = positions.numel()
     if count:
-        _read_c8_fia_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](
+        _read_c8_split_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](
             cache,
             cache.view(torch.bfloat16),
             cache.view(torch.float32),

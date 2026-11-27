@@ -156,9 +156,27 @@ def _hash_ids_kernel(
 
 @triton.jit
 def _flash_hash_and_store(
-    input_ids, lookback, token_map, multipliers, primes, offsets, output,
-    num_tokens, vocab_size, pad_id, pad_token_id, req, start, token, layer, valid, store_mask,
-    MAX_NGRAM: tl.constexpr, HEADS: tl.constexpr, VISUAL_IDS: tl.constexpr, BLOCK_T: tl.constexpr,
+    input_ids,
+    lookback,
+    token_map,
+    multipliers,
+    primes,
+    offsets,
+    output,
+    num_tokens,
+    vocab_size,
+    pad_id,
+    pad_token_id,
+    req,
+    start,
+    token,
+    layer,
+    valid,
+    store_mask,
+    MAX_NGRAM: tl.constexpr,
+    HEADS: tl.constexpr,
+    VISUAL_IDS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
     current = tl.load(input_ids + token, valid, other=-1)
     invalid = ~valid | (current < 0) | (current >= vocab_size) | (current == pad_token_id)
@@ -191,16 +209,30 @@ def _flash_hash_and_store(
             remainder = rolling[:, None] % prime[None, :]
             result = tl.where(remainder < 0, remainder + prime[None, :], remainder) + offset[None, :]
             result = tl.where(invalid[:, None], -1, result).to(tl.int32)
-            tl.store(output + (layer * num_tokens + token[:, None]) * width + col[None, :],
-                     result, store_mask[:, None])
+            tl.store(output + (layer * num_tokens + token[:, None]) * width + col[None, :], result, store_mask[:, None])
 
 
 @triton.jit(do_not_specialize=["num_tokens", "num_reqs", "num_valid"])
 def _flash_prefill_hash_kernel(
-    input_ids, lookback, starts, req_ids, token_map, multipliers, primes,
-    offsets, output, num_tokens, num_reqs, num_valid, vocab_size, pad_id,
-    pad_token_id, MAX_NGRAM: tl.constexpr, HEADS: tl.constexpr,
-    VISUAL_IDS: tl.constexpr, BLOCK_T: tl.constexpr,
+    input_ids,
+    lookback,
+    starts,
+    req_ids,
+    token_map,
+    multipliers,
+    primes,
+    offsets,
+    output,
+    num_tokens,
+    num_reqs,
+    num_valid,
+    vocab_size,
+    pad_id,
+    pad_token_id,
+    MAX_NGRAM: tl.constexpr,
+    HEADS: tl.constexpr,
+    VISUAL_IDS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     layer = tl.program_id(1)
@@ -208,17 +240,49 @@ def _flash_prefill_hash_kernel(
     req = tl.load(req_ids + token, valid, other=0)
     start = tl.load(starts + req, valid & (req < num_reqs), other=0)
     _flash_hash_and_store(
-        input_ids, lookback, token_map, multipliers, primes, offsets, output,
-        num_tokens, vocab_size, pad_id, pad_token_id, req, start, token, layer, valid, token < num_tokens,
-        MAX_NGRAM, HEADS, VISUAL_IDS, BLOCK_T,
+        input_ids,
+        lookback,
+        token_map,
+        multipliers,
+        primes,
+        offsets,
+        output,
+        num_tokens,
+        vocab_size,
+        pad_id,
+        pad_token_id,
+        req,
+        start,
+        token,
+        layer,
+        valid,
+        token < num_tokens,
+        MAX_NGRAM,
+        HEADS,
+        VISUAL_IDS,
+        BLOCK_T,
     )
+
 
 @triton.jit(do_not_specialize=["num_tokens", "num_reqs"])
 def _flash_prefill_hash_by_request(
-    input_ids, lookback, starts, token_map, multipliers, primes,
-    offsets, output, num_tokens, num_reqs, vocab_size, pad_id,
-    pad_token_id, MAX_NGRAM: tl.constexpr, HEADS: tl.constexpr,
-    VISUAL_IDS: tl.constexpr, BLOCK_T: tl.constexpr,
+    input_ids,
+    lookback,
+    starts,
+    token_map,
+    multipliers,
+    primes,
+    offsets,
+    output,
+    num_tokens,
+    num_reqs,
+    vocab_size,
+    pad_id,
+    pad_token_id,
+    MAX_NGRAM: tl.constexpr,
+    HEADS: tl.constexpr,
+    VISUAL_IDS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
     req = tl.program_id(1)
     layer = tl.program_id(2)
@@ -228,14 +292,46 @@ def _flash_prefill_hash_by_request(
     token = start + tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     valid = (token < stop) & ~padding
     _flash_hash_and_store(
-        input_ids, lookback, token_map, multipliers, primes, offsets, output,
-        num_tokens, vocab_size, pad_id, pad_token_id, req, start, token, layer, valid, token < stop,
-        MAX_NGRAM, HEADS, VISUAL_IDS, BLOCK_T,
+        input_ids,
+        lookback,
+        token_map,
+        multipliers,
+        primes,
+        offsets,
+        output,
+        num_tokens,
+        vocab_size,
+        pad_id,
+        pad_token_id,
+        req,
+        start,
+        token,
+        layer,
+        valid,
+        token < stop,
+        MAX_NGRAM,
+        HEADS,
+        VISUAL_IDS,
+        BLOCK_T,
     )
 
 
-def flash_prefill_hash(input_ids, lookback, starts, num_valid, token_map, multipliers,
-                       primes, offsets, output, pad_id, pad_token_id, visual_ids, *, query_starts=None):
+def flash_prefill_hash(
+    input_ids,
+    lookback,
+    starts,
+    num_valid,
+    token_map,
+    multipliers,
+    primes,
+    offsets,
+    output,
+    pad_id,
+    pad_token_id,
+    visual_ids,
+    *,
+    query_starts=None,
+):
     num_tokens = input_ids.numel()
     num_reqs = lookback.shape[0]
     layers, max_ngram = multipliers.shape
@@ -248,17 +344,52 @@ def flash_prefill_hash(input_ids, lookback, starts, num_valid, token_map, multip
         tile_count = max(tiles)
         if tile_count * len(tiles) <= 2 * sum(tiles):
             _flash_prefill_hash_by_request[(tile_count, len(tiles), layers)](
-                input_ids, lookback, starts, token_map, multipliers, primes, offsets, output,
-                num_tokens, num_reqs, token_map.numel(), pad_id, pad_token_id,
-                max_ngram, primes.shape[-1], visual_ids, block_t,
+                input_ids,
+                lookback,
+                starts,
+                token_map,
+                multipliers,
+                primes,
+                offsets,
+                output,
+                num_tokens,
+                num_reqs,
+                token_map.numel(),
+                pad_id,
+                pad_token_id,
+                max_ngram,
+                primes.shape[-1],
+                visual_ids,
+                block_t,
             )
             return
     req_ids = input_ids.new_empty((num_tokens,), dtype=starts.dtype)
     _engram_req_index_kernel[(triton.cdiv(num_valid, block_t),)](
-        starts, req_ids, num_valid, num_reqs, starts.stride(0), BLOCK_T=block_t,
+        starts,
+        req_ids,
+        num_valid,
+        num_reqs,
+        starts.stride(0),
+        BLOCK_T=block_t,
     )
     _flash_prefill_hash_kernel[(triton.cdiv(num_tokens, block_t), layers)](
-        input_ids, lookback, starts, req_ids, token_map, multipliers, primes,
-        offsets, output, num_tokens, num_reqs, num_valid, token_map.numel(),
-        pad_id, pad_token_id, max_ngram, primes.shape[-1], visual_ids, block_t,
+        input_ids,
+        lookback,
+        starts,
+        req_ids,
+        token_map,
+        multipliers,
+        primes,
+        offsets,
+        output,
+        num_tokens,
+        num_reqs,
+        num_valid,
+        token_map.numel(),
+        pad_id,
+        pad_token_id,
+        max_ngram,
+        primes.shape[-1],
+        visual_ids,
+        block_t,
     )

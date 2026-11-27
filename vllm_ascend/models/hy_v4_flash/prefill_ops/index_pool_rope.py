@@ -28,21 +28,26 @@ def _make_factors(positions, theta, rotary_dim, sections, interleaved, stream):
 
 @triton.jit(do_not_specialize=["rows"])
 def _index_pool_rope_phase(
-    positions, frequency, phase, rows, ROW_STRIDE: tl.constexpr, AXIS_STRIDE: tl.constexpr,
-    HEIGHT_LIMIT: tl.constexpr, WIDTH_LIMIT: tl.constexpr, ROW_TILE: tl.constexpr,
+    positions,
+    frequency,
+    phase,
+    rows,
+    ROW_STRIDE: tl.constexpr,
+    AXIS_STRIDE: tl.constexpr,
+    HEIGHT_LIMIT: tl.constexpr,
+    WIDTH_LIMIT: tl.constexpr,
+    ROW_TILE: tl.constexpr,
 ):
     row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     col = tl.arange(0, 32)
-    axis = tl.where((col % 3 == 2) & (col < WIDTH_LIMIT), 2,
-                    tl.where((col % 3 == 1) & (col < HEIGHT_LIMIT), 1, 0))
+    axis = tl.where((col % 3 == 2) & (col < WIDTH_LIMIT), 2, tl.where((col % 3 == 1) & (col < HEIGHT_LIMIT), 1, 0))
     position = tl.load(
         positions + row[:, None] * ROW_STRIDE + axis[None, :] * AXIS_STRIDE,
         row[:, None] < rows,
         other=0,
     ).to(tl.float32)
     inverse = tl.load(frequency + col)
-    tl.store(phase + row[:, None] * 32 + col[None, :],
-             position * inverse[None, :], row[:, None] < rows)
+    tl.store(phase + row[:, None] * 32 + col[None, :], position * inverse[None, :], row[:, None] < rows)
 
 
 def make_factors(positions, theta, rotary_dim, sections, interleaved, stream):
@@ -59,8 +64,14 @@ def make_factors(positions, theta, rotary_dim, sections, interleaved, stream):
     phase = torch.empty((rows, 32), dtype=torch.float32, device=positions.device)
     tile = 32
     _index_pool_rope_phase[(triton.cdiv(rows, tile),)](
-        positions, frequency, phase, rows, positions.stride(-1),
-        positions.stride(0), sections[1] * 3, sections[2] * 3,
+        positions,
+        frequency,
+        phase,
+        rows,
+        positions.stride(-1),
+        positions.stride(0),
+        sections[1] * 3,
+        sections[2] * 3,
         tile,
     )
     return phase.cos(), phase.sin()

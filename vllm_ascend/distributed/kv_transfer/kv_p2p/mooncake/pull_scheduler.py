@@ -484,7 +484,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             not prompt_tokens
             or params.get("remote_num_prompt_tokens") != prompt_tokens
             or self._state_prefill_token_count(prompt_tokens) != prompt_tokens
-            or not all(params.get(key) for key in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id"))
+            or not all(
+                params.get(key) for key in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")
+            )
         ):
             return False
         remote_groups = params.get("remote_block_ids")

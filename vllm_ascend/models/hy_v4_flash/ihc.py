@@ -8,17 +8,17 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
 from vllm.models.hy_v4.nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer, HYV4HCPreLayer
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from vllm_ascend.device.device_config import is_950
+from vllm_ascend.logger import init_logger_ascend
 
 from .attention import get_flash_attention_metadata
 from .decode_fusions import is_decode_batch
 from .ihc_first import first_ihc_post, first_ihc_pre
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 _PRECISE_DECODE_MEAN_GROUPS = {6: 4, 12: 8, 18: 16, 24: 8, 48: 16}
 _FUSED_PRE_CHANNELS = 4

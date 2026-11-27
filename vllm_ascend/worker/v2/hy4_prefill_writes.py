@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import cache
-from typing import Sequence
 
 import torch
 from vllm.v1.worker.gpu.buffer_utils import FusedStagedWriter, StagedWriteTensor
@@ -47,11 +47,10 @@ class PrefillWrites:
         if (
             output.scheduled_new_reqs
             and type(runner.model_state).__name__ == "FlashModelState"
-            and sampler is not None and len(sampler.logits_processors) == 3
+            and sampler is not None
+            and len(sampler.logits_processors) == 3
             and all(
-                req.sampling_params is not None
-                and not use_penalty(req.sampling_params)
-                and not req.mm_features
+                req.sampling_params is not None and not use_penalty(req.sampling_params) and not req.mm_features
                 for req in output.scheduled_new_reqs
             )
         ):
@@ -80,9 +79,7 @@ class PrefillWrites:
             _pending_writes.reset(scope)
 
     def _apply(self, tensors: Sequence[StagedWriteTensor]):
-        if len(tensors) <= 1 or any(
-            len(t._staged_write_indices) != len(set(t._staged_write_indices)) for t in tensors
-        ):
+        if len(tensors) <= 1 or any(len(t._staged_write_indices) != len(set(t._staged_write_indices)) for t in tensors):
             for tensor in tensors:
                 tensor.apply_write()
             return

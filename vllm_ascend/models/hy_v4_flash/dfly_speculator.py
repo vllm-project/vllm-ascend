@@ -7,7 +7,6 @@ from typing import NamedTuple
 import torch
 from vllm.config import CUDAGraphMode, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import get_draft_load_config, process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import get_quant_config
@@ -17,11 +16,12 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 from .dfly import CHECKPOINT_PREFIX, MODEL_PREFIX, FlashDFlyDraft
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 
 class DFlyProposeInputs(NamedTuple):

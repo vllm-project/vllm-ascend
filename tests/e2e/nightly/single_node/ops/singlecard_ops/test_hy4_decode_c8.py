@@ -12,7 +12,7 @@ from vllm_ascend.hisparse.c8 import dequantize_c8_rows  # noqa: E402
 from vllm_ascend.models.hy_v4_flash.c8_decode import attend_compact_c8  # noqa: E402
 from vllm_ascend.models.hy_v4_flash.index_pool_cache import copy_pool_keys  # noqa: E402
 from vllm_ascend.models.hy_v4_flash.index_pool_decode import refresh_pages, select_pages, write_pages  # noqa: E402
-from vllm_ascend.models.hy_v4_flash.index_pool_select import select_paged_pool  # noqa: E402
+from vllm_ascend.models.hy_v4_flash.index_pool_select import select_pool_candidates, write_pool_scores  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +101,7 @@ def test_paged_indexer_replays_short_long_reused_and_updated_pages(batch):
         write_pages(updated, pages, tables[0], first, end, 64)
         graph.replay()
         for i in range(batch):
-            expected = select_paged_pool(
+            scores = write_pool_scores(
                 query[i * 6 : (i + 1) * 6],
                 weights[i * 6 : (i + 1) * 6],
                 cache,
@@ -110,6 +110,6 @@ def test_paged_indexer_replays_short_long_reused_and_updated_pages(batch):
                 64,
                 groups,
                 4,
-                511,
             )
+            expected = select_pool_candidates(scores, visible[i], 4, 511)
             assert torch.equal(actual[i].sort(-1).values, expected.sort(-1).values)

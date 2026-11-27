@@ -5,9 +5,9 @@ import os
 
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.logger import init_logger
 from vllm.triton_utils import triton
 
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.ops.triton.engram_lookback import _gather_lookback_kernel
 from vllm_ascend.utils import lmhead_tp_enable
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -16,7 +16,7 @@ from .aclgraph import FlashAclGraphManager
 from .decode_fusions import uses_decode_fusions
 from .pd_role import uses_prefill_ops
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 
 class FlashModelState(AscendModelState):
@@ -278,7 +278,7 @@ class FlashModelState(AscendModelState):
             )
             and self._decode_optimizations
         ):
-            from .engram_hash_triton_extra import fused_engram_hashes
+            from .engram_hash_triton import fused_engram_hashes
 
             inputs = self.prepare_engram_dummy_inputs(
                 input_batch.num_reqs_after_padding, input_batch.num_tokens_after_padding

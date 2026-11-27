@@ -20,9 +20,7 @@ def _window_geometry(device, first, rows, history_start, width, group_rows):
         indices = indices.clamp_min(0).flatten()
         return tuple(zip(selected.split(group_rows), indices.split(group_rows * width)))
 
-    return reuse_prefill_metadata(
-        device, ("early_swa", first, rows, history_start, width, group_rows), build
-    )
+    return reuse_prefill_metadata(device, ("early_swa", first, rows, history_start, width, group_rows), build)
 
 
 def attend_window_chunks(query, keys, first, history_start, width, sink, scale, latent_dim, chunk, dtype):

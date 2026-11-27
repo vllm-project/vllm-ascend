@@ -43,8 +43,14 @@ def _prod(key, query, k_inv, q_inv, key_weight, query_weight, index):
 
 @triton.jit(do_not_specialize=["key_stride"])
 def _engram_gate_dot_ordered(
-    key, hidden, key_weight, query_weight, dot, key_stride,
-    CHANNEL: tl.constexpr, EPS: tl.constexpr,
+    key,
+    hidden,
+    key_weight,
+    query_weight,
+    dot,
+    key_stride,
+    CHANNEL: tl.constexpr,
+    EPS: tl.constexpr,
 ):
     row = tl.program_id(0)
     col = tl.arange(0, 1024)
@@ -69,8 +75,15 @@ def gate_dot(key, hidden, key_weight, query_weight, channel, epsilon):
     tokens = hidden.shape[0]
     dot = hidden.new_empty(tokens)
     _engram_gate_dot_ordered[(tokens,)](
-        key, hidden, key_weight, query_weight, dot, key.stride(0),
-        channel, epsilon, enable_fp_fusion=False,
+        key,
+        hidden,
+        key_weight,
+        query_weight,
+        dot,
+        key.stride(0),
+        channel,
+        epsilon,
+        enable_fp_fusion=False,
     )
     return dot
 
@@ -99,6 +112,10 @@ def gate_value_inverse(value, epsilon):
     tokens = value.shape[0]
     inverse = value.new_empty(tokens, dtype=torch.float32)
     _engram_gate_value_inverse[(tokens,)](
-        value, inverse, value.stride(0), epsilon, enable_fp_fusion=False,
+        value,
+        inverse,
+        value.stride(0),
+        epsilon,
+        enable_fp_fusion=False,
     )
     return inverse

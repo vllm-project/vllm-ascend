@@ -1,8 +1,0 @@
-pr: 1
-entries:
-  - category: feature
-    text: >-
-      HY4 Flash selects supported CANN Engram RMS, Decode fusion and bulk C8
-      reads automatically. Only hy4flash_dfly_dp_graph remains in
-      additional-config for local TP1/DP Draft graph capture and defaults to
-      false. Per-operator enable and rollback switches are removed.

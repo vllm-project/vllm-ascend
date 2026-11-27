@@ -8,7 +8,6 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group, get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.models.utils import copy_pp_buffers, is_pp_missing_parameter
 from vllm.models.hy_v4.nvidia.model import HYV4Model
 from vllm.models.hy_v4_flash.model import HYV4FlashDecoderLayer, HYV4FlashForCausalLM, HYV4FlashModel
@@ -17,6 +16,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_config import get_ascend_device_type, is_950
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 from .attention import AscendHYV4FlashAttention, FlashAttentionBackend
@@ -27,7 +27,7 @@ from .ihc import FlashHCHeadLayer, FlashHCLayer
 from .moe import AscendFlashMoE
 from .pd_role import uses_prefill_ops
 
-logger = init_logger(__name__)
+logger = init_logger_ascend(__name__)
 
 FLASHCOMM_950_PEER_BYTES = 768 * 1024
 
@@ -282,7 +282,12 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             )
         if not defer_hc_head or self.engram_hash is None:
             return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram,
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                lookback_token_ids,
+                prepared_engram,
             )
         hidden = self._forward_prefill_hidden(input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram)
         if check_hc_head_rows is not None:
@@ -292,7 +297,10 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             max_abs = (reference.float() - selected.float()).abs().max().item()
             logger.info(
                 "HY4 HC_HEAD_CHECK tokens=%d rows=%d different=%d max_abs=%g",
-                hidden.shape[0], selected.shape[0], different, max_abs,
+                hidden.shape[0],
+                selected.shape[0],
+                different,
+                max_abs,
             )
         return hidden
 
@@ -302,11 +310,7 @@ class AscendHYV4FlashModel(HYV4FlashModel):
     def _forward_prefill_hidden(self, input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram):
         if input_ids is None:
             raise ValueError("Flash Engram requires original input token IDs")
-        hidden = (
-            inputs_embeds
-            if inputs_embeds is not None
-            else self.embed_input_ids(input_ids)
-        )
+        hidden = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         if prepared_engram is None:
             hashes = input_ids.new_empty(
                 (
@@ -325,10 +329,7 @@ class AscendHYV4FlashModel(HYV4FlashModel):
             rows = None
         else:
             hashes, rows = prepared_engram
-        hash_indices = {
-            layer_id - 1: index
-            for index, layer_id in enumerate(self.config.engram_layer_ids)
-        }
+        hash_indices = {layer_id - 1: index for index, layer_id in enumerate(self.config.engram_layer_ids)}
         for index, layer in enumerate(self.layers):
             if index in hash_indices:
                 hidden = layer.hc_attn_layer.prepare_input(hidden)
@@ -336,9 +337,7 @@ class AscendHYV4FlashModel(HYV4FlashModel):
                 if rows is None:
                     hidden = layer.engram_layer(hidden, hashes[i])
                 else:
-                    hidden = layer.engram_layer(
-                        hidden, hashes[i], embedding_rows=rows[i]
-                    )
+                    hidden = layer.engram_layer(hidden, hashes[i], embedding_rows=rows[i])
             hidden, _ = layer(positions, hidden, None)
         return hidden
 
@@ -430,21 +429,32 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
             and transfer is not None
             and (
                 transfer.kv_role == "kv_consumer"
-                or (
-                    transfer.kv_role == "kv_producer"
-                    and os.getenv("HY4_PREFILL_FP32_HEAD") == "1"
-                )
+                or (transfer.kv_role == "kv_producer" and os.getenv("HY4_PREFILL_FP32_HEAD") == "1")
             )
         )
 
     def forward(
-        self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None,
-        lookback_token_ids=None, prepared_engram=None, *,
-        defer_hc_head=False, check_hc_head_rows=None, first_ihc_vocab=False,
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        lookback_token_ids=None,
+        prepared_engram=None,
+        *,
+        defer_hc_head=False,
+        check_hc_head_rows=None,
+        first_ihc_vocab=False,
     ):
         return self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram,
-            defer_hc_head=defer_hc_head, check_hc_head_rows=check_hc_head_rows,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            lookback_token_ids,
+            prepared_engram,
+            defer_hc_head=defer_hc_head,
+            check_hc_head_rows=check_hc_head_rows,
             first_ihc_vocab=first_ihc_vocab,
         )
 

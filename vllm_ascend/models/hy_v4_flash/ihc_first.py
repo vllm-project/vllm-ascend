@@ -7,9 +7,17 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _hy4_first_ihc_pre(
-    embedding, token_ids, gates, reduced, post,
-    TOKENS: tl.constexpr, VOCAB_SIZE: tl.constexpr, WIDTH: tl.constexpr, CHANNELS: tl.constexpr,
-    TILE: tl.constexpr, ROWS: tl.constexpr,
+    embedding,
+    token_ids,
+    gates,
+    reduced,
+    post,
+    TOKENS: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    CHANNELS: tl.constexpr,
+    TILE: tl.constexpr,
+    ROWS: tl.constexpr,
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     col = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -32,10 +40,17 @@ def _hy4_first_ihc_pre(
 
 @triton.jit
 def _hy4_first_ihc_post(
-    hidden, embedding, post, output,
-    TOKENS: tl.constexpr, WIDTH: tl.constexpr, CHANNELS: tl.constexpr,
-    HIDDEN_ROW_STRIDE: tl.constexpr, HIDDEN_COL_STRIDE: tl.constexpr,
-    TILE: tl.constexpr, ROWS: tl.constexpr,
+    hidden,
+    embedding,
+    post,
+    output,
+    TOKENS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    CHANNELS: tl.constexpr,
+    HIDDEN_ROW_STRIDE: tl.constexpr,
+    HIDDEN_COL_STRIDE: tl.constexpr,
+    TILE: tl.constexpr,
+    ROWS: tl.constexpr,
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     col = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -57,9 +72,19 @@ def first_ihc_pre(embedding, token_ids, gates):
     post = torch.empty((tokens, channels), dtype=torch.float32, device=embedding.device)
     rows, tile = 4, 1024
     _hy4_first_ihc_pre[(triton.cdiv(tokens, rows), triton.cdiv(width, tile))](
-        embedding, token_ids, gates, reduced, post,
-        tokens, gates.shape[0] - 1, width, channels, tile, rows,
-        num_warps=1, enable_fp_fusion=False,
+        embedding,
+        token_ids,
+        gates,
+        reduced,
+        post,
+        tokens,
+        gates.shape[0] - 1,
+        width,
+        channels,
+        tile,
+        rows,
+        num_warps=1,
+        enable_fp_fusion=False,
     )
     return reduced, post
 
@@ -70,7 +95,18 @@ def first_ihc_post(hidden, embedding, post):
     output = torch.empty((tokens, channels, width), dtype=hidden.dtype, device=embedding.device)
     rows, tile = 4, 1024
     _hy4_first_ihc_post[(triton.cdiv(tokens, rows), triton.cdiv(width, tile))](
-        hidden, embedding, post, output, tokens, width, channels, hidden.stride(0), hidden.stride(1), tile, rows,
-        num_warps=1, enable_fp_fusion=False,
+        hidden,
+        embedding,
+        post,
+        output,
+        tokens,
+        width,
+        channels,
+        hidden.stride(0),
+        hidden.stride(1),
+        tile,
+        rows,
+        num_warps=1,
+        enable_fp_fusion=False,
     )
     return output

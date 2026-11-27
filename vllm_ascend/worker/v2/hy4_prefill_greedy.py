@@ -11,10 +11,21 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 @triton.jit
 def _hy4_prefill_argmax_parts(
-    logits, mapping, indices, positions, min_lens, stop_counts, stop_ids,
-    partial_values, partial_indices,
-    VOCAB: tl.constexpr, STRIDE: tl.constexpr, STOP_STRIDE: tl.constexpr,
-    PARTS: tl.constexpr, BLOCK: tl.constexpr, MASK_STOP: tl.constexpr,
+    logits,
+    mapping,
+    indices,
+    positions,
+    min_lens,
+    stop_counts,
+    stop_ids,
+    partial_values,
+    partial_indices,
+    VOCAB: tl.constexpr,
+    STRIDE: tl.constexpr,
+    STOP_STRIDE: tl.constexpr,
+    PARTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    MASK_STOP: tl.constexpr,
 ):
     row = tl.program_id(0)
     part = tl.program_id(1)
@@ -37,8 +48,16 @@ def _hy4_prefill_argmax_parts(
 
 @triton.jit
 def _hy4_prefill_argmax_finish(
-    partial_values, partial_indices, sampled, mapping, seq_lens, prefill_lens,
-    num_sampled, num_rejected, PARTS: tl.constexpr, BLOCK: tl.constexpr,
+    partial_values,
+    partial_indices,
+    sampled,
+    mapping,
+    seq_lens,
+    prefill_lens,
+    num_sampled,
+    num_rejected,
+    PARTS: tl.constexpr,
+    BLOCK: tl.constexpr,
     FUSE_COUNTS: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -65,14 +84,34 @@ def sample_prefill(logits, batch, bias, prefill_lens, mask_stop, fuse_counts):
     num_sampled = torch.empty_like(batch.seq_lens[:rows]) if fuse_counts else None
     num_rejected = torch.empty_like(num_sampled) if fuse_counts else None
     _hy4_prefill_argmax_parts[(rows, parts)](
-        logits, batch.idx_mapping, batch.logits_indices, batch.positions,
-        bias.min_lens.gpu, bias.num_stop_token_ids.gpu, bias.stop_token_ids.gpu,
-        values, indices, vocab, logits.stride(0), bias.stop_token_ids.gpu.stride(0),
-        parts, block, mask_stop,
+        logits,
+        batch.idx_mapping,
+        batch.logits_indices,
+        batch.positions,
+        bias.min_lens.gpu,
+        bias.num_stop_token_ids.gpu,
+        bias.stop_token_ids.gpu,
+        values,
+        indices,
+        vocab,
+        logits.stride(0),
+        bias.stop_token_ids.gpu.stride(0),
+        parts,
+        block,
+        mask_stop,
     )
     _hy4_prefill_argmax_finish[(rows,)](
-        values, indices, sampled, batch.idx_mapping, batch.seq_lens, prefill_lens,
-        num_sampled, num_rejected, parts, triton.next_power_of_2(parts), fuse_counts,
+        values,
+        indices,
+        sampled,
+        batch.idx_mapping,
+        batch.seq_lens,
+        prefill_lens,
+        num_sampled,
+        num_rejected,
+        parts,
+        triton.next_power_of_2(parts),
+        fuse_counts,
     )
     return sampled, num_sampled, num_rejected
 
@@ -95,7 +134,10 @@ class PrefillSampler:
 
         bias = self.logits_processors[0]
         sampled, num_sampled, num_rejected = sample_prefill(
-            logits, input_batch, bias, self.req_states.prefill_len.gpu,
+            logits,
+            input_batch,
+            bias,
+            self.req_states.prefill_len.gpu,
             bool(np.any(bias.num_stop_token_ids.np[reqs])),
             self._fuse_counts,
         )
@@ -148,6 +190,8 @@ class PrefillSampler:
             and not np.any(bias.restore_when_all_masked.np[req])
             and not np.any(penalties.use_penalty[req])
             and not np.any(bad_words.num_bad_words.np[req])
-            and (not self.thinking_budget_state.enabled
-                 or not np.any(self.thinking_budget_state.use_thinking_budget[req]))
+            and (
+                not self.thinking_budget_state.enabled
+                or not np.any(self.thinking_budget_state.use_thinking_budget[req])
+            )
         )

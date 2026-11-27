@@ -8,12 +8,11 @@ import pytest
 import torch
 
 from vllm_ascend.models.hy_v4_flash import (
-    attention_fusions,
     c8_read,
     decode_fusions,
     dfly_prepare,
     dfly_speculator,
-    fia_lengths,
+    kv_compaction,
 )
 
 pytestmark = pytest.mark.skipif(os.environ.get("TRITON_INTERPRET") != "1", reason="requires CPU Triton interpreter")
@@ -32,7 +31,7 @@ def test_compact_integer_indices_matches_stable_partition(candidates, dtype):
     # Exercise a non-contiguous row stride, plus repeated values and holes.
     storage = torch.full((7, candidates + 3), -33, dtype=dtype)
     storage[:, :candidates].copy_(values)
-    actual = c8_read.compact_fia_positions(storage[:, :candidates])
+    actual = c8_read.compact_kv_positions(storage[:, :candidates])
     expected = torch.full_like(values, -1)
     for i, row in enumerate(values):
         valid = row[row >= 0]
@@ -177,15 +176,23 @@ def test_native_context_respects_packed_reader_mask(prepacked):
     sink = torch.zeros(2)
     nope, rope = kv[..., :512].unsqueeze(2), kv[..., 512:].unsqueeze(2)
     if prepacked:
-        nope, rope = fia_lengths.compact_fia_rows(selected, nope, rope)
+        nope, rope = kv_compaction.compact_kv_rows(selected, nope, rope)
         mask = torch.tensor([[False, False, True], [True, True, True]])[:, None, None]
-        rows = fia_lengths.CompactFIAKV(nope, rope, mask)
+        rows = kv_compaction.CompactKV(nope, rope, mask)
     else:
         rows = (nope, rope, selected.lt(0)[:, None, None])
     actual = decode_fusions.native_mla_context(
-        query, selected, rows, sink, 0.04, length_provider=None, metadata=None,
+        query,
+        selected,
+        rows,
+        sink,
+        0.04,
     )
     expected = decode_fusions.native_mla_context(
-        query, selected, kv, sink, 0.04, length_provider=None, metadata=None,
+        query,
+        selected,
+        kv,
+        sink,
+        0.04,
     )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

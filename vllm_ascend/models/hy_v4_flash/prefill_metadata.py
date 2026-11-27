@@ -34,7 +34,8 @@ def _make_window_candidates(first, queries, width, device):
 
 def window_indices(first, queries, width, device):
     return reuse_prefill_metadata(
-        device, ("c8_window_indices", first, queries, width),
+        device,
+        ("c8_window_indices", first, queries, width),
         lambda: _make_window_candidates(first, queries, width, device),
     )
 
@@ -48,6 +49,7 @@ def _make_sparse_lengths(num_pages, queries, length, device):
 
 def sparse_lengths(num_pages, queries, length, device):
     return reuse_prefill_metadata(
-        device, ("c8_sparse_lengths", num_pages, queries, length),
+        device,
+        ("c8_sparse_lengths", num_pages, queries, length),
         lambda: _make_sparse_lengths(num_pages, queries, length, device),
     )

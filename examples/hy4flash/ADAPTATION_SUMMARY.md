@@ -1,173 +1,24 @@
-# Hy4 Flash 昇腾适配总结
+# HY4 Flash 昇腾适配
 
-更新于 2026-11-18。当前实机基线为 8 张 Ascend 950DT，每卡 96 GiB HBM。运行环境为 CANN 9.2.1、`torch_npu 2.10.0.post7`、Python 3.12.16，使用 vLLM MRV2、TP8 + EP 和 Hy4 Flash 全量权重。启动示例使用 `/home/hy4nxt` 作为权重路径。
+文本和视觉模型使用 Model Runner V2，支持 FP8 权重、BF16 计算、FP8 KV、
+DFly 投机解码和 Mooncake PD 分离。部署依赖、配置与代码布局见
+[集成说明](../../docs/source/developer_guide/hy4_decode_integration.md)。
 
-下文的 TP8 精度和性能数据对应上述基线。另在 CANN 9.3.0、Python 3.12.13、相同 Torch-NPU 版本的 8 张 950DT 上，完成了 TP4 × DP2 的启动和请求验证，包括 Engram DP 共享 CPU 表；该验证不替代下文的精度评测。
+## 当前运行路径
 
-## 精度差异有多大
+- Prefill 支持分页 KV、prefix cache、Engram CPU offload，以及 eager TP2/PP2。
+- Decode 支持 TP1/DP4 外部负载均衡、目标模型 `FULL_DECODE_ONLY` 图回放，
+  以及 `hy4flash_dfly_dp_graph` 控制的小模型入图。
+- 三个可选优化是分页 IndexPool、C8 sparse attention 和 C8 SWA attention；
+  默认关闭，条件与验证范围见 [C8 Decode 说明](../../docs/source/developer_guide/hy4_decode_c8.md)。
+- 优化条件不满足时保留回退；FP32 KV、learned sink、MoE 和 iHC 精度边界保持不变。
 
-**已测的 4K 和 16K 单路样本逐值对齐。短输入的差异已经能改变贪心输出。** 两边均使用 C8 和 DFly 5，控制输入和采样设置，以 eager 为对照。logprob 差按相同生成前缀统计。
+## 启动入口
 
-| 输入场景 | 输出 token 差异 | 所选 token 的最大绝对 logprob 差 | 平均接受长度 eager → FULL |
-| --- | --- | ---: | ---: |
-| 5 token 单路 | 0 / 18 | 0.627 | 1.385 → 1.500 |
-| 128 token 单路 | 18 / 24，第 4 个 token 首次分叉 | 0.205 | 3.571 → 3.286 |
-| 128 token × 8 路 | 16 / 192，两路在第 14 个 token 首次分叉 | 0.297 | 4.038 → 3.852 |
-| 509、2,047、2,051、4,093 token 混合长度 | 0 / 96 | 0.497 | 2.561 → 2.561 |
-| 4,096 token 单路 | 0 / 200，logprob 和 top-5 也一致 | 0 | 2.971 → 2.971 |
-| 16,384 token 单路 | 0 / 24，logprob 和 top-5 也一致 | 0 | 3.375 → 3.375 |
+- `start_hy4flash.sh`：单服务示例。
+- `serve_decode_external_dp.sh`：通过八个位置参数启动外部 DP Decode rank。
+- `pd_118/`：P TP4 与 D TP1/DP4 示例；使用前修改本机路径与通信资源。
+- `all-optimizations.json`：三个 CANN Decode 优化的组合配置。
 
-服务器以 128 并发、128K 上下文启动时，也复现了 4K 和 16K 的逐值对齐。大配置另测 128–130 token 的短输入，每路生成 24 个 token。
-
-| 并发 | 实际回放图 | 有输出分叉的请求 | 所选 token 最大绝对 logprob 差 | 平均接受长度 eager → FULL | TPOT eager → FULL |
-| --- | --- | --- | ---: | ---: | ---: |
-| BS9 | BS16 | 3 / 9 | 0.746 | 4.291 → 4.423 | 163.9 → 58.2 ms |
-| BS17 | BS32 | 7 / 17 | 0.518 | 3.620 → 3.860 | 292.0 → 108.6 ms |
-
-BS9 有一路在首 token 已分叉，两轮 prefill 调度也有差异。表中对照是服务端到端的输出差异。公共 top-5 候选的最大绝对 logprob 差在小配置对照中为 3.039，在大配置并发对照中为 5.145。GPQA 和 MMMU-Pro 对最新 FULL 与 eager 的受控任务分数仍待测。
-
-此前固定形状图的逐层定位中，6 个有效候选、C8 字节、反量化 KV、query、有效 QK logits 和 learned sink 一致。Eager 在 6 个有效位置和 1 个 sink 上做 softmax，固定形状路径把候选填充到 2,048 个位置，再加 1 个 sink。归约宽度由 7 变成 2,049，有效概率最大差约 `1.19e-7`。一处 FP32 context 从 `-0.068115241826` 变为 `-0.068115226924`，转 BF16 分别为 `-0.068359375` 和 `-0.06787109375`。这说明算子层的细微差异怎样传递到整网输出。
-
-## 当前适配
-
-| 模块 | 已接入的实现与实测范围 |
-| --- | --- |
-| 模型与权重 | 文本和视觉入口注册在 `vllm_ascend/models/hy_v4_flash`。当前 checkpoint 有 42 层语言主干，其中 12 层 IndexPool、30 层 SWA。加载原生 128×128 block FP8 权重，普通线性层和专家按 950DT 的 MXFP8 推理路径处理，MLA 的 `kv_b_proj` 保持 BF16。此前完成图片请求验证，最新 FULL 精度回归使用文本输入。 |
-| SWA、IndexPool、分页 MLA | 基于 vLLM 页表写读 KV。IndexPool 增量缓存已完成的组，按本轮有效长度和因果范围召回。当前 attention 使用分页读取、QK、带 learned sink 的 softmax 和 PV。设备侧长度与页表随每步请求更新。 |
-| C8 与小算子优化 | `fp8` KV 使用 C8，512 维 latent 采用每 128 维一个 FP32 scale，64 维 RoPE 保留 BF16。950DT 下自动选用符合条件的 C8 写入、分页读取与反量化、同宽验证批量计算、吸收投影和 iHC 融合。MoE 的 clamped SwiGLU 根据量化后端能力选择融合或逐步计算。 |
-| FULL decode ACLGraph | 目标模型的 KV 写入、IndexPool、分页 MLA、iHC 和 MoE 随整图回放。默认精确捕获 1–8 路，更大的同宽批次复用下一档完整图。Prefill、混合 query 宽度及未命中的尾步使用 eager。 |
-| DFly 5 | 此前讨论的 DFlash 5。Checkpoint 自带 5 层 draft，vLLM 方法名为 `dfly`。每轮提出最多 5 个草稿 token，目标模型最多每路联合验证 6 个 query。Draft 使用目标层的候选快照和分页 KV，draft attention 和后续计算均已入 FULL 图。 |
-| Engram | 4 张 embedding 表按 TP 分片，默认用 pinned CPU 内存保存。图回放前按本轮 token 算 hash 并拷入查到的行。当前 checkpoint 的表为 BF16，约 126.7 GB 合计。 |
-| 共享专家双流 | 共享专家和路由专家可用不同 NPU stream。此前同步调度的开关对照覆盖 10 个请求、120 个生成 token，token、logprob 与 top-5 均一致。最新 FULL 整网回归启用了双流。 |
-| Prefix cache | 已在 eager 和此前的分段图中验证纯文本、SWA/IndexPool 长度边界和图片前缀命中。默认开启，可与 DFly 5、FULL decode 图和异步调度同时使用；冷热请求仍可能存在概率和贪心输出差异。 |
-
-### 目标模型和 draft 的数据流
-
-1. 每路 decode 的逻辑位置从设备上的本轮序列长度推导。若序列长度为 `end`，每路有 `width` 个 query，则第 `i` 个 query 的逻辑位置为 `end - width + i`。SWA 按窗口截取，IndexPool 在已完成的历史组中召回，并拼入当前因果可见的组尾。页表和 slot mapping 决定实际 KV 地址，填充行使用 mask。
-2. C8 的 MLA 基础行由 512 字节 E4M3 latent、128 字节 BF16 RoPE 和 16 字节 FP32 scale 组成。IndexPool 在 sidecar 中保留 BF16 原始键、3 个 `int64` 位置及增量池化键。Attention 读取选中行并反量化，带 learned sink 的 softmax 将 sink 计入分母。
-3. DFly 用目标验证中最后有效行作为 anchor，从目标第 25、29、33、37、41 层复用 Top-K 快照和 KV，层号从 0 开始。Draft 过滤 anchor 后的旧候选，每个 query 只访问可见的草稿块。草稿 KV 在 draft 生命周期内使用，目标验证更新目标缓存。候选构造曾与 GPU 参考逐索引比较 81 组批大小、query 宽度、Top-K 宽度和窗口组合，结果一致。
-4. Engram 图回放前根据当前 token 和 lookback 计算 hash，将查到的行写入预分配缓冲。目标和 draft 分别提交一次完整图。1–8 路精确捕获，更大的同宽 decode 使用 vLLM batch padding，防止填充请求读写真实 KV。
-
-相关实现位于 `vllm_ascend/models/hy_v4_flash/`。其中 `attention.py` 和 `index_pool_cache.py` 实现候选与 KV，`aclgraph.py` 派发目标图，`dfly.py` 和 `dfly_speculator.py` 实现 draft，`engram.py` 和 `model_state.py` 管理 Engram 存储及图输入。
-
-## 启动与开关
-
-在匹配的 Ascend 容器内执行启动脚本。下面以 `/opt/hy4flash` 为部署目录，容器名为 `hy4flash`。
-
-```bash
-docker exec -it hy4flash bash
-```
-
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-cd /opt/hy4flash
-./start_hy4flash.sh
-```
-
-启动脚本使用 checkpoint 配置选择 dtype。当前 `/home/hy4nxt` 自动解析为 BF16。
-
-脚本从部署目录下的 `vllm`、`vllm-ascend` 载入源码，默认使用 TP8、EP、C8 KV、DFly 5 和 FULL Decode。默认最多调度 128 路请求，上下文上限为 131,072 token。可通过 vLLM 的 CLI 参数覆盖资源设置，例如 `./start_hy4flash.sh --max-num-seqs 32 --gpu-memory-utilization 0.70`。
-
-### 用 CLI 切换的特性
-
-- **Prefix cache**。默认与 DFly 5、FULL decode 图和异步调度同时开启，无需额外参数。需要对照时可追加 `--no-enable-prefix-caching`，DFly 仍可保持开启。
-
-  ```bash
-  ./start_hy4flash.sh
-  ```
-
-- **Engram CPU offload**。默认 `cpu_offload=true`，TP 本地表使用 pinned CPU 内存。传入 `--engram-config '{"cpu_offload":false}'` 将表放在 NPU，TP8 下仅表权重平均每卡约 15.8 GB。传入 `--engram-config '{"cpu_offload":true}'` 可显式开启。
-- **Engram DP 共享 CPU 表**。同机 TP4 × DP2 可传入 `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`，使两个 DP 副本中相同 TP rank 的 worker 共用一份表分片。要求 DP peer 位于同一节点和共享内存命名空间，`/dev/shm` 能容纳表权重；当前 BF16 checkpoint 的 16 份共享分片合计约 118 GiB。显式传入 `dp_shared_memory:false` 时仍按 DP 副本各自存表，不再被强制改为 true。共享模式不支持 dummy checkpoint；`embedding_across_dp` 和磁盘 offload 仍未接入。
-- **文本或视觉**。默认加载视觉塔。启动追加 `--language-model-only` 可用于纯文本评测。
-- **调度对照**。默认传入 `--async-scheduling`；启动追加 `--no-async-scheduling` 可固定到同步调度。比较精度时还要核对实际 prefill 分块和 batch。
-
-### Draft 入图开关
-
-模型仅保留 `--additional-config` 中的 `hy4flash_dfly_dp_graph`，默认 `false`。
-在 TP1/DP4 的本地 DFly 场景设为 `true`，启用 Draft FULL Decode 图。
-显式 eager 设置优先；不支持的并行布局继续使用 eager Draft。
-
-已验证的 Decode、DFly、C8 和输入准备优化按硬件、P/D 角色及张量形状自动选择，
-不再提供单独的算子回退开关。已删除的 HY4 配置项不应继续写入启动配置。
-部署和依赖说明见 [Decode 集成说明](../../docs/source/developer_guide/hy4_decode_integration.md)。
-
-## 性能证据和当前边界
-
-- **IndexPool Hadamard 与 E4M3 舍入**。950DT TP8 + EP、C8、DFly 5 在相同预热的 FULL decode A/B 中，414 个固定续写位置、2,240 个采样原始 logits 及 DFly 计数逐值一致。四档主图 p50 时间下降 6.4%–7.4%。4K 单路、512 token BS8、513 token BS9 和 4K BS6 的 p50 TPOT 分别下降 5.79%、6.52%、6.19% 和 0.88%。单算子额外覆盖 E4M3 中点及相邻 FP32 值，144,384 个值逐位一致。
-- **SWA 共读 KV**。950DT TP8 + EP、C8、DFly 5、同步调度的 FULL 图 A/B 中，23 个请求、414 个固定续写位置的 token ID、2,242 个采样的原始 logits（top-5 和固定续写 token）及 DFly 计数逐值一致。自由生成时，512 token × BS8 的 p50 TPOT 从 22.76 降至 22.20 ms，513 token × BS9 补齐到 BS16 的 p50 从 57.98 降至 56.56 ms。64 和 4K 单路基本持平。
-- **SWA query RMSNorm 与动态 MXFP8 量化融合**。在共读版本上打开融合，固定续写的 414 个位置仍逐项一致。四组自由生成的 p50 TPOT 相对共读版变化介于 −0.23% 和 +0.15%。完成整套优化的评测回归后默认开启。
-- **Attention 输出 gate**。950DT TP8 + EP、C8、DFly 5、8K 上下文配置下，Triton 融合和旁流各自与基线的 360 个固定续写位置、1,949 个采样原始 logits、DFly 计数及自由生成一致。4K 单路 p50 TPOT 为基线 12.1042 ms、Triton 12.0461 ms、旁流 11.9375 ms。512 token BS8 和 513 token BS9 的旁流 p50 TPOT 分别下降 0.46% 和 0.39%。
-- **Attention 输出 gate 的 128K 对照**。对 130,944 token 输入完成实际 prefill，生成 128 token。在同一请求的 24 个 decode 步上，用相同 KV 和输入配对回放三张目标图。8 个 rank 的目标 hidden states 逐值一致。Rank 0 主图 p50 为基线 32.3193 ms、Triton 32.2176 ms（−0.31%）、旁流 32.0118 ms（−0.95%）。本次测量范围为目标图回放。
-- **C8 页读取与 QK**。对 6 个 query、4 个本地头和 2,048 候选，Triton 融合页读取、反量化和 IEEE FP32 QK。QK 核只将 512 维 FP32 latent 写回给 PV。单卡页读到 PV 从 288.04 降到 215.81 µs，QK 和 PV 逐值一致。PV 直接读 C8 页的尝试耗时 382.70 µs，出现 4 个 BF16 值差异。满足已验证形状条件时自动开启。
-- **IndexPool 分页打分和共读池页**。复用同一份池页为 6 个 query 打分，将 Cube 运算拆成 4+2 个 query，在 128 组 tile 内完成。原 TopK、排序和候选拼接在全有效、尾行 padding 和分数并列场景逐项一致。128K 配置下，实际 4K、16K 和 128K 时，页读、打分至 TopK 的回放耗时从 234.84、239.67 和 281.77 µs 降到 96.65、98.69 和 214.85 µs。满足形状条件的 FULL decode 路径默认开启。
-- **Gate 旁流和 IndexPool 分页打分的默认路径**。950DT TP8 + EP、DFly 5 和 C8 下，对照旧路径、新默认和新默认加 C8 QK。396 个固定续写位置及 2,237 个采样 raw logits 逐值一致，短测自由生成和 DFly 计数一致。配对回放中，BS1、BS8、BS9 和 128K 的有效 hidden 与 5 层 DFly 候选逐值一致。实际 130,944 token 输入的主图 p50 为 32.44 → 31.47 → 30.21 ms。C8 QK 相对新默认的主图 p50 降幅为 3.97%–11.82%。
-- **iHC inverse RMS**。48 行单卡图回放中 CANN 与 Triton 探针从现行逐行归约的 103 µs 降至约 14 µs。用 4 层 checkpoint 的 attention/MLP 门控权重及合成 BF16 输入继续验证，两种探针均改变门控和 BF16 残差，模型沿用现行逐行归约。
-- **FULL decode**。同配置的 TP8 + EP、C8、DFly 5 单路对照中，4K 输入的 TPOT 从 144.5 降至 12.7 ms，16K 从 144.4 降至 12.7 ms。服务器大配置原有 49 个目标图档位，在第 16 张图遇到 CANN Runtime 207001 内存分配失败。改为 12 张目标图后，全图捕获结束，KV cache 容量为 1,363,904 token。BS9 和 BS17 分别复用 BS16 和 BS32 的 FULL 图。
-- **C8 算子优化**。接入 FULL 前的对照中，融合写入与同宽 attention 优化覆盖短单路、短 BS8、混合长度和 16K 单路。336 个输出 token 的 token ID、logprob 和 top-5 逐值一致，16K 单路 TPOT 从 105.7 降至 71.0 ms。
-- **历史 GSM8K**。100 条、5-shot、最多 8 路并发，使用当时的分段图和 DFly 5。9,310 轮验证共提出 46,550 个草稿 token，接受 21,795 个。平均接受长度 `1 + 21795 / 9310 = 3.341` token/轮，草稿接受率 46.82%。
-- **Prefix cache**。先前的分段图和 eager 分别完成 10 个场景。65-token 热请求命中 64 token，2,048、2,049、2,052-token 请求分别命中 1,984、2,048、2,048 token，同图同文本命中 128 token，换图命中 0。冷热分块不同的 2,052-token 请求所选 logprob 最大差为 0.170681，冷请求强制按 `[2048, 4]` 切分后逐值一致。
-- **并行限制与 DP 验证**。模型已放开 DP 校验，PP、PCP、DCP 仍要求为 1，EPLB、DBO、LoRA 和 KV transfer 暂未接入。TP4 × DP2 已在上述 CANN 9.3.0 环境完成启动、curl 和两路并发 4209-token 长输入验证；Engram 共享开启前后，短补全 32 token、长补全 16 token 的 token 和所选 logprob 逐值一致，两个 DP 都处理了请求。26 项相关单测通过。128 并发及 128K 上下文为启动配置上限，本次未做该规模压力验收。
-- **历史 HCCL 问题**。此前 CANN 9.2.1 的 TP2 + DP4 试验中，大张量 HCCL AllGather 报 EI0006，`HCCL_BUFFSIZE=1024` 仍复现；独立 8-rank 程序中，BF16 `[32, 1536]` 通过，`[2048, 1536]` 建链超时。CANN 9.3.0 下对 `[32, 1536]`、`[2048, 1536]`、`[4096, 1536]` 各重复 3 次的 8-rank 原生 AllGather 均通过，本次未修改 HCCL 库，也未将其记为底层通信缺陷修复。
-- **模型回归**。本轮模型参考测试在 950DT 容器内为 `16 passed`，覆盖设备侧长度、同宽 decode padding、分页读取、C8、候选与因果边界，以及 SWA 共读的跨页和 padding 场景。
-
-### Rank 0 profiling 摘要
-
-4K 输入、200 输出在 prefill 后采集 6 步 decode，由 CANN msprof 导出。目标和 draft 每步各提交一次整图。以下为开启 `all-optimizations.json` 的最新 Rank 0 记录。
-
-| msprof 统计项 | 次数 |
-| --- | ---: |
-| `aclmdlRIExecuteAsync` | 12 |
-| `_write_c8_rows` | 252 |
-| `_read_c8_rows` | 180 |
-| `_read_c8_qk` | 72 |
-| `_score_paged_pool` | 72 |
-| `_indexpool_hadamard` | 144 |
-| `_indexpool_round_e4m3` | 144 |
-| `_gate_dynamic_mx_quant` | 246 |
-| `RmsNormDynamicMxQuant` | 180 |
-| `SwigluMxQuant` | 246 |
-
-### 全套优化的评测与启动
-
-所有已验证的融合在支持条件满足时自动启用，仅保留 Draft 入图开关。
-
-`all-optimizations.json` 保存共享专家双流和编译选项。Gate、SWA、IndexPool 和 C8 的已验证优化由源码调度。第 1 层（从 0 编号）的 `q_b_proj` 固定使用 checkpoint 解量后的 BF16 权重。启动脚本根据 checkpoint 选择计算 dtype。
-
-从两份源码的上一级目录，可默认开启 prefix cache 和异步调度启动。
-
-```bash
-./start_hy4flash.sh --language-model-only --max-num-seqs 32 --gpu-memory-utilization 0.70 \
-  --additional-config "$(cat vllm-ascend/examples/hy4flash/all-optimizations.json)"
-```
-
-以下历史三轮结果来自关闭 prefix cache、使用同步调度的 TP8 服务。EvalScope 1.15.0 使用并发 16、`temperature=0.9`、`top_p=1` 和 `top_k=-1`，完整评测 AIME2026 与 GPQA-Diamond 各三轮。每轮都重新生成输出。
-
-| 数据集 | 第一轮 | 第二轮 | 第三轮 | 平均正确率 |
-| --- | ---: | ---: | ---: | ---: |
-| AIME2026 | 30 / 30 | 29 / 30 | 30 / 30 | 98.89% |
-| GPQA-Diamond | 184 / 198 | 181 / 198 | 181 / 198 | 91.92% |
-
-684 次作答均自然结束。AIME 第一轮的生成上限为 32,768，最长输出 30,452。其后五轮请求使用 131,072 的总上下文预算。AIME 第二轮最长输出 97,818 token。文本检查中，29 条 AIME 思考段出现了局部公式控制字符，最终答案段未检出这些字符。
-
-16,384 输入、1,024 输出、8 路并发的单次无 profiler 测量，逐请求 TPOT 均值为 123.40 ms/token。8 路全部进入 decode 的 20.0 秒区间中，TPOT 均值为 27.39 ms/token，P50 为 24.62 ms/token。较早开始生成的请求会在其余请求分块 prefill 时累计等待，逐请求 TPOT 包含这段等待。
-
-## 源码配套
-
-分支以 `vllm-ascend` 的 `915d58873c0854c0550b56f66a126ca2cb114e71` 为基线，包含 Ascend 模型实现、运行时接入和测试。引擎侧采用 vLLM `ba15685ab7f4f5fbed8630bbb7441f8837e76fbe`，完整改动随分支放在 `patches/hy4flash-vllm-ba15685.patch`，覆盖模型配置、文本和视觉共用实现、Engram、处理器、参考计算及 SWA KV Cache 所需的调度与 Mooncake 接口。启动脚本位于 `examples/hy4flash/start_hy4flash.sh`。两份源码采用同级目录布局。
-
-在具有配套 vLLM Ascend 编译依赖的环境中，准备有该分支的 `vllm-ascend` 源码和上述基线的 `vllm` 源码。对干净的 vLLM 基线应用一次补丁，再复制启动脚本到两份源码的上一级。
-
-HY4 Flash 在 V2 Model Runner 和混合 KV Cache 管理器下默认启用 SWA KV Cache。SWA 路径按运行条件自动选择。升级已有环境时，在干净的 vLLM 基线上应用下方更新后的完整补丁。
-
-```bash
-git -C vllm apply --check ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch
-git -C vllm apply ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch
-install -m 0755 vllm-ascend/examples/hy4flash/start_hy4flash.sh ./start_hy4flash.sh
-```
-
-### P 端流水线并行
-
-四张 950DT 上可将专用 P 实例设置为 `--tensor-parallel-size 2 --pipeline-parallel-size 2`。
-使用 eager 和 iHC，关闭 P 端投机解码和序列并行 MoE。P、D 两端的 Mooncake
-`kv_connector_extra_config.prefill` 都填写同一组 `tp_size`、`pp_size` 和 `dp_size`。
-更新上文的配套 vLLM 补丁后再启动两端，以便 D 端核对所有流水段的 KV 缓存组。
+精度和性能测试使用 AISBench，保留原始 result 文件。历史版本的数据不作为
+当前 PR 的性能结论；重构后需在固定版本和相同配置下重新评测。
