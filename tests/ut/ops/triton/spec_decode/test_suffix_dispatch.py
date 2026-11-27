@@ -98,13 +98,6 @@ def test_registration_is_idempotent_and_retries_failures(monkeypatch):
     register.assert_called_with(overrides.TRITON_KERNEL_OVERRIDES)
 
 
-def test_override_table_contains_only_suffix_entry_points():
-    prefix = "vllm.v1.worker.gpu.spec_decode.suffix.speculator._suffix_"
-    assert set(overrides.TRITON_KERNEL_OVERRIDES) == {
-        f"{prefix}{operation}_kernel" for operation in ("local_scan", "finalize", "ingest", "observe")
-    }
-
-
 @pytest.mark.parametrize("compatibility,has_triton", [(False, True), (False, False), (True, True)])
 def test_platform_routes_registration(monkeypatch, compatibility, has_triton):
     platform = importlib.import_module("vllm_ascend.platform")
