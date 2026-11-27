@@ -1,3 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Shared HiSparse cache operations, layouts and Core backend integration."""
+
+from importlib.util import find_spec
+
+from vllm.config import VllmConfig
+
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+
+
+def supports_hybrid_hisparse_core() -> bool:
+    """Require Core support for separate indexer pages and fitted recurrent state."""
+    if find_spec("vllm.v1.hisparse") is None:
+        return False
+    from vllm.v1.hisparse import binding
+
+    return callable(getattr(binding, "fit_mamba_blocks_to_attention", None))
+
+
+def require_hybrid_hisparse_core() -> None:
+    if not supports_hybrid_hisparse_core():
+        raise ValueError("Hybrid HiSparse requires the verified vLLM main pin with Mamba cache fitting.")
+
+
+def uses_pooled_hisparse(vllm_config: VllmConfig) -> bool:
+    """Detect the pooled indexer configuration before worker cache specs exist."""
+    if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is None:
+        return False
+    text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
+    pool_size = getattr(text_config, "index_kpool", None)
+    return isinstance(pool_size, int) and pool_size > 1
+
+
+def supports_pooled_hisparse(vllm_config: VllmConfig) -> bool:
+    """Gate the qualified A5 FP8 and GLM-5.3-Flash A3 INT8 pooled layouts."""
+    if not uses_pooled_hisparse(vllm_config):
+        return False
+    parallel = vllm_config.parallel_config
+    text_config = vllm_config.model_config.hf_text_config
+    common_geometry = (
+        getattr(text_config, "index_kpool", None) == 4
+        and getattr(text_config, "qk_rope_head_dim", None) == 0
+        and parallel.data_parallel_size == 1
+        and parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+    )
+    if not common_geometry:
+        return False
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    indexer_dtype = vllm_config.attention_config.indexer_kv_dtype
+    if cache_dtype == "fp8" and indexer_dtype in ("fp8", "fp8_e4m3"):
+        return get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
+    return (
+        cache_dtype == "int8"
+        and indexer_dtype in ("auto", "bf16")
+        and getattr(text_config, "model_type", None) == "glm5_next_text"
+        and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+    )

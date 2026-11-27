@@ -26,8 +26,8 @@ from vllm_ascend.attention.sfa_v1 import (
     needs_pcp_kv_gather,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.hisparse import cache_ops
-from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.hisparse import cache_ops, supports_pooled_hisparse
+from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
 
@@ -216,13 +216,16 @@ class AscendHiSparseImpl(AscendSFAImpl):
         super().__init__(*args, **kwargs)
         if self.enable_sparse_sfa_turboquant:
             raise ValueError("Ascend HiSparse does not support TurboQuant")
+        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+            raise ValueError("Ascend HiSparse with NoPE requires native C8 for the main MLA KV cache")
         if self.enable_sparse_sfa_c8:
             if (
                 self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
-                or (self.kv_lora_rank, self.qk_rope_head_dim) != (512, 64)
+                or self.kv_lora_rank != 512
+                or self.qk_rope_head_dim not in (0, 64)
                 or self.sfa_qsfa_tile_size != 128
             ):
-                raise ValueError("HiSparse C8 requires native INT8/E4M3FN NoPE512/RoPE64 with FP32 scales")
+                raise ValueError("HiSparse C8 requires native INT8/E4M3FN NoPE512/RoPE0 or RoPE64 with FP32 scales")
         parallel = self.vllm_config.parallel_config
         if parallel.decode_context_parallel_size > 1:
             raise ValueError("Ascend HiSparse does not support DCP")
@@ -232,7 +235,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if self.enable_sparse_sfa_c8:
-            row_width = C8_ROW_BYTES
+            row_width = self.sfa_qsfa_packed_kv_head_dim
         else:
             row_width = self.kv_lora_rank + self.qk_rope_head_dim
         self.index_group, self.index_group_index = builder.register_layer(
@@ -244,6 +247,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
+        if supports_pooled_hisparse(self.vllm_config):
+            install_flash_layer_view_bounds(self.hisparse_cache)
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
             raise ValueError("Ascend HiSparse SFA requires top-k to be divisible by 128")
@@ -327,7 +332,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             device = self.index_group.logical_topk_indices.device
             return (
                 torch.empty(
-                    (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
+                    (self._kv_staging_capacity // 128, 128, 1, self.sfa_qsfa_packed_kv_head_dim),
                     dtype=self.c8_cache_dtype,
                     device=device,
                 ),
@@ -336,7 +341,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         # Layers execute sequentially on the same stream. Share scratch across
         # layers while keeping its address fixed for graph capture/replay.
-        key = ("ascend_hisparse_pcp_prolog", self._kv_staging_capacity, self.c8_cache_dtype)
+        key = (
+            "ascend_hisparse_pcp_prolog",
+            self._kv_staging_capacity,
+            self.c8_cache_dtype,
+            self.sfa_qsfa_packed_kv_head_dim,
+        )
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _prolog_slot_mapping(self, mapping, num_input_rows):
@@ -472,7 +482,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             from vllm_ascend.hisparse.c8 import pack_c8_components
 
             rope, latent, scales = super()._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-            packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
+            packed = pack_c8_components(
+                latent.contiguous(), rope.contiguous(), scales.contiguous(), rope_head_dim=self.qk_rope_head_dim
+            )
             self._scatter_c8_kv(packed, slots.numel(), attn_metadata)
             return rope, latent, scales
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
@@ -521,15 +533,25 @@ class AscendHiSparseImpl(AscendSFAImpl):
         query_ends, key_length = self._c8_length_workspace() if lengths is None else lengths
         scale = self.scale
         view, block, stride_rows, capacity = c8_storage_view(cache)
+        if view.shape[-1] != self.sfa_qsfa_packed_kv_head_dim:
+            raise ValueError("HiSparse C8 cache row width does not match the MLA layer")
         rows = query.shape[0]
         if query.ndim != 3 or query.dtype != torch.bfloat16 or query.shape[-1] != self.kv_lora_rank or rows <= 0:
             raise ValueError("HiSparse C8 query must be nonempty BF16 [queries, heads, 512]")
-        if query_rope.shape != (*query.shape[:-1], 64) or query_rope.dtype != query.dtype:
+        rope_head_dim = self.qk_rope_head_dim
+        if query_rope is None:
+            if rope_head_dim:
+                raise ValueError("HiSparse C8 requires matching BF16 query RoPE")
+        elif (
+            query_rope.shape != (*query.shape[:-1], rope_head_dim)
+            or query_rope.dtype != query.dtype
+            or query_rope.device != query.device
+        ):
             raise ValueError("HiSparse C8 requires matching BF16 query RoPE")
         if indices.ndim != 2 or indices.shape[0] != rows or indices.shape[1] <= 0 or indices.shape[1] % 128:
             raise ValueError("HiSparse C8 top-k width must be positive and divisible by 128")
         if query.device.type != "npu" or any(
-            tensor.device != query.device for tensor in (query_rope, cache, indices, query_ends, key_length)
+            tensor.device != query.device for tensor in (cache, indices, query_ends, key_length)
         ):
             raise ValueError("HiSparse C8 inputs must share one NPU")
         if any(tensor.shape != (1,) or tensor.dtype != torch.int32 for tensor in (query_ends, key_length)):
@@ -541,12 +563,13 @@ class AscendHiSparseImpl(AscendSFAImpl):
             if indices_are_mapped
             else compact_c8_indices(map_c8_physical_indices(indices, block, stride_rows, capacity))
         )
-        packed_query = torch.cat((query, query_rope), dim=-1)
+        if query_rope is not None and rope_head_dim:
+            query = torch.cat((query, query_rope), dim=-1)
         if lengths is None:
             query_ends.fill_(rows)
             key_length.fill_(view.shape[0])
         result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-            query=packed_query,
+            query=query.contiguous(),
             key=view,
             value=view,
             sparse_indices=mapped.unsqueeze(1),
@@ -562,7 +585,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             tile_size=128,
             key_quant_mode=2,
             value_quant_mode=2,
-            rope_head_dim=64,
+            rope_head_dim=rope_head_dim,
             return_softmax_lse=False,
         )
         if isinstance(result, tuple):
@@ -641,7 +664,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if (
             not self.enable_sparse_sfa_c8
             or metadata.hisparse_for_capture
-            or query_rope is None
+            or (query_rope is None and self.qk_rope_head_dim)
             or num_prefill_tokens <= 0
             or metadata.num_reqs != num_decodes + metadata.num_prefills
             or not (query.shape[0] == logical_topk.shape[0] == num_prefill_tokens)
@@ -763,6 +786,10 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 selected = logical[num_decode:]
                 nonnegative = selected.clamp_min(0)
                 block_ids = nonnegative.to(torch.int64) // metadata.block_size
+                if metadata.num_actual_tokens < logical.shape[0]:
+                    # Padded rows have had their logical TopK masked. Use a valid
+                    # row even when rebasing request IDs made the padding negative.
+                    req_ids = req_ids.clamp_min(0)
                 request_tables = staged_table[req_ids.to(torch.int64)]
                 physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
                 physical = physical + nonnegative % metadata.block_size

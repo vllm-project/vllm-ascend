@@ -1,0 +1,6 @@
+pr: 23449
+entries:
+  - category: feature
+    text: Enabled pooled HiSparse for GLM-5.3-Flash W8A8 on Ascend A3 with INT8 NoPE KV, BF16 indexer pages, and MTP5.
+    model: glm-5.3-flash
+    hardware: [A3]
