@@ -1,5 +1,9 @@
 # Balance Schedule Refactor
 
+!!! warning "Balance scheduling sunset"
+
+    Balance scheduling is **deprecated as of v0.33.0** and is planned for removal in a future release. Enabling it still activates the feature and emits a startup warning, including through the legacy top-level key. Set `scheduler_config.enable_balance_scheduling=false` (the default) to use the normal scheduler path. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229) and [additional_config.md](../../user_guide/configuration/additional_config.md#scheduler_config).
+
 **TL;DR** The existing `patch_balance_schedule.py` copied three large upstream
 units verbatim to inject roughly 5 lines of real logic: `Scheduler.schedule()`
 (~520 lines), `DPEngineCoreProc.run_busy_loop()` (~40 lines), and
