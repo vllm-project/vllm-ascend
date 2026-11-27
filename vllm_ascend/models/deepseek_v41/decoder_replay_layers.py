@@ -36,11 +36,18 @@ class AscendDecoderReplayLayers:
         self.first_swa_prefix = first_swa_prefix
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
+        self.launch_metadata: Callable[[], None] | None = None
         self.num_actual_rows = 0
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
         self.smla_plan_ratios: tuple[int, ...] | None = None
         self.first_swa_plan_ratios: tuple[int, ...] | None = None
+
+    def launch_pending_metadata(self) -> None:
+        launch = self.launch_metadata
+        if launch is not None:
+            self.launch_metadata = None
+            launch()
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:

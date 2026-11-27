@@ -1403,6 +1403,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 # Custom ops resolve the mutable per-forward replay state through
                 # ForwardContext, following the same pattern as Ascend DSA ops.
                 static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
+                if (
+                    vllm_config.parallel_config.prefill_context_parallel_size > 1
+                    and self.start_layer < self.decoder_replay_start
+                ):
+                    first_attn = self.layers[self.start_layer].self_attn
+                    first_attn.launch_replay_metadata = self.decoder_replay_layers.launch_pending_metadata
 
             self._init_routing_input_ids_cache(vllm_config)
             rollback.pop_all()

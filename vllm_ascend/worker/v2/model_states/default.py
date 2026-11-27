@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     update_sparse_kv_offload_metadata,
 )
 from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
+from vllm_ascend.worker.metadata_async import finish_metadata
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+    from vllm_ascend.worker.metadata_async import AsyncTargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
@@ -79,15 +81,14 @@ class AscendModelState(DefaultModelState):
     pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
-    device_metadata: "TargetDeviceMetadata | None" = None
+    device_metadata: "TargetDeviceMetadata | AsyncTargetDeviceMetadata | None" = None
 
     def runner_plan_launch_d2h(self, **kwargs) -> None:
         """Runner-assigned hook: plan and launch the delayed D2H batch."""
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
-        if self.device_metadata is not None:
-            self.device_metadata.finish()
+        finish_metadata(self.device_metadata, failed=failed)
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
@@ -479,6 +480,8 @@ class AscendModelState(DefaultModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+        *,
+        before_metadata_build: "Callable[[AscendPCPAttentionContext | None], None] | None" = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
         self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
@@ -628,6 +631,8 @@ class AscendModelState(DefaultModelState):
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
+        if before_metadata_build is not None:
+            before_metadata_build(pcp_context)
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

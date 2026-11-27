@@ -17,11 +17,15 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Callable
+from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -29,6 +33,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
+from vllm_ascend.worker.metadata_async import AsyncTargetDeviceMetadata
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
@@ -225,7 +230,8 @@ class EngramModelState(AscendModelState):
         # padded, graph-shaped buffer above.
         if model_specific_attn_metadata is None and replay_np.any():
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        attn_metadata = super().prepare_attn(
+        build_attn = partial(
+            super().prepare_attn,
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -236,23 +242,61 @@ class EngramModelState(AscendModelState):
             ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
-        if self.decoder_replay_state is not None:
-            self.decoder_replay_state.prepare(
-                DecoderReplayInputs(
-                    input_batch,
-                    block_tables,
-                    slot_mappings,
-                    attn_groups,
-                    replay_start,
-                    self.pcp_context,
-                    metadata_producer_stream=(
-                        self.device_metadata.executor.stream if self.device_metadata is not None else None
-                    ),
-                ),
-                cudagraph_mode,
-                for_capture=for_capture,
+        if self.decoder_replay_state is None:
+            return build_attn()
+        replay_inputs = DecoderReplayInputs(
+            input_batch,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            replay_start,
+            metadata_producer_stream=(
+                self.device_metadata.executor.stream if self.device_metadata is not None else None
+            ),
+            defer_pcp_metadata_wait=isinstance(self.device_metadata, AsyncTargetDeviceMetadata),
+        )
+        return self._prepare_attn_with_replay(build_attn, replay_inputs, cudagraph_mode, for_capture=for_capture)
+
+    def _prepare_attn_with_replay(
+        self,
+        build_attn: Callable[..., dict[str, Any]],
+        inputs: DecoderReplayInputs,
+        mode: CUDAGraphMode,
+        *,
+        for_capture: bool,
+    ) -> dict[str, Any]:
+        replay = self.decoder_replay_state
+        assert replay is not None
+        if (
+            not inputs.defer_pcp_metadata_wait
+            or mode != CUDAGraphMode.NONE
+            or for_capture
+            or replay.config.parallel_config.data_parallel_size <= 1
+        ):
+            metadata = build_attn()
+            replay.prepare(replace(inputs, pcp_context=self.pcp_context), mode, for_capture=for_capture)
+            return metadata
+
+        preparation = None
+
+        def start_replay_coordination(pcp_context):
+            nonlocal preparation
+            preparation = replay.begin_prepare(
+                replace(inputs, pcp_context=pcp_context), mode, for_capture=for_capture, async_dp=True
             )
-        return attn_metadata
+
+        try:
+            metadata = build_attn(before_metadata_build=start_replay_coordination)
+        except BaseException:
+            if preparation is not None:
+                try:
+                    preparation.wait()
+                except BaseException:
+                    logger.exception("Failed to finish DP replay coordination after metadata preparation failed")
+            raise
+        if preparation is not None:
+            replay.finish_prepare(preparation)
+        return metadata
 
     def prepare_engram_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
         model_inputs: dict[str, Any] = {}

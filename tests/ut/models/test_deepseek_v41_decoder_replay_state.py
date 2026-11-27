@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -80,28 +80,132 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
 
 
 @pytest.mark.parametrize("uses_pcp_replay", [False, True])
-def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay):
+@pytest.mark.parametrize("defer_wait", [False, True])
+def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay, defer_wait):
     producer = object()
     calls = Mock()
     monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
     monkeypatch.setattr(state, "_prepare_compact_replay", calls.prepare_compact_replay)
-    replay_inputs = replace(inputs(), metadata_producer_stream=producer)
+    replay_inputs = replace(inputs(), metadata_producer_stream=producer, defer_pcp_metadata_wait=defer_wait)
     plan = replace(state._build_replay_plan(replay_inputs), uses_pcp_replay=uses_pcp_replay)
     monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
 
     state.prepare(replay_inputs, CUDAGraphMode.NONE)
 
     calls.prepare_compact_replay.assert_called_once()
-    if uses_pcp_replay:
+    if uses_pcp_replay and not defer_wait:
         calls.stream.wait_stream.assert_called_once_with(producer)
         assert calls.mock_calls[0][0] == "stream.wait_stream"
     else:
         calls.stream.wait_stream.assert_not_called()
 
 
+@pytest.mark.parametrize("async_pcp", [False, True])
+def test_pcp_replay_metadata_orders_collectives_and_planners(state, monkeypatch, async_pcp):
+    calls = Mock()
+    producer = calls.producer
+    replay_inputs = inputs()
+    batch = replay_inputs.batch
+    batch.seq_lens = torch.from_numpy(batch.seq_lens_np)
+    batch.max_query_len = 6
+    batch.attn_state = None
+    state.config.model_config = SimpleNamespace(max_model_len=32)
+    state.builders = [(0, ["decoder.swa_cache"], calls.builder)]
+    calls.builder.defer_device_metadata.side_effect = nullcontext
+    stage = replay_mod.DeviceMetadataStage
+    task = replay_mod.DeviceMetadataTask
+    calls.builder.take_device_metadata_tasks.return_value = (
+        task(stage.ATTENTION, calls.sas, 0),
+        task(stage.COMPRESSOR, calls.c2, 1),
+        task(stage.INDEXER, calls.qli, 2),
+    )
+    replay_inputs = replace(
+        replay_inputs,
+        block_tables=(torch.zeros(3, 1),),
+        pcp_context=SimpleNamespace(global_batch=batch),
+        metadata_producer_stream=producer,
+        defer_pcp_metadata_wait=async_pcp,
+    )
+    plan = replay_mod._DecoderReplayPlan(
+        kept_lens=np.array([1, 2, 2], dtype=np.int32),
+        replay_inputs=replay_inputs,
+        num_tokens=5,
+        requires_compaction=True,
+        uses_pcp_replay=True,
+    )
+
+    def all_gather(tensor, *, dim):
+        calls.all_gather(dim)
+        return torch.cat([tensor, tensor], dim=dim)
+
+    pcp_group = SimpleNamespace(all_gather=all_gather)
+
+    def build_replay_pcp_context(inputs, global_kept):
+        pcp_group.all_gather(torch.arange(5), dim=0)
+        return inputs.pcp_context
+
+    @contextmanager
+    def producer_scope(stream):
+        assert stream is producer
+        calls.enter_producer()
+        yield
+
+    monkeypatch.setattr(replay_mod, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(torch.npu, "stream", producer_scope)
+    monkeypatch.setattr(state, "_gather", calls.gather)
+    monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
+    monkeypatch.setattr(state, "_build_replay_pcp_context", build_replay_pcp_context)
+    monkeypatch.setattr(state, "_build_metadata", replay_mod.DecoderReplayState._build_metadata.__get__(state))
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+
+    assert state.metadata["decoder.swa_cache"] is calls.builder.build.return_value
+    assert calls.all_gather.call_args_list[0].args == (0,)
+    assert calls.all_gather.call_args_list[1].args == (1,)
+    if async_pcp:
+        assert [call[0] for call in calls.mock_calls] == [
+            "gather",
+            "all_gather",
+            "builder.defer_device_metadata",
+            "all_gather",
+            "builder.build",
+            "builder.take_device_metadata_tasks",
+            "c2",
+            "stream.record_event",
+        ]
+        assert state.metadata_ready is None
+        calls.sas.assert_not_called()
+        calls.first_attention()
+        state.layers.launch_pending_metadata()
+        state.layers.launch_pending_metadata()
+        assert [call[0] for call in calls.mock_calls][-6:] == [
+            "first_attention",
+            "producer.wait_event",
+            "enter_producer",
+            "sas",
+            "qli",
+            "producer.record_event",
+        ]
+        calls.producer.wait_event.assert_called_once_with(calls.stream.record_event.return_value)
+        calls.producer.wait_stream.assert_not_called()
+        assert [task.stage for task in state._pending_pcp_metadata_tasks] == [stage.ATTENTION, stage.INDEXER]
+        state.wait_for_metadata()
+        state.wait_for_metadata()
+        calls.stream.wait_event.assert_called_once_with(calls.producer.record_event.return_value)
+        assert not state._pending_pcp_metadata_tasks
+    else:
+        calls.stream.wait_stream.assert_called_once_with(producer)
+        assert calls.mock_calls[0][0] == "stream.wait_stream"
+        calls.producer.wait_stream.assert_not_called()
+        assert state.metadata_ready is None
+
+
 @pytest.mark.parametrize("has_tasks", [False, True])
 @pytest.mark.parametrize("task_fails", [False, True])
-def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails):
+@pytest.mark.parametrize("pcp", [False, True])
+def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails, pcp):
     calls = Mock()
     monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
 
@@ -121,28 +225,37 @@ def test_compact_metadata_orders_production_and_first_consumption(state, monkeyp
 
     def build(*args, tasks):
         if has_tasks:
-            tasks.append(SimpleNamespace(run=run))
+            tasks.append(replay_mod.DeviceMetadataTask(replay_mod.DeviceMetadataStage.ATTENTION, run, 0))
         return metadata
 
     monkeypatch.setattr(state, "_build_metadata", build)
+
+    def submit_and_launch():
+        state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
+        state.layers.launch_pending_metadata()
+
     if has_tasks and task_fails:
         with pytest.raises(RuntimeError, match="planner failed"):
-            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+            submit_and_launch()
         calls.main.wait_stream.assert_called_once_with(calls.producer)
         calls.producer.record_event.assert_not_called()
         assert state.metadata_ready is None
         return
 
-    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+    submit_and_launch()
     assert state.metadata is metadata
     if has_tasks:
+        ready_calls = ["main.record_event", "producer.wait_event"] if pcp else ["producer.wait_stream"]
         assert [call[0] for call in calls.mock_calls] == [
-            "producer.wait_stream",
+            *ready_calls,
             "enter_producer",
             "run",
             "producer.record_event",
         ]
-        calls.producer.wait_stream.assert_called_once_with(calls.main)
+        if pcp:
+            calls.producer.wait_event.assert_called_once_with(calls.main.record_event.return_value)
+        else:
+            calls.producer.wait_stream.assert_called_once_with(calls.main)
         calls.main.wait_event.assert_not_called()
         state.wait_for_metadata()
         state.wait_for_metadata()
@@ -150,6 +263,23 @@ def test_compact_metadata_orders_production_and_first_consumption(state, monkeyp
     else:
         assert not calls.mock_calls
     assert state.metadata_ready is None
+
+
+def test_unlaunched_pcp_metadata_is_discarded_at_retirement(state, monkeypatch):
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
+
+    def build(*args, tasks):
+        tasks.append(replay_mod.DeviceMetadataTask(replay_mod.DeviceMetadataStage.ATTENTION, calls.run, 0))
+        return {}
+
+    monkeypatch.setattr(state, "_build_metadata", build)
+    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=True)
+    state.wait_for_metadata()
+    state.layers.launch_pending_metadata()
+
+    calls.run.assert_not_called()
+    assert not state._pending_pcp_metadata_tasks
 
 
 @pytest.mark.parametrize(
@@ -440,7 +570,8 @@ def test_idle_dp_rank_participates_when_peer_trims(state, monkeypatch):
     monkeypatch.setattr(replay_mod, "should_skip_dp_coordination", lambda: False)
     monkeypatch.setattr(replay_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0, cpu_group=None))
 
-    def agree(values, group):
+    def agree(values, group, *, async_op):
+        assert not async_op
         values[:, 1] = torch.tensor([1, 2])
 
     monkeypatch.setattr(replay_mod.dist, "all_reduce", agree)
@@ -468,11 +599,60 @@ def synchronized_dp(state, monkeypatch):
     monkeypatch.setattr(replay_mod, "should_skip_dp_coordination", lambda: False)
     monkeypatch.setattr(replay_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0, cpu_group=None))
 
-    def agree(values, group):
+    def agree(values, group, *, async_op):
+        assert not async_op
         values[:, 1] = torch.tensor([1, 2])
 
     monkeypatch.setattr(replay_mod.dist, "all_reduce", agree)
     return state
+
+
+@pytest.mark.parametrize("metadata_fails", [False, True])
+def test_replay_dp_coordination_overlaps_metadata_build(synchronized_dp, monkeypatch, metadata_fails):
+    state = synchronized_dp
+    model_state = EngramModelState.__new__(EngramModelState)
+    model_state.decoder_replay_state = state
+    calls = []
+    metadata = {"layer": object()}
+    pcp_context = SimpleNamespace()
+    replay_inputs = replace(inputs(dummy=True), defer_pcp_metadata_wait=True)
+
+    def reduce(values, group, *, async_op):
+        assert async_op
+        assert values.tolist() == [[0, 0], [16, 0]]
+        calls.append("submit")
+
+        def wait():
+            calls.append("wait")
+            values[:, 1] = torch.tensor([1, 2])
+
+        return SimpleNamespace(wait=wait)
+
+    def build_attn(*, before_metadata_build):
+        before_metadata_build(pcp_context)
+        assert state.dp_tokens is None
+        calls.append("metadata")
+        if metadata_fails:
+            raise RuntimeError("metadata preparation failed")
+        return metadata
+
+    monkeypatch.setattr(replay_mod.dist, "all_reduce", reduce)
+    plan = Mock(wraps=state._build_replay_plan)
+    monkeypatch.setattr(state, "_build_replay_plan", plan)
+
+    if metadata_fails:
+        with pytest.raises(RuntimeError, match="metadata preparation failed"):
+            model_state._prepare_attn_with_replay(build_attn, replay_inputs, CUDAGraphMode.NONE, for_capture=False)
+        assert state.dp_tokens is None
+    else:
+        result = model_state._prepare_attn_with_replay(build_attn, replay_inputs, CUDAGraphMode.NONE, for_capture=False)
+        assert result is metadata
+        assert state.dp_tokens.tolist() == [16, 2]
+        assert state.layers.context_factory is not None
+    assert calls == ["submit", "metadata", "wait"]
+    plan.assert_called_once()
+    assert plan.call_args.args[0].pcp_context is pcp_context
+    state._gather.assert_not_called()
 
 
 @pytest.mark.parametrize("local_tokens", [0, 1, 3])

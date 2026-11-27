@@ -48,18 +48,22 @@ def test_indexer_qw_selection(monkeypatch, case):
     assert layer.fused_prologue_qw is (kernel if case == "mxfp8" else None)
 
 
-def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
+@pytest.mark.parametrize("launch_replay", [False, True])
+def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch, launch_replay):
     hidden = torch.zeros(1, 8)
     output = torch.empty_like(hidden)
-    impl = Mock()
-    attn = SimpleNamespace(v41_impl=impl)
+    calls = Mock()
+    attn = SimpleNamespace(v41_impl=calls.impl)
+    if launch_replay:
+        attn.launch_replay_metadata = calls.launch
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",
         lambda: SimpleNamespace(no_compile_layers={"layer": attn}),
     )
     dsa_v41.dsa_v41_forward(hidden, output, "layer")
-    impl.forward.assert_called_once_with(attn, None, hidden, output)
+    calls.impl.forward.assert_called_once_with(attn, None, hidden, output)
+    assert [call[0] for call in calls.mock_calls] == (["impl.forward", "launch"] if launch_replay else ["impl.forward"])
 
 
 @pytest.mark.parametrize("overlap", [False, True])

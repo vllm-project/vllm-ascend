@@ -73,6 +73,9 @@ def dsa_v41_forward(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     attn.v41_impl.forward(attn, None, hidden_states, output)
+    launch_replay_metadata = getattr(attn, "launch_replay_metadata", None)
+    if launch_replay_metadata is not None:
+        launch_replay_metadata()
 
 
 def dsa_v41_forward_fake(
