@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import itertools
+import weakref
+from typing import Any
 
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -453,7 +455,7 @@ def _try_lora_linear_triton(
     return True
 
 
-_LORA_WRAPPERS: dict = {}  # wrapper_id: int -> wrapper: PunicaWrapperNPU
+_LORA_WRAPPERS: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 _LORA_WRAPPER_IDS = itertools.count()
 
 
@@ -470,7 +472,12 @@ def lora_linear(
     packed_lora_b: torch.Tensor | None,
     add_inputs: bool,
 ) -> None:
-    wrapper = _LORA_WRAPPERS[wrapper_id]
+    wrapper = _LORA_WRAPPERS.get(wrapper_id)
+    if wrapper is None:
+        raise RuntimeError(
+            f"LoRA Punica wrapper id {wrapper_id} is no longer registered "
+            "(the PunicaWrapperNPU instance may have been garbage-collected)."
+        )
     packed = len(lora_a_stacked) == 1 or (packed_lora_a is not None and packed_lora_b is not None)
     use_kernel = not wrapper._single_lora_slot or not packed
     if use_kernel:

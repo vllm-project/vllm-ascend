@@ -41,11 +41,14 @@ def history(tmp_path_factory):
     git("config", "user.name", "Local Test")
     git("config", "user.email", "test@example.invalid")
     git("config", "commit.gpgsign", "false")
-    common = commit("README", "base\n")
+    common = commit("README.md", "Run the installer.\n")
     git("checkout", "-qb", "feature")
     commit("feature.py", "first_change = 1\n")
     head = commit("second.py", "second_change = 2\n")
     next_head = commit("third.py", "followup_change = 3\n")
+    docs_head = commit("README.md", "Run the installer with --unknown-flag.\n")
+    git("revert", "--no-edit", docs_head)
+    withdrawn_head = git("rev-parse", "HEAD")
     git("checkout", "-q", "main")
     base = commit("base_only.py", "base_only_change = 3\n")
     git("remote", "add", "origin", str(repo))
@@ -53,7 +56,15 @@ def history(tmp_path_factory):
     kb = repo / ".github/agent-review"
     shutil.copytree(Path(__file__).resolve().parents[2] / "agent-review", kb)
     (kb / "allowlist.txt").write_text("maintainer  # pilot reviewer\npilot-triager\n")
-    return SimpleNamespace(repo=repo, common=common, base=base, head=head, next_head=next_head)
+    return SimpleNamespace(
+        repo=repo,
+        common=common,
+        base=base,
+        head=head,
+        next_head=next_head,
+        docs_head=docs_head,
+        withdrawn_head=withdrawn_head,
+    )
 
 
 class PullRequest:
@@ -198,7 +209,8 @@ def test_command_permissions(pr, phase, body, actor, allowed, feedback):
     if feedback is None:
         assert comment["body"] == body
     else:
-        assert feedback in comment["body"]
+        marker = "🟢" if allowed else "🔴"
+        assert f"🤖 [AI review bot]: {marker} {feedback}" in comment["body"]
     if allowed:
         assert "[View Actions run](https://github.com/example/project/actions/runs/101)" in comment["body"]
 
@@ -207,7 +219,8 @@ def test_command_permissions(pr, phase, body, actor, allowed, feedback):
 def test_label_checks_the_reviewer_and_removes_it_when_denied(pr, phase, actor):
     assert phase("authorize", pr.label_event(actor=actor)) == {}
     [notice] = pr.comments.values()
-    assert f"@{actor}" in notice["body"] and "RFC #21451" in notice["body"]
+    assert notice["body"].startswith(f"@{actor} 🤖 [AI review bot]: 🔴 ")
+    assert "RFC #21451" in notice["body"]
     assert not pr.labels
 
 
@@ -247,6 +260,52 @@ def test_request_rechecks_live_pr_after_queue(pr, phase, agent, change, notice):
 
 
 # --- Review, pass and manual follow-up ---
+
+
+@pytest.mark.parametrize(
+    "paths,expected",
+    [
+        (["vllm_ascend/worker/model_runner.py"], {"model-execution"}),
+        (["README.md"], {"doc-quality"}),
+        (["README.zh.md"], {"doc-quality"}),
+        (["docs/source/getting_started.md", "vllm_ascend/worker/model_runner.py"], {"doc-quality", "model-execution"}),
+        (["vllm_ascend/ops/triton/docs/kernels.md"], {"doc-quality"}),
+        (["docs/source/locale/zh_CN/LC_MESSAGES/user_guide/getting_started.po"], {"doc-quality"}),
+        (["docs/source/locale/de/LC_MESSAGES/guide.po", "examples/README.md"], set()),
+        ([".github/agent-review/instructions.md"], {"ci"}),
+    ],
+)
+def test_doc_quality_path_routing(history, paths, expected):
+    registry = (history.repo / ".github/agent-review/domains.yaml").read_text()
+    assert {domain["name"] for domain in ai.resolve_domains(registry, paths)} == expected
+
+
+def test_doc_finding_can_be_resolved_after_the_author_withdraws_the_change(pr, phase, agent, history):
+    pr.pull["head"]["sha"] = history.docs_head
+    assert phase("prepare", pr.command())["doc_quality"] == "true"
+    doc = finding() | dict(path="README.md", rule="L2-doc-quality#upstream-rule", body="Remove --unknown-flag.")
+    agent.return_value = result(findings=[doc])
+    phase("review")
+    assert {"README.md", "feature.py"} <= set(agent.call_args.args[1]["files"])
+    [first] = pr.state()["findings"]
+    assert first["status"] == "open" and "ai-review-passed" not in pr.labels
+
+    pr.pull["head"]["sha"] = history.withdrawn_head
+    reply = f"/ai-review {first['id']}: I reverted the README edit and kept the code changes."
+    prepared = phase("prepare", pr.command(reply))
+    assert prepared == {"review": "true", "head": history.withdrawn_head, "base": history.common}
+    for snapshot in ("base", "head"):
+        assert ai.git(history.repo, "show", f"{prepared[snapshot]}:README.md") == "Run the installer.\n"
+    evidence = "README.md matches the base version. The command no longer mentions --unknown-flag."
+    agent.return_value = result(updates=[dict(id=first["id"], status="resolved", evidence=evidence)])
+    phase("review")
+    request = agent.call_args.args[1]
+    assert "README.md" not in request["files"] and "doc-quality" not in request["domains"]
+    assert "first_change" in request["diff"] and "--unknown-flag" not in request["diff"]
+    assert request["reply"] == reply and request["state"]["findings"] == [first]
+    [reviewed] = pr.state()["findings"]
+    assert (reviewed["id"], reviewed["status"], reviewed["evidence"]) == (first["id"], "resolved", evidence)
+    assert len(pr.inline) == 1 and pr.statuses[-1] == (history.withdrawn_head, "success")
 
 
 def test_label_then_manual_review_of_all_changes(pr, phase, agent, history):
@@ -326,7 +385,7 @@ def test_waive_one_then_all_for_a_single_commit(pr, phase, agent, history):
         event = pr.command(f"/ai-review-waive {selector} upstream handles this", "maintainer")
         assert phase("authorize", event) == {"authorized": "true"}
         assert phase("prepare", event) == {}
-        assert "Waived 1" in pr.comments[event["comment"]["id"]]["body"]
+        assert "🤖 [AI review bot]: 🟢 Waived 1" in pr.comments[event["comment"]["id"]]["body"]
         if selector == "F001":
             assert "ai-review-passed" not in pr.labels
             first, second = pr.state()["findings"]
@@ -362,7 +421,7 @@ def test_invalid_waiver_preserves_summary(pr, phase, history, command, feedback)
         pr.pull["head"] = {"sha": history.next_head}
     event = pr.command(command, "maintainer")
     assert phase("prepare", event) == {}
-    assert feedback in pr.comments[event["comment"]["id"]]["body"]
+    assert f"🤖 [AI review bot]: 🔴 {feedback}" in pr.comments[event["comment"]["id"]]["body"]
     assert summary["body"] == before
 
 
@@ -384,7 +443,9 @@ def test_last_available_round_is_counted_before_the_next_request_runs(
     before = pr.state()
     assert (before["round"], before["total"]) == (5, previous_total + 1)
     assert phase("prepare", pending) == {}
-    assert expected_limit in pr.comments[pending["comment"]["id"]]["body"]
+    _, accepted, rejected = pr.comments[pending["comment"]["id"]]["body"].split("🤖 [AI review bot]: ")
+    assert accepted.startswith("🟢 Review request accepted")
+    assert rejected.startswith(f"🔴 Reached the {expected_limit}")
     assert pr.state() == before and agent.call_count == 1
     pr.pull["head"] = {"sha": history.next_head}
     assert bool(phase("prepare", pr.command())) == (previous_total < 14)
@@ -585,6 +646,7 @@ def agent_request(monkeypatch):
         "state": {"head": "abc123", "findings": [{"id": "F003"}]},
         "merge_base": "def456",
         "files": ["example.py"],
+        "domains": [],
         "diff": "+print('{{REPLY}}')",
         "truncated": False,
         "reply": "/ai-review Recheck F003 and keep {{HEAD_SHA}} literal.",
@@ -602,6 +664,8 @@ def test_agent_receives_original_input_and_redacts_output(agent_request, tmp_pat
     workspace = Path(ai.__file__).resolve().parents[3]
     prompt, echoed_key = json.loads(ai.run_agent(workspace, agent_request))
 
+    assert f"Merge base: {agent_request['merge_base']}" in prompt
+    assert f"Head: {agent_request['state']['head']}" in prompt
     assert agent_request["diff"] in prompt
     assert agent_request["reply"] in prompt
     assert '"id": "F003"' in prompt

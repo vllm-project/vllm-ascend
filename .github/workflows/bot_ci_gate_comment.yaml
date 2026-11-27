@@ -289,6 +289,17 @@ jobs:
                   "them; maintainers will handle claiming:\n"
                   f"{listing}"
               )
+          ignored = read_detail("ignored_files.txt")
+          if ignored:
+              listing = "\n".join(f"- `{path}`" for path in ignored)
+              plural = "s" if len(ignored) != 1 else ""
+              body += (
+                  f"\n\n**Codeowner approval ignored "
+                  f"({len(ignored)} file{plural}).** A maintainer waived "
+                  "these files from the approval gate with /ignore-owner; "
+                  "the waiver stays until /ignore-owner-clear replaces it:\n"
+                  f"{listing}"
+              )
 
           # First failure of this streak: post a fresh comment so it lands at
           # the bottom of the timeline and notifies participants. A repeated

@@ -1,5 +1,5 @@
-test_name: "MiniMax-M3-w8a8-PP-128k-PD-3cases"
-model: "Eco-Tech/MiniMax-M3-w8a8-0626"
+test_name: "MiniMax-M3.1-Flash-W4A8-PP-128k-PD-3cases"
+model: "vllm-ascend/MiniMax-M3.1-Flash-W4A8"
 num_nodes: 3
 npu_per_node: 16
 dp_load_balancing: external

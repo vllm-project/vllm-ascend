@@ -1112,4 +1112,4 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-        maybe_save_kv_layer_to_connector("", [])
+        maybe_save_kv_layer_to_connector(self.prefix, [])
