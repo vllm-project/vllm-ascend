@@ -120,15 +120,18 @@ def test_sfa_remote_d2h_connector_is_registered():
     )
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_prefill_pp_uses_default_store_without_extra_topology_guard(pp_size):
+@pytest.mark.parametrize("pp_size,pcp_size,hisparse_target", [(1, 1, False), (2, 1, False), (2, 8, True)])
+def test_prefill_pp_uses_default_store_without_extra_topology_guard(pp_size, pcp_size, hisparse_target):
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_size, prefill_context_parallel_size=pcp_size, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_producer",
             is_kv_producer=True,
             is_kv_consumer=False,
-            kv_connector_extra_config={"transfer_backend": "memfabric"},
+            kv_connector_extra_config={"transfer_backend": "memfabric", "hisparse_target": hisparse_target},
             engine_id="prefill",
         ),
     )
@@ -152,6 +155,35 @@ def test_prefill_pp_uses_default_store_without_extra_topology_guard(pp_size):
     scheduler.assert_called_once_with(config, cache_config, "prefill")
     assert connector.connector_scheduler is scheduler.return_value
     assert connector.is_producer
+
+
+@pytest.mark.parametrize(
+    "producer,model_type,dcp_size,match",
+    [
+        (False, "glm_moe_dsa", 1, "supports PCP on GLM SFA Prefill"),
+        (True, "deepseek_v32", 1, "supports PCP on GLM SFA Prefill"),
+        (True, "glm_moe_dsa", 2, "DCP=1"),
+    ],
+)
+def test_layerwise_hisparse_rejects_unsupported_context_parallelism(producer, model_type, dcp_size, match):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=8, decode_context_parallel_size=dcp_size),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_producer" if producer else "kv_consumer",
+            is_kv_producer=producer,
+            is_kv_consumer=not producer,
+            kv_connector_extra_config={"hisparse_target": True},
+        ),
+    )
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector.KVConnectorBase_V1.__init__",
+            return_value=None,
+        ),
+        pytest.raises(ValueError, match=match),
+    ):
+        SfaRemoteD2HConnector(config, KVConnectorRole.SCHEDULER, MagicMock())
 
 
 def test_infer_separate_main_and_indexer_groups():

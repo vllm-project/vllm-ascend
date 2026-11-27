@@ -38,7 +38,7 @@ across requests.
 | --- | --- |
 | Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
-| Parallelism and transport | Colocated serving supports PCP. The experimental [layerwise P/D receiver](#layerwise-kv-transfer-from-a-separate-prefill-node) supports equal TP, PCP1 and DCP1. |
+| Parallelism and transport | Colocated serving supports PCP. The experimental [layerwise P/D receiver](#layerwise-kv-transfer-from-a-separate-prefill-node) uses equal TP, DCP1 and Decode PCP1. GLM SFA Prefill supports replicated PCP KV. |
 | Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
@@ -58,8 +58,10 @@ save and remote read complete.
    Set `"hisparse_target": true` in the Prefill **SfaRemoteD2HConnector**
    child's `kv_connector_extra_config`. Keep its `AscendStoreConnector` child.
 2. Use the same model, KV and Indexer formats, logical page size and TP size
-   on both endpoints. This receiver requires PCP1 and DCP1. Prefill can use
-   PP and Decode can use DP with one pipeline stage per replica.
+   on both endpoints. Use DCP1 on both and PCP1 on Decode. GLM SFA Prefill can
+   use PCP with replicated Main and Indexer pages. PCP rank 0 exposes the
+   gathered pages after each layer on every PP stage and TP rank. Prefill
+   can use PP and Decode can use DP with one pipeline stage per replica.
 3. On Decode use Model Runner V2, Core eager Host mirroring and the following
    connector pair. The example reserves 8 GiB of Host KV per TP rank with
    the current Ascend backend. Size this pool for the requested context and

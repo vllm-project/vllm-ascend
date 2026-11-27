@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank, get_tp_group
+from vllm.distributed import get_pcp_group, get_pp_group, get_tensor_model_parallel_rank, get_tp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
@@ -666,6 +666,8 @@ class SFAPDRD2HProducerWorker:
     """
 
     _hisparse_target = False
+    _pcp_replicated = False
+    _publishes_kv = True
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         # Preserve the Mooncake worker's transfer-engine timeout setup. The
@@ -684,14 +686,21 @@ class SFAPDRD2HProducerWorker:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self._pcp_replicated = (
+            self._hisparse_target and getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1) > 1
+        )
+        # GLM SFA gathers Main and Indexer rows back into the paged caches
+        # on all PCP ranks. Publish one copy per PP stage and TP rank.
+        self._publishes_kv = not self._pcp_replicated or get_pcp_group().rank_in_group == 0
         self.pp_rank = get_pp_group().rank_in_group
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.side_channel_host = get_ip()
         self.side_channel_port = vllm_config.kv_transfer_config.kv_port + self.dp_rank * self.tp_size
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.last_layer_idx = self.total_layers - 1
-        self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
-        self.te_rpc_port = self.engine.get_rpc_port()
+        if self._publishes_kv:
+            self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
+            self.te_rpc_port = self.engine.get_rpc_port()
         self.kv_cache_specs = [group_spec.kv_cache_spec for group_spec in self.kv_cache_config.kv_cache_groups]
         self.block_size = [spec.block_size for spec in self.kv_cache_specs]
         self.num_kv_cache_groups = len(self.kv_cache_specs)
@@ -747,6 +756,8 @@ class SFAPDRD2HProducerWorker:
 
         ``remote_host`` / ``local_block_ids`` are already correct from
         ``build_connector_meta``; main and indexer group ids remain separate."""
+        if not self._publishes_kv:
+            return
         if self._backend == BACKEND_MEMFABRIC:
             self.current_layer = 0
             self._pd_dispatched_layers = set()
@@ -853,6 +864,8 @@ class SFAPDRD2HProducerWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         # memfabric pull mode only.
+        if not self._publishes_kv:
+            return
         assert self._backend == BACKEND_MEMFABRIC, "SfaRemoteD2HConnector P side supports memfabric pull only."
         layer2group_ids: dict[str, int] = {}
         for group_idx, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -941,7 +954,10 @@ class SFAPDRD2HProducerWorker:
             self.kv_send_layer_thread.stop()
             raise RuntimeError("SFAPD P-side send thread failed during startup") from error
         logger.info(
-            "MembPull P registered kv caches: target_layers=%d, dspark_draft_layers=%d, p_session=%s",
+            "MembPull P registered kv caches: pp_rank=%d, tp_rank=%d, "
+            "target_layers=%d, dspark_draft_layers=%d, p_session=%s",
+            self.pp_rank,
+            self.tp_rank,
             len(self.layer_metadata),
             len(self.dspark_draft_kv_metadata),
             global_memfabric_te.unique_id,
@@ -1067,6 +1083,9 @@ class SFAPDRD2HProducerWorker:
         D-notification is moved earlier so co-located pull overlaps attention.
         Idempotent per layer — save_kv_layer skips layers dispatched here.
         """
+        if self._pcp_replicated:
+            # Publish at layer end, after both PCP cache gathers have finished.
+            return
         if self._backend != BACKEND_MEMFABRIC or self.kv_send_layer_thread is None:
             return
         resolved_layer_name = layer_name or (
@@ -1096,6 +1115,8 @@ class SFAPDRD2HProducerWorker:
         connector_metadata: KVConnectorMetadata,
         **kwargs,
     ) -> None:
+        if not self._publishes_kv:
+            return
         if self._backend != BACKEND_MEMFABRIC:
             raise RuntimeError("SfaRemoteD2HConnector P side supports memfabric pull only.")
         send_thread = self.kv_send_layer_thread
@@ -1221,6 +1242,8 @@ class SFAPDRD2HProducerWorker:
 
     def wait_for_layer_reuse(self, stage_local_layer_idx: int) -> None:
         """Translate AscendStore's stage-local ordinal to a global layer."""
+        if not self._publishes_kv:
+            return
         try:
             global_layer_idx = _layer_idx(self.stage_layer_names[stage_local_layer_idx])
         except IndexError as error:

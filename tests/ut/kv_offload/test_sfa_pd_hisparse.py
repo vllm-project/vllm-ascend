@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import worker as transfer_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.hisparse_consumer import (
     HiSparseLayerwiseReadThread,
     HiSparseReadState,
@@ -128,6 +129,60 @@ def test_final_save_fences_dispatched_layers():
     worker.wait_for_layer_send = MagicMock()
     worker.wait_for_save()
     assert sorted(c.args[0] for c in worker.wait_for_layer_send.call_args_list) == [4, 7]
+
+
+@pytest.mark.parametrize("pcp_rank", [0, 5])
+def test_pcp_prefill_publishes_from_rank_zero_after_the_cache_gather(monkeypatch, pcp_rank):
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "3000")
+    monkeypatch.setattr(transfer_worker, "_configure_layerwise_transport", MagicMock())
+    monkeypatch.setattr(transfer_worker, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=pcp_rank))
+    monkeypatch.setattr(transfer_worker, "get_pp_group", lambda: SimpleNamespace(rank_in_group=1))
+    monkeypatch.setattr(transfer_worker, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(transfer_worker, "get_ip", lambda: "localhost")
+    monkeypatch.setattr(transfer_worker, "infer_sfa_component_group_ids", lambda _: (0, 1))
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(transfer_worker.global_memfabric_te, "get_transfer_engine", transfer_engine)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_rank=0, tensor_parallel_size=1, pipeline_parallel_size=2, prefill_context_parallel_size=8
+        ),
+        model_config=SimpleNamespace(use_mla=True, get_num_layers=lambda _: 78),
+        kv_transfer_config=SimpleNamespace(
+            kv_port=20050,
+            kv_connector_extra_config={"hisparse_target": True, "transfer_backend": "memfabric"},
+        ),
+    )
+    cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=128)) for _ in range(2)]
+    )
+    producer = SFAPDRD2HProducerWorker(config, cache_config, "prefill")
+    layer = "model.layers.42.self_attn"
+    request = SimpleNamespace(remote_host="decode", remote_port=20050, local_block_ids=([0], [0]))
+    metadata = SimpleNamespace(requests={"req": request})
+    if pcp_rank == 0:
+        transfer_engine.assert_called_once_with("localhost")
+        send_thread = MagicMock()
+        producer.kv_send_layer_thread = send_thread
+        producer.layer_metadata[layer] = SimpleNamespace(tensor_group_idx=[0, 1], has_indexer=True)
+        producer.on_kv_cache_written(layer, metadata)
+        send_thread.record_p_save_event.assert_not_called()
+        send_thread.send_queue.put.assert_not_called()
+        assert producer._pd_dispatched_layers == set()
+        cache_ready = object()
+        producer.save_kv_layer(layer, [], SimpleNamespace(reshape_cache_event=cache_ready), metadata)
+        send_thread.mark_layer_pending.assert_called_once_with(42)
+        send_thread.record_p_save_event.assert_called_once_with(42)
+        send_thread.send_queue.put.assert_called_once()
+        task = send_thread.send_queue.put.call_args.args[0]
+        assert task.send_request == {"req": request}
+        assert task.wait_event is cache_ready
+    else:
+        producer.register_kv_caches({})
+        producer.bind_connector_metadata(metadata)
+        producer.save_kv_layer(layer, [], None, metadata)
+        producer.wait_for_layer_reuse(0)
+        transfer_engine.assert_not_called()
+        assert producer.kv_send_layer_thread is None
 
 
 def test_pp_stages_must_cover_every_destination_layer_before_final_ack():

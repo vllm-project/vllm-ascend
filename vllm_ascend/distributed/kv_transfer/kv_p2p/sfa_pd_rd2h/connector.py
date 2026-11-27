@@ -80,8 +80,12 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
             if not self.use_layerwise or self.is_producer == self.is_consumer:
                 raise ValueError("Layerwise HiSparse requires a dedicated producer or consumer")
             parallel = vllm_config.parallel_config
-            if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
-                raise ValueError("Layerwise HiSparse requires unsharded source and destination pages (PCP=1 and DCP=1)")
+            if parallel.decode_context_parallel_size != 1:
+                raise ValueError("Layerwise HiSparse requires unsharded source and destination pages (DCP=1)")
+            if parallel.prefill_context_parallel_size > 1:
+                text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+                if not self.is_producer or getattr(text_config, "model_type", None) != "glm_moe_dsa":
+                    raise ValueError("Layerwise HiSparse supports PCP on GLM SFA Prefill with replicated KV only")
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         # Decode offload is asymmetric: P exposes regular paged KV while D owns
         # the SparseKVOffloadManager CPU pool.
