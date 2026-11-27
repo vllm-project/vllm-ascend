@@ -1028,8 +1028,20 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
-        # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
-        # so the external l2norm_fwd calls are removed.
+        # FLA's import-time capability queries can initialize an NPU context;
+        # defer them until execution on the selected worker device.
+        # TODO: Restore the top-level import once supported vLLM FLA or Triton
+        # Ascend versions make these queries safe before device selection.
+        try:
+            from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+        except ImportError:  # vLLM before the fla package moved to vllm/third_party
+            from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+        # q/k L2 norm is applied here instead of inside the kernel: requesting
+        # use_qk_l2norm_in_kernel=True (or state_v_first=True) routes the call
+        # into the Ascend950-only "prepare" path of the fused op, which aclnn
+        # rejects with 161002 (ACLNN_ERR_PARAM_INVALID) on Ascend910B/910_93.
+        # The chunk-64 composite core supports pre-normalised q/k and the
+        # K-major state layout, matching the decode path's external l2norm.
         head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
         if all(x.is_contiguous() for x in head_first_qkv):
             q, k, v = head_first_qkv
@@ -1037,6 +1049,8 @@ class BaseDeviceAdaptor:
         else:
             q, k, v = (x.contiguous() for x in (q, k, v))
             layout = "BSND"
+        q = l2norm_fwd(q.contiguous())
+        k = l2norm_fwd(k.contiguous())
         g = g.to(torch.float32).contiguous()
         # fused_gdn_gating already emits sigmoid(beta), so beta is forwarded
         # as-is and the kernel must not apply the sigmoid a second time.
@@ -1050,6 +1064,10 @@ class BaseDeviceAdaptor:
         if keep_meta is not None:
             cu_seqlens = prebuilt_meta.cu_seqlens_kern
             initial_state_kern = initial_state[keep_meta]
+        # The core path keeps the recurrent state K-major ([seqNum, Hv, K, V])
+        # while the state cache is V-major, so swap the last two dims on the
+        # way in and on the way out.
+        initial_state_kern = initial_state_kern.transpose(-1, -2).contiguous()
 
         output, final_state, *_ = fused_fwd(
             q,
@@ -1065,12 +1083,13 @@ class BaseDeviceAdaptor:
             scale=scale,
             layout=layout,
             use_exp2=False,
-            use_qk_l2norm_in_kernel=True,
+            use_qk_l2norm_in_kernel=False,
             use_beta_sigmoid_in_kernel=False,
             allow_neg_eigval=False,
             disable_recompute=False,
-            state_v_first=True,
+            state_v_first=False,
         )
+        final_state = final_state.transpose(-1, -2).contiguous()
         if keep_meta is not None:
             full_final_state = initial_state.clone()
             full_final_state[keep_meta] = final_state

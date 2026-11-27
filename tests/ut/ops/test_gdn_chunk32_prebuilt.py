@@ -37,8 +37,12 @@ class NoIterationTuple(tuple):
 @pytest.mark.parametrize(
     "device_type,chunk32_enabled,chunk_size,use_exp2,kernel_l2norm,disable_recompute,state_v_first",
     [
-        (AscendDeviceType.A2, False, 64, False, True, False, True),
-        (AscendDeviceType.A3, False, 64, False, True, False, True),
+        # A2/A3 chunk-64 core path: external l2norm and the K-major state
+        # layout. The in-kernel spellings (kernel_l2norm/state_v_first=True)
+        # route the call into the Ascend950-only "prepare" path, which aclnn
+        # rejects with 161002 on Ascend910B/910_93.
+        (AscendDeviceType.A2, False, 64, False, False, False, False),
+        (AscendDeviceType.A3, False, 64, False, False, False, False),
         (AscendDeviceType.A5, True, 32, False, True, False, True),
         (AscendDeviceType.A5, False, 64, True, True, True, True),
     ],

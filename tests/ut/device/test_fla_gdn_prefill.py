@@ -20,16 +20,21 @@ kernel, verifying the optimized parameter contract:
 
 * q/k/v are handed over head-first (BNSD) without copying when the transpose
   is already contiguous, and as sequence-major (BSND) otherwise;
-* q/k normalization is delegated to the kernel (use_qk_l2norm_in_kernel=True);
+* q/k L2 normalization happens outside the kernel
+  (use_qk_l2norm_in_kernel=False), matching the decode path and avoiding the
+  Ascend950-only prepare path of the fused operator;
 * beta arrives already sigmoided from fused_gdn_gating, so the kernel must not
   apply it again (use_beta_sigmoid_in_kernel=False);
-* the recurrent state keeps its [N, Hv, Dk, Dv] layout (state_v_first=True);
+* the recurrent state is transposed to the kernel's K-major [N, Hv, Dk, Dv]
+  layout on the way in and back to the cache's V-major layout on the way out
+  (state_v_first=False);
 * use_exp2=False, disable_recompute=False for the A2/A3 optimized path.
 """
 
 from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
@@ -71,8 +76,25 @@ def make_state(slots=STATE_SLOTS, dtype=torch.bfloat16, fill=5.0):
     return torch.full((slots, HV, HEAD_DIM, HEAD_DIM), fill, dtype=dtype)
 
 
+def ref_l2norm(x, eps=1e-6, output_dtype=None):
+    """Reference L2 normalization; the Triton kernel is a no-op off-NPU."""
+    x_fp32 = x.float()
+    y = x_fp32 / (x_fp32.norm(dim=-1, keepdim=True) + eps)
+    return y.to(output_dtype or x.dtype)
+
+
 class TestFlaGdnPrefillAdaptor(TestCase):
     """Verify BaseDeviceAdaptor.fla_gdn_prefill forwards the kernel contract."""
+
+    def setUp(self):
+        # The Triton L2-norm kernel does not produce meaningful values on CPU,
+        # so every adaptor call runs against a reference implementation.
+        self.l2norm_patch = patch(
+            "vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd",
+            side_effect=ref_l2norm,
+        )
+        self.l2norm = self.l2norm_patch.start()
+        self.addCleanup(self.l2norm_patch.stop)
 
     # ------------------------------------------------------------------ #
     # 1. Kernel contract: all parameters match the A2/A3 optimized path.  #
@@ -94,16 +116,26 @@ class TestFlaGdnPrefillAdaptor(TestCase):
 
         self.assertEqual(call["chunk_size"], 64)
         self.assertFalse(call["use_exp2"])
-        self.assertTrue(call["use_qk_l2norm_in_kernel"])
+        self.assertFalse(call["use_qk_l2norm_in_kernel"])
         # fused_gdn_gating already emits sigmoid(beta), so re-applying it in the
         # kernel would double-sigmoid the values.
         self.assertFalse(call["use_beta_sigmoid_in_kernel"])
         self.assertFalse(call["disable_recompute"])
-        self.assertTrue(call["state_v_first"])
+        self.assertFalse(call["state_v_first"])
         self.assertFalse(call["allow_neg_eigval"])
         self.assertTrue(call["output_final_state"])
         self.assertEqual(call["layout"], "BSND")
         self.assertEqual(call["scale"], 0.125)
+        # q/k reach the kernel already normalized by the external reference.
+        self.assertEqual(self.l2norm.call_count, 2)
+        for actual in (call["q"], call["k"]):
+            self.assertTrue(actual.is_contiguous())
+            torch.testing.assert_close(
+                actual.float().norm(dim=-1),
+                torch.ones_like(actual.float().norm(dim=-1)),
+                atol=2e-3,
+                rtol=2e-3,
+            )
 
     # ------------------------------------------------------------------ #
     # 2. Layout selection: BNSD when head-first transpose is contiguous. #
@@ -157,25 +189,30 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         self.assertEqual(calls[0]["layout"], "BSND")
 
     # ------------------------------------------------------------------ #
-    # 3. State passthrough: state_v_first=True, no transpose, no copy.   #
+    # 3. State layout: K-major into the kernel, V-major back to the cache. #
     # ------------------------------------------------------------------ #
-    def test_recurrent_state_is_passed_through_untransposed(self):
-        """initial_state must reach the kernel as-is (state_v_first=True)."""
+    def test_recurrent_state_is_transposed_to_k_major_and_back(self):
+        """initial_state must enter K-major and leave V-major (state_v_first=False)."""
         from vllm_ascend.device.device_op import BaseDeviceAdaptor
 
-        state = make_state(fill=7.0)
-        original_ptr = state.data_ptr()
+        state = torch.arange(STATE_SLOTS * HV * HEAD_DIM * HEAD_DIM, dtype=torch.float32).reshape(
+            STATE_SLOTS, HV, HEAD_DIM, HEAD_DIM
+        )
+        original_state = state.clone()
 
         calls = []
 
         def fused_fwd(q_in, k_in, v_in, g_in, beta_in, **kwargs):
             calls.append(kwargs)
-            self.assertEqual(kwargs["initial_state"].data_ptr(), original_ptr)
+            torch.testing.assert_close(
+                kwargs["initial_state"],
+                original_state.transpose(-1, -2).contiguous(),
+            )
             return torch.zeros_like(q_in), kwargs["initial_state"].clone()
 
         q, k, v, g, beta = make_inputs()
         output, final = BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd)
-        self.assertTrue(torch.equal(final, state))
+        torch.testing.assert_close(final, original_state)
 
     # ------------------------------------------------------------------ #
     # 4. keep_meta: scatter kept segments, preserve empty ones.           #
@@ -205,7 +242,10 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         def fused_fwd(q_in, k_in, v_in, g_in, beta_in, **kwargs):
             self.assertEqual(kwargs["cu_seqlens"], (0, 33, 98))
             self.assertEqual(kwargs["initial_state"].shape[0], 2)
-            torch.testing.assert_close(kwargs["initial_state"], original_state[[1, 3]])
+            torch.testing.assert_close(
+                kwargs["initial_state"],
+                original_state[[1, 3]].transpose(-1, -2).contiguous(),
+            )
             return torch.zeros_like(q_in), kernel_final
 
         output, final = BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, gate, raw_beta, state, 0.125, meta, fused_fwd)
@@ -314,7 +354,10 @@ class TestFlaGdnPrefillAdaptor(TestCase):
             for actual in (q, k, v):
                 self.assertTrue(actual.is_contiguous())
             torch.testing.assert_close(beta, raw_beta)
-            torch.testing.assert_close(kwargs["initial_state"], original_state[[1, 3]])
+            torch.testing.assert_close(
+                kwargs["initial_state"],
+                original_state[[1, 3]].transpose(-1, -2).contiguous(),
+            )
             self.assertEqual(kwargs["cu_seqlens"], (0, 33, 98))
             return qkv.clone(), kwargs["initial_state"] + 1000
 
