@@ -1,0 +1,8 @@
+pr: 23475
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect or missing expert LoRA results across data-parallel ranks,
+      including idle ranks, adapter slot reuse, and W8A8 communication.
+      For shared MoE execution, set --max-loras to cover the adapters scheduled
+      across the communication group at the same time.
