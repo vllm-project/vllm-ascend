@@ -18,7 +18,7 @@ def test_idle_dummy_batch_scopes_and_restores_config(fails):
     def dummy(num_tokens, **kwargs):
         assert get_current_vllm_config() is config
         assert num_tokens == 2
-        assert kwargs == {"uniform_decode": True, "skip_gdn_state_update": True}
+        assert kwargs == {"uniform_decode": True, "skip_gdn_state_update": True, "num_active_loras": 0}
         if fails:
             raise RuntimeError("dummy failed")
 

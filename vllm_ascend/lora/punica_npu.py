@@ -27,6 +27,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
+        # Published by the runner's cross-DP expert adapter coordinator.
+        self.moe_lora_slot_ids: torch.Tensor | None = None
         ascend_device_type = get_ascend_device_type()
         self.ascend_device_type = ascend_device_type
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
