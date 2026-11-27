@@ -905,10 +905,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
       direct P/D transfer.
     - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
       disabled. For P/D, use the same integration version and TP size on both
-      roles and set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both. The A5 P/D test
-      used a modified image with PP4/TP8 on prefill, DP4/TP8/DCP8 on decode,
-      and `PCP=1`. End-to-end output equivalence remains unverified, including
-      with prefix caching enabled.
+      roles and set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both.
     - **Qwen3.x (GDN)** is validated on A3 and A5. Ascend 310P is unsupported.
       For Qwen3.8, use the Qwen3.5-compatible `Qwen/Qwen3.8-27B` checkpoint.
       Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`, BF16 activations and
