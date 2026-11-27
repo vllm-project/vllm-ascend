@@ -20,11 +20,6 @@ shows both forms. Use local checkpoint paths when you already have the weights.
     hybrid Mamba models. Use the model tutorial for role-specific serving and
     parallelism settings. See the [model tutorials](../../tutorials/models/index.md).
 
-!!! note "ACLGraph capture sizes"
-
-    For fixed-length full ACLGraph with EAGLE, DFlash2, or MTP with `K > 1`,
-    set manual capture sizes to multiples of `K + 1`.
-
 ## Speculative Decoding Methods
 
 | `method` | Draft source or purpose |
