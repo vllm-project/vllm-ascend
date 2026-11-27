@@ -87,6 +87,18 @@ def manager(monkeypatch):
     mgr.clear()
 
 
+@pytest.fixture
+def execution_manager(manager):
+    manager.model.select_encoder_cudagraph_items.side_effect = lambda kwargs, indices: dict(kwargs)
+
+    def postprocess(outputs, indices, counts, result, *, clone, batch_mm_kwargs):
+        assert clone
+        result[0] = outputs["default"][: counts[0]].clone()
+
+    manager.model.postprocess_encoder_output.side_effect = postprocess
+    return manager
+
+
 def capture_pair(mgr, path="default", axis_keys=()):
     mgr._capture_budget_graph(8, path, axis_keys)
     mgr._capture_budget_graph(4, path, axis_keys)
@@ -96,6 +108,16 @@ def capture_pair(mgr, path="default", axis_keys=()):
 
 def same_storage(a, b):
     return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+
+
+def assert_cleared(manager):
+    assert all(not graphs for graphs in manager.budget_graphs.values())
+    assert not manager._shared_input_buffers
+    assert not manager._shared_output_buffers
+    assert not manager._shared_input_keys
+    assert not manager.is_captured()
+    assert acl.get_encoder_graph_params() is None
+    assert manager.update_stream is None
 
 
 def test_compatible_buffers_share_storage_and_keep_probe_contents(manager):
@@ -125,29 +147,32 @@ def test_path_and_axis_groups_do_not_alias(manager, path, axes):
     )
 
 
-@pytest.mark.parametrize("kind", ["shape", "dtype", "missing", "larger", "scalar"])
-def test_incompatible_inputs_keep_own_allocation(manager, kind):
+@pytest.mark.parametrize(
+    "shape,dtype,missing",
+    [
+        pytest.param((4, 3), torch.float32, False, id="shape"),
+        pytest.param((4, 2), torch.float64, False, id="dtype"),
+        pytest.param((4, 2), torch.float32, True, id="missing"),
+        pytest.param((9, 2), torch.float32, False, id="larger"),
+        pytest.param((), torch.float32, False, id="scalar"),
+    ],
+)
+def test_incompatible_inputs_keep_own_allocation(manager, shape, dtype, missing):
     original = manager.model.prepare_encoder_cudagraph_capture_inputs.side_effect
 
     def prepare(budget, *args):
         values = original(budget, *args).values
         if budget == 8:
-            if kind != "missing":
+            if not missing:
                 values["extra"] = torch.ones(8, 2)
         else:
-            values["extra"] = {
-                "shape": lambda: torch.ones(4, 3),
-                "dtype": lambda: torch.ones(4, 2, dtype=torch.float64),
-                "missing": lambda: torch.ones(4, 2),
-                "larger": lambda: torch.ones(9, 2),
-                "scalar": lambda: torch.tensor(4),
-            }[kind]()
+            values["extra"] = torch.ones(shape, dtype=dtype)
         return SimpleNamespace(values=values)
 
     manager.model.prepare_encoder_cudagraph_capture_inputs.side_effect = prepare
     large, small = capture_pair(manager)
     assert "extra" not in manager._shared_input_keys[("default", ())]
-    if kind != "missing":
+    if not missing:
         assert not same_storage(large.input_buffers["extra"], small.input_buffers["extra"])
     assert same_storage(large.input_buffers["pixels"], small.input_buffers["pixels"])
 
@@ -212,15 +237,9 @@ def test_nonshared_missing_input_keeps_per_budget_value(manager):
     assert torch.all(output == 5)
 
 
-def test_execute_clones_output_before_next_replay(manager):
+def test_execute_requests_cloned_outputs_before_next_replay(execution_manager):
+    manager = execution_manager
     capture_pair(manager)
-    manager.model.select_encoder_cudagraph_items.side_effect = lambda kwargs, indices: dict(kwargs)
-
-    def postprocess(outputs, indices, counts, result, *, clone, batch_mm_kwargs):
-        assert clone
-        result[0] = outputs["default"][: counts[0]].clone()
-
-    manager.model.postprocess_encoder_output.side_effect = postprocess
     first = manager._execute_local({"pixels": torch.ones(4, 2), "scale": torch.tensor(2)})[0]
     second = manager._execute_local({"pixels": torch.ones(8, 2), "scale": torch.tensor(5)})[0]
     assert torch.all(first == 3)
@@ -235,11 +254,7 @@ def test_clear_releases_backing_and_recapture_uses_new_storage(manager):
     manager.clear()
     gc.collect()
     assert backing() is None
-    assert not manager._shared_input_buffers
-    assert not manager._shared_output_buffers
-    assert not manager._shared_input_keys
-    assert acl.get_encoder_graph_params() is None
-    assert manager.update_stream is None
+    assert_cleared(manager)
     acl.set_encoder_graph_params(manager.path_token_budgets)
     capture_pair(manager)
     assert manager._shared_output_buffers
@@ -256,12 +271,7 @@ def test_partial_failure_cleans_state_and_allows_recapture(manager):
     manager.model.prepare_encoder_cudagraph_capture_inputs.side_effect = fail_small
     with pytest.raises(RuntimeError, match="small capture failed"):
         manager.capture(graph_pool=object())
-    assert all(not graphs for graphs in manager.budget_graphs.values())
-    assert not manager._shared_input_buffers
-    assert not manager._shared_output_buffers
-    assert not manager._shared_input_keys
-    assert not manager.is_captured()
-    assert acl.get_encoder_graph_params() is None
+    assert_cleared(manager)
     manager.model.prepare_encoder_cudagraph_capture_inputs.side_effect = prepare
     manager.capture(graph_pool=object())
     assert manager.is_captured()
@@ -270,7 +280,7 @@ def test_partial_failure_cleans_state_and_allows_recapture(manager):
     assert len(manager._get_graph_set()) == 2
 
 
-def test_probe_does_not_record_fia_tasks_and_capture_is_largest_first(manager):
+def test_probe_uses_eager_context_and_capture_is_largest_first(manager):
     states = []
 
     def forward(values, path):
@@ -311,19 +321,15 @@ def test_replay_padding_contract(manager, custom):
     assert torch.all(lengths[3:] == expected_tail)
 
 
-def test_execute_falls_back_when_replay_exceeds_capture(manager):
+def test_execute_falls_back_when_replay_exceeds_capture(execution_manager):
+    manager = execution_manager
     _, small = capture_pair(manager)
-    manager.model.select_encoder_cudagraph_items.side_effect = lambda kwargs, indices: dict(kwargs)
     manager.model.prepare_encoder_cudagraph_replay_buffers.side_effect = lambda *args: SimpleNamespace(
         values={"pixels": torch.ones(5, 2)}
     )
     eager_output = torch.full((4, 2), 17.0)
     manager.model.encoder_eager_forward.return_value = eager_output
 
-    def postprocess(outputs, indices, counts, result, **kwargs):
-        result[0] = outputs["default"].clone()
-
-    manager.model.postprocess_encoder_output.side_effect = postprocess
     result = manager._execute_local({"pixels": torch.ones(4, 2)})
     assert torch.equal(result[0], eager_output)
     assert small.graph.replays == 0
