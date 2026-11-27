@@ -13,7 +13,7 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -29,11 +29,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     group_concurrent_contiguous,
 )
+from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
 
 from .helpers import (
     make_circular_spec,
     make_full_spec,
     make_kpool_tail_spec,
+    make_kv_cache_tensor,
     make_mamba_spec,
     make_metadata_groups,
     make_pp_metadata,
@@ -1016,6 +1018,77 @@ def test_transfer_bucket_routes_each_request_to_one_complete_pcp_replica() -> No
 
     assert set(buckets) == {(0, 0), (1, 0)}
     assert request_ids == {(0, 0): {"decode-a"}, (1, 0): {"decode-b"}}
+
+
+def test_qsa_c8_registers_and_transfers_k_v_and_k_scales(monkeypatch) -> None:
+    spec = QSAC8Spec(block_size=256, num_kv_heads=1, head_size=256, dtype=torch.int8)
+    name = "model.layers.0.self_attn"
+    worker = base_worker.MooncakeBaseConnectorWorker.__new__(base_worker.MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 2
+    worker.engine_id, worker.te_rpc_port = "qsa-c8", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 256, "127.0.0.1", 5000
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=2 * spec.page_size_bytes,
+                layers=[name],
+                layer_stride=2 * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+    )
+    engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", engine)
+
+    # K/V are strided views while the scale pages are dense. Use different
+    # K/V page strides on the producer and consumer to check each address.
+    producer = [torch.empty((8, 128, 1, 256), dtype=torch.int8)[::2] for _ in range(2)]
+    producer.append(torch.empty((4, 1, 128), dtype=torch.float32))
+    consumer = [torch.empty((12, 128, 1, 256), dtype=torch.int8)[::3] for _ in range(2)]
+    consumer.append(torch.empty((4, 1, 128), dtype=torch.float32))
+    worker.register_kv_caches({name: producer})
+    produced = worker.transfer_metadata
+    worker.register_kv_caches({name: consumer})
+    consumed = worker.transfer_metadata
+
+    assert consumed.block_shapes == [[(1, 128, 256), (1, 128, 256), (1, 128)]]
+    assert consumed.block_size_scales == [[2, 2, 2]]
+    assert consumed.block_lens == [[32768, 32768, 512]]
+    assert consumer[2].data_ptr() in engine.register_buffer.call_args.args[0]
+    remote = make_pp_metadata(
+        layer_names=produced.layer_names,
+        layer_block_sizes=produced.layer_block_sizes,
+        block_shapes=produced.block_shapes,
+        block_strides=produced.block_strides,
+        block_lens=produced.block_lens,
+        block_size_scales=produced.block_size_scales,
+        tp_base_addrs={0: produced.kv_caches_base_addr},
+    )
+    thread = make_thread(
+        tp_size=2,
+        kv_cache_specs=[spec],
+        layer_names=consumed.layer_names,
+        layer_block_sizes=consumed.layer_block_sizes,
+        kv_caches_base_addr=consumed.kv_caches_base_addr,
+        block_shapes=consumed.block_shapes,
+        block_strides=consumed.block_strides,
+        block_lens=consumed.block_lens,
+        block_size_scales=consumed.block_size_scales,
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+    thread._append_spec_transfer_addresses(
+        0, 0, 0, 1, 2, 1, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+    )
+
+    assert src == [cache[1].data_ptr() for cache in consumer]
+    assert dst == [cache[2].data_ptr() for cache in producer]
+    assert lengths == [32768, 32768, 512]
 
 
 def test_attention_address_generation_handles_partial_head_overlap() -> None:

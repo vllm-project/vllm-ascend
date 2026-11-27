@@ -70,6 +70,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+        HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,

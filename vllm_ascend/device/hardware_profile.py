@@ -147,6 +147,8 @@ class HardwareCapability(Enum):
     LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS = auto()
     # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
     NATIVE_INT8_SPARSE = auto()
+    # INT8 QLI v2 supports paged, request-batched compressed causal decode.
+    INT8_QLI_V2_REQUEST_BATCHED_DECODE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
@@ -455,6 +457,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
+                HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,

@@ -64,8 +64,9 @@ from .lightning_indexer import (
     QSAIndexerMetadataProtocol,
     qsa_select_paged_tokens_lightning_v2,
     qsa_select_paged_tokens_quantized,
+    request_batched_decode_width,
 )
-from .quantization import C8_SCALE_BYTES, QSAC8Spec, QSAStaticVParameters, uses_qsa_c8_quantization
+from .quantization import C8_QSA_PER_HEAD, C8_SCALE_BYTES, QSAC8Spec, QSAStaticVParameters, uses_qsa_c8_quantization
 
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
@@ -566,6 +567,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 self.token_topk,
                 self.compress_ratio,
                 out,
+                decode_width=request_batched_decode_width(metadata, query.shape[0]),
             )
         logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
         return qsa_select_paged_tokens_lightning_v2(
@@ -1022,6 +1024,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 self.head_dim,
                 get_tensor_model_parallel_world_size(),
                 get_tensor_model_parallel_rank(),
+                per_head=quant_config.quant_description[f"{prefix}.quant_type"] == C8_QSA_PER_HEAD,
             )
             self.register_buffer(
                 "c8_p_scale",

@@ -23,6 +23,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
     PLE,
+    QSA_K_SCALE_REGION,
     _merge_mamba_state_groups,
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
@@ -30,8 +31,10 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
     get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
+    make_qsa_c8_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
@@ -193,6 +196,34 @@ def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> 
     assert layout.owner("model.layers.0.linear_attn").role == GDN
     assert layout.owner("model.ple").role == PLE
     assert layout.owner("model.cache_only_layers.0").role == HIDDEN
+
+
+def test_c8_shared_cache_layout_aligns_each_gbsa_page() -> None:
+    groups = _groups()
+    spec = QSAC8Spec(block_size=896, num_kv_heads=1, head_size=256, dtype=torch.int8)
+    groups[0] = replace(groups[0], kv_cache_spec=spec)
+    groups[2] = replace(groups[2], kv_cache_spec=replace(groups[2].kv_cache_spec, block_size=896))
+    # This state size gives the unaligned shared stride seen in the A3 TP2 / PP4 run.
+    groups[3] = replace(
+        groups[3],
+        kv_cache_spec=replace(groups[3].kv_cache_spec, shapes=((64, 4), (423712,)), block_size=896),
+    )
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=2)
+    assert layout is not None
+    shared = layout.region("r0")
+    assert shared.block_stride == 849408
+    scales_region = layout.region(QSA_K_SCALE_REGION)
+    key, value, scales = make_qsa_c8_kernel_page_cache(
+        torch.empty(layout.slot_backing_size, dtype=torch.int8),
+        spec=spec,
+        num_blocks=layout.num_blocks,
+        storage_offset=shared.offset,
+        block_stride=shared.block_stride,
+        scale_offset=scales_region.offset,
+    )
+    assert key.stride(0) == value.stride(0) == 121344
+    assert scales.shape == (14, 1, 128)
+    assert scales.is_contiguous()
 
 
 def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> None:

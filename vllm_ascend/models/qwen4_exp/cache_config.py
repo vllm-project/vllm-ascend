@@ -291,6 +291,13 @@ def build_qwen4_kv_cache_layout(
             if not isinstance(spec, QSAC8Spec)
         ),
         *(16 * (spec.block_size // 128) for _, spec in role_members[QSA_MAIN]),
+        # GBSA requires the INT8 stride of each 128-token subpage to
+        # be a multiple of the K/V row width, in bytes.
+        *(
+            (spec.block_size // 128) * spec.num_kv_heads * spec.head_size
+            for _, spec in role_members[QSA_MAIN]
+            if isinstance(spec, QSAC8Spec)
+        ),
     )
     state_stride = round_up(max(conv_bytes + max_ssm_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
     regions = [
@@ -450,9 +457,10 @@ def make_qsa_c8_kernel_page_cache(
         raise ValueError("QSA C8 manager pages must split into whole 128-token pages")
     page_stride = block_stride // kernel_pages
     width = spec.head_size
-    key_bytes = 128 * spec.num_kv_heads * width
-    if page_stride < 2 * key_bytes:
-        raise ValueError("QSA C8 page stride must fit both K and V codes")
+    row_bytes = spec.num_kv_heads * width
+    key_bytes = 128 * row_bytes
+    if page_stride < 2 * key_bytes or page_stride % row_bytes:
+        raise ValueError("QSA C8 page stride must fit both K and V codes and align to the K/V row width")
     key, value = (
         make_slab_view(
             backing,

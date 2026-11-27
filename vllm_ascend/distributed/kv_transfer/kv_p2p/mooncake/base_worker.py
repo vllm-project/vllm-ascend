@@ -60,6 +60,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
@@ -475,7 +476,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
     @staticmethod
     def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
-        """Describe single-head NHD as byte-equivalent HND without changing the cache."""
+        """Describe the byte layout of one physical cache page for transfer."""
         shape = tuple(cache.shape[1:])
         if (
             not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
@@ -497,6 +498,12 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 )
             if not cache[0].is_contiguous():
                 raise ValueError("MooncakeConnector packed HND requires contiguous bytes within each KV block.")
+            return shape
+        if isinstance(spec, QSAC8Spec) and len(shape) == 2:
+            # K scales are stored head-major, so the existing per-head
+            # transfer logic can copy them alongside the K and V pages.
+            if cache.dtype != torch.float32 or shape[0] != heads or not cache.is_contiguous():
+                raise ValueError(f"MooncakeConnector expects dense FP32 QSA C8 scales for {heads} KV heads.")
             return shape
         if len(shape) != 3:
             raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")

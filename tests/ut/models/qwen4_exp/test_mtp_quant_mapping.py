@@ -186,7 +186,8 @@ def test_draft_config_remaps_modelslim_description(monkeypatch, num_mtp_layers) 
     }
 
 
-def test_predictor_constructor_passes_remapped_c8_description_to_draft_layers(monkeypatch) -> None:
+@pytest.mark.parametrize("v_mode", ["QK_INT8_DYNAMIC_V_INT8", "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL"])
+def test_predictor_constructor_passes_remapped_c8_description_to_draft_layers(monkeypatch, v_mode) -> None:
     # Exercise the installed vLLM constructor and its real draft-config
     # call site. Stub model allocation so both supported ABIs run on CPU.
     upstream = mtp.upstream_mtp
@@ -202,7 +203,7 @@ def test_predictor_constructor_passes_remapped_c8_description_to_draft_layers(mo
     target_config.parallel_config = SimpleNamespace(enable_eplb=False)
     target_config.compilation_config = CompilationConfig(mode=CompilationMode.NONE)
     quant_description = {
-        "mtp.layers.0.self_attn.quant_type": "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL",
+        "mtp.layers.0.self_attn.quant_type": v_mode,
         "mtp.layers.1.self_attn.indexer.quant_type": "QK_INT8_DYNAMIC",
     }
     quant_config = SimpleNamespace(quant_description=quant_description, get_name=lambda: "ascend")
@@ -225,7 +226,7 @@ def test_predictor_constructor_passes_remapped_c8_description_to_draft_layers(mo
     assert [call.kwargs["prefix"] for call in decoder.call_args_list] == ["mtp.layers.48", "mtp.layers.49"]
     for call in decoder.call_args_list:
         assert call.args[0].quant_config.quant_description == {
-            "mtp.layers.48.self_attn.quant_type": "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL",
+            "mtp.layers.48.self_attn.quant_type": v_mode,
             "mtp.layers.49.self_attn.indexer.quant_type": "QK_INT8_DYNAMIC",
         }
         assert call.args[0].model_config is draft_model_config

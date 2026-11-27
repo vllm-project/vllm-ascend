@@ -1073,9 +1073,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         from vllm_ascend.quantization.utils import get_model_file
 
+        qwen_qsa = getattr(hf_config, "model_type", None) in ("qwen4_exp", "qwen4_exp_text", "qwen4_exp_mtp")
+        if qwen_qsa:
+            self.model_type = hf_config.model_type
         # If quant_description is already populated (e.g. from from_config()),
-        # there is nothing to do.
+        # only the model-specific FA routing may need refreshing.
         if self.quant_description:
+            if qwen_qsa:
+                self._add_kvcache_quant_metadata()
             return
 
         # Try to get the config file (local or remote)
@@ -1223,8 +1228,11 @@ class AscendModelSlimConfig(QuantizationConfig):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
         # QSA owns its static V parameters directly. Legacy FAKQuant targets
         # MLA and would rename fa_v.scale/offset into a nonexistent submodule.
+        native_modes = (_QSA_INT8_FA_QUANT_TYPE,)
+        if self.model_type in ("qwen4_exp", "qwen4_exp_text", "qwen4_exp_mtp"):
+            native_modes += ("QK_INT8_DYNAMIC_V_INT8",)
         qsa_native_int8 = any(
-            key.endswith(".self_attn.quant_type") and value == _QSA_INT8_FA_QUANT_TYPE
+            key.endswith(".self_attn.quant_type") and value in native_modes
             for key, value in self.quant_description.items()
         )
         self.enable_fa_quant = fa_quant_type != "" and not qsa_native_int8

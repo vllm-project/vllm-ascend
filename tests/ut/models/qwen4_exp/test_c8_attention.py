@@ -196,9 +196,11 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
     requests = torch.tensor([0, 0])
     lengths = torch.tensor([8])
 
+    boundaries = torch.tensor([0, 2], dtype=torch.int32)
+
     def prepare(page_table=table):
         return lightning_indexer._prepare_quantized_indexer_metadata(
-            page_table, requests, positions, lengths, 512, 4, 256
+            page_table, requests, positions, lengths, 512, 4, 256, boundaries, 0
         )
 
     def new_context():
@@ -212,7 +214,7 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
         other_table = torch.tensor([[2, 3]], dtype=torch.int32)
         other = prepare(other_table)
         assert other is not first
-        torch.testing.assert_close(other[2], other_table.expand(2, -1))
+        torch.testing.assert_close(other[1], other_table.expand(2, -1))
         assert (prepare(other_table) is other) == reuse
     positions.copy_(torch.tensor([0, 3]))
     table.copy_(torch.tensor([[4, 5]]))
@@ -220,9 +222,73 @@ def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
         second = prepare()
         assert (prepare() is second) == reuse
     assert first is not second
-    torch.testing.assert_close(second[2], table.expand(2, -1))
+    torch.testing.assert_close(second[1], table.expand(2, -1))
     calls_per_input = 1 if reuse else 2
     assert calls == [[1, 2]] * 2 * calls_per_input + [[0, 1]] * calls_per_input
+
+
+@pytest.mark.parametrize(
+    "supported,prefills,width,rows,expected",
+    [
+        (True, 0, 4, 32, 4),
+        (True, 1, 4, 32, 0),
+        (True, 0, 1, 32, 0),
+        (True, 0, 4, 31, 0),
+        (False, 0, 4, 32, 0),
+    ],
+)
+def test_request_batched_decode_dispatch(monkeypatch, supported, prefills, width, rows, expected):
+    profile = SimpleNamespace(supports=lambda cap: supported)
+    monkeypatch.setattr(lightning_indexer, "get_current_hardware_profile", lambda: profile)
+    meta = SimpleNamespace(num_prefills=prefills, decode_query_len=width, num_actual_tokens=32)
+    assert lightning_indexer.request_batched_decode_width(meta, rows) == expected
+
+
+def test_c8_decode_qli_preserves_request_tables_and_visibility(monkeypatch):
+    width = 4
+    lengths = torch.tensor([16384, 16385, 131070, 131071, 0], dtype=torch.int32)
+    boundaries = torch.tensor([0, 4, 8, 12, 16, 16], dtype=torch.int32)
+    owners = torch.arange(4).repeat_interleave(width)
+    positions = lengths[owners] - width + torch.arange(width).repeat(4)
+    table = torch.arange(5 * 1024, dtype=torch.int32).view(5, -1)
+    scheduled = {}
+
+    def build(**kw):
+        assert (kw["batch_size"], kw["max_seqlen_q"], kw["num_heads_q"]) == (5, 4, 64)
+        assert (kw["mask_mode"], kw["cmp_ratio"], kw["quant_mode"]) == (3, 4, 2)
+        torch.testing.assert_close(kw["cu_seqlens_q"], boundaries)
+        torch.testing.assert_close(kw["cmp_residual_k"], lengths % 4)
+        assert kw["seqused_k"].tolist() == (lengths // 4).tolist()
+        scheduled.update(kw)
+        return torch.empty(0)
+
+    def select(**kw):
+        assert kw["block_table"] is table
+        for name in ("cu_seqlens_q", "seqused_k", "cmp_residual_k"):
+            assert kw[name] is scheduled[name]
+        assert (kw["mask_mode"], kw["cmp_ratio"], kw["quant_mode"]) == (3, 4, 2)
+        restored = kw["seqused_k"] * kw["cmp_ratio"] + kw["cmp_residual_k"]
+        qlen = kw["cu_seqlens_q"].diff()
+        visible = (restored[owners] - qlen[owners] + torch.arange(16) - boundaries[owners] + 1) // 4
+        torch.testing.assert_close(visible, (positions + 1) // 4)
+        return torch.full((16, 1, 512), -1, dtype=torch.int32), torch.empty(0)
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", build, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", select, raising=False)
+    monkeypatch.setattr(lightning_indexer, "pack_qsa_group_indices_npu", lambda *args: None)
+    lightning_indexer.qsa_select_paged_tokens_quantized(
+        torch.ones(16, 4, 128, dtype=torch.bfloat16),
+        torch.zeros(1, 32, 1, 132, dtype=torch.int8),
+        table,
+        owners,
+        positions,
+        lengths,
+        boundaries,
+        2048,
+        4,
+        decode_width=width,
+    )
+    assert scheduled
 
 
 def test_quantized_indexer_native_abi_and_visibility(monkeypatch):

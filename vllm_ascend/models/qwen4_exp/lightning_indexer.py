@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import math
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 from vllm.config import CUDAGraphMode
@@ -172,6 +172,19 @@ def _validate_request_boundaries(
         raise ValueError("QSA request mapping must match query rows")
 
 
+def request_batched_decode_width(metadata: QSAIndexerMetadataProtocol, rows: int) -> int:
+    """The uniform decode builder packs live rows as contiguous request suffixes."""
+    width = getattr(metadata, "decode_query_len", 0)
+    if (
+        width > 1
+        and getattr(metadata, "num_prefills", None) == 0
+        and rows == metadata.num_actual_tokens
+        and get_current_hardware_profile().supports(HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE)
+    ):
+        return width
+    return 0
+
+
 def _prepare_quantized_indexer_metadata(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
@@ -180,9 +193,21 @@ def _prepare_quantized_indexer_metadata(
     group_topk: int,
     compress_ratio: int,
     max_seqlen_k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query_start_loc: torch.Tensor,
+    decode_width: int,
+) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
     cache = None
-    cache_key = (block_table, token_to_req, query_positions, sequence_lengths, group_topk, compress_ratio, max_seqlen_k)
+    cache_key = (
+        block_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        query_start_loc,
+        decode_width,
+        group_topk,
+        compress_ratio,
+        max_seqlen_k,
+    )
     context = get_forward_context() if is_forward_context_available() else None
     if context is not None and context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
         # The scheduler keeps these tensors unchanged during a forward.
@@ -194,26 +219,34 @@ def _prepare_quantized_indexer_metadata(
         if cached is not None:
             return cached
     rows = query_positions.shape[0]
-    cu_query, visible_groups, row_table = prepare_qli_metadata_inputs(
-        block_table, token_to_req, query_positions, sequence_lengths, compress_ratio
-    )
+    if decode_width:
+        # QLI reconstructs the uncompressed length from the group count and
+        # residual, then applies the causal boundary separately for each Q row.
+        common = dict(
+            cu_seqlens_q=query_start_loc.clamp_max(rows),
+            seqused_k=sequence_lengths.floor_divide(compress_ratio),
+            cmp_residual_k=sequence_lengths.remainder(compress_ratio),
+            mask_mode=3,
+            cmp_ratio=compress_ratio,
+        )
+        page_table = block_table
+    else:
+        cu_query, visible_groups, page_table = prepare_qli_metadata_inputs(
+            block_table, token_to_req, query_positions, sequence_lengths, compress_ratio
+        )
+        common = dict(cu_seqlens_q=cu_query, seqused_k=visible_groups, mask_mode=0, cmp_ratio=1)
+    common.update(quant_mode=2, layout_q="TND", layout_k="PA_BBND")
     metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
         num_heads_q=QLI_V2_QUERY_HEADS,
         num_heads_k=1,
         head_dim=_HEAD_DIM,
         topk=group_topk,
-        batch_size=rows,
-        max_seqlen_q=1,
+        batch_size=page_table.shape[0],
+        max_seqlen_q=decode_width or 1,
         max_seqlen_k=max_seqlen_k,
-        quant_mode=2,
-        cu_seqlens_q=cu_query,
-        seqused_k=visible_groups,
-        layout_q="TND",
-        layout_k="PA_BBND",
-        mask_mode=0,
-        cmp_ratio=1,
+        **common,
     )
-    inputs = cu_query, visible_groups, row_table, metadata
+    inputs = common, page_table, metadata
     if cache is not None:
         cache[cache_key] = inputs
     return inputs
@@ -230,8 +263,10 @@ def qsa_select_paged_tokens_quantized(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    decode_width: int = 0,
 ) -> torch.Tensor:
-    """INT8 QLI-v2 with explicit per-row visibility in compressed-key units."""
+    """INT8 QLI-v2 with request-batched decode or explicit per-row visibility."""
     _validate_request_boundaries(query, query_start_loc, token_to_req, sequence_lengths)
     if query.ndim != 3 or query.dtype != torch.bfloat16 or query.shape[-1] != _HEAD_DIM:
         raise ValueError("QSA INT8 indexer requires BF16 queries with width 128")
@@ -254,10 +289,8 @@ def qsa_select_paged_tokens_quantized(
     if not rows:
         return out
     padded_query, padded_scales, weights = prepare_qli_query(query)
-    # Preserve explicit causal visibility in compressed-key units. The
-    # per-row lengths, page table and CANN metadata are shared across layers.
     group_topk = token_topk // compress_ratio
-    cu_query, visible_groups, row_table, metadata = _prepare_quantized_indexer_metadata(
+    common, page_table, metadata = _prepare_quantized_indexer_metadata(
         block_table,
         token_to_req,
         query_positions,
@@ -265,15 +298,8 @@ def qsa_select_paged_tokens_quantized(
         group_topk,
         compress_ratio,
         block_table.shape[1] * key.shape[1],
-    )
-    common = dict(
-        quant_mode=2,
-        cu_seqlens_q=cu_query,
-        seqused_k=visible_groups,
-        layout_q="TND",
-        layout_k="PA_BBND",
-        mask_mode=0,
-        cmp_ratio=1,
+        query_start_loc,
+        decode_width,
     )
     groups, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
         query=padded_query,
@@ -282,7 +308,7 @@ def qsa_select_paged_tokens_quantized(
         query_dequant_scale=padded_scales,
         key_dequant_scale=key_scales,
         topk=group_topk,
-        block_table=row_table,
+        block_table=page_table,
         metadata=metadata,
         return_value=0,
         **common,

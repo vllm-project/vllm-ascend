@@ -303,6 +303,14 @@ def test_c8_owner_constructor_disables_direct_bf16_cache_prepare(monkeypatch):
     )
     assert not draft.c8_enabled and draft.use_fused_qsa_prepare
 
+    config.quant_description["mtp.layers.48.self_attn.quant_type"] = "QK_INT8_DYNAMIC_V_INT8"
+    draft = qsa.AscendQwen4ExpQSAAttention(
+        vllm_config=vllm_config, quant_config=config, prefix="mtp.layers.48.self_attn"
+    )
+    draft.fa_v.scale.weight_loader(draft.fa_v.scale, torch.tensor([[0.125]]))
+    assert draft.c8_enabled and not draft.use_fused_qsa_prepare
+    torch.testing.assert_close(draft.fa_v.scale, torch.full((1, 128), 0.125))
+
 
 def test_bf16_qsa_keeps_upstream_pcp_cache_registration(monkeypatch):
     configure_cache_backends = Mock()
@@ -448,17 +456,30 @@ def test_c8_device_interfaces_reject_cpu_workloads():
 
 
 @pytest.mark.parametrize("total_heads,tp_size", [(8, 1), (8, 4), (2, 8), (1, 8)])
-def test_static_v_tp_shards_and_replica_groups(total_heads, tp_size):
-    values = torch.arange(1, total_heads * 4 + 1, dtype=torch.float32).reshape(-1, 1)
+@pytest.mark.parametrize("per_head", [False, True])
+def test_static_v_tp_shards_and_replica_groups(total_heads, tp_size, per_head):
+    width = 1 if per_head else 4
+    values = torch.arange(1, total_heads * width + 1, dtype=torch.float32).reshape(-1, 1)
     for rank in range(tp_size):
-        module = QSAStaticVParameters(total_heads, 4, tp_size, rank)
+        module = QSAStaticVParameters(total_heads, 4, tp_size, rank, per_head=per_head)
         module.scale.weight_loader(module.scale, values)
         module.offset.weight_loader(module.offset, torch.zeros_like(values, dtype=torch.int8))
         module.process_weights_after_loading()
         local = max(1, total_heads // tp_size)
         start = (rank // max(1, tp_size // total_heads)) * local
-        torch.testing.assert_close(module.scale, values.reshape(total_heads, 4)[start : start + local])
+        expected = values.reshape(total_heads, width)[start : start + local].expand(local, 4)
+        torch.testing.assert_close(module.scale, expected)
+        assert module.scale.is_contiguous()
         assert module.scale.dtype == torch.float32
+
+
+def test_static_v_rejects_mismatched_granularity():
+    per_head = QSAStaticVParameters(2, 4, 1, 0, per_head=True)
+    with pytest.raises(ValueError, match="global KV heads"):
+        per_head.load_scale(per_head.scale, torch.ones(2, 4))
+    per_channel = QSAStaticVParameters(2, 4, 1, 0)
+    with pytest.raises(ValueError, match="global KV head/channel"):
+        per_channel.load_scale(per_channel.scale, torch.ones(2, 1))
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0])
@@ -482,17 +503,23 @@ def test_static_v_quantization_uses_channel_scales_and_saturates():
     assert quantize_qsa_values(rows, scale).tolist() == [[[0, 2, -128, 127]], [[2, -2, 0, 0]]]
 
 
-def test_modelslim_static_v_mapper_and_actual_auto_loader():
+@pytest.mark.parametrize("per_head", [False, True])
+def test_modelslim_static_v_mapper_and_actual_auto_loader(per_head):
     from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
     from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 
+    mode = "QK_INT8_DYNAMIC_V_INT8" if per_head else "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL"
     config = AscendModelSlimConfig(
         {
             "fa_quant_type": "FAKQuant",
-            "model.language_model.layers.3.self_attn.quant_type": "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL",
+            "model.language_model.layers.3.self_attn.quant_type": mode,
         }
     )
+    if per_head:
+        # The generic per-head marker is also used by legacy FAKQuant models.
+        assert config.enable_fa_quant
+    config.maybe_update_config("", hf_config=SimpleNamespace(model_type="qwen4_exp"))
     config.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"model.language_model.": "layers_root."}))
     name = "layers_root.layers.3.self_attn.fa_v.scale"
     assert config.get_cache_scale_mapper().map_name(name) == name
@@ -500,13 +527,15 @@ def test_modelslim_static_v_mapper_and_actual_auto_loader():
     model = torch.nn.Module()
     model.quant_config = config
     model.add_module("self_attn", torch.nn.Module())
-    model.self_attn.add_module("fa_v", QSAStaticVParameters(2, 4, 4, 3))
+    model.self_attn.add_module("fa_v", QSAStaticVParameters(2, 4, 4, 3, per_head=per_head))
+    values = torch.arange(1, 3 if per_head else 9, dtype=torch.float32).reshape(-1, 1)
     loaded = AutoWeightsLoader(model).load_weights(
         [
-            ("self_attn.fa_v.scale", torch.arange(1, 9, dtype=torch.float32).reshape(8, 1)),
-            ("self_attn.fa_v.offset", torch.zeros(8, 1, dtype=torch.int8)),
+            ("self_attn.fa_v.scale", values),
+            ("self_attn.fa_v.offset", torch.zeros_like(values, dtype=torch.int8)),
         ]
     )
     assert loaded == {"self_attn.fa_v.scale", "self_attn.fa_v.offset"}
     model.self_attn.fa_v.process_weights_after_loading()
-    torch.testing.assert_close(model.self_attn.fa_v.scale, torch.tensor([[5.0, 6.0, 7.0, 8.0]]))
+    expected = torch.full((1, 4), 2.0) if per_head else torch.tensor([[5.0, 6.0, 7.0, 8.0]])
+    torch.testing.assert_close(model.self_attn.fa_v.scale, expected)

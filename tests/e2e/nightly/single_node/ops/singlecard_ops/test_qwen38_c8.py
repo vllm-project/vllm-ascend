@@ -323,6 +323,71 @@ def test_c8_indexer_matches_all_visible_group_set():
         assert (selected[row, groups:512] == -1).all()
 
 
+@pytest.mark.skipif(
+    not get_current_hardware_profile().supports(HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE),
+    reason="Requires the A3 request-batched INT8 QLI v2 kernel",
+)
+@torch.inference_mode()
+def test_c8_mtp_indexer_request_batch_matches_singletons_after_replay():
+    # Each physical key row has a unique, exactly representable positive score.
+    # Distinct page orders catch accidental reuse of another request's table.
+    width, pages, page_size = 4, 20, 32
+    query = torch.ones(16, 4, 128, dtype=torch.bfloat16, device="npu")
+    cache = torch.zeros(pages, page_size, 1, 132, dtype=torch.int8, device="npu")
+    key, scales = qsa_c8_indexer_cache_views(cache)
+    key.fill_(1)
+    scales.copy_(torch.arange(1, pages * page_size + 1, device="npu").reshape_as(scales))
+    page_ids = torch.arange(pages, dtype=torch.int32, device="npu")
+    table = torch.stack([page_ids.roll(i * 5) for i in range(4)])
+    lengths = torch.tensor([2300, 2301, 2302, 2303], dtype=torch.int32, device="npu")
+    boundaries = torch.arange(0, 17, width, dtype=torch.int32, device="npu")
+    owners = torch.arange(4, dtype=torch.int32, device="npu").repeat_interleave(width)
+    offsets = torch.arange(width, dtype=torch.int32, device="npu").repeat(4) - width
+    positions = lengths[owners.long()] + offsets
+
+    def run(decode_width):
+        return qsa_select_paged_tokens_quantized(
+            query,
+            cache,
+            table,
+            owners,
+            positions,
+            lengths,
+            boundaries,
+            2048,
+            4,
+            decode_width=decode_width,
+        )
+
+    def check(actual):
+        reference = run(0).cpu()
+        actual = actual.cpu()
+        torch.testing.assert_close(actual[:, :512].sort().values, reference[:, :512].sort().values)
+        torch.testing.assert_close(actual[:, 512:], reference[:, 512:])
+        # Check the selected set independently of both QLI schedules.
+        for row, pos in enumerate(positions.tolist()):
+            if pos < 0:
+                assert (actual[row] == -1).all()
+                continue
+            groups = torch.arange((pos + 1) // 4)
+            scores = table[row // width].cpu()[groups // page_size] * page_size + groups % page_size
+            expected = groups[scores.topk(512).indices].int().sort().values
+            torch.testing.assert_close(actual[row, :512].sort().values, expected)
+
+    check(run(width))
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run(width)
+    # Keep the graph shape but shorten the live batch and change page ownership.
+    boundaries[-1:].copy_(boundaries[-2:-1])
+    lengths.copy_(torch.tensor([2423, 2422, 2421, 0], dtype=torch.int32, device="npu"))
+    positions.copy_(lengths[owners.long()] + offsets)
+    positions[-width:].fill_(-1)
+    table.copy_(table.roll(1, 0))
+    graph.replay()
+    check(captured)
+
+
 @torch.inference_mode()
 def test_c8_static_v_store_channel_scales_and_saturation():
     cache = torch.full((3, 128, 2, 256), 37, dtype=torch.int8, device="npu")

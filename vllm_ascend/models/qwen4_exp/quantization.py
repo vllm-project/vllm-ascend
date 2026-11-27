@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 C8_SCALE_BYTES = 4
 C8_QUANT_MAX = 127
 C8_SCALE_MIN = torch.finfo(torch.float32).eps
+C8_QSA_PER_HEAD = "QK_INT8_DYNAMIC_V_INT8"
 C8_QSA_QUANT_TYPE = "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL"
 
 
@@ -40,22 +41,23 @@ def uses_qsa_c8_quantization(quant_config: Any, prefix: str, *, indexer: bool = 
     if key not in description:
         return False
     mode = description[key]
-    expected = "QK_INT8_DYNAMIC" if indexer else C8_QSA_QUANT_TYPE
-    if mode != expected:
+    expected = ("QK_INT8_DYNAMIC",) if indexer else (C8_QSA_QUANT_TYPE, C8_QSA_PER_HEAD)
+    if mode not in expected:
         raise ValueError(f"Unsupported QSA FA3 mode {mode!r} for {prefix}; expected {expected}")
     return True
 
 
 class QSAStaticVParameters(torch.nn.Module):
-    """Load ModelSlim's flattened (KV head, channel) scales with QKV TP rules."""
+    """Load static V parameters into GBSA's dense local [KV head, channel] layout."""
 
-    def __init__(self, total_heads: int, dim: int, tp_size: int, tp_rank: int) -> None:
+    def __init__(self, total_heads: int, dim: int, tp_size: int, tp_rank: int, *, per_head: bool = False) -> None:
         super().__init__()
         if min(total_heads, dim, tp_size) <= 0 or not 0 <= tp_rank < tp_size:
             raise ValueError("Invalid QSA V-scale tensor-parallel geometry")
         if max(total_heads, tp_size) % min(total_heads, tp_size):
             raise ValueError("QSA KV heads and TP size must divide each other")
         self.total_heads, self.dim = total_heads, dim
+        self.per_head = per_head
         self.local_heads = max(1, total_heads // tp_size)
         replicas = max(1, tp_size // total_heads)
         self.head_start = (tp_rank // replicas) * self.local_heads
@@ -69,6 +71,10 @@ class QSAStaticVParameters(torch.nn.Module):
         self.offset.weight_loader = self.load_offset
 
     def _shard(self, weight: torch.Tensor) -> torch.Tensor:
+        if self.per_head:
+            if weight.shape != (self.total_heads, 1):
+                raise ValueError("Per-head QSA V parameters require [global KV heads, 1]")
+            return weight.narrow(0, self.head_start, self.local_heads).expand(-1, self.dim)
         if weight.numel() != self.total_heads * self.dim:
             raise ValueError("QSA V parameter must contain one value per global KV head/channel")
         return weight.reshape(self.total_heads, self.dim).narrow(0, self.head_start, self.local_heads)
