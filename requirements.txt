@@ -13,10 +13,10 @@ pandas
 psutil
 setuptools>=64
 setuptools-scm>=8
-torch==2.10.0
-torch-npu==2.10.0.post7
-torchvision==0.25.0
-torchaudio==2.10.0
+torch==2.13.0
+torch-npu==2.13.0
+torchvision==0.28.0
+torchaudio==2.11.0
 triton-ascend===3.6.0.post2
 wheel
 xgrammar>=0.1.30
