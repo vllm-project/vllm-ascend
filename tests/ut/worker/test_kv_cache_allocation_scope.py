@@ -44,7 +44,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
     worker.model_runner = runner
-    worker._sleep_saved_buffers = {}
+    worker._sleep_mode_backend = MagicMock()
     worker.sleep_wakeup_manager = MagicMock()
     worker._sleep_mode_backend = MagicMock()
 
@@ -75,10 +75,14 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
         sleep_preserve_parameter_names=[],
         sleep_mode_backend="camem",
     )
-    worker.model_runner = SimpleNamespace(model=model)
-    worker._sleep_saved_buffers = {}
+    from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
+
+    worker.model_runner = SimpleNamespace(
+        model=model,
+        get_draft_model=lambda: None,
+    )
+    worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
-    worker._sleep_mode_backend = MagicMock()
     return worker
 
 
@@ -101,7 +105,6 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 
     NPUWorker.sleep(worker, level=1)
 
-    assert worker._sleep_saved_buffers == {}
     assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
     # Both sleep barriers fire on the cleanup-disabled path too.
     assert mock_synchronize_device.call_count == 2
@@ -111,7 +114,7 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
 @patch("vllm_ascend.worker.worker.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
-def test_level2_sleep_still_cpu_backups_named_buffers(
+def test_level2_sleep_does_not_python_backup_named_buffers(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
     mock_get_config.return_value = SimpleNamespace(
@@ -126,7 +129,7 @@ def test_level2_sleep_still_cpu_backups_named_buffers(
 
     NPUWorker.sleep(worker, level=2)
 
-    assert "_dsa_hadamard" in worker._sleep_saved_buffers
-    assert worker._sleep_saved_buffers["_dsa_hadamard"].device.type == "cpu"
-    assert torch.equal(worker._sleep_saved_buffers["_dsa_hadamard"], hadamard)
+    assert not hasattr(worker, "_sleep_saved_buffers")
+    assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
+    worker.sleep_mode_backend.suspend.assert_called_once_with(set())
     assert mock_synchronize_device.call_count == 2

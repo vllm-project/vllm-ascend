@@ -65,6 +65,7 @@ def _make_decode(monkeypatch, num_tokens, speculative, quantization, num_heads, 
     impl.qk_rope_head_dim = ROPE_DIM
     impl.v_head_dim = VALUE_DIM
     impl.enable_kv_nz = False
+    impl.sliding_window = None
     impl.fa_quant_layer = quantization != "bf16"
     impl.support_fp8_attention = quantization != "int8"
     impl.speculative_config = SimpleNamespace(use_eagle=lambda: False) if speculative else None

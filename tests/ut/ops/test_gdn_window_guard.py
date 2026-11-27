@@ -35,6 +35,7 @@ OP_NAME = "recurrent_gated_delta_rule"
 # fails until you do, which is the point of the guard.
 KNOWN_OPP_WINDOWS: dict[str, int | None] = {
     "26.10.0+feature": 8,
+    "26.11.0.dev20261126": None,
 }
 
 UNKNOWN = object()

@@ -22,14 +22,13 @@ import gc
 import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from fnmatch import filter as fnmatch_filter
+from datetime import timedelta
 from threading import RLock
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
@@ -49,7 +48,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group, get_world_group
 from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -84,6 +83,7 @@ import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime, release_static_kernels
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
@@ -96,6 +96,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_gva_config,
     plan_layerwise_cache_reuse,
@@ -119,10 +120,14 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    shared_expert_tp_enable,
 )
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+
+
+_STATIC_KERNEL_SHUTDOWN_TIMEOUT = timedelta(seconds=3)
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -236,9 +241,6 @@ class NPUWorker(GPUWorker):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.npugraph_memory_bytes = 0
-        # Buffers and parameters saved before sleep.
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
@@ -248,6 +250,7 @@ class NPUWorker(GPUWorker):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -267,9 +270,6 @@ class NPUWorker(GPUWorker):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
-
-    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
-        raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
@@ -363,32 +363,6 @@ class NPUWorker(GPUWorker):
                 except Exception:
                     return
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        # Older supported vLLM versions do not expose the retention option.
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = dict(model.named_parameters())
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
-            if not matches:
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        meta_names = [name for name in names if parameters[name].device.type == "meta"]
-        if meta_names:
-            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
-        self._sleep_saved_parameters.clear()
-
     def set_metrics_level(self, level: str) -> str:
         """Set this worker process's MS metric level. Called by collective RPC."""
         from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
@@ -401,17 +375,9 @@ class NPUWorker(GPUWorker):
         backend = self.sleep_mode_backend
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Level-1 only offloads the weights pool. Persistent metadata such as
-        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
-        # stays resident and does not need a CPU backup.
-        if level == 1:
-            self._sleep_saved_buffers = {}
-            self._sleep_saved_parameters = {}
-        else:
-            model = self.model_runner.model
-            # Level-2 discards the weights pool; retain parameters the sender omits.
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Level 2 keeps everything the weight update does not rewrite; the
+        # allocator backs up mixed/non-parameter weights-pool allocations.
+        discardable = self._discardable_parameters(self.model_runner.model) if level == 2 else set()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -420,7 +386,7 @@ class NPUWorker(GPUWorker):
         self.synchronize_device()
 
         global_te.unregister_buffer()
-        backend.suspend(level)
+        backend.suspend(discardable)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -445,18 +411,6 @@ class NPUWorker(GPUWorker):
         self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
             global_te.reregister_buffer()
-
-        # Do not access or consume saved weights when only the KV pool wakes.
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        # Restore the buffers after level 2 sleep
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -510,8 +464,29 @@ class NPUWorker(GPUWorker):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+        if self._static_kernel_runtime_initialized:
+            self._release_static_kernel_runtime()
         if engram_error is not None:
             raise engram_error
+
+    def _release_static_kernel_runtime(self) -> None:
+        world_group = get_world_group()
+        try:
+            # Bound the collective itself so group teardown can finish after the local wait times out.
+            work = world_group.cpu_group.barrier(timeout=_STATIC_KERNEL_SHUTDOWN_TIMEOUT)
+            work.wait(timeout=_STATIC_KERNEL_SHUTDOWN_TIMEOUT)
+        except RuntimeError as exc:
+            logger.warning(
+                "Rank %d could not confirm graph release. Static kernel packages may remain under "
+                "static_kernel_install/ in the worker's working directory. After all workers in this instance "
+                "have exited, remove only its <timestamp>_<pid> subdirectory. Gloo reported: %s",
+                world_group.rank,
+                exc,
+            )
+            return
+
+        release_static_kernels()
+        self._static_kernel_runtime_initialized = False
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -636,6 +611,18 @@ class NPUWorker(GPUWorker):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        compilation = get_ascend_config().ascend_compilation_config
+        static_kernel_compilation = "disabled"
+        if compilation.enable_static_kernel:
+            static_kernel_compilation = (
+                "enabled through model compilation" if compilation.enable_npugraph_ex else "enabled during graph warmup"
+            )
+        logger.info_once(
+            "Static kernel compilation is %s. SuperKernel is %s.",
+            static_kernel_compilation,
+            "enabled" if compilation.enable_super_kernel else "disabled",
+            scope="global",
+        )
         # FLA import-time capability queries must run on the selected worker
         # device, and registration must finish before any model is constructed.
         # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
@@ -664,7 +651,12 @@ class NPUWorker(GPUWorker):
                 return MMEncoderModelRunner(self.vllm_config, self.device)
         from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
-        return NPUModelRunner(self.vllm_config, self.device)
+        model_runner = NPUModelRunner(self.vllm_config, self.device)
+        compilation = get_ascend_config().ascend_compilation_config
+        if compilation.enable_static_kernel and not compilation.enable_npugraph_ex:
+            initialize_static_kernel_runtime(self.vllm_config, capture=True)
+            self._static_kernel_runtime_initialized = True
+        return model_runner
 
     def _apply_kv_offload_decode_memory_constraints(
         self,
@@ -825,7 +817,11 @@ class NPUWorker(GPUWorker):
         buffers to fit.
         """
         if self.vllm_config.attention_config.hisparse_config is not None:
-            # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
+            # The combined worker allocates one shared slab with alignment
+            # headroom after Core plans the number of blocks.
+            transfer = self.vllm_config.kv_transfer_config
+            if transfer is not None and transfer.has_connector("AscendStoreConnector"):
+                return max(0, available_memory - (DEVICE_BUFFER_ALIGNMENT - 1))
             return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
@@ -1007,6 +1003,17 @@ class NPUWorker(GPUWorker):
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if shared_expert_tp_enable():
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+            if not any(
+                isinstance(module, AscendMoERunner)
+                and module.ascend_shared_experts is not None
+                and module.ascend_shared_experts.finegrained_tp_group is not None
+                for module in self.get_model().modules()
+            ):
+                raise ValueError("shared_expert_tensor_parallel_size > 1 requires a layer using shared-expert TP.")
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()

@@ -22,11 +22,12 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -73,7 +74,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
@@ -88,6 +89,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     apply_dspark_resident_kv_specs,
     get_resident_dspark_layer_names,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
+    aligned_hisparse_allocation_config,
+    is_hisparse_ascendstore_enabled,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_layout,
@@ -150,6 +155,9 @@ from vllm_ascend.worker.v2.utils import (
     torch_cuda_wrapper,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.utils import AttentionGroup
+
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
@@ -163,6 +171,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    attn_groups: list[list["AttentionGroup"]]
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
@@ -226,9 +235,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
         ftpc = self.ascend_config.finegrained_tp_config
-        self._finegrained_tp_requires_graph = (
-            ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1
-        ) and self.dp_size > 1
+        self._finegrained_tp_requires_graph = ftpc.requires_graph(vllm_config) and self.dp_size > 1
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -520,8 +527,11 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
+        allocation_config = kv_cache_config
+        if is_hisparse_ascendstore_enabled(self.vllm_config, kv_cache_config):
+            allocation_config = aligned_hisparse_allocation_config(kv_cache_config)
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
             # PCP owns the local-row capacity; FIA may append one padding
             # request for either target or draft metadata.
             max_metadata_reqs = (
@@ -598,6 +608,10 @@ class NPUModelRunner(GPUModelRunner):
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
+        # The speculator owns separate builders and graph buffers for these
+        # layers. Building them with target lengths submits unused schedules.
+        if draft_layer_names:
+            self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
         self.use_fia = any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
@@ -649,6 +663,11 @@ class NPUModelRunner(GPUModelRunner):
                 for module in model.modules()
                 if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
             )
+        config = self.ascend_config.ascend_compilation_config
+        if config.enable_static_kernel and not config.enable_npugraph_ex:
+            torch.npu.synchronize()
+            breakable_cudagraph.BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs()
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -921,7 +940,7 @@ class NPUModelRunner(GPUModelRunner):
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
             raise RuntimeError(
-                "o_proj / MLP TP require every step on a captured graph: this step dispatched "
+                "Fine-grained projection / MLP TP require every step on a captured graph: this step dispatched "
                 "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."
@@ -1163,6 +1182,9 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        if num_tokens_after_padding > num_tokens:
+            self.input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1448,13 +1470,23 @@ class NPUModelRunner(GPUModelRunner):
 
         draft_architectures = spec.draft_model_config.architectures or ()
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
-        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
-        # The initialized target producer also covers sharded SFA DCP metadata.
+        # Sharded SFA needs its device metadata producer. Unsharded FP8 SFA/LI
+        # and KDA in local-TP decode read corrected lengths directly on device.
         kimi_k31_device_lengths = (
             self.model_config.architecture == "KimiK31ForConditionalGeneration"
             and "K3DSparkModel" in draft_architectures
             and use_flashmla
-            and getattr(self.model_state, "device_metadata", None) is not None
+            and (
+                getattr(self.model_state, "device_metadata", None) is not None
+                or (
+                    self.parallel_config.decode_context_parallel_size == 1
+                    and self._finegrained_tp_requires_graph
+                    and self.cache_config.cache_dtype == "fp8"
+                    and self.ascend_config.enable_sparse_li_c8
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                    and self.vllm_config.attention_config.hisparse_config is None
+                )
+            )
         )
         if not kimi_k31_device_lengths and (
             self.model_config.architecture

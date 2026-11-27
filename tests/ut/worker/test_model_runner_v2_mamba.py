@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -36,6 +37,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
+from vllm_ascend.worker.v2.model_states import mamba_hybrid as mamba_hybrid_module
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
@@ -44,6 +46,12 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
     _cp_utils.prepare_dcp_local_seq_lens = (
         lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
     )
+
+
+class _MetadataState(SimpleNamespace):
+    # Metadata-only doubles still use the real inherited entry check.
+    _check_finegrained_tp_idle_graph_step = AscendMambaHybridModelState._check_finegrained_tp_idle_graph_step
+    _uses_global_mamba_pcp = AscendMambaHybridModelState._uses_global_mamba_pcp
 
 
 class _FakeAttentionBackend:
@@ -403,7 +411,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 ):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=num_spec,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -412,6 +420,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
+        _align_mode=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -470,7 +479,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
     drafts_missing = num_draft_tokens is None
     num_draft_tokens = num_draft_tokens or 0
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=3,
             speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
@@ -479,6 +488,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
         recoverssm=None,
+        _align_mode=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,
@@ -526,8 +536,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
 @pytest.mark.parametrize("is_target", [False, True])
 def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
-    state = SimpleNamespace(
-        _uses_global_mamba_pcp=lambda: True,
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -608,8 +617,7 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
         global_block_tables=object(),
         global_slot_mappings=object(),
     )
-    state = SimpleNamespace(
-        _uses_global_mamba_pcp=lambda: True,
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -665,9 +673,11 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
 def test_mamba_padding_is_independent_of_pcp_context(
     mock_build_attn_metadata, graph_mode, use_pcp_padding, has_pcp_context
 ):
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=0, parallel_config=SimpleNamespace()),
         max_model_len=1024,
+        recoverssm=None,
+        _align_mode=False,
     )
     batch = SimpleNamespace(
         num_reqs=1,
@@ -1428,9 +1438,10 @@ def test_init_model_state_uses_override_then_default():
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadata):
     """A 16x1 dummy capture must allow a real 9-token verification query."""
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
+        _align_mode=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=16,
@@ -1463,3 +1474,82 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     )
 
     assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9
+
+
+@pytest.mark.parametrize("drafts", [None, [0, 3, 0, 2]])
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capture):
+    build = MagicMock(return_value={})
+    monkeypatch.setattr(mamba_hybrid_module, "build_attn_metadata", build)
+    indices = torch.arange(24 * 6 * 4, dtype=torch.int32).view(24, 6, 4)
+    gather = MagicMock(return_value=indices)
+    builders = [SimpleNamespace(mamba_aligned_state_indices=None) for _ in range(24)]
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _, b=b: b)] for b in builders]
+    state = _MetadataState(
+        vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=None),
+        num_accepted_tokens_gpu=torch.tensor([1, 4, 2, 3], dtype=torch.int32),
+        max_model_len=1024,
+        recoverssm=None,
+        _align_mode=True,
+        _get_mamba_group_info=MagicMock(return_value=(list(range(24)), None)),
+        _ensure_align_ctx=MagicMock(return_value=SimpleNamespace(compute_aligned_state_indices=gather)),
+    )
+    state._get_aligned_state_index_views = lambda values: AscendMambaHybridModelState._get_aligned_state_index_views(
+        state, values
+    )
+    batch = SimpleNamespace(
+        num_reqs=4,
+        num_reqs_after_padding=6,
+        num_tokens=9,
+        num_tokens_after_padding=12,
+        is_prefilling_np=np.array([False, True, True, False]),
+        prefill_runs_as_decode_np=np.array([False, False, True, False]),
+        idx_mapping=torch.tensor([3, 1, 2, 0]),
+        num_draft_tokens_per_req=None if drafts is None else np.array(drafts, dtype=np.int32),
+        num_scheduled_tokens=np.array([1, 7, 1, 0], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1, 8, 9, 9, 9, 9], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 1, 8, 9, 9, 9, 9], dtype=np.int32),
+        seq_lens=torch.tensor([32, 7, 16, 0, 0, 0], dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.array([32, 7, 16, 0, 0, 0], dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+    tables = tuple(torch.zeros(6, 32, dtype=torch.int32) for _ in builders)
+    AscendMambaHybridModelState.prepare_attn(
+        state, batch, CUDAGraphMode.FULL, tables, torch.empty(0), groups, MagicMock(), for_capture=for_capture
+    )
+    gather.assert_called_once_with(batch.seq_lens, 6)
+    for group_idx, builder in enumerate(builders):
+        torch.testing.assert_close(builder.mamba_aligned_state_indices, indices[group_idx])
+    model_metadata = build.call_args.kwargs["model_specific_attn_metadata"]
+    assert model_metadata.is_prefilling.tolist() == [False, True, False, False, False, False]
+    if for_capture:
+        assert model_metadata.num_decode_draft_tokens_cpu is None
+        assert model_metadata.num_accepted_tokens is None
+    else:
+        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1, -1, -1, -1, -1]
+        assert model_metadata.num_accepted_tokens.tolist() == [3, 4, 2, 1, 1, 1]
+
+
+def test_gdn_group_reuse_respects_builder_spec_and_step_hooks():
+    spec = _mamba_spec()
+
+    def group(name, cls, cache_spec):
+        builder = object.__new__(cls)
+        builder.supports_update_block_table = True
+        builder.graph_state_updater = object()
+        return SimpleNamespace(layer_names=[name], kv_cache_spec=cache_spec, get_metadata_builder=lambda _: builder)
+
+    owner = group("owner", AscendGDNAttentionMetadataBuilder, spec)
+    follower = group("follower", AscendGDNAttentionMetadataBuilder, spec)
+    other_spec = group("other_spec", AscendGDNAttentionMetadataBuilder, replace(spec, block_size=spec.block_size * 2))
+    host = group("host", AscendGDNHostMetadataBuilder, spec)
+    groups = [[owner], [other_spec, follower], [host]]
+    built, followers = mamba_hybrid_module._partition_gdn_groups(groups)
+    assert built == [[owner], [other_spec], [host]]
+    assert [(gid, g, parent[0]) for gid, g, _, parent in followers] == [(1, follower, "owner")]
+
+    # A late hook consumes every layer before the common metadata build returns.
+    host.get_metadata_builder(0).prepare_step_metadata = lambda *args: None
+    assert mamba_hybrid_module._partition_gdn_groups(groups) == (groups, [])

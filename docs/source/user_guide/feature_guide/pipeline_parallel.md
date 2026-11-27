@@ -295,7 +295,7 @@ the model and hardware requirements in the relevant feature guide.
 | Prefix caching | Supported. |
 | Pooling | Supported. |
 | KV Cache Pool | Supported. |
-| Lmhead TP | Supported. |
+| LM head TP | Supported. |
 | MLAPO | Supported. |
 | Multimodal inputs (mm) | Supported. |
 | Multistream MoE | Supported. |

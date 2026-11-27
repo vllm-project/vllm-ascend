@@ -12,7 +12,6 @@ import pytest
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "_get_sleep_parameters",
     "discard",
     "checkpoint_prepare",
     "checkpoint_restore",
@@ -192,7 +191,13 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_ascend_config",
-        Mock(return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=False))),
+        Mock(
+            return_value=SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_npugraph_ex=False, enable_static_kernel=False, enable_super_kernel=False
+                )
+            )
+        ),
     )
     sleep_manager = SimpleNamespace()
 
@@ -272,8 +277,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.local_rank == 2
     assert worker.distributed_init_method == "env://"
     assert worker.is_driver_worker is True
-    assert worker._sleep_saved_buffers == {}
-    assert worker._sleep_saved_parameters == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False

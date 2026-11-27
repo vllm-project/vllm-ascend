@@ -381,7 +381,7 @@ msgstr ""
 msgid ""
 "Record the checkpoint revision, software versions, topology, dataset, and "
 "sampling settings with the evaluation results."
-msgstr ""
+msgstr "随评估结果一并记录检查点修订版本、软件版本、拓扑、数据集和采样设置。"
 
 msgid "### 7.2 Text Evaluation"
 msgstr "### 7.2 文本评估"

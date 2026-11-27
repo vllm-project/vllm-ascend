@@ -181,6 +181,26 @@ class TestNPUWorker(TestBase):
                         ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
                     self.assertIs(get_current_vllm_config(), config)
 
+    def test_hisparse_shared_slab_alignment_budget(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            attention_config=SimpleNamespace(hisparse_config=object()), kv_transfer_config=None
+        )
+        budget = 3 * DEVICE_BUFFER_ALIGNMENT
+        scale = worker._scale_kv_cache_memory_for_multi_group
+        self.assertEqual(scale(budget), budget)
+        transfer = MagicMock()
+        worker.vllm_config.kv_transfer_config = transfer
+        transfer.has_connector.return_value = False
+        self.assertEqual(scale(budget), budget)
+        transfer.has_connector.return_value = True
+        self.assertEqual(scale(budget), budget - DEVICE_BUFFER_ALIGNMENT + 1)
+        self.assertEqual(scale(256), 0)
+        transfer.has_connector.assert_called_with("AscendStoreConnector")
+
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -358,8 +378,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -453,8 +471,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -494,7 +510,9 @@ class TestNPUWorker(TestBase):
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
-        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(("weights",))
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(
+            ("weights", "runtime", "cudagraph"), set()
+        )
         self.assertEqual(mock_mem_get_info.call_count, 2)
         # sleep() brackets the transition: one barrier before the baseline memory
         # snapshot, one after the optional RL extra cleanup and before the unmap.
@@ -532,8 +550,6 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
-            worker._sleep_saved_buffers = {}
-            worker._sleep_saved_parameters = {}
             worker.sleep_wakeup_manager = MagicMock()
             _attach_sleep_backend(worker)
             # Test wake_up method
@@ -568,8 +584,6 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
         worker.model_runner = SimpleNamespace(model=MagicMock())
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["kv_cache"])
@@ -656,8 +670,6 @@ class TestNPUWorker(TestBase):
             quant_config=None,
             speculative_config=SimpleNamespace(method="mtp"),
         )
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["weights"])
@@ -761,6 +773,14 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
             patch.object(NPUWorker, "_init_device", return_value=device),
+            patch(
+                "vllm_ascend.worker.worker.get_ascend_config",
+                return_value=SimpleNamespace(
+                    ascend_compilation_config=SimpleNamespace(
+                        enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                    )
+                ),
+            ),
             patch("vllm_ascend.worker.worker.init_workspace_manager"),
             patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
             patch("vllm_ascend.worker.v2.utils.torch_cuda_wrapper", wrapper),
@@ -1658,7 +1678,8 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_model_output)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    def test_load_model_with_sleep_mode(self, mock_allocator_class):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_with_sleep_mode(self, _mock_shared_tp, mock_allocator_class):
         """Test load_model method - with sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1688,7 +1709,8 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="weights")
             worker.model_runner.load_model.assert_called_once()
 
-    def test_load_model_without_sleep_mode(self):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_without_sleep_mode(self, _mock_shared_tp):
         """Test load_model method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1707,7 +1729,8 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.load_model.assert_called_once()
 
-    def test_load_model_leaves_prewarm_join_to_model_runner(self):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_leaves_prewarm_join_to_model_runner(self, _mock_shared_tp):
         """Joining prewarm threads belongs to the shared model load, not the worker."""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -2109,6 +2132,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = object.__new__(NPUWorker)
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._static_kernel_runtime_initialized = False
         worker._weight_update_is_draft = False
         worker._incomplete_weight_updates = set()
         worker._kv_cache_reclaimable = False

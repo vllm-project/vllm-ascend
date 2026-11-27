@@ -64,6 +64,10 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+With `--data-parallel-multi-port-external-lb`, each local data-parallel rank gets
+`TP × PP × PCP` devices. If you pass `--device-ids`, list the devices for all
+local ranks in the order you want them assigned.
+
 For supported models, decode requests are sharded when
 `--prefill-context-parallel-size` is greater than 1 and
 `--decode-context-parallel-size` is 1. Each decode request in a batch is

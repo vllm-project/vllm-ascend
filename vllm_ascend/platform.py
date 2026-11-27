@@ -64,6 +64,7 @@ from vllm_ascend.utils import (
     model_supports_dcp,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
+    pad_num_tokens,
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
@@ -821,6 +822,7 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config)
+        _validate_direct_reload_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -1302,15 +1304,6 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         additional_config = dict(additional_config)
         additional_config["eplb_config"] = eplb_config
         vllm_config.additional_config = additional_config
-    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false"
-    ).lower() in ("true", "1"):
-        logger.warning(
-            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-            "additional_config.eplb_config supports only %s.",
-            sorted(_V2_EPLB_CONFIG_FIELDS),
-        )
     load_collection_phase = eplb_config.get("load_collection_phase", "all")
     # Disabled drafts inherit this target-only setting but never collect
     # EPLB load. Keep target validation strict and preserve other checks.
@@ -1333,6 +1326,19 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             upstream_eplb_config.use_async = True
         if vllm_config.parallel_config.enable_elastic_ep:
             raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
+
+
+def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
+    if (
+        getattr(envs_vllm, "VLLM_RELOAD_MODE", None) == "direct"
+        and ascend_config.enable_fused_mc2
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.is_moe
+    ):
+        raise ValueError(
+            "Direct weight reload does not support fused MC2 or MegaMoE. "
+            "Set enable_fused_mc2=0 or use VLLM_RELOAD_MODE=layerwise."
+        )
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
@@ -1370,6 +1376,7 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
 
     _validate_kv_load_failure_policy(vllm_config)
+    _validate_mooncake_connector_v1_role(vllm_config)
 
     # short_request_first_config requires FCFS and excludes batch-job and
     # kv-consumer paths. When profiling-chunk is also enabled, the profiling
@@ -1463,9 +1470,9 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
     # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
     ftpc = ascend_config.finegrained_tp_config
-    if offload_missing and (ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1):
+    if offload_missing and ftpc.requires_graph(vllm_config):
         raise AssertionError(
-            "oproj_tensor_parallel_size / mlp_tensor_parallel_size require PreemptOffloadConnector "
+            "Fine-grained projection / MLP TP require PreemptOffloadConnector "
             "(via MultiConnector): a preempted request must not return to the prefill node, "
             "whose recomputed KV loses precision."
         )
@@ -1478,6 +1485,36 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
         if getattr(vllm_config.model_config, "is_hybrid", False):
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
+
+
+def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
+    """MooncakeConnectorV1 does not support kv_role='kv_both'.
+
+    Its worker branches on exact role strings, so kv_both silently starts only
+    the receive thread and prefill-to-decode KV transfer never happens.
+    Fail fast instead of degrading silently.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return
+
+    # MultiConnector children carry their own kv_role; the top-level role is
+    # not passed down, so inspect children as well (mirrors
+    # AscendKVPPConfig.validate).
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        extra_config = kv_transfer_config.kv_connector_extra_config or {}
+        connectors = extra_config.get("connectors", [])
+    else:
+        connectors = [{"kv_connector": kv_transfer_config.kv_connector, "kv_role": kv_transfer_config.kv_role}]
+    for connector in connectors:
+        if connector.get("kv_connector") == "MooncakeConnectorV1" and connector.get("kv_role") == "kv_both":
+            raise ValueError(
+                "MooncakeConnectorV1 does not support kv_role='kv_both': "
+                "only the receive thread would be started and "
+                "prefill-to-decode KV transfer would silently never happen. "
+                "Use kv_role='kv_producer' on prefill engines and "
+                "kv_role='kv_consumer' on decode engines."
+            )
 
 
 def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
@@ -1573,6 +1610,7 @@ def _setup_compile_backend(
     cudagraph mode does not support them. Writes back into additional_config
     for workers.
     """
+    from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
     from vllm.config import CompilationMode
     from vllm.config.compilation import CUDAGraphMode
 
@@ -1606,63 +1644,63 @@ def _setup_compile_backend(
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
     # current max / size inputs after the mode adjustments above).
+    scheduler_config = vllm_config.scheduler_config
+    logical_max_num_tokens = scheduler_config.max_num_batched_tokens
+    max_num_tokens = pad_num_tokens(logical_max_num_tokens, vllm_config, enable_shared_expert_dp)
+    if max_num_tokens > logical_max_num_tokens:
+        if scheduler_config.max_num_scheduled_tokens is None:
+            scheduler_config.max_num_scheduled_tokens = logical_max_num_tokens
+        scheduler_config.max_num_batched_tokens = max_num_tokens
+
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    additional_config = vllm_config.additional_config or {}
-    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp
-    if (
-        vllm_config.parallel_config.tensor_parallel_size > 1
-        and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        and not vllm_config.model_config.enforce_eager
-        and requires_tp_aligned_capture_sizes
-    ):
-        # Upstream resolves prefill tokens and decode requests separately.
-        # The TP token-layout restriction applies to the prefill grid; keep
-        # the resolved decode request grid used by the graph managers intact.
+    if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and not vllm_config.model_config.enforce_eager:
         prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
-        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
-        if not sp_aclgraph_sizes:
-            raise AssertionError(
-                f"cudagraph_capture_sizes {original_sizes} does not contain"
-                f"values that are multiples of tp_size "
-                f"{vllm_config.parallel_config.tensor_parallel_size}"
-            )
+        original_sizes = list(
+            prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes or []
+        )
+        padded_sizes = [pad_num_tokens(size, vllm_config, enable_shared_expert_dp) for size in original_sizes]
+        if padded_sizes != original_sizes:
+            capture_sizes = sorted({size for size in padded_sizes if size <= max_num_tokens})
+            if not capture_sizes:
+                raise AssertionError(
+                    f"cudagraph_capture_sizes {original_sizes} cannot be aligned "
+                    f"to tp_size {vllm_config.parallel_config.tensor_parallel_size}"
+                )
 
-        if prefill_sizes is not None:
-            compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
-            compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
-            # Re-record the token union from the resolved split grids. Keeping
-            # a legacy-only list (e.g. [4] with one decode request) makes the
-            # engine handshake's config re-entry reject the derived sizes.
-            vllm_config._split_cudagraph_capture_sizes(
-                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
-            )
-            compilation_config.post_init_cudagraph_sizes()
-        elif len(sp_aclgraph_sizes) != len(original_sizes):
-            # Match max_cudagraph_capture_size with the valid max size to avoid
-            # initialization error of vllm server.
-            compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
-            compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
-            update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
+            if prefill_sizes is not None:
+                compilation_config.prefill_cudagraph_capture_token_sizes = capture_sizes
+                compilation_config.max_prefill_cudagraph_capture_tokens = capture_sizes[-1]
+                vllm_config._split_cudagraph_capture_sizes(
+                    False,
+                    vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len),
+                )
+                compilation_config.post_init_cudagraph_sizes()
+            else:
+                compilation_config.cudagraph_capture_sizes = capture_sizes
+                compilation_config.max_cudagraph_capture_size = capture_sizes[-1]
+                update_cudagraph_capture_sizes(vllm_config, capture_sizes)
 
     # Get custom compile backend for graph fusion
     compilation_config.oot_compiler = compile_backend
     compilation_config.use_inductor = False
-    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+    graph_mode = compilation_config.cudagraph_mode
+    if graph_mode == CUDAGraphMode.NONE:
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
-    elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
+    elif is_breakable_cudagraph_enabled(compilation_config):
+        # Breakable splits graphs at runtime, so only the compiled path configures FX splits.
+        return
+    elif graph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
                 "cudagraph_mode=%s",
-                compilation_config.cudagraph_mode,
+                graph_mode,
             )
         compilation_config.set_splitting_ops_for_v1(
             all2all_backend=vllm_config.parallel_config.all2all_backend,
@@ -1682,11 +1720,11 @@ def _setup_compile_backend(
         # npugraph_ex compiles each piece (force_eager) and runs the static/
         # super kernel passes per piece; keep the user's
         # ascend_compilation_config flags untouched for PIECEWISE.
-    elif compilation_config.cudagraph_mode.has_full_cudagraphs():
+    elif graph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
     else:
-        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", compilation_config.cudagraph_mode)
+        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", graph_mode)
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False

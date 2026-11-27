@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -69,6 +70,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.linear import AscendRowParallelLinear
+from vllm_ascend.ops.linear_op import OProjRowParallelOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -854,6 +857,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    _decode_o_proj_out: bool = False
+
     # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe): the flag is
     # flipped on in process_weights_after_loading once the weights are loaded.
     enable_sparse_sfa_hif8: bool = False
@@ -936,6 +941,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        self._decode_o_proj_out = (
+            self.is_kimi_k31
+            and not self.pcp_enabled
+            and self.vllm_config.lora_config is None
+            and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+        )
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
         config_candidates = (hf_config, hf_text_config)
         index_cache_enabled = _get_config_bool(
@@ -2068,6 +2079,24 @@ class AscendSFAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(attn_output)[0]
         return output
 
+    def _project_finegrained_o(self, attn_output: torch.Tensor, output: torch.Tensor, capacity: int) -> None:
+        # Preserve the pre-trim graph capacity: idle and live owners may have
+        # different actual rows, and the graph bucket can exceed DP live rows.
+        if attn_output.shape[0] < capacity:
+            attn_output = nn.functional.pad(attn_output, (0, 0, 0, capacity - attn_output.shape[0]))
+        output.copy_(self.o_proj(attn_output)[0][: output.shape[0]])
+
+    def _forward_dummy(
+        self, hidden_states: torch.Tensor, output: torch.Tensor, project_gate, o_capacity: int | None
+    ) -> torch.Tensor:
+        if project_gate is not None:
+            finish_gate = project_gate()
+            finish_gate()
+        if o_capacity is not None:
+            attn_output = hidden_states.new_zeros((o_capacity, self.local_num_heads * self.v_head_dim))
+            self.o_proj(attn_output)
+        return output.zero_()
+
     def _get_sfa_kv_slot_mapping(
         self,
         attn_metadata: M,
@@ -2214,9 +2243,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
+        o_capacity = None
+        if isinstance(getattr(self.o_proj, "custom_op", None), OProjRowParallelOp):
+            o_capacity = hidden_states.shape[0]
+            dp_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if dp_tokens is not None:
+                o_capacity = max(o_capacity, dp_tokens)
+        begin_gate = getattr(self, "begin_gate", None)
+        # Gather before NoPE trims live rows so idle and active ranks send the same shape.
+        project_gate = begin_gate(hidden_states) if begin_gate is not None else None
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
@@ -2230,7 +2267,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                return output.zero_()
+                return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
+
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
 
@@ -2361,6 +2399,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
+        # Return G to its token owners while the indexer and attention run.
+        finish_gate = project_gate() if project_gate is not None else None
+
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
         has_local_query = attn_metadata.num_actual_tokens > 0
@@ -2403,9 +2444,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # above - so the connector can dispatch the PD pull.
         notify_kv_cache_written(self.layer_name or "")
 
-        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
-        # reuse cached top-k indices and have no indexer, so recording this
-        # inside the indexer's forward would leave their gate closed.
+        # Keep the attention boundary for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so the indexer's
+        # forward cannot provide the save event or fallback load gate for them.
         with attention_transfer_window():
             if has_local_query:
                 attn_output = self._execute_sparse_flash_attention_process(
@@ -2425,9 +2466,21 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
-            gate = self.g_proj(gate_hidden_states.contiguous())[0]
+            if finish_gate is not None:
+                gate = finish_gate().flatten(1)[: attn_output.shape[0]]
+            else:
+                gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)
-        self._finalize_o_proj(attn_output, output[:num_input_tokens])
+        dst = output[:num_input_tokens]
+        if o_capacity is not None:
+            self._project_finegrained_o(attn_output, dst, o_capacity)
+        elif not (
+            self._decode_o_proj_out
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and isinstance(self.o_proj, AscendRowParallelLinear)
+            and self.o_proj.try_forward_into(attn_output, dst)
+        ):
+            self._finalize_o_proj(attn_output, dst)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

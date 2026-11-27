@@ -50,7 +50,7 @@ def make_pool(has_load):
         kv_recv_thread=SimpleNamespace(raise_if_failed=Mock()),
         _submit_ready_layer_loads=Mock(),
     )
-    scope = {"reset_attention_compute_start_gate": Mock(), "logger": Mock()}
+    scope = {"reset_attention_gates": Mock(return_value=(Mock(), Mock())), "logger": Mock()}
     worker.wait_for_layer_load = MethodType(load(POOL, "wait_for_layer_load", scope, "LayerwiseKVPoolWorker"), worker)
     return worker, event, tracked_event
 
@@ -188,7 +188,7 @@ def make_forward(path, batch, wait):
         _forward_prefill=lambda *_args: torch.ones(prefill_tokens, 2),
         o_proj=lambda x, **_kwargs: (x,),
     )
-    for name in ("forward", "_mla_preprocess", "mla_preprocess_prolog_v3"):
+    for name in ("forward", "_mla_preprocess", "mla_preprocess_prolog_v3", "_unpack_prolog_decode_q"):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
     return impl, metadata, cache, writes, scope
 
@@ -327,6 +327,7 @@ def test_decode_attention_opens_gate_for_next_layer_prefetch(speculative):
         num_kv_heads=1,
         head_padding=0,
         scale=1.0,
+        sliding_window=None,
         speculative_config=object() if speculative else None,
         _v_up_proj=lambda value: value,
     )

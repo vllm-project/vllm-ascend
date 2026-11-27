@@ -3,7 +3,6 @@
 
 import ast
 import importlib.util
-import logging
 import sys
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint
@@ -81,13 +80,12 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
-        "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    assert len(config) == 8
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -151,7 +149,6 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.provider",
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
-        "vllm_ascend.observability.ms_metrics.handlers.eplb",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -160,18 +157,16 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
     handler_module = __import__(
         _HANDLER_PACKAGE,
         fromlist=[
-            "eplb_do_update_hotness_handler",
             "runtime_guard_handle_alert_handler",
         ],
     )
 
-    assert callable(handler_module.eplb_do_update_hotness_handler)
     assert callable(handler_module.runtime_guard_handle_alert_handler)
 
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 4
+    assert len(config_paths) == 3
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -190,169 +185,6 @@ def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
             for node in owner.body
         ), f"Missing symbol method: {item['symbol']}"
-
-
-def test_eplb_handler_records_rank_zero_hotness(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers", "eplb")
-    worker = type(
-        "Worker",
-        (),
-        {
-            "rank_id": 0,
-            "latest_expert_hotness": {
-                "current_mean": 2.0,
-                "current_max": 4.0,
-                "update_mean": 3.0,
-                "update_max": 6.0,
-                "current_imbalance_list": [1.1, 1.2],
-                "update_imbalance_list": [1.3, 1.4],
-            },
-        },
-    )()
-
-    result = handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert result == "updated"
-    assert metrics.get_or_create_metric.call_count == 5
-    metrics.get_or_create_metric.assert_any_call(
-        metric_name="eplb:expert_hotness:current_mean",
-        metric_type="gauge",
-        label_names=["rank", "phase"],
-    )
-    metrics.get_or_create_metric.assert_any_call(
-        metric_name="eplb:expert_hotness:imbalance",
-        metric_type="gauge",
-        label_names=["rank", "phase", "layer"],
-    )
-    assert metrics.record_metric.call_count == 8
-
-
-def test_eplb_handler_registers_metrics_once_per_recorder(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    first_metrics = Mock()
-    current_metrics = [first_metrics]
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: current_metrics[0],
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_cache", "eplb")
-    worker = type(
-        "Worker",
-        (),
-        {
-            "rank_id": 0,
-            "latest_expert_hotness": {"current_mean": 1.0},
-        },
-    )()
-
-    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert first_metrics.get_or_create_metric.call_count == 5
-    assert first_metrics.record_metric.call_count == 2
-
-    second_metrics = Mock()
-    current_metrics[0] = second_metrics
-    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert second_metrics.get_or_create_metric.call_count == 5
-    second_metrics.record_metric.assert_called_once()
-
-
-def test_eplb_handler_skips_nonzero_rank(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_nonzero", "eplb")
-    worker = type("Worker", (), {"rank_id": 1})()
-
-    assert handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker) == "updated"
-    metrics.record_metric.assert_not_called()
-
-
-def test_eplb_handler_skips_when_recorder_unavailable(monkeypatch, caplog):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: None,  # ← when recorder is None
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_no_recorder", "eplb")
-    worker = type(
-        "Worker",
-        (),
-        {
-            "rank_id": 0,
-            "latest_expert_hotness": {"current_mean": 1.0},
-        },
-    )()
-
-    result = handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert result == "updated"
-    with caplog.at_level(logging.WARNING):
-        result = handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert result == "updated"
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-
-
-def test_eplb_handler_given_metric_failure_then_preserves_inference_result(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    metrics = Mock()
-    metrics.get_or_create_metric.side_effect = RuntimeError("registry unavailable")
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_failure", "eplb")
-    worker = type(
-        "Worker",
-        (),
-        {
-            "rank_id": 0,
-            "latest_expert_hotness": {"current_mean": 1.0},
-        },
-    )()
-
-    assert (
-        handlers.eplb_do_update_hotness_handler(
-            lambda _: "updated",
-            worker,
-        )
-        == "updated"
-    )
-
-
-def _hotness_worker():
-    return type(
-        "Worker",
-        (),
-        {
-            "rank_id": 0,
-            "latest_expert_hotness": {
-                "current_mean": 2.0,
-                "current_max": 4.0,
-                "update_mean": 3.0,
-                "update_max": 6.0,
-                "current_imbalance_list": [1.1, 1.2],
-                "update_imbalance_list": [1.3, 1.4],
-            },
-        },
-    )()
 
 
 def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(monkeypatch):
@@ -402,44 +234,6 @@ def test_set_metric_level_rejects_unknown_value(monkeypatch):
         common.set_metric_level(2)
     with pytest.raises(ValueError):
         common.set_metric_level("off")
-
-
-def test_eplb_handler_skips_higher_level_series_until_level_rises(monkeypatch):
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_level_rise", "eplb")
-    common = sys.modules[_COMMON_MODULE]
-    imbalance = common.MetricSpec(
-        handlers._IMBALANCE_METRIC,
-        handlers.MetricType.GAUGE,
-        ("rank", "phase", "layer"),
-        level=common.METRIC_LEVEL_DETAIL,
-    )
-    handlers._IMBALANCE_SPEC = imbalance
-    handlers._EPLB_METRIC_SPECS = (*handlers._SUMMARY_SPECS, imbalance)
-    worker = _hotness_worker()
-
-    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert metrics.get_or_create_metric.call_count == 4
-    recorded_names = [call.args[0] for call in metrics.record_metric.call_args_list]
-    assert recorded_names == [
-        "eplb:expert_hotness:current_mean",
-        "eplb:expert_hotness:current_max",
-        "eplb:expert_hotness:update_mean",
-        "eplb:expert_hotness:update_max",
-    ]
-
-    common.set_metric_level("detail")
-    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
-
-    assert metrics.get_or_create_metric.call_count == 9
-    recorded_names = [call.args[0] for call in metrics.record_metric.call_args_list]
-    assert recorded_names.count("eplb:expert_hotness:imbalance") == 4
 
 
 def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):

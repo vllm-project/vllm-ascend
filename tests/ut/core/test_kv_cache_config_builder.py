@@ -139,7 +139,7 @@ def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
     runtime.kv_transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
         kv_role="kv_producer",
-        kv_connector_extra_config={"use_layerwise": True, "layerwise_num_shared_buffers": 1},
+        kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1},
     )
     builder = AscendKVCacheConfigBuilder()
     spec = generic_specs()["layer.a"]

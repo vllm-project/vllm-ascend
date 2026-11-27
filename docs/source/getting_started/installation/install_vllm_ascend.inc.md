@@ -176,7 +176,7 @@ After completing any of the three installation methods, install the kernel packa
 
     pip install \
         --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
-        "triton-ascend==={{ release_triton_ascend_version }}"
+        "triton-ascend=={{ release_triton_ascend_version }}"
 
     pip install --no-deps \
         --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
@@ -195,7 +195,7 @@ After completing any of the three installation methods, install the kernel packa
 
         For Triton Ascend 3.2.1 and later, installing Triton Ascend first installs the required community Triton package and then provides its Ascend-specific implementation over the shared installation paths. If Triton is reinstalled or upgraded afterward, it may overwrite the Triton Ascend files. In that case, uninstall both packages and reinstall Triton Ascend.
 
-        For more Triton Ascend installation guidance, see [Triton-Ascend > FAQ](https://github.com/Ascend/triton-ascend/blob/main/docs/en/FAQ.md#1-installation-and-environment-configuration).
+        For more Triton Ascend installation guidance, see [Triton Ascend > FAQ](https://github.com/Ascend/triton-ascend/blob/main/docs/en/FAQ.md#1-installation-and-environment-configuration).
 
     When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
 
