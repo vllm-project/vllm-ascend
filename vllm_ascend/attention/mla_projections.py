@@ -19,8 +19,10 @@ class MLAProjectionMixin:
 
     Attention implementations are not nn.Modules, so references cached directly
     on them are invisible to module replacement. The model-facing wrapper owns
-    the shared ModuleDict. Existing unfused projection calls read that container
-    without forward-time rebinding. KV-B absorption remains backend-owned.
+    the shared ModuleDict, which LoRAModelManager._create_lora_modules rewires
+    through its existing alias handling. This mixin only exposes those aliases
+    to the non-Module backend; it does not load or replace adapters itself.
+    KV-B absorption remains backend-owned.
     """
 
     _query_projection_name: str = "q_proj"

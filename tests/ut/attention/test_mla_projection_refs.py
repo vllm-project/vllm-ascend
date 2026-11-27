@@ -39,13 +39,14 @@ class AdapterProjection(BaseLayerWithLoRA):
         return output, None
 
 
-def replace_projection(model, projection_name):
+def replace_projection(model, projection_name, target_modules=None):
     """Run vLLM's alias-aware replacement; only the layer factory is a fixture."""
     manager = SimpleNamespace(
         model=model,
         supported_modules_to_save=set(),
         supported_lora_modules={projection_name},
-        lora_config=SimpleNamespace(target_modules=None),
+        lora_config=SimpleNamespace(target_modules=target_modules),
+        _match_target_modules=lambda path: LoRAModelManager._match_target_modules(manager, path),
         _get_punica_wrapper=lambda name: object(),
         _is_non_gated_moe=False,
         packed_modules_mapping={},
@@ -70,7 +71,8 @@ def replace_projection(model, projection_name):
 
 @pytest.mark.parametrize("backend_type", [AscendMLAImpl, AscendSFAImpl])
 @pytest.mark.parametrize("name", MLA_PROJECTION_NAMES)
-def test_replacement_reaches_backend_without_duplicate_adapter_registration(backend_type, name):
+@pytest.mark.parametrize("deployment_filter", [False, True])
+def test_replacement_reaches_backend_without_duplicate_adapter_registration(backend_type, name, deployment_filter):
     torch.manual_seed(41)
     original = TupleLinear(5, 4, bias=False)
     model = nn.Module()
@@ -84,7 +86,7 @@ def test_replacement_reaches_backend_without_duplicate_adapter_registration(back
     setattr(backend, backend_name, original)
     backend.projections = model.mla.projections
 
-    wrapped = replace_projection(model, name)
+    wrapped = replace_projection(model, name, [name] if deployment_filter else None)
     inputs = torch.randn(3, 5)
     for slot in (0, -1, 1, 0):
         wrapped.slot = slot
