@@ -56,8 +56,6 @@ else:
 
 
 class BaseDeviceAdaptor:
-    native_dcp_indexer = False
-
     @staticmethod
     def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
         return None
@@ -79,8 +77,6 @@ class BaseDeviceAdaptor:
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> torch.Tensor:
-        if not get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-            raise NotImplementedError("Owner-local INT8 QLI metadata requires the A3 native QLI kernel")
         assert global_seq_lens is not None
         return torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
             num_heads_q,
@@ -122,13 +118,9 @@ class BaseDeviceAdaptor:
         qli_metadata: torch.Tensor,
         topk: int = 2048,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Select owner-local causal candidates with the A3 QLI DCP kernel."""
-        if (
-            not get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
-            or q_li.dtype != torch.int8
-            or kv_cache.dtype != torch.int8
-        ):
-            raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
+        """Select owner-local causal candidates with the native INT8 DCP indexer."""
+        if q_li.dtype != torch.int8 or kv_cache.dtype != torch.int8:
+            raise NotImplementedError("DCP QLI requires INT8 query and key tensors on this device")
         indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             q_li.contiguous(),
             kv_cache,
@@ -1158,8 +1150,6 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    native_dcp_indexer = True
-
     @staticmethod
     def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
         # indexer imports DeviceOperator; defer the reverse import until runtime.

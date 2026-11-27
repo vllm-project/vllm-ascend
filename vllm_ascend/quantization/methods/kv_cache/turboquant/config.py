@@ -22,11 +22,24 @@ def _validate_turboquant_common(vllm_config) -> None:
 
 
 def _validate_turboquant_sfa(vllm_config) -> None:
-    """Checks for the packed SFA main cache.
+    """Checks for the packed SFA main cache."""
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        # DCP merges partial attention outputs using softmax_max and softmax_sum.
+        # Check the same torch_npu operator that _turboquant_sfa calls for TQ4.
+        op = getattr(torch.ops.npu, "npu_kv_quant_sparse_flash_attention", None)
+        schema = op.default._schema if op is not None else None
+        if (
+            schema is None
+            or len(schema.returns) != 3
+            or not any(arg.name == "return_softmax_lse" for arg in schema.arguments)
+        ):
+            raise ValueError(
+                f"SFA {TURBOQUANT_CACHE_DTYPE} with DCP > 1 requires a torch_npu "
+                "npu_kv_quant_sparse_flash_attention that accepts return_softmax_lse "
+                "and returns attention output, softmax_max and softmax_sum. "
+                "Set --decode-context-parallel-size 1 or use --kv-cache-dtype auto."
+            )
 
-    Unlike the compressed-cache path this one supports context parallelism, so
-    the DCP/PCP restriction stays out of here.
-    """
     additional_config = vllm_config.additional_config or {}
     enable_sparse_sfa_c8 = validate_additional_config_bool(
         additional_config.get("enable_sparse_sfa_c8", False),

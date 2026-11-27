@@ -452,6 +452,7 @@ def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
 @pytest.mark.parametrize(
     "arch,enable_dcp",
     [
+        pytest.param(AscendDeviceType.A2, True, id="a2-int8-dcp"),
         pytest.param(AscendDeviceType.A3, False, id="a3-int8"),
         pytest.param(AscendDeviceType.A3, True, id="a3-int8-dcp"),
         pytest.param(AscendDeviceType.A5, False, id="a5-fp8"),

@@ -11,6 +11,7 @@ import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from tests.ut.kv_offload.mooncake_v2.helpers import vllm_dcp_ranks_by_worker
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -56,11 +57,10 @@ def producers(worker, monkeypatch):
                 )
             else:
                 spec = Mock(
-                    spec=push_worker.AscendSFAIndexerCacheSpec,
+                    spec=AscendSFAIndexerCacheSpec,
                     dcp_sharded=True,
                     sliding_window=None,
                     is_circular=False,
-                    sfa_dcp_replicated_indexer_size=dcp if cache_kind in ("p_replicated", "both_replicated") else 1,
                 )
             obj.kv_cache_specs = [spec]
             monkeypatch.setattr(obj, "_get_remote_metadata", lambda _: remote)
@@ -103,7 +103,7 @@ def producers(worker, monkeypatch):
 @pytest.mark.parametrize("prefix", [0, 5, 16])
 @pytest.mark.parametrize(
     "cache_kind",
-    ["mla", "p_replicated", "d_replicated", "both_replicated", "p_unsharded", "d_unsharded", "both_unsharded"],
+    ["mla", "sharded_indexer", "p_unsharded", "d_unsharded", "both_unsharded"],
 )
 def test_bilateral_chunks_copy_each_token_once(
     worker,
@@ -124,11 +124,9 @@ def test_bilateral_chunks_copy_each_token_once(
 ):
     remote = configure(worker, monkeypatch, d_dcp, d_tp, d_interleave, p_scale, d_scale, pcp=d_pcp)
     pp = remote.metadata_by_pp_rank[0]
-    p_effective = 1 if cache_kind in ("p_replicated", "both_replicated", "p_unsharded", "both_unsharded") else p_dcp
-    d_effective = 1 if cache_kind in ("d_replicated", "both_replicated", "d_unsharded", "both_unsharded") else d_dcp
+    p_effective = 1 if cache_kind in ("p_unsharded", "both_unsharded") else p_dcp
+    d_effective = 1 if cache_kind in ("d_unsharded", "both_unsharded") else d_dcp
     pp.dcp_sharded[:] = [cache_kind not in ("d_unsharded", "both_unsharded")]
-    if cache_kind in ("d_replicated", "both_replicated"):
-        pp.indexer_replication_sizes[:] = [d_dcp]
     senders = producers(p_dcp, p_tp, remote, p_interleave, p_scale, cache_kind, pcp=p_pcp)
     destination_dcp_ranks = vllm_dcp_ranks_by_worker(d_tp, d_pcp, d_effective)
     source_blocks = tuple(1 + 2 * i for i in range(16))

@@ -144,29 +144,24 @@ O = sum_j(w_j * O_j) / sum_j(w_j)
 
 With DCP=PCP, Q heads are already identical within the group. The shared merge path gathers partial output/LSE contributions across PCP. With DCP=TP*PCP, distinct Q heads are first gathered across TP; the output exchange then combines TP and PCP contributions and restores the TP-local head range. TP-only DCP exchanges contributions within its DCP group. Common operations are implemented by `DCPImplMixin` and `dcp_a2a_fused`.
 
-### GLM-5.2 SFA DCP replicated indexer
+### GLM-5.2 SFA DCP sharded indexer
 
-GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP, the indexer needs a full-sequence view to select the same sparse top-k blocks as non-DCP SFA, while the much larger SFA KV cache should remain sharded to retain DCP's memory benefit:
+With DCP enabled, each rank stores LightningIndexer keys and scales for the same tokens as its SFA KV shard. For a fixed context length, the indexer history is distributed across the DCP group. Each rank's share depends on block allocation and the interleave size.
 
-- The LightningIndexer cache is replicated on every DCP rank, so index selection uses the complete sequence.
-- The SFA KV cache remains DCP-local. During decode, global indices from the replicated indexer view are remapped to local KV indices.
-- During prefill or a mixed batch, KV blocks referenced by the request block table are compacted and all-gathered after the current layer writes its KV cache.
-- Decode-only batches retain the DCP SFA Q-gather and result-merge path.
+- With PCP=1, each DCP rank selects candidates from its own token history. Distributed Top-K merges the candidates across ranks. SFA gathers query heads, attends over local KV, and merges partial outputs.
+- With PCP+DCP prefill, PCP ranks can own different query rows. They temporarily gather the required KV history and select Top-K for their own rows. The persistent indexer cache remains sharded.
 
-This mode is selected automatically for sparse SFA models when DCP is enabled (`decode_context_parallel_size>1`).
-
-For a GLM-5.2 DCP deployment, keep `cp_kv_cache_interleave_size` equal to the KV-cache block size:
+For GLM-5.2 on Atlas A2 or A3, select an INT8 indexer cache and use a checkpoint that supports it for every LightningIndexer layer. Keep the KV-cache interleave size equal to the block size. Set TP and DCP to the number of devices used by the deployment:
 
 ```bash
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size <N> \
-  --block-size <B> \
-  --cp-kv-cache-interleave-size <B>
+  --attention-config '{"indexer_kv_dtype":"int8"}' \
+  --block-size 128 \
+  --cp-kv-cache-interleave-size 128
 ```
-
-The replicated indexer increases indexer-cache memory in proportion to the DCP world size; the SFA KV cache itself remains sharded.
 
 With PCP+DCP, the compact block-table plan is derived from the global request view. SFA PCP supports both KV-input gathering and fused prologs. A fused prolog first writes local cache rows; those rows are packed, gathered, and written to receiving caches. Indexer updates are synchronized separately.
 

@@ -80,21 +80,15 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-# SFA DCP replicated-indexer layout:
+# SFA and LightningIndexer cache tokens use the same DCP owners. Each rank
+# selects candidates from its local indexer history, then distributed TopK
+# determines the sparse selection. Main attention consumes owner-local IDs
+# or remaps global IDs, depending on the shared-index coordinate contract.
 #
-# - LightningIndexer cache is replicated on every DCP rank so index selection
-#   can run against the full sequence and keep the same sparse topk semantics as
-#   non-DCP SFA.
-# - SFA KV cache remains DCP-local to preserve the KV memory saving. The sparse
-#   topk indices produced from the replicated indexer view are remapped to local
-#   KV indices before calling sparse flash attention.
-# - BlockTable only owns the DCP-local physical layout. This builder derives its
-#   replicated block table and slot mapping on demand, then stores the original
-#   DCP-local view in metadata.dcp_context for KV writes and SFA reads. The
-#   independent indexer builder derives its own replicated view from common
-#   metadata using the same stateless address helpers.
-# - The replicated view uses the same logical/kernel block size as BlockTable,
-#   including hybrid block splitting.
+# The main-attention builder retains temporary full-context address views for
+# shared metadata construction and gathered-prefill paths. Persistent KV writes
+# and sharded attention reads use metadata.dcp_context's local slots/tables;
+# the independent LightningIndexer builder consumes its own local common metadata.
 class AscendSFADCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendSFAMetadataBuilder,
@@ -840,11 +834,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         actual_seq_lengths_key,
     ):
         # Mirrors AscendSFAImpl for the non-DCP case, and additionally asks for
-        # softmax LSE so decode can merge partial results across CP ranks.
+        # softmax LSE when merging partial results from local KV shards.
         dcp_context = attn_metadata.dcp_context
 
-        if self._has_prefill(attn_metadata):
-            # Prefill keeps Q local and attends over the gathered KV, so no LSE.
+        if dcp_context.kv_gather_block_ids is not None:
+            # PCP prefill keeps Q local and attends over the gathered KV.
             gathered_kv_cache = self._finish_dcp_kv_gather(kv_cache, attn_metadata)
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
@@ -861,8 +855,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             output = self.turboquant.inverse(attn_out)
             return self._mask_nope_dcp_padding(output, actual_seq_lengths_query)[0]
 
-        # Decode attends over this rank's KV shard only, so the partial results
-        # are recombined by _merge_dcp_outputs using the LSE.
+        # Both decode and DCP-only sharded prefill attend over local KV.
+        # Merge their partial outputs using the LSE.
         gather_context = dcp_context.gather_context
         dcp_context.gather_context = None
         if gather_context is None:

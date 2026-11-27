@@ -1,0 +1,8 @@
+pr: 22215
+entries:
+  - category: feature
+    text: >-
+      On Atlas A2 and A3, SFA models with an INT8 LightningIndexer cache can shard
+      that cache across decode context parallel ranks. Select the INT8 cache with
+      `--attention-config '{"indexer_kv_dtype":"int8"}'` and set
+      `--decode-context-parallel-size` to a value greater than one.
