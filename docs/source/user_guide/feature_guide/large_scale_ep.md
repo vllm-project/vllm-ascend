@@ -311,7 +311,7 @@ done
 # 4 decoder nodes x 16 DP engines (ports 9000..9015)
 DECODER_HOSTS=""; DECODER_PORTS=""
 for h in 192.0.0.5 192.0.0.6 192.0.0.7 192.0.0.8; do
-  for p in $(seq 9000 9015); do
+  for p in {9000..9015}; do
     DECODER_HOSTS="$DECODER_HOSTS $h"
     DECODER_PORTS="$DECODER_PORTS $p"
   done
