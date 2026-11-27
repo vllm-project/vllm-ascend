@@ -57,9 +57,9 @@ def cpu_gbsa(query, keys, values, indices, counts, block_shape, **kwargs):
     ],
 )
 def test_c8_prefill_grouped_schedule_bounds(starts, lengths, prefilling, tokens, expected):
-    plan = build_qsa_request_plan(torch.tensor(starts), torch.tensor(lengths), tokens, torch.tensor(prefilling))
-    assert c8_attention.c8_prefill_kv_length(plan, tokens) == expected
-    assert c8_attention.c8_prefill_kv_length(None, tokens) is None
+    plan = build_qsa_request_plan(torch.tensor(starts), tokens, torch.tensor(prefilling))
+    assert c8_attention.c8_prefill_kv_length(plan, tokens, torch.tensor(lengths)) == expected
+    assert c8_attention.c8_prefill_kv_length(None, tokens, None) is None
 
 
 def test_c8_grouped_prefill_uses_request_bounds_and_preserves_sparse_rows(monkeypatch):

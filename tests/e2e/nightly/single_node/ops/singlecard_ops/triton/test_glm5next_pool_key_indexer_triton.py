@@ -56,8 +56,16 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("max_pool_seq_len", [0, 4, 127, 128, 129, 512, 2050])
-@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "use_graph,max_pool_seq_len",
+    [
+        (use_graph, max_pool_seq_len)
+        for use_graph in (False, True)
+        for max_pool_seq_len in (0, 4, 127, 128, 129, 512, 2050)
+        # Keep all replay boundaries; sample empty, aligned and long tail shapes in eager.
+        if use_graph or max_pool_seq_len in (0, 128, 2050)
+    ],
+)
 @torch.inference_mode()
 def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_graph, monkeypatch):
     generator = torch.Generator().manual_seed(19)

@@ -3,16 +3,18 @@
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
 from collections.abc import Iterable
+from copy import copy
 from dataclasses import replace
 
 import torch
 from torch import nn
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -22,6 +24,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
@@ -42,6 +45,7 @@ from vllm_ascend.models.kimi_k3.kimi_k3 import (
 )
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 
 
 def _uses_causal_draft_attention(config) -> bool:
@@ -68,8 +72,9 @@ class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
     def __init__(
         self,
         *,
-        vllm_config: VllmConfig,
         config,
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
         layer_idx: int,
         start_layer_id: int,
         prefix: str,
@@ -78,7 +83,6 @@ class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
         # components. Keep its class contract while constructing the Ascend
         # equivalents below.
         nn.Module.__init__(self)
-        quant_config = get_draft_quant_config(vllm_config)
         layer_prefix = maybe_prefix(
             prefix,
             f"layers.{start_layer_id + layer_idx}",
@@ -94,7 +98,7 @@ class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
             kv_lora_rank=config.kv_lora_rank,
             use_output_gate=False,
             use_rope=True,
-            cache_config=vllm_config.cache_config,
+            cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{layer_prefix}.self_attn",
             non_causal_multi_token_decode=not _uses_causal_draft_attention(config),
@@ -159,6 +163,23 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         assert draft_model_config is not None
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
+        if (
+            vllm_config.speculative_config.method == "dspark"
+            and self.config.model_type == "k3_dspark"
+            and isinstance(self.quant_config, AscendModelSlimConfig)
+        ):
+            # ModelSlim describes a standalone draft. Align its recipe with the
+            # names used by this model's projections and attention backend.
+            self.quant_config = copy(self.quant_config)
+            self.quant_config.packed_modules_mapping = self.quant_config.packed_modules_mapping.copy()
+            self.quant_config.apply_vllm_mapper(
+                WeightsMapper(
+                    orig_to_new_prefix={
+                        f"layers.{idx}.": maybe_prefix(prefix, f"layers.{start_layer_id + idx}.")
+                        for idx in range(self.config.num_hidden_layers)
+                    }
+                )
+            )
         self.embed_tokens: nn.Module | None = None
         # The draft config used for construction reports PP=1; query the real
         # PP group, the same signal maybe_share_target_embed uses.
@@ -187,8 +208,9 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.layers = nn.ModuleList(
             [
                 AscendK3DSparkDecoderLayer(
-                    vllm_config=vllm_config,
                     config=self.config,
+                    cache_config=vllm_config.cache_config,
+                    quant_config=self.quant_config,
                     layer_idx=layer_idx,
                     start_layer_id=start_layer_id,
                     prefix=prefix,
@@ -255,6 +277,7 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
                 sin,
                 normalized_cache,
                 slots,
+                return_bf16_kv=False,
             )
 
     def forward(

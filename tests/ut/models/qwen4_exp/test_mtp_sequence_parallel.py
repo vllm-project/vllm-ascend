@@ -41,8 +41,8 @@ def test_mtp_preserves_decoder_token_sharding_and_gathers_outputs(monkeypatch, s
         return torch.cat([x, x], dim=0)
 
     monkeypatch.setattr(mtp, "get_pp_group", lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True))
-    monkeypatch.setattr(mtp.upstream_mtp, "sp_shard", shard)
-    monkeypatch.setattr(mtp.upstream_mtp, "sp_all_gather", gather)
+    monkeypatch.setattr(mtp, "sp_shard", shard)
+    monkeypatch.setattr(mtp, "sp_all_gather", gather)
     layer = SimpleNamespace(
         hc_count=hc_count,
         hidden_size=hidden_size,

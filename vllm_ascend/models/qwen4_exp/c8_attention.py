@@ -18,18 +18,28 @@ _MIN_GROUPED_QUERY_TOKENS = 512
 _MAX_GROUPED_KV_TOKENS = 10 * 1024
 
 
-def c8_prefill_kv_length(request_plan: QSARequestPlan | None, tokens: int) -> int | None:
+def c8_prefill_kv_length(
+    request_plan: QSARequestPlan | None,
+    tokens: int,
+    lengths_cpu: torch.Tensor | None,
+) -> int | None:
     """Return the scheduler's KV upper bound for an eligible prefill chunk."""
-    if request_plan is None or len(request_plan.requests) != 1:
+    if (
+        request_plan is None
+        or len(request_plan.requests) != 1
+        or lengths_cpu is None
+        or lengths_cpu.device.type != "cpu"
+    ):
         return None
     request = request_plan.requests[0]
+    kv_length = int(lengths_cpu[request.request_index])
     if (
         request.is_prefill
         and request.query_start == 0
         and request.query_end == tokens
-        and _MIN_GROUPED_QUERY_TOKENS <= tokens <= request.kv_length <= _MAX_GROUPED_KV_TOKENS
+        and _MIN_GROUPED_QUERY_TOKENS <= tokens <= kv_length <= _MAX_GROUPED_KV_TOKENS
     ):
-        return request.kv_length
+        return kv_length
     return None
 
 

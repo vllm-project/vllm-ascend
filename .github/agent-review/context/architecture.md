@@ -25,14 +25,14 @@ important thing to keep in mind when reviewing a diff here.
 - `vllm_ascend/compilation/` — ACL graph capture/replay (ACLGraphWrapper, API-compatible with CUDA graph) and the inductor compiler bridge (AscendCompiler, graph fusion passes)
 - `vllm_ascend/core/` — scheduler extensions and Ascend KV-cache specs (batch-job-aware scheduler, dyntra LB, kv_cache_interface)
 - `vllm_ascend/device/`, `device_allocator/` — hardware profiles (A2/A3/A5/310P) and the CaMem allocator
-- `vllm_ascend/distributed/` — parallel state, NPUCommunicator, MC2/MLP-TP, KV transfer (Mooncake/AscendStore/UCM), EPLB-related comms
+- `vllm_ascend/distributed/` — parallel state, NPUCommunicator, MC2/MLP-TP, KV transfer (Mooncake/AscendStore/UCM), EPLB state/policies/comms, expert offload
 - `vllm_ascend/quantization/` — W8A8/W4A8/W4A4/WNA16 and KV-cache quant methods
 - `vllm_ascend/models/` — Ascend-specific model implementations registered into ModelRegistry (deepseek_v4/v41, glm5*, kimi_k3, llama_eagle3, ...)
 - `vllm_ascend/ops/` — operator layer: fused MoE (routers/dispatchers/quant/eplb), triton kernels, custom op registration
 - `vllm_ascend/patch/` — upstream monkey-patches; `platform/` = global (pre-worker), `worker/` = per-worker; catalog in `patch/__init__.py`
 - `vllm_ascend/model_executor/` — weight offloader/prefetch and kernel warmup
 - `vllm_ascend/model_loader/` — non-standard loaders (netloader, rfork, bigtensorloader)
-- `vllm_ascend/eplb/`, `ec_manager/` — EPLB policies and expert-parallel manager
+- `vllm_ascend/ec_manager/` — score-based encoder cache manager
 - `vllm_ascend/_cann_ops_custom/` — CANN custom operator kernels and compilation pass utilities
 - `vllm_ascend/ascend_config.py` — AscendConfig singleton and typed sub-configs (`--additional-config`)
 - `vllm_ascend/envs.py` — the ONLY place VLLM_ASCEND_* env vars are defined

@@ -152,8 +152,6 @@ def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
     impl._dispatch_qsa(
         layer,
         output,
-        None,
-        None,
         (cache, cache, scales),
         metadata,
         output,

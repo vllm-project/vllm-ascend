@@ -189,10 +189,6 @@ def _load_patch_distributed_module():
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
-    # The patch only uses this to decide whether to set ``cpu_timeout`` (vLLM
-    # main) or leave it to the upstream base class (0.33.0); no test here
-    # asserts on that branch.
-    utils_module.vllm_version_is = lambda _target: False
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
@@ -352,18 +348,18 @@ def test_mc2_stays_isolated_from_ep_even_when_pg_options_match(module_env):
     assert first.device_group is not second.device_group
 
 
-def test_dynamic_eplb_stays_separate_from_ep_when_pg_options_differ(module_env):
+def test_groups_stay_separate_from_ep_when_pg_options_differ(module_env):
     default_hccl_pg_options = module_env.utils_module.create_hccl_pg_options.return_value
 
     def fake_create_hccl_pg_options(group_name: str):
-        if group_name == "dynamic_eplb":
+        if group_name == "custom_group":
             return {"hccl_config": {"hccl_buffer_size": 512}}
         return default_hccl_pg_options
 
     module_env.utils_module.create_hccl_pg_options.side_effect = fake_create_hccl_pg_options
 
     first = _make_group(module_env, group_name="ep")
-    second = _make_group(module_env, group_name="dynamic_eplb")
+    second = _make_group(module_env, group_name="custom_group")
 
     hccl_calls = _calls_with_backend(module_env, "hccl")
 

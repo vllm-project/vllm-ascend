@@ -58,6 +58,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
@@ -67,8 +68,8 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
-        HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
+        HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
         HardwareCapability.NATIVE_INT8_SPARSE,
@@ -116,6 +117,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
+            HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
@@ -347,8 +349,8 @@ def test_every_device_type_has_a_profile() -> None:
 @pytest.mark.parametrize(
     ("device_type", "models"),
     [
-        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX})),
-        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN})),
+        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN})),
         (AscendDeviceType.A5, frozenset({FlashAttentionNpu3Model.STEP5})),
         (AscendDeviceType._310P, frozenset()),
     ],

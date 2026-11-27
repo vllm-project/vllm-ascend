@@ -26,8 +26,6 @@ import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def check_triton_ascend_version_valid() -> bool:
     """
@@ -258,14 +256,13 @@ class UvaBufferWrapper:
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
 
 
-if not vllm_version_is("0.33.0"):
+def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
+    buf = self._next_buf(n)
+    if isinstance(buf, UvaBufferWrapper):
+        return cast(UvaBufferWrapper, buf).copy_chunks_to_uva(chunks, n)
+    # NonUvaBuffer keeps its own CPU mirror and copy on uva().
+    np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
+    return buf.uva(n)
 
-    def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
-        buf = self._next_buf(n)
-        if isinstance(buf, UvaBufferWrapper):
-            return cast(UvaBufferWrapper, buf).copy_chunks_to_uva(chunks, n)
-        # NonUvaBuffer keeps its own CPU mirror and copy on uva().
-        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
-        return buf.uva(n)
 
-    vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore
+vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore

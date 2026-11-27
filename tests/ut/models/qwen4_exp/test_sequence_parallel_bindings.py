@@ -14,7 +14,7 @@ def test_qwen_target_mtp_and_ple_use_opaque_ascend_sp_helpers():
     ple.patch_upstream_ple_short_conv()
     assert model.upstream_model.sp_shard is sp.sp_shard
     assert model.upstream_model.sp_reduce_scatter is sp.sp_reduce_scatter
-    assert mtp.upstream_mtp.sp_shard is sp.sp_shard
+    assert mtp.sp_shard is sp.sp_shard
     assert ple_layer.sp_shard is sp.sp_shard
     assert ple_layer.sp_reduce_scatter is sp.sp_reduce_scatter
 

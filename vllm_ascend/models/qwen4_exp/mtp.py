@@ -25,7 +25,7 @@ from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
 
-from vllm_ascend.models.common.ops.sequence_parallel import sp_shard
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -106,7 +106,6 @@ def _remap_modelslim_mtp_layer_ids(
 
 
 _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
-upstream_mtp.sp_shard = sp_shard
 
 
 def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
@@ -187,9 +186,10 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         if positions.ndim > 1:
             positions = positions[0]
 
-        # Ascend PP loads the local MTP drafter on the last target stage. It is
-        # therefore the first logical draft stage even though the global PP
-        # coordinator reports that it is not the first target stage.
+        # The V2 speculator builds the complete local drafter on the last
+        # target PP rank. Follow the upstream Qwen4Exp contract: the absence
+        # of transported intermediates identifies that local drafter entry,
+        # independently of the global target-model PP rank.
         if intermediate_tensors is None:
             assert hidden_states is not None
             if inputs_embeds is None:
@@ -210,12 +210,11 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
             hidden_states = intermediate_tensors["hidden_states"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        full_num_tokens = positions.shape[-1]
-        if self.use_hc_sequence_parallel:
-            # The decoder's HC state is token-sharded, including in MTP. Keep
-            # the same layout as upstream before its attention/MoE collectives.
-            hidden_states = upstream_mtp.sp_shard(hidden_states)
         layer = self.layers[current_step_idx]
+        # Match the upstream transport contract: the drafter boundary is
+        # full-token, and HC SP owns the local shard independently of MoE SP.
+        if self.use_hc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=None,
@@ -233,11 +232,12 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
             hidden_states, block_output, injection
         )
         if self.use_hc_sequence_parallel:
-            packed = torch.cat([sample_hidden_states, multi_hidden], dim=-1)
-            packed = upstream_mtp.sp_all_gather(packed)[:full_num_tokens]
-            sample_hidden_states, multi_hidden = packed.split([hidden_size, hc_count * hidden_size], dim=-1)
-            sample_hidden_states = sample_hidden_states.contiguous()
+            full_num_tokens = positions.shape[-1]
+            multi_hidden_size = multi_hidden.shape[-1]
+            gathered_hidden = sp_all_gather(torch.cat((multi_hidden, sample_hidden_states), dim=-1))[:full_num_tokens]
+            multi_hidden, sample_hidden_states = gathered_hidden.split((multi_hidden_size, hidden_size), dim=-1)
             multi_hidden = multi_hidden.contiguous()
+            sample_hidden_states = sample_hidden_states.contiguous()
         return sample_hidden_states, multi_hidden
 
 
@@ -247,6 +247,14 @@ upstream_mtp.Qwen4ExpMultiTokenPredictor = AscendQwen4ExpMultiTokenPredictor
 
 class AscendQwen4ExpMTP(upstream_mtp.Qwen4ExpMTP):
     """Qwen4Exp MTP model bound to the Ascend-patched decoder."""
+
+    def process_weights_after_loading(self) -> None:
+        from .hc_fused import prepare_model_textgr_weights
+
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     def embed_input_ids(
         self,

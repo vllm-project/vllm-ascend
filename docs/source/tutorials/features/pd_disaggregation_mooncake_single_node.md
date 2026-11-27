@@ -47,7 +47,7 @@ For disjoint P/D device assignments and the interaction between
     for i in {0..7}; do hccn_tool -i $i -ip -g;done
     ```
 
-4. Cross-Node PING Test
+4. (Optional) Cross-Node PING Test (skip for single-node deployment)
 
     ```bash
     # Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
@@ -63,7 +63,7 @@ For disjoint P/D device assignments and the interaction between
 
 ## Run with Docker
 
-Start a Docker container.
+Start a Docker container. The command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
 # Update the vllm-ascend image
@@ -75,23 +75,8 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-7 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
@@ -150,13 +135,17 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 !!! note "Timeout for long sequences or high concurrency"
 
-    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+    The fixed timeout below applies to `MooncakeConnectorV1`. For
+    `MooncakeConnectorV2`, configure `kv_lease_duration` instead; see
+    [MooncakeConnectorV2 KV Leases](pd_disaggregation_mooncake_multi_node.md#mooncakeconnectorv2-kv-leases).
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
-    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
     ```
 
-    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+    The value is in seconds: `1800` allows 30 minutes before timeout.
 
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
@@ -245,7 +234,7 @@ python load_balance_proxy_server_example.py \
     --host 192.0.0.1 \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 \
-    --prefiller-port 13700 \
+    --prefiller-ports 13700 \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
@@ -253,10 +242,44 @@ python load_balance_proxy_server_example.py \
 |Parameter  | Meaning |
 | --- | --- |
 | --port | Proxy port |
-| --prefiller-port | All prefiller ports |
+| --prefiller-ports | All prefiller ports |
 | --decoder-ports | All decoder ports |
 
 ## Verification
+
+### Decode health probes without a prefill service
+
+With `MooncakeConnectorV2`, send a request directly to D with
+`do_virtual: true` and `do_remote_prefill: true` in `kv_transfer_params` to
+exercise D-side scheduling and inference without transferring KV cache from P.
+This works in both default pull mode and layerwise push mode
+(`kv_connector_extra_config.use_layerwise=true`). The flag defaults to false.
+
+For pull mode, retain the required remote metadata fields as placeholders, for example:
+
+```json
+{
+  "do_remote_prefill": true,
+  "do_virtual": true,
+  "remote_block_ids": [[0]],
+  "remote_host": "127.0.0.1",
+  "remote_port": 1,
+  "remote_engine_id": "health-probe",
+  "remote_request_id": "unique-probe-id",
+  "remote_num_prompt_tokens": 32
+}
+```
+
+Set `remote_num_prompt_tokens` to the actual prompt token count and use the
+appropriate number of KV cache groups. For layerwise push probes, only
+`do_remote_prefill` and `do_virtual` are needed in `kv_transfer_params`; D does
+not dispatch the request to P through the metaserver. Use a short nonempty prompt,
+disable prefix caching for this check, and request only a small number of output tokens.
+
+A successful probe confirms request completion on D. Generated text is not an
+accuracy result because historical KV cache was not transferred.
+
+### Normal PD inference
 
 Check service health using the proxy server endpoint.
 
@@ -268,7 +291,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/qwen.png"}},
                 {"type": "text", "text": "What is the text in the illustration?"}
             ]}
             ],

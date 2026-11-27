@@ -25,6 +25,43 @@ def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
         assert not (model_root / platform_neutral_dir).exists()
 
 
+def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
+    model = _source("vllm_ascend/models/qwen4_exp/model.py")
+    mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
+    model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
+    ple = _source("vllm_ascend/models/qwen4_exp/ple.py")
+    assert "class AscendQwen4ExpDecoderLayer" not in model
+    assert model.count("def forward(") == 1
+    assert "for layer_idx" not in model
+    assert "output = super().forward(" in model
+    assert 'sp_all_gather(output["hidden_states"])' in model
+    assert '"hidden_states": sp_shard(hidden_states)' in model
+    assert "intermediate_tensors.tensors" in model
+    assert "output.tensors" in model
+    assert "pp_intermediate_tensors_are_full_tokens = True" in model
+    assert "upstream_model.sp_all_gather = sp_all_gather" in model
+    assert "upstream_model.sp_reduce_scatter = sp_reduce_scatter" in model
+    assert "upstream_model.sp_shard = sp_shard" in model
+    assert "upstream_ple.sp_all_gather = sp_all_gather" in model
+    assert "upstream_ple.sp_reduce_scatter = sp_reduce_scatter" in model
+    assert "upstream_ple.sp_shard = sp_shard" in model
+    assert "upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention" in model
+    assert "AscendQwen4ExpSparseMoeBlock" not in model
+    assert "upstream_model.Qwen4ExpSparseMoeBlock" not in model
+    assert "inputs_embeds: torch.Tensor | None = None" in model
+    assert "inputs_embeds=inputs_embeds" in model
+    assert "hidden_states.shape[0] == positions.shape[-1]" not in model + mtp
+    assert "if self.use_hc_sequence_parallel:" in mtp
+    assert "hidden_states = sp_shard(hidden_states)" in mtp
+    assert "sequence_parallel_chunk" not in model + mtp
+    assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
+    assert not (ROOT / "vllm_ascend/patch/platform/patch_qwen4_exp_pp.py").exists()
+    assert "ple_layer_ids = []" not in model_state
+    assert "if intermediate_tensors is None:" in mtp
+    assert "get_npu_view_from_cpu_tensor" not in ple
+
+
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
     registry = _source("vllm_ascend/models/__init__.py")
     for architecture, wrapper in (

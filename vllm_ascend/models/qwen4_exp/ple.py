@@ -33,7 +33,6 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
-from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin, pcp_gather_tokens, pcp_scatter_tokens
 from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
@@ -372,8 +371,6 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
-    upstream_ple_layer.sp_reduce_scatter = sp_reduce_scatter
-    upstream_ple_layer.sp_shard = sp_shard
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

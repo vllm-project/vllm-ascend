@@ -59,6 +59,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
+from vllm.models.step5.common.config import (  # type: ignore[import-not-found]
+    Step5SparseConfig,
+    get_step5_sparse_config,
+)
 from vllm.models.step5.nvidia.layernorm import (
     Step5IndexerLayerNorm,
     Step5RMSNorm,
@@ -112,18 +116,6 @@ from vllm_ascend.ops.triton.step5.gated_scale import (
 from vllm_ascend.ops.triton.step5.indexer_qkz_norm_rope import (
     fused_indexer_qkz_norm_rope,
 )
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.33.0"):
-    from vllm.models.step5.nvidia.config import (  # type: ignore[import-not-found]
-        Step5SparseConfig,
-        get_step5_sparse_config,
-    )
-else:
-    from vllm.models.step5.common.config import (  # type: ignore[import-not-found]
-        Step5SparseConfig,
-        get_step5_sparse_config,
-    )
 
 
 def _kv_cache_torch_dtype(cache_config, vllm_config) -> torch.dtype:
