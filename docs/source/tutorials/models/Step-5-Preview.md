@@ -118,10 +118,6 @@ Inside the container, run `npu-smi info` and confirm that all eight NPUs are vis
 
 The container runs without `--privileged`: Ascend Docker Runtime injects the eight Davinci devices selected by `-e ASCEND_VISIBLE_DEVICES=0-7`, so no `--device` entry is needed for them. Add `--device` only if you start the container without that runtime.
 
-The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
-
-The container runs without `--privileged`: Ascend Docker Runtime injects the eight Davinci devices selected by `-e ASCEND_VISIBLE_DEVICES=0-7`, so no `--device` entry is needed for them. Add `--device` only if you start the container without that runtime.
-
 The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/root/.cache`; modify it according to the actual situation.
 The `docker run` command above opens an interactive container shell. Use that shell for the following steps. To open an additional shell, run this command from another terminal on the host:
 
