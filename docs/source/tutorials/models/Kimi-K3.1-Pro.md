@@ -14,7 +14,7 @@ This guide covers the validated Atlas 800I A3 and 950DT Products platforms. A2 a
 
 Kimi K3.1 Pro is a multimodal Mixture-of-Experts (MoE) model developed by Moonshot AI as an evolution of Kimi K3. It retains the hybrid attention and Latent MoE architecture and introduces DSA sparse attention. The model supports visual understanding and a one-million-token context, combining language understanding, reasoning, and tool calling for coding, long-document processing, and multi-step agent tasks.
 
-This guide provides eight-node 4P4D basic and 1M configurations for Atlas 800I A3 and 950DT Products. Use the parallelism, cache types, and parsers specified by each platform's templates. [Section 5.3](#53-pooled-pd) provides the Atlas 800I A3 pooled reference and the 950DT Products pooled configuration.
+The basic and 1M examples use the eight-node 4P4D configuration on Atlas 800I A3. On 950DT Products, both examples use 1P1D, with four nodes forming one Prefill instance and one node running one Decode instance. Choose the number of Prefill and Decode instances to suit your workload and available hardware. For pooled deployments, see [Section 5.3](#53-pooled-pd).
 
 This guide is based on **vLLM-Ascend 0.30.0**, which introduces experimental support for Kimi K3.1 Pro for evaluation and validation with the configurations provided here. Supported scenarios, performance, and configuration interfaces may evolve in later releases.
 
@@ -31,7 +31,7 @@ Refer to the [feature guide](../../user_guide/feature_guide/index.md) for featur
 | Weight Version | Hardware Requirements | Download Links | Notes |
 |---|---|---|---|
 | Kimi K3.1 Pro target model (A3)<br>`Kimi-K3.1-Pro-w4a8` | PD separation:<br>8 Atlas 800I A3 servers, with 16 devices per node (64 GB × 16). | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8) | Use the W4A8 quantized checkpoint for A3 with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
-| Kimi K3.1 Pro target model (950DT Products)<br>`Kimi-K3.1-Pro-w4a8-mxfp` | PD separation:<br>8 950DT servers, with 8 devices per node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp) | Use the W4A8_MXFP quantized checkpoint for 950DT Products with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
+| Kimi K3.1 Pro target model (950DT Products)<br>`Kimi-K3.1-Pro-w4a8-mxfp` | Basic and 1M examples (1P1D):<br>4 Prefill nodes and 1 Decode node, with 8 devices per node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp) | Use the W4A8_MXFP quantized checkpoint for 950DT Products with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
 
 The target checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the Kimi K3.1 Pro release. DSpark is a speculative decoding method: a draft model proposes candidate tokens, which the target model then verifies. For DSpark in PD separation or pooled PD deployment, prepare a draft checkpoint compatible with the platform and target model and specify its local directory.
 
@@ -377,7 +377,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
 === "950DT Products"
 
-    950DT Products use eight nodes in a 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill, with layer partition `24,24,24,21`, and DP4 / TP8 / DCP8 on Decode. Only P0 exposes a Prefill API; P1–P3 use `--headless`, and all four Decode nodes expose APIs.
+    The 950DT Products example uses 1P1D. P0–P3 form one Prefill instance with DP1 / PP4 / PCP8 / TP1 and layer partition `24,24,24,21`. P0 serves its API and P1–P3 run with `--headless`. D0 runs one Decode instance with DP1 / TP8 / DCP8 and serves the Decode API.
 
     Both roles use `--max-model-len 140000` in the basic configuration. The target model uses W4A8_MXFP weights with `--quantization ascend`; the main attention and indexer K caches use FP8. Both roles enable Model Runner V2 and CCU communication (`HCCL_OP_EXPANSION_MODE=CCU_SCHED`), with `HCCL_BUFFSIZE` set to `2000/800` on Prefill/Decode.
 
@@ -492,7 +492,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
               "tp_size": 1
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 1,
               "tp_size": 8
             }
           }
@@ -517,6 +517,11 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
         KV_PORT="<DECODE_KV_PORT>"
         ENGINE_ID="<DECODE_ENGINE_ID>"
         DRAFT_MODEL_PATH="<YOUR_DRAFT_MODEL_PATH>"
+
+        dp_rank_args=()
+        if (( $3 > 1 )); then
+            dp_rank_args=(--data-parallel-rank "$4")
+        fi
 
         export ASCEND_RT_VISIBLE_DEVICES="$1"
         export HCCL_IF_IP="$local_ip"
@@ -548,7 +553,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             --host 0.0.0.0 \
             --port "$2" \
             --data-parallel-size "$3" \
-            --data-parallel-rank "$4" \
+            "${dp_rank_args[@]}" \
             --data-parallel-address "$5" \
             --data-parallel-rpc-port "$6" \
             --tensor-parallel-size "$7" \
@@ -587,7 +592,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
               "tp_size": 1
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 1,
               "tp_size": 8
             }
           }
@@ -732,30 +737,30 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     The template automatically adds `--headless` on P1–P3. Start P0 before P1–P3, keeping model paths, layer partitioning, and parallelism settings consistent across all four P nodes.
 
-    **Start Decode (D0–D3)**
+    **Start Decode (D0)**
 
-    Deploy `launch_online_dp.py` on the D nodes and save the matching Decode template as `run_dp_template.sh` in the same directory. Run the following command from that directory to start one DP instance per node:
+    Place `launch_online_dp.py` and the Decode template `run_dp_template.sh` in the same directory on D0. Run the following command from that directory to start the Decode instance.
 
     This guide uses the repository launcher that passes seven positional arguments. DCP is explicitly set in the Decode template: `16` for A3 and `8` for 950DT Products. Use a launcher that matches the template; do not substitute versions that pass parameters through `$8` or `AICLUSTERHUB_PCP_SIZE` / `AICLUSTERHUB_DCP_SIZE` without adapting the template.
 
     ```bash
     python launch_online_dp.py \
-        --dp-size 4 \
+        --dp-size 1 \
         --tp-size 8 \
         --dp-size-local 1 \
-        --dp-rank-start '<DECODE_DP_RANK>' \
+        --dp-rank-start 0 \
         --dp-address '<DECODE_MASTER_IP>' \
         --dp-rpc-port '<DECODE_DP_RPC_PORT>' \
         --vllm-start-port '<DECODE_API_PORT>'
     ```
 
-    Set `<DECODE_DP_RANK>` to `0, 1, 2, 3` on D0–D3 respectively. Use the D0 IP for `<DECODE_MASTER_IP>` and the same `<DECODE_DP_RPC_PORT>` on all four D nodes. Set `<DECODE_API_PORT>` to each node's actual API port. Start D0 before D1–D3.
+    Use the D0 IP for `<DECODE_MASTER_IP>` and D0's API port for `<DECODE_API_PORT>`. To run more Decode instances in the same DP group, set `--dp-size` and the connector's `decode.dp_size` on both roles to the number of Decode instances. Assign each Decode node a distinct DP rank starting at zero and use the same Decode master IP and RPC port across the group.
 
     The launcher still passes Decode arguments `$1`–`$7`: device list, API port, DP size, DP rank, Decode master IP, DP RPC port, and TP size. Configure master addresses and ports separately for P and D, and register the actual API endpoints with the Proxy.
 
     **Start the Proxy**
 
-    After the P0 API and all four Decode APIs are ready, register these five addresses with the Proxy. Each API port below must match that node's launch command. Send client requests to the Proxy using model name `kimi-k3.1-pro`.
+    Once P0 and D0 are ready, register their API addresses with the Proxy. If you change the instance counts, list the API host and port of the head node of each Prefill instance and of each Decode instance. Send requests to the Proxy using model name `kimi-k3.1-pro`.
 
     ```bash
     python '<VLLM_ASCEND_SOURCE_DIR>/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py' \
@@ -764,15 +769,15 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         --workers 1 \
         --prefiller-hosts '<P0_IP>' \
         --prefiller-ports '<P0_API_PORT>' \
-        --decoder-hosts '<D0_IP>' '<D1_IP>' '<D2_IP>' '<D3_IP>' \
-        --decoder-ports '<D0_API_PORT>' '<D1_API_PORT>' '<D2_API_PORT>' '<D3_API_PORT>'
+        --decoder-hosts '<D0_IP>' \
+        --decoder-ports '<D0_API_PORT>'
     ```
 
     **Key PD Settings**
 
     | Setting | 950DT Products Prefill | 950DT Products Decode |
     |---|---|---|
-    | DP / TP / PP | `1 / 1 / 4` | `4 / 8 / 1` |
+    | DP / TP / PP | `1 / 1 / 4` | `1 / 8 / 1` |
     | PCP / DCP | `8 / 1` | `1 / 8` |
     | `VLLM_PP_LAYER_PARTITION` | `24,24,24,21` | — |
     | `--block-size` / `--cp-kv-cache-interleave-size` | `1536 / 1536` | `1536 / 1536` |
@@ -1005,7 +1010,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 === "950DT Products"
 
-    950DT Products 1M deployment uses the basic eight-node 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode. Set `--max-model-len 1048576` on both Prefill and Decode and retain the other basic settings.
+    The 950DT Products 1M example uses the 1P1D topology from [Section 5.1](#51-pd-deployment). P0–P3 form one PP4 Prefill instance, and D0 runs one TP8 / DCP8 Decode instance. Set `--max-model-len 1048576` on both roles.
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
@@ -1116,7 +1121,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
               "tp_size": 1
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 1,
               "tp_size": 8
             }
           }
@@ -1141,6 +1146,11 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         KV_PORT="<DECODE_KV_PORT>"
         ENGINE_ID="<DECODE_ENGINE_ID>"
         DRAFT_MODEL_PATH="<YOUR_DRAFT_MODEL_PATH>"
+
+        dp_rank_args=()
+        if (( $3 > 1 )); then
+            dp_rank_args=(--data-parallel-rank "$4")
+        fi
 
         export ASCEND_RT_VISIBLE_DEVICES="$1"
         export HCCL_IF_IP="$local_ip"
@@ -1172,7 +1182,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --host 0.0.0.0 \
             --port "$2" \
             --data-parallel-size "$3" \
-            --data-parallel-rank "$4" \
+            "${dp_rank_args[@]}" \
             --data-parallel-address "$5" \
             --data-parallel-rpc-port "$6" \
             --tensor-parallel-size "$7" \
@@ -1211,7 +1221,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
               "tp_size": 1
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 1,
               "tp_size": 8
             }
           }
@@ -1235,7 +1245,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 The pooling flow differs by platform: A3 uses a separate MetaService, eight standalone MemCache providers, and zero-capacity engine clients. 950DT Products uses the same MetaService startup procedure without standalone providers. See [Section 5.3.2](#532-prepare-the-memcache-configuration-files) for configuration.
 
-The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products engine templates below follow [Section 5.1.1](#511-create-the-engine-templates); see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
+The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products pooled example uses one four-node Prefill instance and four Decode instances; see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
 
 These are supplied deployment references. Environment readiness does not establish model-side pool hits, output correctness, or performance. Verify those on the deployed runtime as described in [Section 5.3.7](#537-verify-the-pool-and-model-service). The A3 reference retains different P/D TP sizes; the equal-TP settings in the K3 templates are not a universal pooling requirement. Do not infer support for another cache layout from this reference.
 
@@ -1655,9 +1665,9 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     !!! note "Lookup Identifier Assignments"
 
-        The 950DT Products pooled launch commands follow [Section 5.1.1](#511-create-the-engine-templates): DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode, with matching connector topology. Both roles use maximum length `172032`. All four PP4 Prefill nodes use `LOOKUP_RPC_PORT=0`. The four DP4 Decode nodes use `4/5/6/7` for DP ranks `0/1/2/3`, respectively, calculated as `$4 + 4` in the template. These lookup identifiers identify local IPC endpoints, not PP ranks or MemCache registration ranks.
+        The 950DT Products pooled example uses DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode, with matching connector topology. Both roles use maximum length `172032`. All four PP4 Prefill nodes use `LOOKUP_RPC_PORT=0`. The four DP4 Decode nodes use `4/5/6/7` for DP ranks `0/1/2/3`, respectively, calculated as `$4 + 4` in the template. These lookup identifiers identify local IPC endpoints, not PP ranks or MemCache registration ranks.
 
-    The 950DT Products pooled templates enable DSpark. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); only maximum length and pool configuration change. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
+    The 950DT Products pooled templates enable DSpark. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); the pooled example also changes the Decode DP size, maximum model length, and pool configuration. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
 
     === "Prefill"
 
@@ -1985,7 +1995,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
     export MMC_LOCAL_CONFIG_PATH='<ABSOLUTE_NODE_CONFIG_PATH>/mmc-local.conf'
     ```
 
-    In the same shell, follow [Section 5.1.2](#512-start-the-engines-and-proxy) to start P/D and the Proxy using the pooled templates: direct Bash for Prefill and the matching Python launcher for Decode. Child processes inherit the environment variable. If an existing environment script sets it, reuse that setting after verifying that it points to the local node configuration.
+    In the same shell, start the pooled templates using the launchers in [Section 5.1.2](#512-start-the-engines-and-proxy). Start P0–P3 as one Prefill instance. On D0–D3, use `--dp-size 4` and set `--dp-rank-start` to `0`, `1`, `2`, and `3`, respectively, with the same Decode master IP and RPC port. Child processes inherit `MMC_LOCAL_CONFIG_PATH`.
 
     Keep maximum length `172032` on both roles. Lookup identifiers are `0` on P0–P3 and `4, 5, 6, 7` on D0–D3. P1–P3 use `--headless`; register only P0 and the four Decode APIs with the Proxy.
 
