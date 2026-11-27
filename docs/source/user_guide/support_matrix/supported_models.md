@@ -163,5 +163,6 @@
     | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3.8-27B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-27B](../../tutorials/models/Qwen3.8-27B.md) |
+    | DeepSeek-OCR-2 | ✅ | FP16 | ❌ | Atlas 300I Duo | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 8192 | [DeepSeek-OCR-2](../../tutorials/models/DeepSeekOCR2.md) |
     | PaddleOCR-VL | 🔴 |  | ❌ | Atlas 300I Duo | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
     | Qwen3-ASR | 🔴 |  | ❌ | Atlas 300I Duo | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
