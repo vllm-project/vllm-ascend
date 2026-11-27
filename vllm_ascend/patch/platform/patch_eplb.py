@@ -851,6 +851,9 @@ def _wrap_move_to_workspace(original_move):
                 result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                export_map = getattr(model_state, "_placement_export_map", None)
+                if export_map is not None:
+                    export_map[layer_idx].copy_(pending_result.new_physical_to_logical_map)
                 if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):
@@ -884,6 +887,10 @@ def _wrap_move_to_workspace(original_move):
                 pending_result.consumed_event = consumed_event
         if deferred_event is not None:
             deferred_event.flush()
+        if is_last_result:
+            export_placement = getattr(model_state, "_export_eplb_placement_after_commit", None)
+            if export_placement is not None:
+                export_placement()
         return result
 
     setattr(_move_to_workspace, _PATCH_MARKER, True)

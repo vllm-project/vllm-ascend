@@ -109,7 +109,7 @@ QWEN_FA3_TARGETS = frozenset(
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "placement_export_path", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 _DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"

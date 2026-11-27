@@ -281,6 +281,7 @@ class AscendWarmupConfig:
 class EplbConfig:
     """Ascend extensions to the upstream Model Runner V2 EPLB configuration."""
 
+    placement_export_path: str | None = None
     # Model Runner V2 only. Restricts which batch phase contributes to the
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
@@ -289,6 +290,8 @@ class EplbConfig:
 
     @model_validator(mode="after")
     def _validate_config(self):
+        if self.placement_export_path is not None and not self.placement_export_path.endswith(".json"):
+            raise ValueError("placement_export_path must point to a JSON file.")
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
@@ -791,6 +794,17 @@ class AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         vc = vllm_config
+        if self.eplb_config.placement_export_path is not None:
+            parallel_config = vc.parallel_config
+            if not parallel_config.enable_eplb and not is_draft_config_context():
+                raise ValueError("Placement export requires --enable-eplb.")
+            if parallel_config.enable_eplb and (
+                not vc.use_v2_model_runner
+                or not parallel_config.eplb_config.use_async
+                or parallel_config.enable_elastic_ep
+                or parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Placement export requires MRV2, asynchronous EPLB, elastic EP disabled, and PP=1.")
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

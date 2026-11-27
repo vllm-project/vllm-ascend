@@ -148,7 +148,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+Accepts `load_collection_phase`, `placement_export_path`, and
+`stair_config`. Configure upstream EPLB
 through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
@@ -160,29 +161,22 @@ for the advanced STAIR fields and their defaults.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `placement_export_path` | str | `None` | Atomically export the active physical-to-logical expert map and model metadata after asynchronous EPLB commits. Requires EPLB enabled, PP=1, elastic EP disabled, and a single EP group covering all worker ranks. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
-<span id="scheduler_config"></span>**scheduler_config**
+For example, with EPLB enabled in MRV2, pass
+`--additional-config '{"eplb_config":{"placement_export_path":"/tmp/eplb-placement.json"}}'`.
+EP rank 0 replaces this file after each committed rearrangement. Use a distinct path
+per engine. Each model entry stores one map row per MoE layer in execution order.
+Set the model revision explicitly to record it in the snapshot.
+
+**scheduler_config**
 
 The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
-!!! warning "Balance scheduling deprecated in v0.33.0"
-
-    Balance scheduling is deprecated as of v0.33.0 and is planned for removal in a future release. Enabling it through either configuration format still activates the feature and emits a startup warning. Moving an enabled value from the legacy key to `scheduler_config` does not remove the feature deprecation. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229).
-
-To migrate, merge the following setting into your existing `--additional-config`
-object and remove the legacy top-level `enable_balance_scheduling` key:
-
-```json
-{"scheduler_config": {"enable_balance_scheduling": false}}
-```
-
-This uses the normal scheduler path without the global admission gate. You can
-also remove both forms of the option, since the default is `false`.
-
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_balance_scheduling` | bool | `False` | **Deprecated as of v0.33.0**; planned for removal in a future release. Enabling balance scheduling emits a startup warning; keep `false` to use the normal scheduler path. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229). The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
+| `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |

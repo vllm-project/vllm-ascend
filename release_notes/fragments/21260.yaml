@@ -1,0 +1,4 @@
+pr: 21260
+entries:
+  - category: feature
+    text: Added the optional `eplb_config.placement_export_path` setting to export the committed expert placement after asynchronous EPLB rearrangement in Model Runner V2.
