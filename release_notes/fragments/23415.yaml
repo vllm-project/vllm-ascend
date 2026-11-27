@@ -1,4 +1,0 @@
-pr: 23415
-entries:
-  - category: performance
-    text: AscendStore reuses whole-block layout metadata to reduce CPU time spent preparing KV cache reads and writes.

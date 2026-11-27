@@ -527,9 +527,9 @@ class ChunkedTokenDatabase:
         if full_block:
             layout = self._full_block_layouts.get(kv_cache_group_id)
             if layout is not None:
-                descriptors, sizes = layout
-                return [base + block_id * stride for base, stride in descriptors], list(sizes), block_id
-        descriptors = []
+                cached_descriptors, sizes = layout
+                return [base + block_id * stride for base, stride in cached_descriptors], list(sizes), block_id
+        descriptors: list[tuple[int, int]] = []
         for index, base_addr in enumerate(group_addrs):
             segment_index, segment_count = segments[index] if segments else (0, 1)
             segment_tokens = group_block_size // segment_count
