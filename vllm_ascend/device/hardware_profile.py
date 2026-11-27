@@ -174,7 +174,8 @@ class HardwareCapability(Enum):
     # communication, returning the SP token shard.
     MM_REDUCE_SCATTER_BF16 = auto()
     # Fuse a W8A8_DYNAMIC INT8 matmul with the TP ReduceScatter over AIV
-    # communication, returning the SP token shard.
+    # communication, returning the SP token shard. A2/A3 only: the A5
+    # kernel rejects NZ INT8 operands.
     MM_REDUCE_SCATTER_INT8 = auto()
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of pytorch fallback.
@@ -543,7 +544,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.MM_REDUCE_SCATTER_BF16,
-                    HardwareCapability.MM_REDUCE_SCATTER_INT8,
                     HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
