@@ -74,6 +74,7 @@ def test_shared_engram_config_schema():
         {"backend": "a3", "endpoints": ["owner:0"]},
         {"backend": "a3", "endpoints": []},
         {"backend": "a3", "endpoints": ["owner:29500"], "endpoint": "other:29500"},
+        {"backend": "a3", "endpoint": ["owner:29500", "other:29500"]},
         {"backend": "a3", "endpoints": ["owner:29500"], "unexpected": True},
     ):
         with pytest.raises(ValueError):

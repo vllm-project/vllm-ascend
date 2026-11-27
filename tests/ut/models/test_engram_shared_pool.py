@@ -857,6 +857,11 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
                 "memfabric": {"store_url": "url", "world_size": 3},
                 "shard": {"index": i, "count": 2},
                 "packing": "byte-v1",
+                "packed": {
+                    "owner_rank": i,
+                    "rank_bytes": 2 * (4 if i == 0 else 8),
+                    "space_bytes": 16,
+                },
                 "tensors": {
                     key: {
                         "total_rows": 11,
@@ -864,11 +869,8 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
                         "rows": rows,
                         "width": 1,
                         "dtype": "int8",
-                        "owner_rank": i,
                         "object_id": 0,
                         "byte_offset": j * (4 if i == 0 else 8),
-                        "rank_bytes": 2 * (4 if i == 0 else 8),
-                        "space_bytes": 16,
                     }
                     for j, key in enumerate(("layer1", "layer2"))
                 },
@@ -895,6 +897,7 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
     monkeypatch.setattr(pool, "MappedHostBuffer", Buffer)
     first = pool.ShardedPoolClient(["0", "1"], "model", device="cpu")
     second = pool.ShardedPoolClient(["0", "1"], "model", device="cpu")
+    assert first.clients[0] is second.clients[0]
     view = first.view("layer1", 3, 10, rows=11, width=1, dtype=torch.int8)
     other = second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
     assert view.row_offset == other.row_offset == 3
@@ -902,14 +905,14 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
     assert other.ptrs.tolist() == [1004, 2008, 2012]
     assert events == ["map"] and runtime._packed_refs == 2
     first.close()
-    assert runtime._packed_refs == 1 and events == ["map", "lease released", "lease released"]
+    assert runtime._packed_refs == 1 and events == ["map"]
     second._packed_mapping.fail = True
     with pytest.raises(RuntimeError, match="mapping still live"):
         second.close()
-    assert runtime._packed_refs == 1 and events[-1] == "unmap" and events.count("lease released") == 2
+    assert runtime._packed_refs == 1 and events[-1] == "unmap" and events.count("lease released") == 0
     second._packed_mapping.fail = False
     second.close()
-    assert runtime._packed_refs == 0 and events.count("lease released") == 4
+    assert runtime._packed_refs == 0 and events.count("lease released") == 2
     with pytest.raises(RuntimeError, match="client is closed"):
         second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
     assert runtime._packed_refs == 0
@@ -977,8 +980,17 @@ def test_sharded_owners_use_common_object_id_and_release_real_leases(pool_module
         for i, owner in enumerate(owners):
             owner.add_packed([("codes", 11, 256, torch.int8)])
             owner.ready()
+            layout, rank_bytes, space_bytes = pool.packed_layout([("codes", 11, 256, torch.int8)], i, 2)
+            assert owner.manifest["tensors"]["codes"] == dict(layout["codes"], object_id=0)
+            assert owner.manifest["packed"] == dict(owner_rank=i, rank_bytes=rank_bytes, space_bytes=space_bytes)
         client = pool.ShardedPoolClient([owner.endpoint for owner in owners], "model", device="npu:0")
         assert [owner.manifest["tensors"]["codes"]["object_id"] for owner in owners] == [0, 0]
+        assert [owner.manifest["packed"]["owner_rank"] for owner in owners] == [0, 1]
+        assert all(
+            "owner_rank" not in meta and "rank_bytes" not in meta and "space_bytes" not in meta
+            for owner in owners
+            for meta in owner.manifest["tensors"].values()
+        )
         with pytest.raises(TimeoutError):
             owners[1].close()
         client.close()

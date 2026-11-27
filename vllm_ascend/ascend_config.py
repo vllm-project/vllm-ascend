@@ -459,8 +459,10 @@ class SharedEngramConfig:
             if "endpoint" in options:
                 if "endpoints" in options:
                     raise ValueError("set only one of shared Engram endpoint or endpoints")
-                legacy = options.pop("endpoint")
-                options["endpoints"] = legacy if isinstance(legacy, list) else [legacy]
+                endpoint = options.pop("endpoint")
+                if not isinstance(endpoint, str):
+                    raise ValueError("legacy shared Engram endpoint must be a single host:port string")
+                options["endpoints"] = [endpoint]
             if options.get("backend") == "a3":
                 # Serialized dataclasses include the other backend's default fields.
                 defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}

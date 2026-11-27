@@ -241,7 +241,8 @@ class RemoteReader:
         self._last_use = None
         self.engine = None
         self.buffer = None
-        metadata = checkpoint_metadata(model)
+        # Sharded readers share one local checkpoint; the first reader samples it.
+        metadata = transport.metadata if transport is not None else checkpoint_metadata(model)
         host, port = endpoint.rsplit(":", 1)
         self.wire = socket.create_connection((host, int(port)), 120)
         _configure_socket(self.wire)
@@ -409,15 +410,18 @@ class RemoteReader:
                     self._last_use.synchronize()
                 assert self.engine is not None
                 self.engine.close()
-                _send(self.wire, dict(op="close", generation=self.generation))
-                if _receive(self.wire) != {"closed": True}:
-                    raise RuntimeError("owner did not retire remote Engram lease")
-                self.wire.close()
-                self.buffer = None
-                self.closed = True
+                self._retire_lease()
             except BaseException:
                 _hold_reader(self)
                 raise
+
+    def _retire_lease(self):
+        _send(self.wire, dict(op="close", generation=self.generation))
+        if _receive(self.wire) != {"closed": True}:
+            raise RuntimeError("owner did not retire remote Engram lease")
+        self.wire.close()
+        self.buffer = None
+        self.closed = True
 
 
 class ShardedRemoteReader:
@@ -447,8 +451,6 @@ class ShardedRemoteReader:
                 self.readers.append(reader)
                 if reader.shard != {"index": index, "count": len(endpoints)}:
                     raise ValueError("remote Engram owner shard layout mismatch")
-                if index and reader.metadata != self.readers[0].metadata:
-                    raise ValueError("remote Engram owners use different checkpoints")
                 if not reader.supports_batch:
                     raise ValueError("sharded Engram requires batch lookup support")
         except BaseException:
@@ -514,9 +516,10 @@ class ShardedRemoteReader:
                             positions_npu = torch.as_tensor(positions, dtype=torch.int64, device=output.device)
                             output.view(-1, output.shape[-1]).index_copy_(0, positions_npu, values)
                         offset += size
-                    reader._last_use = torch.npu.Event()
-                    reader._last_use.record(torch.npu.current_stream())
-                    self._last_use = reader._last_use
+                    # All owners write the same receive buffer; only the wrapper
+                    # tracks completion of the latest overwrite.
+                    self._last_use = torch.npu.Event()
+                    self._last_use.record(torch.npu.current_stream())
                 except BaseException:
                     for active_reader in self.readers:
                         _hold_reader(active_reader)
@@ -565,12 +568,7 @@ class ShardedRemoteReader:
         error = None
         for reader in self.readers:
             try:
-                _send(reader.wire, dict(op="close", generation=reader.generation))
-                if _receive(reader.wire) != {"closed": True}:
-                    raise RuntimeError("owner did not retire remote Engram lease")
-                reader.wire.close()
-                reader.buffer = None
-                reader.closed = True
+                reader._retire_lease()
             except Exception as exc:
                 _hold_reader(reader)
                 error = error or exc

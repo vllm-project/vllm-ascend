@@ -591,16 +591,17 @@ def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypa
         raising=False,
     )
     monkeypatch.setitem(sys.modules, fake_kernel.__name__, fake_kernel)
+    syncs = []
     monkeypatch.setattr(
         torch,
         "npu",
         SimpleNamespace(
-            Event=lambda: SimpleNamespace(record=lambda stream: None, synchronize=lambda: None),
+            Event=lambda: SimpleNamespace(record=lambda stream: None, synchronize=lambda: syncs.append("sync")),
             current_stream=lambda: None,
         ),
         raising=False,
     )
-    readers = []
+    readers, transfers = [], []
     for owner_id in range(3):
         reader = object.__new__(rdma.RemoteReader)
         reader.shard = {"index": owner_id, "count": 3}
@@ -615,9 +616,19 @@ def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypa
         reader._operation_lock = threading.Lock()
         reader.buffer = torch.empty(32, dtype=torch.uint8)
         first, _ = rdma.shard_range(10, owner_id, 3)
-        reader._transfer_rows = lambda request, ids, size, r=reader, start=first: r.buffer[:size].copy_(
-            torch.as_tensor(ids + start + 1, dtype=torch.uint8)
-        )
+
+        def transfer(request, ids, size, *, r=reader, start=first):
+            transfers.append(r)
+            values, offset = [], 0
+            for entry in request["lookups"]:
+                count = entry["count"]
+                chunk = ids[offset : offset + count]
+                offset += count
+                base = 100 if entry["layer"] == "14" else 0
+                values.append(torch.as_tensor(chunk + start + 1 + base, dtype=torch.uint8))
+            r.buffer[:size].copy_(torch.cat(values))
+
+        reader._transfer_rows = transfer
         readers.append(reader)
     sharded = object.__new__(rdma.ShardedRemoteReader)
     sharded.readers, sharded.capacity = readers, 32
@@ -639,8 +650,14 @@ def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypa
     hashes = torch.tensor([[[0, 3], [9, 4]], [[6, 3], [-1, 7]]], dtype=torch.int64)
     outputs = sharded.lookup_layers(tables, hashes, hashes.numpy())
     torch.testing.assert_close(outputs[0][:, :, 0], torch.tensor([[0, 4], [7, 4]], dtype=torch.bfloat16))
-    torch.testing.assert_close(outputs[1][:, :, 0], torch.tensor([[10, 5], [0, 8]], dtype=torch.bfloat16))
+    layer14 = torch.tensor([[10, 5], [0, 8]], dtype=torch.bfloat16)
+    layer14 += torch.where(layer14 != 0, torch.tensor(100, dtype=torch.bfloat16), torch.tensor(0, dtype=torch.bfloat16))
+    torch.testing.assert_close(outputs[1][:, :, 0], layer14)
     assert all(torch.equal(output[:, :, 0], output[:, :, 1]) for output in outputs)
+    # Owners share one receive buffer: wait once before each overwrite, never per owner path.
+    assert 1 < len(transfers) < len(readers)
+    assert len(syncs) == len(transfers) - 1
+    assert all(getattr(reader, "_last_use", None) is None for reader in readers)
 
 
 def test_shard_ranges_cover_uneven_table(rdma):
@@ -657,7 +674,8 @@ def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
     def reader(model, endpoint, *, capacity, library_path, listen_port, local_comm_res, transport):
         index = int(endpoint)
         events.append(("attach", index, transport is not None))
-        return SimpleNamespace(
+
+        fake = SimpleNamespace(
             shard={"index": index, "count": 3},
             metadata=metadata,
             supports_batch=True,
@@ -668,6 +686,15 @@ def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
             closed=False,
             buffer=object(),
         )
+
+        def retire():
+            rdma._send(None, dict(op="close", generation=str(index)))
+            assert rdma._receive(None) == {"closed": True}
+            events.append(("wire-close", index))
+            fake.closed = True
+
+        fake._retire_lease = retire
+        return fake
 
     monkeypatch.setattr(rdma, "RemoteReader", reader)
     monkeypatch.setattr(rdma, "_send", lambda wire, msg: events.append(("retire", msg["generation"])))
@@ -978,6 +1005,14 @@ def test_sharded_reader_blocks_lookup_after_partial_close(rdma, monkeypatch):
         engine: Any
         wire = object()
         generation = "g"
+
+        def _retire_lease(self):
+            rdma._send(self.wire, dict(op="close", generation=self.generation))
+            if rdma._receive(self.wire) != {"closed": True}:
+                raise RuntimeError("owner did not retire remote Engram lease")
+            self.wire.close()
+            self.buffer = None
+            self.closed = True
 
     item = Item()
     item.engine = engine
