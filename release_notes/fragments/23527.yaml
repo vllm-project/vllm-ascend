@@ -1,0 +1,8 @@
+pr: 23527
+entries:
+  - category: bugfix
+    text: >-
+      Fixed missing KV transfer parameters in Mooncake prefill responses when
+      generation ends on EOS or another stop condition in PD disaggregated
+      deployments. These responses now include the final token and KV metadata
+      when remote decoding is enabled.
