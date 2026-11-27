@@ -72,6 +72,10 @@ def _active_guard() -> MagicMock:
     """Guard mock that is not fully off (full sync / sample shells)."""
     guard = MagicMock()
     guard.is_fully_off.return_value = False
+    # Avoid MagicMock auto-truthy rare_chars_enabled() opening the pre-sample wrap.
+    guard.detectors.rare_chars_enabled.return_value = False
+    guard.runtime_config.detector_get.return_value = False
+    guard.action_executor.can_run_detection.return_value = False
     return guard
 
 

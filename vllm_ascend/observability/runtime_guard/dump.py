@@ -255,9 +255,6 @@ def block_ids_for_request(
 
     if input_batch is not None:
         idx = req_idx
-        # Negative / out-of-range markers mean "unknown"; look up by req_id.
-        if idx is not None and int(idx) < 0:
-            idx = None
         if idx is None:
             mapping = getattr(input_batch, "req_id_to_index", None)
             if isinstance(mapping, dict) and req_id in mapping:

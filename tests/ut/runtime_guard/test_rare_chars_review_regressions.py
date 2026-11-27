@@ -327,20 +327,14 @@ def test_compute_top1_has_triton_fail_closed(monkeypatch):
     from pathlib import Path as _Path
 
     # Load the module by path to avoid heavy ops/device_config import chains.
-    path = _Path("vllm_ascend/worker/v2/sample/logprob.py").resolve()
+    path = _Path("vllm_ascend/observability/runtime_guard/detector/rare/narrow_collect.py").resolve()
     # Minimal stubs so the module body can import.
-    monkeypatch.setitem(sys.modules, "vllm.v1.outputs", SimpleNamespace(LogprobsTensors=object))
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm_ascend.ops.triton.triton_utils",
-        SimpleNamespace(get_vectorcore_num=lambda: 1),
-    )
     monkeypatch.setitem(
         sys.modules,
         "vllm.logger",
         SimpleNamespace(logger=SimpleNamespace(warning=lambda *a, **k: None)),
     )
-    name = "ut_rare_logprob_isolated"
+    name = "ut_rare_narrow_collect_isolated"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     lp = importlib.util.module_from_spec(spec)

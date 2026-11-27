@@ -31,6 +31,9 @@ have ``runtime_guard`` from ``RuntimeGuardProcessor.bind``.
 Decorator placement: guard step decorators must sit INSIDE
 ``@torch.inference_mode()`` so wave sync stays in that context. The worker
 idle decorator has no inference-mode wrapper — ``_dummy_run`` owns it.
+
+rare_chars-specific stash / batch-sharded wrap / async feed helpers live in
+:mod:`hooks_rare` and are re-exported here for a stable import surface.
 """
 
 from __future__ import annotations
@@ -41,20 +44,47 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
-import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.observability.runtime_guard.hooks_rare import (
+    _rare_chars_active,
+    feed_rare_batch_safe,
+    maybe_feed_rare_sync_output,
+    rare_chars_active,
+    stash_pre_sample_logits,
+    take_pre_sample_logits,
+    take_rare_batch_for_async,
+    wrap_compute_logits_for_pre_sample,
+)
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 
 logger = init_logger_ascend(__name__)
 
 # Stashed by ``runtime_guard_step`` for the same-wave sample phase.
 _SCHEDULER_OUTPUT_ATTR = "_pending_scheduler_output"
+
+__all__ = [
+    "AscendAsyncOutput",
+    "check_before_sample_from_batch",
+    "get_postprocess_sampled",
+    "is_async_output_rank",
+    "maybe_wrap_v2_async_output",
+    "need_pre_sample_hook",
+    "note_postprocess_sampled",
+    "rare_chars_active",
+    "runtime_guard_idle_step",
+    "runtime_guard_sample_tokens",
+    "runtime_guard_step",
+    "stash_pre_sample_logits",
+    "take_pre_sample_logits",
+    "wrap_compute_logits_for_pre_sample",
+    "wrap_postprocess_sampled",
+    "_rare_chars_active",
+]
 
 
 def runtime_guard_step(execute_model_fn):
@@ -184,14 +214,7 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         output = result.model_runner_output
         if guard.needs_sample_phase_hooks():
             output = maybe_wrap_v2_async_output(output, self)
-            # Non-AsyncOutput path: feed this step's rare batch immediately.
-            # Async path attaches the batch onto AscendAsyncOutput instead.
-            take = getattr(guard, "take_step_rare_batch", None)
-            feed = getattr(guard, "feed_rare_logprobs", None)
-            if callable(take) and callable(feed) and not isinstance(output, AscendAsyncOutput):
-                batch = take()
-                if batch is not None:
-                    feed(output, batch=batch)
+            maybe_feed_rare_sync_output(guard, output)
         return output
 
     return wrapper
@@ -218,48 +241,10 @@ def get_postprocess_sampled(runner: Any) -> tuple[Any, Any]:
     )
 
 
-# Stashed pre-sample logits for Guard-side rare_chars (top1, chosen) collect.
-# Detection-only: never attached to the OpenAI / SamplingParams.logprobs path.
-_PRE_SAMPLE_LOGITS_ATTR = "_rg_pre_sample_logits"
-
-
-def stash_pre_sample_logits(runner: Any, logits: Any) -> None:
-    """Snapshot this step's logits for ``rare_chars`` (cleared after use).
-
-    Clone tensors so a later in-place grammar bitmask cannot zero out the
-    (top1, chosen) signal before collect runs.
-    """
-    if isinstance(logits, torch.Tensor):
-        logits = logits.detach().clone()
-    setattr(runner, _PRE_SAMPLE_LOGITS_ATTR, logits)
-
-
-def take_pre_sample_logits(runner: Any) -> Any:
-    """Pop stashed pre-sample logits (or ``None``)."""
-    logits = getattr(runner, _PRE_SAMPLE_LOGITS_ATTR, None)
-    if hasattr(runner, _PRE_SAMPLE_LOGITS_ATTR):
-        try:
-            delattr(runner, _PRE_SAMPLE_LOGITS_ATTR)
-        except Exception:
-            setattr(runner, _PRE_SAMPLE_LOGITS_ATTR, None)
-    return logits
-
-
-def _rare_chars_active(guard: Any) -> bool:
-    """Config enable and not latched off after warmup/native failure."""
-    detectors = getattr(guard, "detectors", None)
-    if detectors is not None and hasattr(detectors, "rare_chars_enabled"):
-        return bool(detectors.rare_chars_enabled())
-    cfg = getattr(guard, "runtime_config", None)
-    if cfg is None:
-        return False
-    return bool(cfg.detector_get("rare_chars", "enabled", False))
-
-
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""
     cfg = guard.runtime_config
-    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or _rare_chars_active(guard)
+    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or rare_chars_active(guard)
     if not need_logits:
         return False
     return bool(guard.action_executor.is_action_leader())
@@ -276,7 +261,7 @@ def check_before_sample_from_batch(
     can be computed after sample without ``SamplingParams.logprobs``.
     """
     cfg = guard.runtime_config
-    if _rare_chars_active(guard):
+    if rare_chars_active(guard):
         stash_pre_sample_logits(guard.runner, logits)
     logits_indices = getattr(input_batch, "logits_indices", None)
     if logits_indices is None:
@@ -307,79 +292,6 @@ def _safe_check_after_sample(runner: Any, output: Any) -> None:
         )
     except Exception:
         logger.exception("[runtime_guard soft-fail] async check_after_sample raised")
-
-
-def _trim_vocab_logits(runner: Any, logits: Any) -> Any:
-    """Match ``GPUModelRunner.sample`` truncating all-to-all width to ``vocab_size``."""
-    if not isinstance(logits, torch.Tensor):
-        return logits
-    vocab = getattr(runner, "vocab_size", None)
-    if vocab is None or logits.size(-1) <= int(vocab):
-        return logits
-    return logits[:, : int(vocab)]
-
-
-@contextmanager
-def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterator[None]:
-    """Run ``check_before_sample`` once on full pre-grammar logits.
-
-    Covers both sample paths:
-    - Normal: wrap ``model.compute_logits`` (parent has no mid-hook before grammar).
-    - Batch-sharded: patch ``all_to_all_vocab_shards`` (or legacy
-      ``all_to_all_logits``) in ``GPUModelRunner.sample``'s globals so we see
-      request-mapped full-vocab logits (wrapping ``compute_logits_local`` alone
-      would stash a vocab shard).
-
-    Fires once per context (v2 may call ``compute_logits`` twice per step).
-    Restored in ``finally``.
-    """
-    model = runner.model
-    # Prefer deleting the instance override so the class method is restored.
-    had_instance_attr = "compute_logits" in getattr(model, "__dict__", {})
-    orig = model.compute_logits
-    guard = runner.runtime_guard
-    fired = False
-
-    # Patch the name ``GPUModelRunner.sample`` closes over (import-bound global).
-    # Pinned vLLM uses ``all_to_all_vocab_shards``; older trees used ``all_to_all_logits``.
-    sample_globals = getattr(GPUModelRunner.sample, "__globals__", None)
-    all_to_all_names = ("all_to_all_vocab_shards", "all_to_all_logits")
-    patch_targets: list[tuple[str, Any]] = []
-    if isinstance(sample_globals, dict):
-        for name in all_to_all_names:
-            if name in sample_globals and callable(sample_globals[name]):
-                patch_targets.append((name, sample_globals[name]))
-
-    def _fire(logits: Any) -> None:
-        nonlocal fired
-        if fired:
-            return
-        fired = True
-        batch = input_batch if input_batch is not None else getattr(runner, "input_batch", None)
-        check_before_sample_from_batch(guard, _trim_vocab_logits(runner, logits), batch)
-
-    def wrapped(hidden_states, *args, **kwargs):
-        logits = orig(hidden_states, *args, **kwargs)
-        _fire(logits)
-        return logits
-
-    def _make_wrapped_all_to_all(orig_fn: Any):
-        def wrapped_all_to_all(*args: Any, **kwargs: Any):
-            logits = orig_fn(*args, **kwargs)
-            _fire(logits)
-            return logits
-
-        return wrapped_all_to_all
-
-    model.compute_logits = wrapped
-    for name, orig_fn in patch_targets:
-        sample_globals[name] = _make_wrapped_all_to_all(orig_fn)
-    try:
-        yield
-    finally:
-        for name, orig_fn in patch_targets:
-            sample_globals[name] = orig_fn
-        _restore_bound_override(model, "compute_logits", orig, had_instance_attr=had_instance_attr)
 
 
 @contextmanager
@@ -431,11 +343,7 @@ def maybe_wrap_v2_async_output(output: Any, runner: Any) -> Any:
         return output
     if not is_async_output_rank():
         return output
-    rare_batch = None
-    guard = getattr(runner, "runtime_guard", None)
-    take = getattr(guard, "take_step_rare_batch", None) if guard is not None else None
-    if callable(take):
-        rare_batch = take()
+    rare_batch = take_rare_batch_for_async(runner)
     return AscendAsyncOutput(output, runner, rare_batch=rare_batch)
 
 
@@ -456,14 +364,10 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         output = self._inner.get_output()
-        guard = getattr(self._runner, "runtime_guard", None)
-        if guard is not None:
-            batch = self._rare_batch
-            self._rare_batch = None
-            try:
-                guard.feed_rare_logprobs(output, batch=batch)
-            except Exception:
-                logger.exception("[runtime_guard soft-fail] async feed_rare_logprobs raised")
+        batch = self._rare_batch
+        self._rare_batch = None
+        if batch is not None:
+            feed_rare_batch_safe(self._runner, output, batch)
         _safe_check_after_sample(self._runner, output)
         return output
 
