@@ -251,14 +251,14 @@ def test_paired_indexer_and_mamba_writes_stay_in_their_pages(vllm_config, scale_
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v32", "glm_moe_dsa"])
-@pytest.mark.parametrize("num_heads", [2, 64])
-def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, model_type, num_heads):
+@pytest.mark.parametrize("num_query_heads", [2, 64])
+def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, model_type, num_query_heads):
     """K3.1 paired dispatch must not consume generic SFA descriptor strides."""
     vllm_config.model_config.hf_config.model_type = model_type
     vllm_config.model_config.hf_text_config.model_type = model_type
     main_spec = AscendMLAAttentionSpec(
         block_size=BLOCK_SIZE,
-        num_heads=num_heads,
+        num_query_heads=num_query_heads,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -278,6 +278,8 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
         # The generic planner derives descriptors from the logical head shape.
         # Ascend's query-head field must not change its one-latent-head storage.
         layer_stride, block_stride, *_ = compute_layout_strides(spec, NUM_BLOCKS, len(names), KVCacheLayout.LBNHC)
+        assert block_stride == spec.page_size_bytes
+        assert layer_stride == NUM_BLOCKS * block_stride
         descriptors.append(
             KVCacheTensor(
                 size=backing_size,
@@ -288,7 +290,7 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
             )
         )
         offset += len(names) * layer_stride
-    assert descriptors[1].offset + descriptors[1].layer_stride >= backing_size
+    assert offset == backing_size
     plan = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=descriptors,
