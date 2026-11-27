@@ -9,7 +9,8 @@ Callers own stream ordering and persistent KV writes. Tensor-content checks belo
 in preflight tests: the decode hot path must not copy lengths or tables to the CPU.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from math import ceil
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -39,6 +40,7 @@ FLASHMLA_NUM_KV_HEADS = 1
 FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_NON_CAUSAL_MASK_MODE = 0
 FLASHMLA_CAUSAL_MASK_MODE = 3
+FLASHMLA_BAND_MASK_MODE = 4
 FLASHMLA_KV_LAYOUT = "PA_BBND"
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
@@ -141,8 +143,11 @@ def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     return first_prefill, request_count - first_prefill, decode_tokens, common.num_actual_tokens - decode_tokens
 
 
-def _check_mask_and_kv_layout(mask_mode: int, layout_kv: str) -> None:
-    if mask_mode not in (FLASHMLA_NON_CAUSAL_MASK_MODE, FLASHMLA_CAUSAL_MASK_MODE):
+def _check_mask_and_kv_layout(mask_mode: int, layout_kv: str, sliding_window: int | None = None) -> None:
+    if sliding_window is not None:
+        if mask_mode != FLASHMLA_BAND_MASK_MODE or not 1 <= sliding_window <= 2**31:
+            raise ValueError("FlashMLA sliding_window requires BAND mask_mode=4 and an int32 left bound")
+    elif mask_mode not in (FLASHMLA_NON_CAUSAL_MASK_MODE, FLASHMLA_CAUSAL_MASK_MODE):
         raise ValueError("FlashMLA mask_mode must be 0 or 3")
     if layout_kv != FLASHMLA_KV_LAYOUT:
         raise ValueError(f"FlashMLA layout_kv must be {FLASHMLA_KV_LAYOUT}")
@@ -155,11 +160,18 @@ class FlashMLAConfig:
     mask_mode: int = FLASHMLA_CAUSAL_MASK_MODE
     layout_kv: str = FLASHMLA_KV_LAYOUT
     return_softmax_lse: bool = False
+    sliding_window: int | None = None
 
     def __post_init__(self) -> None:
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
             raise ValueError(f"FlashMLA requires local Q heads in {MLA_FLASH_SUPPORTED_Q_HEADS}, got {self.num_heads}")
-        _check_mask_and_kv_layout(self.mask_mode, self.layout_kv)
+        _check_mask_and_kv_layout(self.mask_mode, self.layout_kv, self.sliding_window)
+
+    def window_kwargs(self) -> dict[str, int]:
+        # Omitting the attributes preserves the ABI of pre-BAND CANN wheels.
+        if self.sliding_window is None:
+            return {}
+        return {"win_left": self.sliding_window - 1, "win_right": 0}
 
 
 @dataclass(frozen=True)
@@ -238,9 +250,9 @@ def _check_attention_inputs(
         raise ValueError("FlashMLA metadata must be a nonempty int32 tensor from the metadata operator")
     if config.mask_mode == FLASHMLA_NON_CAUSAL_MASK_MODE and attn_mask is not None:
         raise ValueError("FlashMLA mask_mode=0 requires attn_mask=None")
-    if config.mask_mode == FLASHMLA_CAUSAL_MASK_MODE:
+    if config.mask_mode in (FLASHMLA_CAUSAL_MASK_MODE, FLASHMLA_BAND_MASK_MODE):
         if attn_mask is None:
-            raise ValueError("FlashMLA mask_mode=3 requires the upper-triangular int8 mask")
+            raise ValueError(f"FlashMLA mask_mode={config.mask_mode} requires the upper-triangular int8 mask")
         _check_tensor("attn_mask", attn_mask, (FLASHMLA_MASK_SIZE, FLASHMLA_MASK_SIZE), torch.int8)
     for tensor in (k_cache, block_table, cache_seqlens, metadata, attn_mask):
         if tensor is not None and tensor.device != q.device:
@@ -297,6 +309,7 @@ class FlashMLAImpl:
             head_dim_v=FLASHMLA_V_DIM,
             mask_mode=self.config.mask_mode,
             layout_q="TND",
+            **self.config.window_kwargs(),
         )
 
     def attention(
@@ -341,6 +354,7 @@ class FlashMLAImpl:
             layout_kv=self.config.layout_kv,
             layout_out="NTD",
             return_softmax_lse=self.config.return_softmax_lse,
+            **self.config.window_kwargs(),
         )
         if self.config.return_softmax_lse:
             # TND queries return NTD latent output and NT FP32 statistics.
@@ -509,19 +523,37 @@ class FlashMLAMetadataBuilder:
         if adapter is None:
             adapter = getattr(impl, "a3_mla_adapter", None)
         if adapter is None:
+            window = getattr(impl, "sliding_window", None)
             adapter = FlashMLAImpl.load(
-                FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1)
+                FlashMLAConfig(
+                    impl.num_heads,
+                    impl.scale,
+                    mask_mode=FLASHMLA_BAND_MASK_MODE if window is not None else FLASHMLA_CAUSAL_MASK_MODE,
+                    return_softmax_lse=self.dcp_size > 1,
+                    sliding_window=window,
+                )
             )
+        self._query_position_limit: tuple[torch.Tensor, int] | None = None
         self.current_adapter = adapter
-        # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
-        # when DSpark exposes a PCP=1 config for its global query batch.
-        pcp_size = impl.pcp_group.world_size if self.dcp_size > 1 else 1
-        query_gather_size = max(1, self.dcp_size // pcp_size)
-        history_adapter = replace(
-            adapter,
-            config=replace(adapter.config, num_heads=impl.num_heads * query_gather_size, mask_mode=0),
+        self.adapters = {True: adapter}
+        self._split_window_queries = (
+            isinstance(adapter, A3MLAAdapter) and adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE
         )
-        self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
+        if adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE:
+            if self.dcp_size > 1:
+                raise ValueError("FlashMLA BAND requires the full unsharded KV sequence")
+        else:
+            # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
+            # when DSpark exposes a PCP=1 config for its global query batch.
+            pcp_size = impl.pcp_group.world_size if self.dcp_size > 1 else 1
+            query_gather_size = max(1, self.dcp_size // pcp_size)
+            history_adapter = replace(
+                adapter,
+                config=replace(adapter.config, num_heads=impl.num_heads * query_gather_size, mask_mode=0),
+            )
+            self.adapters[False] = history_adapter
+            if self.dcp_size > 1:
+                self.adapters[True] = history_adapter
         self.device = device
         self.dtype = impl.dtype
         self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
@@ -537,6 +569,16 @@ class FlashMLAMetadataBuilder:
             raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+
+    @contextmanager
+    def limit_query_positions(self, first_positions: torch.Tensor, max_model_len: int) -> Iterator[None]:
+        """Limit this build to query positions strictly below the model length."""
+        previous = self._query_position_limit
+        self._query_position_limit = (first_positions, max_model_len)
+        try:
+            yield
+        finally:
+            self._query_position_limit = previous
 
     def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
@@ -576,6 +618,8 @@ class FlashMLAMetadataBuilder:
         cu = torch.zeros(rows + 1, **ints)
         used = torch.zeros(rows, **ints)
         lengths = torch.zeros(rows, **ints)
+        if causal not in self.adapters:
+            raise ValueError("FlashMLA sliding-window drafts require causal attention")
         adapter, schedule = self._allocate_schedule(self.adapters[causal], tokens, columns, lengths, cu, used)
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         split_current = self.dcp_size > 1 and causal and self.use_spec_decode
@@ -595,7 +639,7 @@ class FlashMLAMetadataBuilder:
             positions=torch.zeros(tokens, dtype=torch.int64, device=self.device),
             token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device) if use_boundaries else None,
             live_boundaries=torch.zeros(tokens + 1, **ints) if use_boundaries else None,
-            attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
+            attn_mask=self.attn_mask if adapter.config.mask_mode != FLASHMLA_NON_CAUSAL_MASK_MODE else None,
             cos=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
             sin=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
             output_mask=torch.empty(tokens, dtype=torch.bool, device=self.device) if a3 else None,
@@ -653,6 +697,10 @@ class FlashMLAMetadataBuilder:
         padding_rows = ceil(padding_tokens / max_query_len) if max_query_len is not None else 0
         if max_query_len is not None and num_decodes + padding_rows > FLASHMLA_MAX_BATCH_SIZE:
             raise ValueError("QuantFlashMLA decode and padding rows exceed the metadata batch limit")
+        # The A3 ABI takes packed Q boundaries. Reserve a zero-KV segment after
+        # each real request for its clipped suffix, keeping query token offsets stable.
+        stride = 2 if self._split_window_queries else 1
+        rows = (rows - 1) * stride + 1
         columns = common.block_table_tensor.shape[1]
         key = tokens, rows, columns, common.causal
         if has_prefill and retain_for_graph:
@@ -668,7 +716,9 @@ class FlashMLAMetadataBuilder:
 
         def refresh():
             flash.cu.fill_(tokens)
-            flash.cu[: num_decodes + 1].copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
+            real_rows = slice(0, num_decodes * stride, stride)
+            query_starts = flash.cu[::stride][: num_decodes + 1]
+            query_starts.copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
             if padding_rows > 1:
                 # QuantFlashMLA can inspect padded spans even when their used Q is zero.
                 width = ceil(padding_tokens / padding_rows)
@@ -679,8 +729,15 @@ class FlashMLAMetadataBuilder:
                     out=flash.cu[num_decodes + 1 : num_decodes + padding_rows],
                 )
             flash.used_q.zero_()
-            flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
-            flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+            used_q = query_starts[1:] - query_starts[:-1]
+            if flash.adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE and self._query_position_limit is not None:
+                first_positions, limit = self._query_position_limit
+                available = (limit - first_positions[:num_decodes]).clamp_min_(0)
+                used_q = torch.minimum(used_q, available)
+            flash.used_q[real_rows].copy_(used_q)
+            flash.used_q[real_rows].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+            if self._split_window_queries:
+                flash.cu[1 : num_decodes * stride : stride].copy_(query_starts[:-1] + flash.used_q[real_rows])
             flash.cache_lens.zero_()
             lengths = common.seq_lens[:num_decodes]
             if flash.current is not None:
@@ -694,10 +751,10 @@ class FlashMLAMetadataBuilder:
                     dcp_rank=self.dcp_rank_tensor,
                     cp_kv_cache_interleave_size=self.cp_interleave,
                 )
-            flash.cache_lens[:num_decodes].copy_(lengths)
+            flash.cache_lens[real_rows].copy_(lengths)
             flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
             flash.block_table.zero_()
-            flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
+            flash.block_table[real_rows].copy_(common.block_table_tensor[:num_decodes])
             flash.slots.fill_(-1)
             slots = common.slot_mapping[:num_decode_tokens]
             flash.slots[: slots.numel()].copy_(slots)

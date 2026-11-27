@@ -211,6 +211,7 @@ def runtime(monkeypatch):
         query_capacity=None,
         max_requests=8,
         pcp_size=1,
+        sliding_window=None,
         a3_adapter=None,
     ):
         impl = SimpleNamespace(
@@ -220,6 +221,7 @@ def runtime(monkeypatch):
             dtype=dtype,
             use_mla_rope=use_rope,
             use_quant_flashmla=quantized,
+            sliding_window=sliding_window,
             dcp_size=size,
             dcp_rank=rank,
             pcp_group=SimpleNamespace(world_size=pcp_size),
@@ -1052,6 +1054,33 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
+    builder = runtime.builder(size=1, heads=12, dtype=torch.bfloat16, sliding_window=1024)
+    inputs = common([1028], [8])
+    inputs.slot_mapping = torch.arange(1020, 1028)
+    flash = builder.build(inputs, 1, 8, False, retain_for_graph=True)
+    original_addresses = addresses(flash)
+    assert flash.used_q[0] == 8
+
+    # Same captured rows, but only four queries now belong to the draft.
+    with builder.limit_query_positions(torch.tensor([1024]), 1028):
+        replay = builder.build(inputs, 1, 8, False)
+    assert replay is flash and addresses(replay) == original_addresses
+    assert replay.cu[:2].tolist() == [0, 8]
+    assert replay.used_q[0] == 4 and replay.cache_lens[0] == 1028
+    assert replay.slots.tolist() == [1020, 1021, 1022, 1023, -1, -1, -1, -1]
+    assert replay.attn_mask is builder.attn_mask
+    metadata_kwargs = runtime.metadata_op.call_args.kwargs
+    assert (metadata_kwargs["mask_mode"], metadata_kwargs["win_left"], metadata_kwargs["win_right"]) == (4, 1023, 0)
+
+    # A fully clipped request keeps its physical rows; the next ordinary build recovers all eight.
+    with builder.limit_query_positions(torch.tensor([1029]), 1028):
+        empty = builder.build(inputs, 1, 8, False)
+        assert empty.cu[:2].tolist() == [0, 8] and not empty.used_q.any()
+        assert not empty.cache_lens.any() and (empty.slots == -1).all()
+    assert builder.build(inputs, 1, 8, False).used_q[0] == 8
 
 
 @pytest.mark.parametrize("causal", [False, True])

@@ -327,6 +327,7 @@ def test_decode_attention_opens_gate_for_next_layer_prefetch(speculative):
         num_kv_heads=1,
         head_padding=0,
         scale=1.0,
+        sliding_window=None,
         speculative_config=object() if speculative else None,
         _v_up_proj=lambda value: value,
     )
