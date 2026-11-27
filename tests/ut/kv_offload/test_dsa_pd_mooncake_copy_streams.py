@@ -8,7 +8,7 @@ import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging
 
-from .test_dsa_pd_mooncake_bank_workers import BANKS, HOST_STRIDE, PIECE_BYTES, build
+from .test_dsa_pd_mooncake_bank_workers import BANKS, HOST_STRIDE, PIECE_BYTES, WINDOW, build
 
 
 def assert_bytes(case):
@@ -22,17 +22,21 @@ def assert_bytes(case):
         assert torch.count_nonzero(case.host[start + 16 + PIECE_BYTES : start + HOST_STRIDE]) == 0
 
 
+@pytest.mark.parametrize("workers", [0, 1, 2, 4])
 @pytest.mark.parametrize("metadata", [False, True])
-def test_single_stream_per_bank_preserves_bytes_events_and_repeated_receives(monkeypatch, metadata):
-    case = build(monkeypatch, metadata=metadata)
+def test_single_stream_per_bank_preserves_bytes_events_and_repeated_receives(monkeypatch, metadata, workers):
+    case = build(monkeypatch, workers=workers, metadata=metadata)
+    storage = case.reader._dsa_pd_mooncake_staging_tensor
     contexts = None
     events = None
-    for value in (1, 2):
+    payloads = range(1, 7)
+    for value in payloads:
         case.source.fill_(value)
         case.host.zero_()
         assert case.reader.batch_transfer_sync_read(*case.args, **case.kwargs) == 0
         assert_bytes(case)
         case.runtime.assert_drained()
+        assert case.reader._dsa_pd_mooncake_staging_tensor is storage
         banks = case.reader._dsa_pd_mooncake_staging_banks
         if contexts is not None:
             assert banks is contexts
@@ -43,8 +47,11 @@ def test_single_stream_per_bank_preserves_bytes_events_and_repeated_receives(mon
             submissions = [row for row in case.runtime.copy_submissions if row[0] == index]
             assert {row[1] for row in submissions} == {index}
             assert len({thread for bank_id, thread in case.runtime.batch_threads if bank_id == index}) == 1
+        assert len(case.runtime.threads) == workers
+        case.runtime.threads.clear()
         case.runtime.batch_threads.clear()
-    assert len(case.runtime.reads) == 20
+    batches_per_receive = (case.count + WINDOW // BANKS - 1) // (WINDOW // BANKS)
+    assert len(case.runtime.reads) == len(payloads) * batches_per_receive
     assert len(case.runtime.events) == BANKS
     assert len(case.runtime.queues) == BANKS
 

@@ -383,22 +383,6 @@ def test_failure_waits_for_other_bank_and_drains_before_unlock(monkeypatch, fail
     case.runtime.assert_drained()
 
 
-@pytest.mark.parametrize("workers", [1, 2, 4])
-def test_repeated_requests_reuse_banks_with_fresh_payloads(monkeypatch, workers):
-    case = build(monkeypatch, workers)
-    contexts = None
-    for value in range(1, 7):
-        case.source.fill_(value)
-        case.host.zero_()
-        assert case.reader.batch_transfer_sync_read(*case.args, **case.kwargs) == 0
-        if contexts is None:
-            contexts = case.reader._dsa_pd_mooncake_staging_banks
-        assert case.reader._dsa_pd_mooncake_staging_banks is contexts
-        for index in range(case.count):
-            assert torch.all(case.host[index * HOST_STRIDE + 16 : index * HOST_STRIDE + 16 + PIECE_BYTES] == value)
-        case.runtime.assert_drained()
-
-
 @pytest.mark.parametrize("failure", ["negative", "read_exception", "copy_exception", "event_record"])
 def test_single_worker_failure_cancels_queued_bank_tasks(monkeypatch, failure):
     case = build(monkeypatch, 1)
