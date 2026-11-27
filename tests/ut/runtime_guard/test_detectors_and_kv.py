@@ -452,9 +452,38 @@ def test_scalar_blocks_per_kv_block_expands_not_silent_r1():
         req_states=None,
         kv_cache_config=None,
     )
-    assert _blocks_per_kv_block_for_group(runner, 0) == 2
-    assert _blocks_per_kv_block_for_group(runner, 1) == 2
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
+    assert _blocks_per_kv_block_for_group(runner, 1) == (2, False)
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+
+def test_numpy_scalar_blocks_per_kv_block_shared_across_groups():
+    """Nit #4: numpy scalar uses the same 'shared R' contract as Python int."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import _blocks_per_kv_block_for_group
+
+    runner = SimpleNamespace(
+        block_tables=SimpleNamespace(blocks_per_kv_block=np.int64(2)),
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
+    assert _blocks_per_kv_block_for_group(runner, 1) == (2, False)
+
+
+def test_blocks_per_kv_index_error_warns_and_marks_unknown(monkeypatch):
+    """Nit #4 / Minor #1: short per-group sequence must not silent-R=1."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import _blocks_per_kv_block_for_group
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+    runner = SimpleNamespace(
+        block_tables=SimpleNamespace(blocks_per_kv_block=[2]),  # only group 0
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 1) == (1, True)
+    assert calls and any("index out of range" in str(a) for a in calls[0])
 
 
 def test_derive_ratio_uses_storage_block_size_not_logical():
@@ -478,7 +507,7 @@ def test_derive_ratio_uses_storage_block_size_not_logical():
         execute_model_state=None,
         req_states=None,
     )
-    assert _blocks_per_kv_block_for_group(runner, 0) == 2
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
 
     # Manager-granularity public tables must expand too when attr is absent.
@@ -497,6 +526,50 @@ def test_derive_ratio_uses_storage_block_size_not_logical():
         req_states=SimpleNamespace(req_id_to_index={"r1": 0}),
     )
     assert block_ids_for_request(runner_bt, "r1", kv_cache_group=0) == [10, 11, 12, 13]
+
+
+def test_underivable_compressed_ratio_warns_and_payload_marks_unknown(tmp_path: Path, monkeypatch):
+    """Minor #1: compressed spec without kernel size → warn + expansion=unknown."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import (
+        KvCacheReader,
+        _blocks_per_kv_block_for_group,
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+
+    # storage != block_size ⇒ compressed; no kernel_block_sizes ⇒ underivable
+    spec = SimpleNamespace(block_size=128, storage_block_size=64)
+    cache = torch.arange(0, 4 * 8, dtype=torch.float32).reshape(4, 8)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(),
+        kernel_block_sizes=None,
+        attn_groups=None,
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"], kv_cache_spec=spec)],
+        ),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        tp_rank=0,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (1, True)
+    assert calls and "underivable" in calls[0][0]
+
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert len(snaps) == 1
+    assert snaps[0].payload.get("expansion") == "unknown"
 
 
 def test_kv_source_logs_coverage_when_counts_differ(monkeypatch):

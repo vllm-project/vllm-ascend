@@ -232,10 +232,11 @@ def block_ids_for_request(
 ) -> list[int]:
     """Return kernel-page block ids for ``req_id`` (group 0 by default).
 
-    Id space contract (Ascend / Runtime Guard is MRV2-only):
+    Id space contract (Ascend / Runtime Guard dump is MRV2-oriented):
 
-    - ``requests[].block_ids`` are scheduler/manager ids and are expanded by
-      ``blocks_per_kv_block`` before return.
+    - ``requests[].block_ids`` (mainly ``_310p``; absent on pinned main MRV2)
+      are scheduler/manager ids and are expanded by ``blocks_per_kv_block``
+      before return.
     - ``runner.block_tables``: kernel ids when the table exposes
       ``blocks_per_kv_block`` (_310p); otherwise manager ids expanded here
       (current main keeps public tables at manager granularity).
@@ -261,7 +262,7 @@ def block_ids_for_request(
                 # kernel-paged caches use dim0 = manager_id * R + k; expand here.
                 # ``runner.block_tables`` path expands only when tables are
                 # still manager-granularity (no ``blocks_per_kv_block`` attr).
-                ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
+                ratio, _unknown = _blocks_per_kv_block_for_group(runner, kv_cache_group)
                 return expand_manager_block_ids(parsed, ratio)
 
     if input_batch is None:
@@ -367,7 +368,7 @@ def _block_ids_from_v2_block_tables(
     # Attribute present ⇒ table already kernel-expanded (_310p / older paths).
     if getattr(block_tables, "blocks_per_kv_block", None) is not None:
         return ids
-    ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
+    ratio, _unknown = _blocks_per_kv_block_for_group(runner, kv_cache_group)
     return expand_manager_block_ids(ids, ratio)
 
 
@@ -465,29 +466,44 @@ def _group_for_layer(layer_name: str, layer_to_group: dict[str, int]) -> int | N
     return int(layer_to_group[logical])
 
 
-def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> int:
+def _warn_underivable_blocks_per_kv(kv_cache_group: int, *, reason: str) -> None:
+    logger.warning_once(
+        "[runtime_guard dump_kv] group=%s blocks_per_kv_block underivable (%s); "
+        "falling back to R=1 — dump pages may be wrong for compressed/C8 layouts",
+        kv_cache_group,
+        reason,
+    )
+
+
+def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, bool]:
     """Match KV tensor dim0 bind: ``get_storage_block_size(spec) // kernel``.
 
     Public ``AscendBlockTables`` on main no longer carries
     ``blocks_per_kv_block``; dump tensors are allocated with the *storage*
     ratio in ``attn_utils``, which differs from logical
     ``block_size // kernel_block_size`` for compressed MLA / C8 groups.
+
+    Returns ``(ratio, expansion_unknown)``. ``expansion_unknown`` is True when
+    we fall back to ``R=1`` despite evidence that expansion may be required
+    (silent R=1 would reintroduce wrong-page dumps).
     """
     try:
         from vllm_ascend.core.kv_cache_interface import get_storage_block_size
     except Exception:
-        return 1
+        return 1, False
     cfg = getattr(runner, "kv_cache_config", None)
     groups = getattr(cfg, "kv_cache_groups", None) if cfg is not None else None
     if not groups or kv_cache_group < 0 or kv_cache_group >= len(groups):
-        return 1
+        return 1, False
     spec = getattr(groups[kv_cache_group], "kv_cache_spec", None)
     if spec is None:
-        return 1
+        _warn_underivable_blocks_per_kv(kv_cache_group, reason="missing kv_cache_spec")
+        return 1, True
     try:
         storage = int(get_storage_block_size(spec))
     except Exception:
-        return 1
+        _warn_underivable_blocks_per_kv(kv_cache_group, reason="get_storage_block_size failed")
+        return 1, True
     kbs: int | None = None
     sizes = getattr(runner, "kernel_block_sizes", None)
     if sizes is not None:
@@ -509,39 +525,79 @@ def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> int:
                 break
             if kbs:
                 break
-    if not kbs or kbs <= 0 or storage <= 0 or storage % kbs:
-        return 1
-    return max(1, storage // kbs)
+    if not kbs or kbs <= 0:
+        # Compressed specs often have storage != logical block_size; missing
+        # kernel size then makes R underivable.
+        block_size = int(getattr(spec, "block_size", 0) or 0)
+        if storage > 0 and block_size > 0 and storage != block_size:
+            _warn_underivable_blocks_per_kv(
+                kv_cache_group,
+                reason="missing kernel_block_size for compressed spec",
+            )
+            return 1, True
+        return 1, False
+    if storage <= 0 or storage % kbs:
+        _warn_underivable_blocks_per_kv(
+            kv_cache_group,
+            reason=f"storage={storage} not divisible by kernel={kbs}",
+        )
+        return 1, True
+    return max(1, storage // kbs), False
 
 
-def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
-    """Kernel pages per manager block for ``kv_cache_group`` (default 1).
+def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> tuple[int, bool]:
+    """Kernel pages per manager block for ``kv_cache_group``.
+
+    Returns ``(ratio, expansion_unknown)``.
 
     Prefer ``runner.block_tables.blocks_per_kv_block`` when present (_310p /
-    tests): per-group sequence or a scalar shared by all groups. A scalar
-    must not be treated as ``R=1`` via a failed subscript (wrong expansion).
+    tests):
+
+    - **Scalar** (Python ``int``/``float`` or numpy/tensor scalar): one R
+      **shared by all groups**.
+    - **Sequence**: per-group ``ratios[kv_cache_group]``.
+    - A scalar must not be treated as ``R=1`` via a failed subscript.
 
     When the attribute is missing (current main ``AscendBlockTables``), derive
     R from storage block size so dump indexing matches tensor dim0 for
-    compressed / C8 groups.
+    compressed / C8 groups. Underivable paths warn once and set
+    ``expansion_unknown``.
     """
     block_tables = getattr(runner, "block_tables", None)
     ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
     if ratios is None:
         return _derive_blocks_per_kv_block(runner, kv_cache_group)
-    # Scalar ratio shared by all groups (int/float; not bool).
+    # Scalar ratio shared by all groups (Python int/float; not bool).
     if isinstance(ratios, (int, float)) and not isinstance(ratios, bool):
-        return max(1, int(ratios))
-    try:
-        return max(1, int(ratios[kv_cache_group]))
-    except IndexError:
-        return 1
-    except (TypeError, ValueError):
-        # Numpy / tensor scalars and other non-sequence numerics.
+        return max(1, int(ratios)), False
+    # Numpy / tensor 0-d scalars are subscriptable but must share one R
+    # (do not treat ratios[group] IndexError as missing expansion).
+    if getattr(ratios, "ndim", None) == 0:
         try:
-            return max(1, int(ratios))
+            return max(1, int(ratios)), False
         except (TypeError, ValueError):
-            return 1
+            _warn_underivable_blocks_per_kv(
+                kv_cache_group,
+                reason="0-d blocks_per_kv_block not convertible to int",
+            )
+            return 1, True
+    try:
+        return max(1, int(ratios[kv_cache_group])), False
+    except IndexError:
+        _warn_underivable_blocks_per_kv(
+            kv_cache_group,
+            reason="blocks_per_kv_block index out of range",
+        )
+        return 1, True
+    except (TypeError, ValueError):
+        try:
+            return max(1, int(ratios)), False
+        except (TypeError, ValueError):
+            _warn_underivable_blocks_per_kv(
+                kv_cache_group,
+                reason="blocks_per_kv_block not convertible to int",
+            )
+            return 1, True
 
 
 def expand_manager_block_ids(block_ids: list[int], blocks_per_kv_block: int) -> list[int]:
@@ -712,6 +768,11 @@ class KvCacheReader:
         Returns ``None`` when the layer's ``kv_cache_group`` cannot be resolved
         (empty map or name missing). Callers must skip rather than treat that
         as group 0.
+
+        ``fallback_ids`` (group-0 arm-time hint) must already be in **kernel**
+        page space — same address space as ``block_ids_for_request`` returns.
+        Do not pass raw manager-granularity ids here (would silently slice the
+        wrong pages when mixed with expanded group tables).
         """
         gid = _group_for_layer(layer_name, layer_to_group)
         if gid is None:
@@ -719,8 +780,7 @@ class KvCacheReader:
         if gid not in group_cache:
             got = block_ids_for_request(self._runner, req_id, None, kv_cache_group=gid)
             if not got and gid == 0 and fallback_ids:
-                # Arm-time hint is already in the address space used at arm
-                # (usually group-0 table / requests); do not re-expand.
+                # Kernel-space hint only; do not re-expand.
                 got = list(fallback_ids)
             group_cache[gid] = list(got)
         return group_cache[gid]
@@ -813,21 +873,25 @@ class KvCacheReader:
                 produced = True
                 gid = _group_for_layer(layer_name, layer_to_group)
                 assert gid is not None  # resolved above via _block_ids_for_layer
+                _ratio, expansion_unknown = _blocks_per_kv_block_for_group(self._runner, int(gid))
+                payload: dict[str, Any] = {
+                    "req_id": req_id,
+                    "block_ids": used_ids,
+                    "layer": layer_name,
+                    "kv_cache_group": int(gid),
+                    "source": src_name,
+                    "rank_tag": rank_tag,
+                    "tp_rank": tp_rank,
+                    "pp_rank": pp_rank,
+                    "cp_rank": cp_rank,
+                    "num_kv_heads": num_kv_heads,
+                    "tensor": payload_tensor,
+                }
+                if expansion_unknown:
+                    payload["expansion"] = "unknown"
                 yield KvDumpSnapshot(
                     path=path,
-                    payload={
-                        "req_id": req_id,
-                        "block_ids": used_ids,
-                        "layer": layer_name,
-                        "kv_cache_group": int(gid),
-                        "source": src_name,
-                        "rank_tag": rank_tag,
-                        "tp_rank": tp_rank,
-                        "pp_rank": pp_rank,
-                        "cp_rank": cp_rank,
-                        "num_kv_heads": num_kv_heads,
-                        "tensor": payload_tensor,
-                    },
+                    payload=payload,
                 )
         if not produced:
             if not fallback_ids and not skipped_empty_group and not skipped_unresolved_group:
