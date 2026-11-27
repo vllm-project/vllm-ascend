@@ -399,14 +399,14 @@ def test_lora_manager_for_other_models_delegates_to_upstream():
     upstream.assert_called_once_with(model, config, device)
 
 
-@pytest.mark.parametrize("is_profile,explicit,expected", [(False, None, 0), (True, None, None), (False, 2, 2)])
-def test_idle_dp_lora_preserves_real_cache_but_keeps_explicit_warmup(is_profile, explicit, expected):
+@pytest.mark.parametrize("is_profile,explicit", [(False, None), (True, None), (False, 2)])
+def test_dummy_lora_preserves_upstream_defaults_and_explicit_warmup(is_profile, explicit):
     runner = _make_runner()
     runner.lora_manager = SimpleNamespace(requires_dp_sync=True)
     kwargs = {"num_active_loras": explicit} if explicit is not None else {}
     with patch.object(GPUModelRunner, "_dummy_run", return_value=(None, None)) as parent:
         runner._dummy_run(4, is_profile=is_profile, skip_eplb=True, **kwargs)
-    assert parent.call_args.kwargs.get("num_active_loras") == expected
+    assert parent.call_args.kwargs.get("num_active_loras") == explicit
 
 
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():

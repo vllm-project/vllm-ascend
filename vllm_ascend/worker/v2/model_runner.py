@@ -1340,14 +1340,6 @@ class NPUModelRunner(GPUModelRunner):
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
-        if (
-            getattr(getattr(self, "lora_manager", None), "requires_dp_sync", False)
-            and not is_profile
-            and kwargs.get("num_active_loras") is None
-        ):
-            # Idle DP ranks receive real expert tokens. Preserve their real
-            # adapter cache instead of installing/removing warmup adapters.
-            kwargs["num_active_loras"] = 0
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.

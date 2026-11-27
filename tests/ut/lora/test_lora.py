@@ -182,14 +182,14 @@ def test_allgather_routing_uses_remote_dp_adapter_indices() -> None:
     context = SimpleNamespace(
         top_k=2,
         punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([0, -1])),
-        gathered_lora_indices=torch.tensor([0, -1, 1, 0]),
+        local_token_lora_mapping=torch.tensor([0, -1, 1, 0]),
     )
     _, slots = _recover_moe_lora_routing_allgather(
         context, torch.tensor([2, 0, 4, 6, 1, 3, 5, 7]), torch.zeros(4, 2, dtype=torch.long)
     )
     assert torch.equal(slots, torch.tensor([0, 1, 0, 1, -1, 0, -1, 0]))
     reset_lora_indices(context)
-    assert not hasattr(context, "gathered_lora_indices")
+    assert context.local_token_lora_mapping is None
 
 
 def test_all2all_routing_requires_exchanged_indices() -> None:

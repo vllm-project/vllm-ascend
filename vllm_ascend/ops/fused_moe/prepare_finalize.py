@@ -464,7 +464,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             indices = self.lora_context.punica_wrapper.token_lora_indices[:local_num_tokens]
             # Reuse the exact hidden-state gather order. Encode -1 as zero so
             # the existing input-id padding also produces inactive LoRA rows.
-            self.lora_context.gathered_lora_indices = self.all_gather_input_ids(indices + 1) - 1
+            self.lora_context.local_token_lora_mapping = self.all_gather_input_ids(indices + 1) - 1
         return result
 
     def _prepare_with_ep_group(

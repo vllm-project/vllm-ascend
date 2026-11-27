@@ -1493,7 +1493,9 @@ class NPUWorker(GPUWorker):
         )
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+            self.model_runner._dummy_run(
+                num_tokens, uniform_decode=True, skip_gdn_state_update=True, num_active_loras=0
+            )
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

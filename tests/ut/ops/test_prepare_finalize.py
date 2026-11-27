@@ -407,8 +407,8 @@ class TestSequenceParallelPCP(unittest.TestCase):
             layer = PrepareAndFinalizeWithAllGather(config)
             layer.set_lora_context(context)
             prepared = layer.prepare(torch.ones(3, 4), torch.ones(3, 2))
-        assert prepared.hidden_states.shape[0] == context.gathered_lora_indices.numel() == 8
-        torch.testing.assert_close(context.gathered_lora_indices, torch.tensor([0, -1, 1, -1, 1, -1, 0, -1]))
+        assert prepared.hidden_states.shape[0] == context.local_token_lora_mapping.numel() == 8
+        torch.testing.assert_close(context.local_token_lora_mapping, torch.tensor([0, -1, 1, -1, 1, -1, 0, -1]))
 
     def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
         config = MagicMock()

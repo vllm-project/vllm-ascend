@@ -1004,6 +1004,7 @@ class TestNPUWorker(TestBase):
                 mock_uniform_decode_query_len,
                 uniform_decode=True,
                 skip_gdn_state_update=True,
+                num_active_loras=0,
             )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")

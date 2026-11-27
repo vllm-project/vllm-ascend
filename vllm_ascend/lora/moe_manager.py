@@ -47,8 +47,8 @@ class AscendMoELoRAModelManager(LRUCacheLoRAModelManager):
                     inputs, outputs = module.hidden_size, intermediate
                     if projection == "w2":
                         inputs, outputs = outputs, inputs
-                    lora_model.loras[child] = LoRALayerWeights(
-                        child, rank, rank, template.new_zeros((rank, inputs)), template.new_zeros((outputs, rank))
+                    lora_model.loras[child] = LoRALayerWeights.create_dummy_lora_weights(
+                        child, inputs, outputs, rank, template.dtype, template.device
                     )
         super()._create_merged_loras_inplace(lora_model)
 
