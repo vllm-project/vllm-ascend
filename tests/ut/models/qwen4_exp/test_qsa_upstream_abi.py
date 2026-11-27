@@ -71,16 +71,7 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     torch.testing.assert_close(projected_hidden, hidden_states[:2])
     torch.testing.assert_close(projected_positions, positions[:2])
     layer._update_and_compress.assert_called_once_with(keys, projected_positions, metadata, metadata)
-    layer._select.assert_called_once_with(
-        query,
-        metadata,
-        selected,
-        main_key=None,
-        main_value=None,
-        main_key_cache=None,
-        main_value_cache=None,
-        main_slot_mapping=None,
-    )
+    layer._select.assert_called_once_with(query, metadata, selected)
     torch.testing.assert_close(gate, torch.full_like(gate, 7.0))
 
 

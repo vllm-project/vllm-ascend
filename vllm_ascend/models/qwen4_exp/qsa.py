@@ -286,15 +286,13 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _fused_compression_eligible(
         self,
         token_k: torch.Tensor,
-        positions: torch.Tensor,
         rotary_cache: torch.Tensor,
         compressed_cache: torch.Tensor,
     ) -> bool:
         """Return whether the fixed Qwen3.8 compressed-key ABI is usable."""
         norm_weight = self.k_layernorm.weight
         return bool(
-            self._fused_norm_rope_eligible(token_k, positions)
-            and self.compress_ratio == 4
+            self.compress_ratio == 4
             and token_k.device.type == "npu"
             and norm_weight.shape == (self.index_head_dim,)
             and norm_weight.is_contiguous()
@@ -408,11 +406,16 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out, None
+        select_args = (
+            query[:num_tokens] if pcp_active else query,
+            compressed_metadata,
+            out,
+        )
+        if main_key is None:
+            return self._select(*select_args), None
         return (
             self._select(
-                query[:num_tokens] if pcp_active else query,
-                compressed_metadata,
-                out,
+                *select_args,
                 main_key=main_key,
                 main_value=main_value,
                 main_key_cache=main_key_cache,
@@ -469,9 +472,16 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
         compressed_cache = self.compressed_key_cache.kv_cache
-        if self._fused_compression_eligible(token_k, positions, rotary_cache, compressed_cache):
+        can_fuse_norm_rope = self._fused_norm_rope_eligible(token_k, positions)
+        rotary_cache = (
+            self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+            if can_fuse_norm_rope
+            else None
+        )
+        if rotary_cache is not None and self._fused_compression_eligible(
+            token_k, rotary_cache, compressed_cache
+        ):
             qsa_compress_norm_mrope_store(
                 token_k[:num_tokens],
                 position_rows,

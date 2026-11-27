@@ -125,7 +125,13 @@ def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
 
     with (
         patch.object(torch.ops.vllm, "pcp_gather_tokens", gather),
-        patch.object(torch.ops.vllm, "qwen_gdn_attention_core", side_effect=core),
+        patch.object(
+            torch.ops.vllm,
+            "qwen_gdn_attention_core_norm_with_output",
+            side_effect=lambda qkv, _b, _a, out, _prefix, _packed: core(
+                qkv, None, None, out, None, None
+            ),
+        ),
         patch.object(torch.ops.vllm, "pcp_scatter_tokens", side_effect=lambda rows, *_: rows[[0, 3]]),
     ):
         result = model(local_hidden, output)
@@ -182,9 +188,9 @@ def test_packed_custom_op_keeps_prepare_outputs_inside_boundary():
     context = SimpleNamespace(no_compile_layers={"layers.0.linear_attn": layer})
 
     with (
-        patch("vllm_ascend.ops.gdn.get_forward_context", return_value=context),
+        patch("vllm_ascend.attention.gdn.get_forward_context", return_value=context),
         patch(
-            "vllm_ascend.ops.gdn.fused_gdn_prepare",
+            "vllm_ascend.attention.gdn.fused_gdn_prepare",
             return_value=(prepared_qkv, prepared_z, prepared_b, prepared_a, core_attn_out),
         ) as prepare,
     ):
@@ -403,6 +409,14 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     # registration alive for this test so Inductor sees the same custom op.
     cpu_impl = torch.library.Library("vllm", "IMPL", "CPU")
     cpu_impl.impl("qwen_gdn_attention_core", qwen_gdn_attention_core)
+    cpu_impl.impl(
+        "qwen_gdn_attention_core_norm_with_output",
+        qwen_gdn_attention_core_norm_with_output,
+    )
+    cpu_impl.impl(
+        "qwen_gdn_packed_attention_core_norm_with_output",
+        qwen_gdn_packed_attention_core_norm_with_output,
+    )
     model = _GDNForwardWrapper()
     hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     output = torch.empty_like(hidden_states)

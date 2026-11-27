@@ -135,7 +135,7 @@ def qsa_select_paged_tokens_lightning_v2(
         **common,
     )
     packed_width = block_topk + compress_ratio - 1
-    pack_qsa_group_indices_npu(
+    pack_args = (
         groups.squeeze(1),
         attn_metadata.logical_positions[:rows],
         lengths,
@@ -143,10 +143,16 @@ def qsa_select_paged_tokens_lightning_v2(
         compress_ratio,
         token_topk,
         out[:rows, :packed_width],
-        key=main_key,
-        value=main_value,
-        key_cache=main_key_cache,
-        value_cache=main_value_cache,
-        slot_mapping=main_slot_mapping,
     )
+    if main_key is None:
+        pack_qsa_group_indices_npu(*pack_args)
+    else:
+        pack_qsa_group_indices_npu(
+            *pack_args,
+            key=main_key,
+            value=main_value,
+            key_cache=main_key_cache,
+            value_cache=main_value_cache,
+            slot_mapping=main_slot_mapping,
+        )
     return out
