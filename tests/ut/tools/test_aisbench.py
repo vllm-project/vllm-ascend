@@ -42,6 +42,7 @@ def test_request_config_reasoning_effort(tmp_path: Path, monkeypatch: pytest.Mon
         task_type="accuracy",
         temperature=None,
         no_pred=False,
+        response_anomaly=False,
     )
 
     runner._init_request_conf()
