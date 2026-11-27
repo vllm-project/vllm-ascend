@@ -223,7 +223,15 @@ def build_compressor_metadata_out(
     )
 
 
-_LIMITED_AUX_STREAM_IDS: set[int] = set()
+_LIMITED_AUX_STREAM_IDS: set[tuple[object, object, int]] = set()
+
+
+def _stream_identity(stream: object) -> tuple[object, object, int]:
+    return (
+        getattr(stream, "device_type", None),
+        getattr(stream, "device_index", None),
+        getattr(stream, "stream_id", id(stream)),
+    )
 
 
 def _ensure_aux_stream_vector_limit(stream: torch.npu.Stream) -> torch.npu.Stream:
@@ -233,8 +241,16 @@ def _ensure_aux_stream_vector_limit(stream: torch.npu.Stream) -> torch.npu.Strea
     Ascend 910C and causing STARS queue head-of-line blocking or L2/HBM
     bandwidth contention against the main decode stream.
     """
-    stream_id = id(stream)
-    if stream_id in _LIMITED_AUX_STREAM_IDS:
+    current_stream = getattr(torch_npu.npu, "current_stream", None)
+    if callable(current_stream):
+        try:
+            cur = current_stream()
+        except Exception:
+            cur = None
+        if cur is not None and _stream_identity(stream) == _stream_identity(cur):
+            return stream
+    stream_key = _stream_identity(stream)
+    if stream_key in _LIMITED_AUX_STREAM_IDS:
         return stream
     set_limit = getattr(torch_npu.npu, "set_stream_limit", None)
     if callable(set_limit):
@@ -242,7 +258,7 @@ def _ensure_aux_stream_vector_limit(stream: torch.npu.Stream) -> torch.npu.Strea
             from vllm_ascend.ops.triton.dsv41_swa_rope import swa_aux_vector_core_budget
 
             set_limit(stream, -1, swa_aux_vector_core_budget())
-            _LIMITED_AUX_STREAM_IDS.add(stream_id)
+            _LIMITED_AUX_STREAM_IDS.add(stream_key)
         except Exception:
             pass
     return stream

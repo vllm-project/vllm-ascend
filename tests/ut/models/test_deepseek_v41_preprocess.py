@@ -311,6 +311,21 @@ def test_swa_aux_vector_core_budget_and_stream_limit(monkeypatch):
     assert dsa_v1._ensure_aux_stream_vector_limit(fake_stream) is fake_stream
     assert calls == [(fake_stream, -1, 8)]
 
+    # Main stream (including distinct wrapper with same NPU stream identity) must never be throttled.
+    main_stream = SimpleNamespace(device_type=20, device_index=0, stream_id=101)
+    main_alias = SimpleNamespace(device_type=20, device_index=0, stream_id=101)
+    aux_stream = SimpleNamespace(device_type=20, device_index=0, stream_id=202)
+    aux_alias = SimpleNamespace(device_type=20, device_index=0, stream_id=202)
+    monkeypatch.setattr(torch_npu.npu, "current_stream", lambda: main_stream, raising=False)
+    monkeypatch.setattr(dsa_v1, "_LIMITED_AUX_STREAM_IDS", set())
+    calls.clear()
+    assert dsa_v1._ensure_aux_stream_vector_limit(main_stream) is main_stream
+    assert dsa_v1._ensure_aux_stream_vector_limit(main_alias) is main_alias
+    assert calls == []
+    assert dsa_v1._ensure_aux_stream_vector_limit(aux_stream) is aux_stream
+    assert dsa_v1._ensure_aux_stream_vector_limit(aux_alias) is aux_alias
+    assert calls == [(aux_stream, -1, 8)]
+
 
 def test_store_swa_with_rope_caps_persistent_grid(monkeypatch):
     from vllm_ascend.ops.triton import dsv41_swa_rope
