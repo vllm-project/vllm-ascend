@@ -208,12 +208,11 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # stays for parity with the retired patch so a future
     # vllm.third_party consumer lands on the NPU impl.
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda": chunk_kda,
-    # chunk_kda_with_fused_gate's lower_bound defaults to -5.0 here
-    # (GLM's architecture requires a bounded gate in [-5, 0) and the
-    # NPU gate mirrors fla's internal kernel default), while
-    # upstream's None turns the bound off. No caller today, so the
-    # gap is latent; aligning means teaching the impl an "off"
-    # branch -- the fused_kda_gate follow-up's family.
+    # Intentional deviation: upstream's ``lower_bound`` is itself the
+    # formula switch (None disables the bound), while this impl
+    # follows the glm5next vendored copy's API -- ``safe_gate``
+    # selects the formula and ``lower_bound`` is only the value.
+    # No caller reaches this key today.
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate": (  # noqa: E501
         chunk_kda_with_fused_gate
     ),
