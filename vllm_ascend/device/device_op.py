@@ -29,6 +29,7 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
@@ -1375,15 +1376,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weight_dtype=torch_npu.float4_e2m1fn_x2,
                 output_dtype=torch.bfloat16,
             )[0]
-            # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                hidden_states,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
-            )
+            out, out_scale = swiglu_clamp_and_mxfp8_quant(hidden_states, swiglu_limit)
         elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[x],

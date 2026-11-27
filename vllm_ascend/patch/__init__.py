@@ -1108,3 +1108,17 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+#
+# ** 31. File: platform/patch_dp_device_ids.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.utils.set_device_control_env_var` on vLLM 0.23
+#    Why:
+#       CatCCOS SHMEM initialization needs each local DP process to see the
+#       full communicator device list. vLLM 0.23 normally narrows this list
+#       before spawning each DP engine process.
+#    How:
+#       Keep all local devices visible for CatCCOS multiprocessing DP; the
+#       NPU worker selects its physical device using the local DP rank.
+#    Future Plan:
+#       Remove the v0.23 compatibility path when the supported vLLM release
+#       exposes a device-visibility hook suitable for SHMEM collectives.
