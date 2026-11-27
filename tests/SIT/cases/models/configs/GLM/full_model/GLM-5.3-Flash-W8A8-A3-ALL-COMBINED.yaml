@@ -52,6 +52,8 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: 'true'
   VLLM_USE_FASTOKENS: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
+  # Enable the backend /reset_prefix_cache endpoint used by the PD proxy.
+  VLLM_SERVER_DEV_MODE: '1'
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
