@@ -270,7 +270,7 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
 @pytest.mark.parametrize(
     "device_type,expected_min_query_len",
     [
-        (AscendDeviceType.A2, 9),
+        (AscendDeviceType.A2, None),
         (AscendDeviceType.A3, None),
         (AscendDeviceType.A5, None),
         (AscendDeviceType._310P, None),
