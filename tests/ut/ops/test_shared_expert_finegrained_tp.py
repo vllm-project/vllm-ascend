@@ -243,7 +243,7 @@ def test_reused_shared_group_is_destroyed_once(monkeypatch):
     group = MagicMock()
     for name in ["_MLP_TP", "_LMTP", "_EMBED_TP", "_OTP", "_SHARED_EXPERT_TP"]:
         monkeypatch.setattr(parallel_state, name, group)
-    for name in ["_KVPP", "_MC2", "_P_TP", "_DYNAMIC_EPLB"]:
+    for name in ["_KVPP", "_MC2", "_P_TP"]:
         monkeypatch.setattr(parallel_state, name, None)
     parallel_state.destroy_ascend_model_parallel()
     group.destroy.assert_called_once()

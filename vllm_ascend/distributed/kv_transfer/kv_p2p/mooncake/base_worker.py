@@ -372,12 +372,21 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.handshake_port = self.side_channel_port + device_index
 
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        self.engine = self._init_transfer_engine(device_name)
+        self.engine = self._get_transfer_engine(device_name)
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None
         self.xfer_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake worker %s", engine_id)
+
+    def _get_transfer_engine(self, device_name: str | None) -> Any:
+        """Initialize the default engine; subclasses may select another transport."""
+        return global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
+
+    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
+        """Register physical storage independently of the published cache views."""
+        if ptrs:
+            global_te.register_buffer(ptrs, lengths)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
@@ -718,15 +727,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             register_regions.ptrs,
             register_regions.lengths,
         )
-
-    def _init_transfer_engine(self, device_name: str | None) -> Any:
-        """Initialize the default engine; subclasses may select another transport."""
-        return global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
-
-    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
-        """Register physical storage independently of the published cache views."""
-        if ptrs:
-            global_te.register_buffer(ptrs, lengths)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""

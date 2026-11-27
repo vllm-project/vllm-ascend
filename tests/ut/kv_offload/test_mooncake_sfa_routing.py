@@ -28,7 +28,10 @@ def test_unified_entry_selects_exactly_one_implementation_before_initialization(
     config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=SimpleNamespace(
-            kv_connector="MooncakeConnectorV2", is_kv_consumer=consumer, has_connector=lambda _name: False
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_extra_config={},
+            is_kv_consumer=consumer,
+            has_connector=lambda _name: False,
         ),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
         parallel_config=SimpleNamespace(

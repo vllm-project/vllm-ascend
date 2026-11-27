@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Address ordering, integer arithmetic and descriptor identity across batch sizes."""
 
+import numpy as np
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
@@ -20,8 +21,13 @@ def test_address_paths_preserve_order_and_existing_output(groups, carry_targets)
             local, remote, 1000, 2000, 128, 256, 64, src, dst, lengths, 7, 9, targets, marker
         )
     else:
+        ranges = (
+            np.array([group[0] for group in local], dtype=np.uint64),
+            np.array([group[0] for group in remote], dtype=np.uint64),
+            np.array([len(group) for group in local], dtype=np.uint64),
+        )
         MooncakePullRecvingThread._append_block_transfer_addresses(
-            local, remote, 1000, 2000, 128, 256, 64, src, dst, lengths, 7, 9
+            ranges, 1000, 2000, 128, 256, 64, src, dst, lengths, 7, 9
         )
     assert src == [11] + [1000 + group[0] * 128 + 7 for group in local]
     assert dst == [22] + [2000 + group[0] * 256 + 9 for group in remote]
@@ -32,13 +38,13 @@ def test_address_paths_preserve_order_and_existing_output(groups, carry_targets)
 
 
 @pytest.mark.parametrize("groups", [1, 33])
-def test_addresses_keep_python_integer_precision_and_signed_offsets(groups):
+def test_sfa_addresses_keep_python_integer_precision_and_signed_offsets(groups):
     base = (1 << 64) + 10
     local, remote = [[i + 1] for i in range(groups)], [[i + 2] for i in range(groups)]
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
-    MooncakePullRecvingThread._append_block_transfer_addresses(
+    MooncakeSFAPullRecvingThread._append_block_transfer_addresses(
         local, remote, base, base + 3, 7, 11, 5, src, dst, lengths, -9, -13
     )
     assert src == [base + (i + 1) * 7 - 9 for i in range(groups)]
@@ -48,12 +54,12 @@ def test_addresses_keep_python_integer_precision_and_signed_offsets(groups):
 
 
 @pytest.mark.parametrize("counts", [(1, 0), (0, 1), (33, 32), (32, 33)])
-def test_mismatched_group_counts_keep_zip_truncation(counts):
+def test_sfa_mismatched_group_counts_keep_zip_truncation(counts):
     local, remote = [[i] for i in range(counts[0])], [[i] for i in range(counts[1])]
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
-    MooncakePullRecvingThread._append_block_transfer_addresses(local, remote, 10, 20, 3, 5, 7, src, dst, lengths)
+    MooncakeSFAPullRecvingThread._append_block_transfer_addresses(local, remote, 10, 20, 3, 5, 7, src, dst, lengths)
     count = min(counts)
     assert src == [10 + 3 * i for i in range(count)]
     assert dst == [20 + 5 * i for i in range(count)]
@@ -61,9 +67,9 @@ def test_mismatched_group_counts_keep_zip_truncation(counts):
 
 
 @pytest.mark.parametrize("length", [0, -1])
-def test_nonpositive_transfer_length_does_not_append(length):
+def test_sfa_nonpositive_transfer_length_does_not_append(length):
     src: list[int] = []
     dst: list[int] = []
     sizes: list[int] = []
-    MooncakePullRecvingThread._append_block_transfer_addresses([[0]], [[0]], 10, 20, 3, 5, length, src, dst, sizes)
+    MooncakeSFAPullRecvingThread._append_block_transfer_addresses([[0]], [[0]], 10, 20, 3, 5, length, src, dst, sizes)
     assert not src and not dst and not sizes

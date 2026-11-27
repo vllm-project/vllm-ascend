@@ -488,6 +488,7 @@ class Orchestrator:
             if diff
             else []
         )
+        registry = self.workspace / ".github/agent-review/domains.yaml"
 
         return {
             "pr": self.pr,
@@ -495,6 +496,7 @@ class Orchestrator:
             "state": asdict(self.state),
             "merge_base": merge_base,
             "files": files,
+            "domains": [domain["name"] for domain in resolve_domains(registry.read_text(), files)],
             "diff": diff[:MAX_DIFF_CHARS],
             "truncated": len(diff) > MAX_DIFF_CHARS,
             "reply": event["comment"]["body"] if event_name == "issue_comment" else "",
@@ -679,14 +681,13 @@ def build_prompt(workspace: Path, request: dict) -> str:
             continue
         ids = re.findall(r"^-\s+`([\w-]+#\w[\w-]*)`", path.read_text(), re.M)
         mapping.append(f"- {path.relative_to(workspace)}: {', '.join(ids)}")
-    domains = resolve_domains((kb / "domains.yaml").read_text(), request["files"])
 
     return render_template(
         (kb / "prompt_template.md").read_text(),
         {
             "INSTRUCTIONS": (kb / "instructions.md").read_text(),
             "KB_MAP": "\n".join(mapping),
-            "DOMAINS": "\n".join(d["name"] for d in domains) or "L1 only",
+            "DOMAINS": "\n".join(request["domains"]) or "L1 only",
             "HEAD_SHA": request["state"]["head"],
             "BASE_SHA": request["merge_base"],
             "FILES": json.dumps(request["files"]),
@@ -823,6 +824,8 @@ def main() -> int:
 
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 output.write(f"review=true\nhead={request['state']['head']}\nbase={request['merge_base']}\n")
+                if "doc-quality" in request["domains"]:
+                    output.write("doc_quality=true\n")
 
     return 0
 

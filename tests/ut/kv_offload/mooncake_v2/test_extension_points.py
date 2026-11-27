@@ -47,7 +47,7 @@ def test_default_engine_factory_preserves_host_and_device():
     worker = object.__new__(base_worker.MooncakeBaseConnectorWorker)
     worker.side_channel_host = "127.0.0.1"
     with patch.object(base_worker, "global_te") as registry:
-        assert worker._init_transfer_engine("3") is registry.get_transfer_engine.return_value
+        assert worker._get_transfer_engine("3") is registry.get_transfer_engine.return_value
     registry.get_transfer_engine.assert_called_once_with("127.0.0.1", device_name="3")
 
 

@@ -984,6 +984,41 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertIs(returned[2], value)
         self.assertIs(returned[3], output)
 
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score")
+    def test_kv_sharing_consumer_prefill_reads_producer_cache(self, mock_fia):
+        """A layer without its own K/V reads the producer cache on PrefillNoCache."""
+        query = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+        metadata.block_tables = torch.zeros(2, 4, dtype=torch.int32)
+        metadata.seq_lens_list = [3, 5]
+        metadata.causal = True
+        metadata.num_decodes = 0
+        metadata.num_prefills = 0
+        metadata.max_query_len = 2
+        kv_cache = (torch.empty(4, 128, 8, 64), torch.empty(4, 128, 8, 64))
+        mock_fia.return_value = (torch.ones(2, 8, 64), None)
+
+        self.impl_kv_share.use_bnsd_kv_cache = False
+        self.impl_kv_share.key_cache = None
+        self.impl_kv_share.value_cache = None
+
+        with patch.object(attn_module, "_EXTRA_CTX", MagicMock(capturing=False)):
+            self.impl_kv_share.forward_fused_infer_attention(query, None, None, metadata, output, kv_cache)
+
+        mock_fia.assert_called_once()
+        kwargs = mock_fia.call_args.kwargs
+        # Fewer query tokens than cache pages: the producer cache must reach FIA
+        # untrimmed, so `key[:num_tokens]` cannot have run on it.
+        self.assertEqual(kwargs["key"].shape, (4, 128, 512))
+        self.assertEqual(kwargs["value"].shape, (4, 128, 512))
+        self.assertIs(kwargs["block_table"], metadata.block_tables)
+        self.assertEqual(kwargs["actual_seq_lengths_kv"], metadata.seq_lens_list)
+        self.assertEqual(kwargs["block_size"], 128)
+        self.assertFalse(kwargs["is_prefill_no_cache"])
+
     @patch("torch_npu.npu_scatter_pa_kv_cache", create=True)
     def test_c8_kv_sharing_target_skips_nz_cache_write(self, mock_scatter_pa_kv_cache):
         query = torch.randn(2, 8, 64)

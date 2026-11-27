@@ -49,7 +49,6 @@ def make_configs():
         enable_force_eplb=False,
         enable_fused_mc2=0,
         multistream_overlap_shared_expert=False,
-        eplb_config=SimpleNamespace(dynamic_eplb=False),
         rl_config=SimpleNamespace(enabled=False),
     )
     return vc, ac

@@ -186,7 +186,7 @@ The remaining shared interfaces have the following responsibilities:
 | Interface | Shared responsibility | SFA responsibility |
 | --- | --- | --- |
 | `_create_scheduler()` / `_create_worker()` | Construct the selected component before it starts background work. | Select the SFA scheduler and worker. |
-| `_init_transfer_engine()` | Initialize the default Ascend engine; allow a specialization to select another transport. | Use the default engine. |
+| `_get_transfer_engine()` | Initialize the default Ascend engine; allow a specialization to select another transport. | Use the default engine. |
 | `_register_transfer_buffers()` | Register physical storage independently of published cache addresses. | Exclude Host destinations and include existing device hot/tail storage. |
 | `_create_recving_thread()` / `_build_recving_thread()` | Construct the selected receiver with common arguments; retain startup and readiness checks in the public worker. | Create the staging reader and pass it to the SFA receiver. |
 

@@ -16,6 +16,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorPromMetrics,
+        KVConnectorStats,
+        PromMetric,
+        PromMetricT,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -26,6 +33,61 @@ if TYPE_CHECKING:
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type["KVConnectorBaseType"], "VllmConfig"]]:
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
+
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        has_hisparse = transfer.has_connector("HiSparseConnector")
+        children = super()._get_connector_classes_and_configs(vllm_config)
+        for index, (connector_cls, config) in enumerate(children):
+            if connector_cls in (MooncakeConnectorV2, MooncakeSFACompatibleConnector):
+                assert config.kv_transfer_config is not None
+                child_transfer = config.kv_transfer_config
+                use_hisparse = (
+                    has_hisparse and child_transfer.kv_connector_extra_config.get("transfer_backend") == "memfabric"
+                )
+                children[index] = (
+                    MooncakeConnectorV2._get_connector_cls(child_transfer, use_hisparse=use_hisparse),
+                    config,
+                )
+        return children
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> "KVConnectorPromMetrics":
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorPromMetrics
+
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+        metrics = super().build_prom_metrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+        assert isinstance(metrics, MultiKVConnectorPromMetrics)
+        hisparse_metrics = metrics._prom_metrics.pop(_HiSparseMooncakePullConnector.__name__, None)
+        if hisparse_metrics is not None:
+            metrics._prom_metrics[MooncakeConnectorV2.__name__] = hisparse_metrics
+        return metrics
+
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        stats = super().get_kv_connector_stats()
+        if stats is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+            hisparse_stats = stats.data.pop(_HiSparseMooncakePullConnector.__name__, None)
+            if hisparse_stats is not None:
+                stats.data[MooncakeConnectorV2.__name__] = hisparse_stats
+        return stats
+
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
         transfer = vllm_config.kv_transfer_config
         assert transfer is not None

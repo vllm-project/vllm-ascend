@@ -524,8 +524,6 @@ def _can_use_index_score_topk_fusion(topk: int) -> bool:
     {2, 4, 8} produced values like ``1050427392`` and ``-8388609``; ``topk`` in
     {8, 16, 24, 32} was exact for every shape measured.
     """
-    if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION):
-        return False
     if not 0 < topk <= _INDEX_SCORE_TOPK_MAX or topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT != 0:
         return False
     return _index_score_has_return_choice()
@@ -550,8 +548,8 @@ def minimax_m3_index_prefill(
 ) -> torch.Tensor:
     """Compute AscendC prefill scores and finalize their block TopK.
 
-    The CANN operator fuses the TopK into its score pass when the hardware and
-    toolchain support ``return_choice``; otherwise the scores feed the separate
+    The CANN operator fuses the TopK into its score pass when the installed
+    toolchain supports ``return_choice``; otherwise the scores feed the separate
     TopK and sort helpers.
     """
     if _can_use_index_score_topk_fusion(topk):
