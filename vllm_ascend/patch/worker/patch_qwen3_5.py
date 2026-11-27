@@ -137,7 +137,18 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
             if positions.ndim == 1:
                 positions = positions.unsqueeze(0).expand(3, -1)
-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            cache = self.rotary_emb.cos_sin_cache
+            direct = (
+                cache.device == positions.device == qkv.device
+                and cache.dtype == qkv.dtype
+                and cache.ndim == 2
+                and cache.stride(1) == 1
+                and positions.ndim == 2
+                and positions.size(0) == 3
+                and positions.size(1) == qkv.size(0)
+                and positions.dtype in (torch.int32, torch.int64)
+            )
+            cos_sin = cache if direct else cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
             if cos_sin.dtype != qkv.dtype:
@@ -145,9 +156,11 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
                 cos_sin=cos_sin,
+                positions=positions if direct else None,
+                unit_offset=True,
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_dim,

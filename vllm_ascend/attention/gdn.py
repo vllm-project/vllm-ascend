@@ -57,6 +57,7 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+from vllm_ascend.ops.triton.qwen_prefill import split_packed_qkvz
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -473,7 +474,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                if num_tokens > 1 and mixed_qkvz.is_contiguous():
+                    mixed_qkv, z = split_packed_qkvz(mixed_qkvz, qkv_size)
+                else:
+                    mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
                 b, a = self._split_ba_for_tp(ba)
