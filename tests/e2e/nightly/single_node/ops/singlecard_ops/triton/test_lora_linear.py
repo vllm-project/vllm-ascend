@@ -311,6 +311,7 @@ def test_lora_linear_triton_v2_aclgraph_capture_and_no_lora_skip() -> None:
             first_replay = y.clone()
         else:
             assert torch.equal(y, first_replay)
+    assert first_replay is not None
 
     deltas = [(x.float() @ a.float().T) @ b.float().T for a, b in zip(a_slices, b_slices)]
     expected = y_initial.float() + torch.cat(deltas, dim=1) * mask[:, None].float() * scale
