@@ -133,6 +133,7 @@ def make_pooled_config(role="kv_consumer"):
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
         kv_role=role,
+        engine_id="0",
         kv_connector_extra_config={
             "connectors": [
                 {"kv_connector": "MooncakeConnectorV2", "kv_role": role},
@@ -148,9 +149,14 @@ def make_pooled_config(role="kv_consumer"):
 
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
-def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, monkeypatch):
+@pytest.mark.parametrize("layerwise", [False, True])
+@pytest.mark.parametrize("backend", ["memcache", "MEMCACHE"])
+def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, layerwise, backend, monkeypatch):
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
-    validate_request_indexed_kda_recoverssm(make_pooled_config(role))
+    config = make_pooled_config(role)
+    store_config = config.kv_transfer_config.kv_connector_extra_config["connectors"][1]["kv_connector_extra_config"]
+    store_config.update(backend=backend, use_layerwise=layerwise)
+    validate_request_indexed_kda_recoverssm(config)
 
 
 @pytest.mark.parametrize("children", [None, [], [None], [{"kv_connector": "MooncakeConnectorV2"}]])
@@ -161,11 +167,19 @@ def test_recoverssm_rejects_incomplete_multi_connector(children):
         validate_request_indexed_kda_recoverssm(config)
 
 
-@pytest.mark.parametrize("store_options", [{"backend": "mooncake"}, {"backend": "memcache", "use_layerwise": True}])
-def test_recoverssm_rejects_other_pool_modes(store_options):
+@pytest.mark.parametrize("extra_config", [None, [], "invalid"])
+def test_recoverssm_rejects_malformed_multi_connector_config(extra_config):
+    config = make_pooled_config()
+    config.kv_transfer_config.kv_connector_extra_config = extra_config
+    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 followed by AscendStoreConnector"):
+        validate_request_indexed_kda_recoverssm(config)
+
+
+@pytest.mark.parametrize("store_options", [{"backend": "mooncake"}, {"backend": 1}, {}, None])
+def test_recoverssm_requires_memcache_pooling(store_options):
     config = make_pooled_config()
     config.kv_transfer_config.kv_connector_extra_config["connectors"][1]["kv_connector_extra_config"] = store_options
-    with pytest.raises(ValueError, match="requires non-layerwise MemCache pooling"):
+    with pytest.raises(ValueError, match="requires MemCache pooling"):
         validate_request_indexed_kda_recoverssm(config)
 
 
