@@ -7,11 +7,14 @@ import torch
 _LATENT = 512
 _ROPE_BYTES = 128
 _SCALE_BYTES = 16
-C8_ROW_BYTES = _LATENT + _ROPE_BYTES + _SCALE_BYTES
+C8_NOPE_ROW_BYTES = _LATENT + _SCALE_BYTES
+C8_ROW_BYTES = C8_NOPE_ROW_BYTES + _ROPE_BYTES
 _INT32_MAX = 2**31 - 1
 
 
-def pack_c8_components(nope: torch.Tensor, rope: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+def pack_c8_components(
+    nope: torch.Tensor, rope: torch.Tensor, scales: torch.Tensor, *, rope_head_dim: int = 64
+) -> torch.Tensor:
     """Pack existing SFA quantizer outputs using byte copies only."""
     if nope.dtype not in (torch.int8, torch.float8_e4m3fn):
         raise ValueError("HiSparse C8 requires INT8 or FP8 E4M3 NoPE")
@@ -21,14 +24,16 @@ def pack_c8_components(nope: torch.Tensor, rope: torch.Tensor, scales: torch.Ten
     rows = nope.numel() // _LATENT
     if rows == 0 or nope.numel() != rows * _LATENT:
         raise ValueError("HiSparse C8 requires complete 512-element NoPE rows")
-    if rope.numel() * rope.element_size() != rows * _ROPE_BYTES:
-        raise ValueError("HiSparse C8 requires 64 BF16 RoPE elements per row")
+    rope_bytes = rope_head_dim * torch.bfloat16.itemsize
+    if rope_bytes not in (0, _ROPE_BYTES) or rope.numel() * rope.element_size() != rows * rope_bytes:
+        raise ValueError("HiSparse C8 requires the configured 0 or 64 BF16 RoPE elements per row")
     if scales.numel() * scales.element_size() != rows * _SCALE_BYTES:
         raise ValueError("HiSparse C8 requires four FP32 scale values per row")
     return torch.cat(
         [
             t.view(torch.uint8).reshape(rows, width)
-            for t, width in zip(components, (_LATENT, _ROPE_BYTES, _SCALE_BYTES))
+            for t, width in zip(components, (_LATENT, rope_bytes, _SCALE_BYTES))
+            if width
         ],
         dim=-1,
     )
@@ -40,8 +45,12 @@ def c8_storage_view(cache: torch.Tensor) -> tuple[torch.Tensor, int, int, int]:
     The allocator must align the physical block stride to a whole packed row.
     The returned TND view shares storage; no payload is gathered or dequantized.
     """
-    if cache.ndim != 3 or cache.dtype not in (torch.int8, torch.float8_e4m3fn) or cache.shape[-1] != C8_ROW_BYTES:
-        raise ValueError("HiSparse C8 cache must be INT8 or FP8 [pages, block_size, 656]")
+    if (
+        cache.ndim != 3
+        or cache.dtype not in (torch.int8, torch.float8_e4m3fn)
+        or cache.shape[-1] not in (C8_NOPE_ROW_BYTES, C8_ROW_BYTES)
+    ):
+        raise ValueError("HiSparse C8 cache must be INT8 or FP8 [pages, block_size, 528 or 656]")
     pages, block, width = cache.shape
     stride = cache.stride(0)
     if min(pages, block) <= 0 or cache.stride(1) != width or cache.stride(2) != 1:

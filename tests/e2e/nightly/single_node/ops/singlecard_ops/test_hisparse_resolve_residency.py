@@ -18,17 +18,18 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import bootstrap_custom_op_env
 
+DEVICE_TYPE = get_ascend_device_type()
 pytestmark = [
     pytest.mark.skipif(
-        get_ascend_device_type() != AscendDeviceType.A5,
-        reason="The HiSparse resolver is a SIMT-only op targeting Ascend A5",
+        DEVICE_TYPE not in (AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="The HiSparse resolver tests require Ascend A3 or A5",
     ),
     pytest.mark.e2e_coverage(
         arch="",
         feature="",
         parallel="",
         deploy="",
-        hardware="A5",
+        hardware="A3,A5",
         quantization="",
         graph_mode="eager",
     ),
@@ -121,8 +122,10 @@ def run_resolver(
     host_rows=64,
     attention_capacity=0,
     attention_block_stride=0,
+    valid_rows=None,
 ):
     device = torch.device("npu:0")
+    num_valid_rows = None if valid_rows is None else torch.tensor([valid_rows], dtype=torch.int32, device=device)
     tensors = [t.npu() for t in (logical_cpu, hot_table_cpu, requests_cpu, states_cpu, source_cpu, resident_cpu)]
     logical, hot_table, requests, states, source, resident = tensors
     dgi = dgi_cpu.npu()
@@ -150,7 +153,7 @@ def run_resolver(
         states,
         source,
         resident,
-        None,
+        num_valid_rows,
         dgi,
         lru,
         output,
@@ -266,6 +269,53 @@ def test_resolver_matches_torch_reference_all_resident(attention_capacity):
         assert_matches_reference(actual, expected)
 
 
+@pytest.mark.parametrize("cold", [False, True])
+def test_flash_resident_rows_and_cold_fallback(cold):
+    block, topk, hot_size, stride = 128, 2176, 15232, 1152
+    rows, valid_rows = 7, 6
+    # Both scratch validation and native tiling must accept the full MTP5 union.
+    torch.ops._C_ascend.hisparse_resolver_validate_scratch(hot_size, topk * valid_rows)
+    logical = torch.arange(rows * topk, dtype=torch.int32).view(rows, topk) % 4096
+    logical[:, 1::31] = -1
+    requests = torch.zeros(rows, dtype=torch.int32)
+    states = torch.zeros(1, dtype=torch.int32)
+    source = torch.arange(1, 33, dtype=torch.int32)[None]
+    resident = source.clone()
+    if cold:
+        resident[0, 1] = 0
+    hot_table = torch.arange(33, 33 + hot_size // block, dtype=torch.int32)[None]
+    tags = torch.full((1, hot_size), -1, dtype=torch.int32)
+    lru = torch.arange(hot_size, dtype=torch.int16)[None]
+    live_requests = requests.clone()
+    live_requests[valid_rows:] = -1
+    expected = reference(logical, live_requests, states, source, resident, hot_table, tags, lru, block)
+    actual, attention = run_resolver(
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        tags,
+        lru,
+        block=block,
+        union_rows=topk * valid_rows,
+        host_rows=33 * block,
+        attention_capacity=160 * stride,
+        attention_block_stride=stride,
+        valid_rows=valid_rows,
+    )
+    assert_matches_reference(actual, expected)
+    mapped = expected[0].clone()
+    for row in mapped:
+        active = row[row >= 0]
+        row.fill_(-1)
+        row[: active.numel()] = active // block * stride + active % block
+    torch.testing.assert_close(attention.cpu(), mapped)
+    assert bool(actual[-1][1].item()) == cold
+
+
+@pytest.mark.skipif(DEVICE_TYPE != AscendDeviceType.A5, reason="SIMT single warp scan requires A5")
 def test_resolver_matches_torch_reference_single_warp_scan():
     """One state, a full LRU turn and duplicates; tiles<=32 register scan."""
     block = 16
@@ -304,6 +354,7 @@ def test_resolver_matches_torch_reference_single_warp_scan():
     assert_matches_reference(actual, expected)
 
 
+@pytest.mark.skipif(DEVICE_TYPE != AscendDeviceType.A5, reason="SIMT iterative scan requires A5")
 def test_resolver_matches_torch_reference_iterative_scan():
     """A union spanning 64 tiles exercises the multi-batch prefix path."""
     block = 128

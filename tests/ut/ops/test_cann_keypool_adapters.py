@@ -17,6 +17,29 @@ def mock_triton_launch_config(monkeypatch):
     monkeypatch.setattr(adapters, "triton", triton)
 
 
+def test_hisparse_scoring_table_is_shared_only_within_one_forward_and_stream(monkeypatch):
+    from vllm_ascend.attention import indexer_kpool
+
+    context = SimpleNamespace(additional_kwargs={})
+    stream = SimpleNamespace(npu_stream=1)
+    monkeypatch.setattr(indexer_kpool, "get_forward_context", lambda: context)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    table = torch.tensor([[2, 4], [7, 9]], dtype=torch.int32)
+    expand = indexer_kpool._hisparse_kpool_scoring_table
+
+    first = expand(table, 3)
+    assert first.tolist() == [[6, 7, 8, 12, 13, 14], [21, 22, 23, 27, 28, 29]]
+    assert expand(table.view_as(table), 3) is first
+    shard = expand(table[1:], 3)
+    assert shard.tolist() == [[21, 22, 23, 27, 28, 29]]
+    stream.npu_stream = 2
+    assert expand(table, 3) is not first
+
+    context.additional_kwargs = {}
+    table.copy_(torch.tensor([[8, 3], [5, 0]], dtype=torch.int32))
+    assert expand(table, 3).tolist() == [[24, 25, 26, 9, 10, 11], [15, 16, 17, 0, 1, 2]]
+
+
 @pytest.mark.parametrize("retained_width", [0, 3])
 def test_metadata_launches_use_preallocated_request_and_tail_buffers(monkeypatch, retained_width):
     launch = MagicMock()

@@ -36,10 +36,10 @@ across requests.
 
 | Category | Constraint |
 | --- | --- |
-| Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
+| Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. Requires a vLLM build with the platform HiSparse backend interface. |
 | Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
 | Parallelism and transport | Supports PCP (prefill and decode request sharding). DCP and external P/D transport are outside the current support scope. |
-| Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
+| Host storage | Use private Host pools per tensor-parallel rank. Core mirrors Host KV eagerly by default. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
 
@@ -89,10 +89,28 @@ For a `MultiConnector` configuration, put `transfer_backend` in the
 `HiSparseConnector` child's extra configuration. This setting selects
 the private Host allocator. Omitting it uses native ACL Host-memory registration.
 
+#### GLM-5.3-Flash on 950DT
+
+Start from the [950DT single-node deployment](../../tutorials/models/GLM5.3-Flash.md#glm53-flash-5-1-950dt).
+Keep Model Runner V2, FP8 main KV, the hybrid KV cache manager, and one rank
+for each of DP, PP, PCP and DCP. The hybrid layout requires the verified
+vLLM main pin with Mamba cache fitting. Replace the recipe's indexer attention
+option and add the local HiSparse connector:
+
+```bash
+--attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":false}}' \
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+The host pool stores target DSA pages. The KeyPool index and KDA state stay
+on device. With MTP5, the resident verifier can defer host copies while
+preserving the original copy path for batches that require cold rows.
+
 ### Combining HiSparse with AscendStore
 
 AscendStore saves and restores Host Source and NPU Indexer pages. HiSparse
 manages the Host Source, Resident, and Hot buffers.
+Use the local HiSparse connector for pooled Indexer or recurrent cache layouts.
 
 Use the vLLM Core revision pinned by the matching vLLM Ascend build with
 Ascend HiSparse support. Keep the attention options above and pass the following
@@ -156,7 +174,7 @@ A request served from the local prefix cache may leave both counters unchanged.
 | Parameter | Description |
 | --- | --- |
 | `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
-| `eager_host_mirror` | Keep `true` for this foundation; Core maintains the Host KV mirror. |
+| `eager_host_mirror` | Defaults to `true` for eager Host mirroring. Set it to `false` for lazy Host mirroring. The GLM-5.3-Flash 950DT recipe defers copies on eligible resident MTP5 steps. |
 | `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it for the planned context lengths and concurrency; the example reserves 4 GiB per rank. |
 | `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold the deduplicated union of rows selected during speculative verification and fit the resolver's on-chip UB budget. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |

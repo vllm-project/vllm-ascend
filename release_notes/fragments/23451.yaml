@@ -1,0 +1,6 @@
+pr: 23451
+entries:
+  - category: performance
+    text: Reduced GLM-5.3-Flash HiSparse overhead on Ascend A3 for resident MTP5 verification and medium KV write batches.
+    model: glm-5.3-flash
+    hardware: [A3]
