@@ -263,7 +263,7 @@ class TestSchedulerKeyProber(unittest.TestCase):
     def setUp(self):
         self.worker = make_worker(self, tp_size=2, num_kv_heads=2)
         self.hashes = [bytes([i]) * 16 for i in range(4)]
-        self.states = {}
+        self.states: dict[str, int] = {}
         self.batch_exists = MagicMock(side_effect=lambda keys, *args: [self.states.get(k, 1) for k in keys])
         self.old_sdk = SimpleNamespace(batch_is_exist=self.batch_exists)
         self.sdk = SimpleNamespace(

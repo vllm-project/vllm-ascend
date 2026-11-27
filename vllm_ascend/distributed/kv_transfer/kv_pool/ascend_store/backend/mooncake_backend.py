@@ -55,7 +55,7 @@ _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 def _pack_lookup_hashes(hashes: Sequence[bytes | str]) -> bytes | None:
     """Pack uniform digests while preserving the exact spelling of legacy keys."""
-    digests = []
+    digests: list[bytes] = []
     for value in hashes:
         if isinstance(value, str):
             try:
