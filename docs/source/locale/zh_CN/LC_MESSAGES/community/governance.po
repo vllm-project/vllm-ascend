@@ -22,7 +22,7 @@ msgid "# Governance"
 msgstr "# 治理"
 
 msgid "## Mission"
-msgstr "## 使命"
+msgstr "## 使命和责任以及测试"
 
 msgid "## Principles"
 msgstr "## 原则"

@@ -51,7 +51,7 @@ disaggregation, and the pool example in
 
 ## 3 Prerequisites {: #3-prerequisites }
 
-### 3.1 Model Weight {: #31-model-weight }
+### 3.1 Model Weight {: #l-weight }
 
 Download the checkpoint from ModelScope for the hardware listed below. Only the
 Ascend-adapted W8A8-MXFP8 checkpoint is used in this guide; the official weights
@@ -110,7 +110,7 @@ docker run --rm \
 -v /var/log/npu/:/usr/slog \
 -v /lib64:/lib64 \
 -v /root/.cache:/root/.cache \
--v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
+-v "${MEMCACHE_CONFIG_DIR}::${MEMCACHE_CONFIG_DIR}" \
 -it $IMAGE bash
 ```
 
@@ -135,7 +135,7 @@ docker ps --filter name=step5
 
 Expected result: the container is listed with status `Up`. In the container terminal, verify the installed package versions:
 
-```bash
+``bash
 pip show vllm vllm-ascend
 ```
 
