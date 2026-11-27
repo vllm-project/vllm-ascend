@@ -167,6 +167,7 @@ class TestAscendModelSlimConfig(TestBase):
     def test_get_quant_method_for_linear(self):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
+        mock_config.model_config.hf_config.text_config = None
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer (quant_type is None)
         with (
@@ -187,7 +188,7 @@ class TestAscendModelSlimConfig(TestBase):
             patch("vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer", return_value="INT8"),
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
-            ),
+            ) as mock_create,
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()
             ) as mock_ascend_linear,
@@ -195,6 +196,40 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
+            self.assertEqual(mock_create.call_args.args[2], "linear")
+
+    def test_deepseek_v4_family_mxfp8_linear_uses_ds_linear(self):
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_scheme = MagicMock()
+        cases = (
+            ("deepseek_v4", "W8A8_MXFP8", "ds_linear"),
+            ("deepseek_v41", "W8A8_MXFP8", "ds_linear"),
+            ("qwen3", "W8A8_MXFP8", "linear"),
+            ("deepseek_v4", "W8A8_DYNAMIC", "linear"),
+            ("deepseek_v41", "W8A8_DYNAMIC", "linear"),
+        )
+        for model_type, quant_type, layer_type in cases:
+            mock_config = MagicMock()
+            mock_config.model_config.hf_config.model_type = model_type
+            mock_config.model_config.hf_config.text_config = None
+            with (
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                    return_value=mock_config,
+                ),
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer",
+                    return_value=quant_type,
+                ),
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer",
+                    return_value=mock_scheme,
+                ) as mock_create,
+                patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+            ):
+                self.ascend_config.get_quant_method(linear_layer, "model.layers.0.attn.wo_a")
+            self.assertEqual(mock_create.call_args.args[0], quant_type)
+            self.assertEqual(mock_create.call_args.args[2], layer_type)
 
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
