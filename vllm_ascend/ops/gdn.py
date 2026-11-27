@@ -37,9 +37,6 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.model_executor.layers.fusion.quant_activation import (
-    QuantizedActivation,
-)
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
