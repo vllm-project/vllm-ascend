@@ -124,6 +124,7 @@ def make_shared_worker(
     *,
     bounded=False,
     draft=False,
+    mark_dspark_draft=True,
     num_layers=12,
     sources=(2, 8),
     backend="memcache",
@@ -153,7 +154,7 @@ def make_shared_worker(
     spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     cache_config = SimpleNamespace(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=group, kv_cache_spec=spec) for group in groups],
-        dspark_draft_layer_names=set(groups[-1]) if draft else set(),
+        dspark_draft_layer_names=set(groups[-1]) if draft and mark_dspark_draft else set(),
         num_blocks=4,
         prefix_cache_retention_interval=0,
     )
@@ -268,6 +269,7 @@ class TestMooncakeSharedSourceLayerwise(unittest.TestCase):
             self,
             bounded=bounded,
             draft=draft,
+            mark_dspark_draft=False,  # This fixture drives every layer through the ordinary forward hooks.
             num_layers=24,
             sources=(2, 8, 14, 20),
             backend="mooncake",
@@ -611,13 +613,13 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                 # Shared sources determine the schedule, not this window setting.
                 worker.num_prefetch_layers = 1
                 expected = (
-                    [(0, 2), (2, 8), (8, 14), (14, 20), (23, 24)]
+                    [(0, 2), (2, 8), (8, 14), (14, 20), (24, 24)]
                     if bounded
                     else [(0, layer) for layer in range(3)]
                     + [(2, layer) for layer in range(3, 9)]
                     + [(8, layer) for layer in range(9, 15)]
                     + [(14, layer) for layer in range(15, 21)]
-                    + [(20, 21), (21, 22), (22, 23), (23, 24)]
+                    + [(20, 21), (21, 22), (22, 23), (24, 24)]
                 )
                 for _ in range(2):
                     submitted: list[tuple[int, int]] = []

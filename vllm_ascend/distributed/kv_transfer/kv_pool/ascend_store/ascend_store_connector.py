@@ -463,6 +463,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        # Draft loads run in finish_forward(), after target forward.
         if layer_name in getattr(worker, "dflash_draft_layer_names", ()):
             return
         # PLE and attention can share one physical layer. Load its groups once,
@@ -508,6 +509,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        # Draft saves run in wait_for_save(), after the speculator writes KV.
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 

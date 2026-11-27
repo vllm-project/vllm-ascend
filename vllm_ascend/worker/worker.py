@@ -100,6 +100,7 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_ascend_store_config,
     get_layerwise_gva_config,
     plan_layerwise_cache_reuse,
 )
@@ -1285,7 +1286,7 @@ class NPUWorker(GPUWorker):
             and speculator is not None
             and (
                 uses_sfa_dspark_kv_transfer(self.vllm_config)
-                or get_layerwise_gva_config(self.vllm_config.kv_transfer_config) is not None
+                or get_layerwise_ascend_store_config(self.vllm_config.kv_transfer_config) is not None
             )
         ):
             # Connector construction must see loader-owned draft caches before
