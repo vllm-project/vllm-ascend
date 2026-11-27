@@ -1,0 +1,5 @@
+pr: 23459
+entries:
+  - category: bugfix
+    text: Fixed GLM-5.3-Flash redundant expert weight loading so EPLB redundant slots are populated with the correct weights instead of leaving torch.empty garbage.
+    model: glm-5.3-flash
