@@ -1,0 +1,6 @@
+pr: 15883
+entries:
+  - category: feature
+    text: Added a Mooncake backend for allocating Decode sparse KV offload host memory through Ascend VMM shared segments.
+  - category: config
+    text: Added sparse KV offload host_backend and lru_max_threads options, and VLLM_ASCEND_SKIP_MIGRATEPAGES for retaining CPU binding without process-wide NUMA page migration.

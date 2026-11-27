@@ -66,7 +66,11 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    supports_component_major_mla_pd,
+    uses_mooncake_dsa_kv_transfer,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_context_rows, load_mla_cache_rows_by_slots
@@ -203,11 +207,13 @@ class AscendMLAAttention(MLAAttention):
             cache_sparse_sfa_c8=use_sfa_c8,
             cache_sparse_sfa_hif8=use_sfa_hif8,
             store_on_host=(
-                # Only draft layers owned by the DSpark resident protocol stay
-                # device-resident; an MTP head under another method has no
-                # DSPARK_DRAFT_KV path and must ride the host pipeline (the
-                # blanket is_draft exclusion broke non-dspark MTP PD).
-                not ((spec.is_draft or self.is_draft_layer) and uses_sfa_dspark_kv_transfer(vllm_config))
+                # Mooncake DSA keeps draft KV in every rank's HBM, separately
+                # from shared Main Host KV. Keep DSpark's resident protocol and
+                # other connectors' placement rules unchanged.
+                not (
+                    (spec.is_draft or self.is_draft_layer)
+                    and (uses_sfa_dspark_kv_transfer(vllm_config) or uses_mooncake_dsa_kv_transfer(vllm_config))
+                )
                 and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,

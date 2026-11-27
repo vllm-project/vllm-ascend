@@ -189,20 +189,27 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
-        metadata_cls: type[AscendSFAOffloadMetadata] | None = None,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        # MRV2 keeps draft/MTP KV in HBM even when the target uses offload.
+        # Builders are constructed after draft_config_context exits; use the
+        # planned placement rather than the process-wide offload switch.
+        self.store_on_host = bool(getattr(kv_cache_spec, "store_on_host", True))
         cfg = get_ascend_config().sparse_kv_offload_config
-        _validate_fused_copy_sfa_config(vllm_config, cfg)
+        if self.store_on_host:
+            _validate_fused_copy_sfa_config(vllm_config, cfg)
+        if metadata_cls is None:
+            metadata_cls = AscendSFAOffloadMetadata if self.store_on_host else AscendSFAMetadata
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
-            metadata_cls if metadata_cls is not None else AscendSFAOffloadMetadata,
+            metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.use_fused_copy_sfa = cfg.use_fused_copy_sfa
+        self.use_fused_copy_sfa = self.store_on_host and cfg.use_fused_copy_sfa
         if self.use_fused_copy_sfa:
             self._init_copy_sfa_metadata_buffers(vllm_config, device)
         kv_transfer_config = vllm_config.kv_transfer_config
@@ -311,6 +318,17 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.copy_sfa_reuse_logical_lens = None
         metadata.copy_sfa_copy_src_offsets = None
         if not self.use_fused_copy_sfa:
+            # The normalization below only runs on the fused copy path. Without
+            # it a decode-only batch keeps the ChunkedPrefill state that
+            # build_attn_state derives from its multi-token query, so the sparse
+            # offload mistakes the MTP draft/verify step for prefill and refuses
+            # to read the offloaded device KV cache.
+            if num_prefills == 0 and num_decodes > 0:
+                metadata.attn_state = (
+                    AscendAttentionState.SpecDecoding
+                    if common_attn_metadata.max_query_len > 1
+                    else AscendAttentionState.DecodeOnly
+                )
             return metadata
         if draft_index is None:
             draft_index = getattr(common_attn_metadata, "copy_sfa_draft_index", None)
@@ -352,13 +370,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
-        # The resident working table lags computed tokens by up to two
-        # blocks; only retired full blocks may leave the resident tail,
-        # so geometry follows the runner-owned stable prefixes.
-        stable_prefixes = common_attn_metadata.req_topk_buffer_stable_prefixes
-        if stable_prefixes is None:
-            raise RuntimeError("delayed D2H requires runner-owned stable prefixes")
-        prefix = torch.where(active, stable_prefixes[:count], 0)
+        # Geometry follows the live computed frontier; stable prefixes are
+        # only used by the D2H copy planner, not by row geometry. Without
+        # this, lagged stable prefixes inflate reuse logical lenses and
+        # break MAL acceptance when D2H falls behind under load.
+        prefix = (
+            torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
+            * LIM_CACHE_BLOCK_SIZE
+        )
         is_short = prefix < self.copy_sfa_hot_tokens
         cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), LIM_TOPK)
         logical = torch.where(active, torch.where(is_short, seq_lens, cache + seq_lens - prefix), 0)
@@ -474,8 +493,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         **kwargs: Any,
-    ) -> AscendSFAOffloadMetadata:
+    ) -> AscendSFAMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        if not self.store_on_host:
+            return metadata
         return self._populate_offload_metadata(cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata)
 
     def build_for_drafting(
@@ -483,12 +504,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int,
         **kwargs: Any,
-    ) -> AscendSFAOffloadMetadata:
+    ) -> AscendSFAMetadata:
         metadata = super().build_for_drafting(
             common_attn_metadata,
             draft_index,
             **kwargs,
         )
+        if not self.store_on_host:
+            return metadata
         return self._populate_offload_metadata(
             cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata, draft_index
         )
@@ -787,6 +810,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_id = manager._get_offload_layer_id(layer_name)
         hbm_k = manager.topk_buffers_k[layer_id].view(-1, 128, 1, self.kv_lora_rank)
         hbm_v = manager.topk_buffers_v[layer_id].view(-1, 128, 1, self.qk_rope_head_dim)
+        manager.ensure_copy_sfa_host_visibility(capturing=self._in_graph_runtime())
         host_k = manager.k_caches_cpu[layer_id].view(-1, 128, self.kv_lora_rank)
         host_v = manager.v_caches_cpu[layer_id].view(-1, 128, self.qk_rope_head_dim)
         if reuse_indices:
@@ -1186,7 +1210,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self._fused_overlap_selection_capacity[3] < cache_blocks_per_row
             or self.selection_kv_block_table.device != device
             or self.selection_kv_block_status.device != device
-            or self.selection_membership_map.device.type != "cpu"
+            or not get_sparse_kv_offload_manager().is_fused_membership_storage(self.selection_membership_map)
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
@@ -1265,10 +1289,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 )
         req_ids = attn_metadata.req_ids_tensor[:num_reqs].to(device=device, dtype=torch.long)
         current_req_ids = req_ids[token_to_req]
+        # Reused buffers may have more capacity than this step has active rows.
+        selection_kv_block_status = selection_kv_block_status[:num_tokens]
+        topk_head_count = selection_kv_block_status.shape[1]
         # Row reuse by a different request: drop the whole selection status row.
         changed_rows = last_req_ids != current_req_ids
         selection_kv_block_status.masked_fill_(changed_rows.view(num_tokens, 1, 1), -1)
-        membership_rows = selection_membership_map.reshape(num_tokens, -1, selection_membership_map.shape[-1])
+        membership_rows = selection_membership_map[: num_tokens * topk_head_count].reshape(
+            num_tokens, topk_head_count, selection_membership_map.shape[-1]
+        )
         membership_control = membership_rows[
             ...,
             FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT

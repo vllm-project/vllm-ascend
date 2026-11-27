@@ -1847,11 +1847,20 @@ class SparseKVOffloadConfig:
     store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    lru_max_threads: int = 8
+    host_backend: Literal["memfabric", "mooncake"] = "memfabric"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
         """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
         return self.enabled and not self.use_fused_overlap
+
+    @field_validator("lru_max_threads", mode="before")
+    @classmethod
+    def _validate_lru_max_threads(cls, value: Any) -> int:
+        if type(value) is not int or value <= 0:
+            raise ValueError("sparse_kv_offload_config.lru_max_threads must be a positive integer")
+        return value
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1861,6 +1870,13 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         if not 1 <= self.store_port_base <= 65535:
             raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
+
+        if self.enabled and self.host_backend == "mooncake":
+            if self.keep_device_kv_cache:
+                raise ValueError(
+                    "sparse_kv_offload_config.host_backend='mooncake' is only supported for "
+                    "PD-disaggregated decode; keep_device_kv_cache must be false"
+                )
         return self
 
     @classmethod
@@ -1898,6 +1914,17 @@ class SparseKVOffloadConfig:
         if parallel_config.pipeline_parallel_size > 1:
             raise ValueError("Sparse KV offload don't support pipeline parallel now.")
         if self.keep_device_kv_cache:
+            if self.use_fused_copy_sfa:
+                # Copy-SFA (fused sparse V2) does not support PD colocate
+                # debug mode yet: after the AscendVMM adaptation its row
+                # lifecycle assumes a PD-disaggregated D node. The fused
+                # overlap path still supports colocate debugging.
+                raise ValueError(
+                    "sparse_kv_offload_config: fused Copy-SFA (V2) does not support "
+                    "keep_device_kv_cache (PD colocate debug mode) yet. Use "
+                    "use_fused_overlap=true for colocate debugging, or set "
+                    "keep_device_kv_cache=false."
+                )
             logger.warning_once(
                 "Init sparse KV offload with keep_device_kv_cache enabled, "
                 "in this case we will still allocate device kv cache "

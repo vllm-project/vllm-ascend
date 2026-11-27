@@ -33,7 +33,7 @@ def test_dense_fill_uses_exact_int64_offsets_above_2gib_and_4gib(monkeypatch, bl
         original = block_table.clone()
 
     # Restore 6 valid tokens into slot 1: one full 4-token block plus a 2-token tail.
-    manager.dense_fill_copy_sfa_rows({1: (1, 6)}, block_size=4, block_table=block_table)
+    manager.dense_fill_copy_sfa_rows({1: (1, 6, 0)}, block_size=4, block_table=block_table)
 
     assert copy.call_count == num_layers
     token_bytes = (4, 12)
