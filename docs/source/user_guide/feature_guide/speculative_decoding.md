@@ -183,16 +183,29 @@ speculative config to the matching assistant checkpoint. See the
 Set `method` to `dflash` and `model` to a checkpoint trained for the target.
 The checkpoint's architecture selects the DFlash variant.
 
+#### DFlash2
+
+Use a `DFlash2DraftModel` checkpoint and the target's unquantized,
+full-vocabulary LM head. The checkpoint supplies the candidate selector
+settings and supported draft lengths.
+
 **Offline inference**
 
 ```python
 from vllm import LLM, SamplingParams
 
 llm = LLM(
-    model="Qwen/Qwen3-8B",
+    model="Qwen/Qwen3.8-27B",
+    tensor_parallel_size=2,
+    max_model_len=2048,
+    enable_prefix_caching=False,
+    compilation_config={
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": [8, 16],
+    },
     speculative_config={
         "method": "dflash",
-        "model": "z-lab/Qwen3-8B-DFlash-b16",
+        "model": "z-lab/Qwen3.8-27B-DFlash2",
         "num_speculative_tokens": 7,
     },
 )
@@ -204,15 +217,13 @@ print(outputs[0].outputs[0].text)
 **Online serving**
 
 ```shell
-vllm serve Qwen/Qwen3-8B \
-  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3-8B-DFlash-b16","num_speculative_tokens":7}'
+vllm serve Qwen/Qwen3.8-27B \
+  --tensor-parallel-size 2 \
+  --max-model-len 2048 \
+  --no-enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[8,16]}' \
+  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
 ```
-
-#### DFlash2
-
-Use a `DFlash2DraftModel` checkpoint and the target's unquantized,
-full-vocabulary LM head. The checkpoint supplies the candidate selector
-settings and supported draft lengths.
 
 Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
 `FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
