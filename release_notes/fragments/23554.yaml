@@ -1,0 +1,7 @@
+pr: 23554
+entries:
+  - category: feature
+    text: >-
+      Qwen3-VL and Qwen3.5 visual input preparation now uses fused learned-position
+      interpolation on Triton-capable Ascend devices with supported position tables.
+      Ascend 310P and unsupported table layouts or dtypes retain native interpolation.
