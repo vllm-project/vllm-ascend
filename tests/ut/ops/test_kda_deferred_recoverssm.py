@@ -364,10 +364,10 @@ def test_deferred_vs_immediate_equivalence(gate: bool):
 # Test 5: the acceptance gate's EMA engages and releases
 # ---------------------------------------------------------------------------
 
-def test_acceptance_gate_tracks_full_rows():
-    """The gate's EMA of the fully-accepting row share engages on bimodal
-    acceptance and releases when acceptance drops, through the same device
-    EMA and host mirror the production build path reads."""
+def test_acceptance_gate_tracks_acceptance_rate():
+    """The gate's EMA of the mean acceptance rate engages on high acceptance
+    and releases when it drops, through the same device EMA and host mirror
+    the production build path reads."""
     batch = 4
     gate = RecoverSSMAcceptanceGate(batch, DEVICE)
     assert not gate.engaged()  # starts deferred
@@ -377,18 +377,18 @@ def test_acceptance_gate_tracks_full_rows():
             gate.update(counts, None, SPEC_QUERY_LEN, batch)
         torch.npu.synchronize()  # land the host mirror
 
-    # No fully-accepting row: stays deferred.
+    # Mean acceptance 1.25/3 (~0.42): stays deferred.
     steps(torch.tensor([0, 1, 2, 2], dtype=torch.int32, device=DEVICE), 16)
     assert not gate.engaged()
-    # Half the rows fully accepting: engages within a few steps.
-    steps(torch.tensor([3, 3, 0, 1], dtype=torch.int32, device=DEVICE), 8)
+    # Mean acceptance 2.75/3 (~0.92): engages within a few steps.
+    steps(torch.tensor([3, 3, 2, 3], dtype=torch.int32, device=DEVICE), 8)
     assert gate.engaged()
-    # Falling back below the share releases again.
+    # Falling back below the rate releases again.
     steps(torch.tensor([0, 1, 1, 0], dtype=torch.int32, device=DEVICE), 16)
     assert not gate.engaged()
 
     # request_indices gathers the acceptance rows exactly like the commit plan.
-    pool = torch.tensor([3, 0, 0, 1], dtype=torch.int32, device=DEVICE)
+    pool = torch.tensor([3, 3, 2, 0], dtype=torch.int32, device=DEVICE)
     request_indices = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
     for _ in range(8):
         gate.update(pool, request_indices, SPEC_QUERY_LEN, 2)
@@ -396,7 +396,7 @@ def test_acceptance_gate_tracks_full_rows():
     assert gate.engaged()
     assert gate.eager_mask(2).shape[0] == 2
 
-    print("[PASS] acceptance gate: engages and releases with the full-row share")
+    print("[PASS] acceptance gate: engages and releases with the acceptance rate")
 
 
 # ---------------------------------------------------------------------------

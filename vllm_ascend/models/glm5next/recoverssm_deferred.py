@@ -26,12 +26,13 @@ if TYPE_CHECKING:
 FP32_DEFERRED = "fp32_deferred"
 
 # Deferral saves the fold launch but pays a per-token premium in the fused
-# replay: rows accepting their whole window carry the whole premium and none
-# of the savings. Past this share of such rows, fold immediately instead.
-RECOVERSSM_FULL_ROW_SHARE = 0.25
-# Per-step EMA decay of the share estimate; acceptance is autocorrelated, and
+# replay; past this mean acceptance rate the premium outgrows the saving.
+# Bracketed by the measured points (~0.43 deferred wins, full acceptance it
+# loses); recalibrate against the bench's uniform-rate sweep.
+RECOVERSSM_DEFER_RATE = 0.75
+# Per-step EMA decay of the rate estimate; acceptance is autocorrelated, and
 # every gate flip is a free transition (eager rows zero their pending replay).
-RECOVERSSM_SHARE_DECAY = 0.75
+RECOVERSSM_RATE_DECAY = 0.75
 
 # The fused replay plan handed to ``kda_recoverssm_verify``:
 # (commit_lens, final_state_indices, boundary_state_indices, boundary_recovery_lens).
@@ -39,18 +40,18 @@ ReplayPlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class RecoverSSMAcceptanceGate:
-    """Tracks the share of spec rows accepting their whole speculative window.
+    """Tracks the mean acceptance rate of the speculative rows.
 
-    The share is an EMA kept on the device (updated from the commit's
+    The rate is an EMA kept on the device (updated from the commit's
     acceptance tensor with the commit plan's row indexing) and mirrored to
     host memory with an asynchronous copy: the build-side read lags by the
-    enqueue depth, which a slowly moving share tolerates, and never
+    enqueue depth, which a slowly moving rate tolerates, and never
     synchronizes the pipeline.
     """
 
     def __init__(self, max_rows: int, device: torch.device) -> None:
-        self.share = torch.zeros((), dtype=torch.float32, device=device)
-        self.share_host = torch.zeros((), dtype=torch.float32, pin_memory=is_pin_memory_available())
+        self.rate = torch.zeros((), dtype=torch.float32, device=device)
+        self.rate_host = torch.zeros((), dtype=torch.float32, pin_memory=is_pin_memory_available())
         self.eager_ones = torch.ones(max_rows, dtype=torch.int32, device=device)
 
     def update(
@@ -60,19 +61,19 @@ class RecoverSSMAcceptanceGate:
         spec_query_len: int,
         batch: int,
     ) -> None:
-        """Fold this step's acceptance into the share estimate."""
+        """Fold this step's acceptance into the rate estimate."""
         if batch <= 0:
             return
         rows = num_accepted[:batch]
         if request_indices is not None:
             rows = num_accepted[request_indices[:batch].long()]
-        full = (rows >= spec_query_len).float().mean()
-        self.share.mul_(RECOVERSSM_SHARE_DECAY).add_(full, alpha=1.0 - RECOVERSSM_SHARE_DECAY)
-        self.share_host.copy_(self.share, non_blocking=True)
+        rate = rows.float().mean() / spec_query_len
+        self.rate.mul_(RECOVERSSM_RATE_DECAY).add_(rate, alpha=1.0 - RECOVERSSM_RATE_DECAY)
+        self.rate_host.copy_(self.rate, non_blocking=True)
 
     def engaged(self) -> bool:
         """Whether the next commit should fold every row now."""
-        return float(self.share_host) >= RECOVERSSM_FULL_ROW_SHARE
+        return float(self.rate_host) >= RECOVERSSM_DEFER_RATE
 
     def eager_mask(self, rows: int) -> torch.Tensor:
         """The all-eager mask the engaged gate hands the commit."""

@@ -31,18 +31,18 @@ from this checkout's operators instead of two checkouts:
   deferred path restores the warmup replay plan from a snapshot instead
   of rebuilding it (the defer kernel zeroes the plan it consumes), so both
   paths replay/commit the same counts every execution.
-* ``full`` accepts Q tokens everywhere, ``mixed ramp`` cycles lengths 0..Q,
-  and the alternating/clustered cases split the batch evenly between zero-
-  and full-acceptance requests. K=V=128 throughout.
+* ``rate k/Q``: every request accepts k of its Q draft tokens — a uniform
+  acceptance-rate sweep, the axis production actually moves on (the bimodal
+  zero/full splits production never produces are gone). K=V=128 throughout.
 
 The deferred path runs in steady state (every verify replays the previous
 step's accepted counts), which is what the engine does between flushes.
 
 The ``Gate`` / ``Gated reduction`` columns run the production acceptance
-gate over each pattern's counts: when its EMA of the fully-accepting row
-share crosses the threshold the engine folds immediately instead of
-deferring, so the gated reduction is the arm the gate picks (gate-on steps
-cost the immediate path plus a one-warp defer kernel).
+gate over each pattern's counts: when its EMA of the mean acceptance rate
+crosses the threshold the engine folds immediately instead of deferring,
+so the gated reduction is the arm the gate picks (gate-on steps cost the
+immediate path plus a one-warp defer kernel).
 
 Run under ``ASCEND_RT_VISIBLE_DEVICES`` to pick the card (device npu:0).
 """
@@ -84,7 +84,6 @@ SHAPES = (
     (12, 11, 32, 128, 128, 6),
     (12, 11, 64, 128, 128, 6),
 )
-PATTERNS = ("full", "mixed ramp", "0/full alternating", "0/full clustered")
 LOWER_BOUND = -5.0
 # Recorded serving page strides for the H32/H64 checkpoint pools.
 SERVING_PAGE_STRIDE = {32: 625152, 64: 1250304}
@@ -112,16 +111,17 @@ def _profiler_options() -> dict:
         return {}
 
 
+# The acceptance sweep: every request accepts k of its Q draft tokens, one
+# bench case per level (a uniform rate, the axis production actually moves on).
+RATE_PATTERN = "rate {accepted}/{spec_query_len}"
+
+
 def acceptance_counts(pattern: str, batch: int, spec_query_len: int) -> list[int]:
-    if pattern == "full":
-        return [spec_query_len] * batch
-    if pattern == "mixed ramp":
-        return [index % (spec_query_len + 1) for index in range(batch)]
-    if pattern == "0/full alternating":
-        return [spec_query_len if index % 2 == 0 else 0 for index in range(batch)]
-    if pattern == "0/full clustered":
-        return [0 if index < batch // 2 else spec_query_len for index in range(batch)]
-    raise ValueError(f"unknown acceptance pattern: {pattern}")
+    prefix, _, tail = pattern.partition(" ")
+    if prefix != "rate" or not tail:
+        raise ValueError(f"unknown acceptance pattern: {pattern}")
+    accepted = min(int(tail.partition("/")[0]), spec_query_len)
+    return [accepted] * batch
 
 
 def gate_arm(shape: tuple, pattern: str) -> str:
@@ -558,7 +558,9 @@ def main() -> None:
     )
     rows = []
     for shape in SHAPES:
-        for pattern in PATTERNS:
+        spec_query_len = shape[5]
+        for accepted in range(1, spec_query_len + 1):
+            pattern = RATE_PATTERN.format(accepted=accepted, spec_query_len=spec_query_len)
             label = f"{shape_label(shape)} {pattern}"
             if args.filter and args.filter not in label:
                 continue
