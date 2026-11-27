@@ -17,10 +17,12 @@ import pytest
 from tools.epd_bench import (
     _fetch_text,
     _load_ec_bytes,
+    _write_reports,
     aggregate_stage_metrics,
     compare_with_tolerance,
     main,
     parse_bench_output,
+    parse_proxy_metrics,
     render_json,
     render_markdown,
 )
@@ -256,3 +258,199 @@ def test_main_reports_missing_vllm_as_user_error(monkeypatch, tmp_path) -> None:
     report = json.loads(report_json.read_text(encoding="utf-8"))
     assert any("failed to execute benchmark command" in note for note in report["notes"])
     assert report["benchmark"] == parse_bench_output("")
+
+
+SUMMARY_ONLY_METRICS = """
+epd_stage_seconds_count{stage="encode"} 4
+epd_stage_seconds_sum{stage="encode"} 0.096
+"""
+
+BUCKET_METRICS = """
+epd_stage_seconds_bucket{stage="encode",le="0.05"} 2
+epd_stage_seconds_bucket{stage="encode",le="0.1"} 4
+epd_stage_seconds_bucket{stage="encode",le="+Inf"} 4
+epd_stage_seconds_count{stage="encode"} 4
+epd_stage_seconds_sum{stage="encode"} 0.096
+"""
+
+
+def test_parse_proxy_metrics_reports_bucket_upper_bounds() -> None:
+    stages = parse_proxy_metrics(BUCKET_METRICS)
+
+    encode = stages["encode"]
+    assert encode["count"] == 4
+    assert encode["mean_ms"] == pytest.approx(24.0)
+    # The percentiles are histogram bucket upper bounds, not exact quantiles.
+    assert encode["p50_ms"] == pytest.approx(50.0)
+    assert encode["p99_ms"] == pytest.approx(100.0)
+
+
+def test_parse_proxy_metrics_never_falls_back_to_the_mean() -> None:
+    stages = parse_proxy_metrics(SUMMARY_ONLY_METRICS)
+
+    encode = stages["encode"]
+    assert encode["mean_ms"] == pytest.approx(24.0)
+    assert encode["p50_ms"] is None, "a summary-only exporter must not turn the mean into p50"
+    assert encode["p99_ms"] is None, "a summary-only exporter must not turn the mean into p99"
+
+
+def test_parse_proxy_metrics_requires_the_inf_bucket_for_percentiles() -> None:
+    without_inf = "\n".join(line for line in BUCKET_METRICS.splitlines() if "+Inf" not in line)
+    encode = parse_proxy_metrics(without_inf)["encode"]
+    assert encode["count"] == 4
+    assert encode["p50_ms"] is None
+    assert encode["p99_ms"] is None
+
+    # Exporters may write integral counts as floats; the parser still reads them.
+    float_counts = BUCKET_METRICS.replace("} 4", "} 4.0").replace("} 2", "} 2.0")
+    encode = parse_proxy_metrics(float_counts)["encode"]
+    assert encode["p50_ms"] == pytest.approx(50.0)
+    assert encode["p99_ms"] == pytest.approx(100.0)
+
+    empty = parse_proxy_metrics("")
+    assert empty == {}
+
+
+def test_parse_proxy_metrics_handles_a_partial_family() -> None:
+    buckets_only = "\n".join(
+        line for line in BUCKET_METRICS.splitlines() if "count{" not in line and "sum{" not in line
+    )
+    encode = parse_proxy_metrics(buckets_only)["encode"]
+    assert encode["count"] == 4, "the +Inf bucket is the observation count"
+    assert encode["mean_ms"] is None, "a missing _sum must stay unmeasured"
+    assert encode["p99_ms"] == pytest.approx(100.0)
+
+
+def test_parse_bench_output_keeps_a_measured_zero() -> None:
+    text = (
+        "Request throughput (req/s): 0.00\nThroughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s"
+    )
+    parsed = parse_bench_output(text)
+    assert parsed["request_throughput_rps"] == pytest.approx(0.0)
+
+
+def test_dry_run_records_the_command_without_running_it(tmp_path) -> None:
+    report_md = tmp_path / "epd_report.md"
+    report_json = tmp_path / "epd_report.json"
+
+    exit_code = main(["--model", "m", "--dry-run", "--report-md", str(report_md), "--report-json", str(report_json)])
+
+    assert exit_code == 0
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["command"][:3] == ["vllm", "bench", "serve"]
+    assert any("not executed" in note for note in report["notes"])
+    assert all(value is None for value in report["benchmark"].values())
+    assert not list(tmp_path.glob("*.tmp")), "no temporary report file may be left behind"
+
+
+def test_bench_output_does_not_record_a_command(tmp_path) -> None:
+    bench_output = tmp_path / "bench.txt"
+    bench_output.write_text(SERVING_OUTPUT, encoding="utf-8")
+    report_json = tmp_path / "epd_report.json"
+
+    exit_code = main(
+        [
+            "--model",
+            "m",
+            "--bench-output",
+            str(bench_output),
+            "--report-md",
+            str(tmp_path / "r.md"),
+            "--report-json",
+            str(report_json),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["command"] is None, "a parsed previous run must not claim a command was executed"
+    assert any("no benchmark command was executed" in note for note in report["notes"])
+    assert report["benchmark"]["successful_requests"] == 10
+
+
+def _run_cli(tmp_path, *extra: str) -> tuple[int, Path, Path]:
+    report_md = tmp_path / "epd_report.md"
+    report_json = tmp_path / "epd_report.json"
+    args = ["--model", "m", "--report-md", str(report_md), "--report-json", str(report_json), *extra]
+    return main(args), report_md, report_json
+
+
+def test_invalid_inputs_are_user_errors(tmp_path, capsys) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}", encoding="utf-8")
+
+    cases = [
+        (["--bench-output", str(tmp_path / "missing.txt")], "does not exist"),
+        (["--dry-run", "--baseline-json", str(tmp_path / "missing.json")], "does not exist"),
+        (["--dry-run", "--fail-on-regression"], "needs --baseline-json"),
+        (["--dry-run", "--tolerance", "0"], "tolerance"),
+        (["--dry-run", "--tolerance", "1.5"], "tolerance"),
+        (["--dry-run", "--bench-output", str(baseline)], "cannot be combined"),
+        (["--dry-run", "--report-md", str(tmp_path / "missing" / "r.md")], "parent directory"),
+    ]
+    for extra, expected in cases:
+        exit_code, report_md, report_json = _run_cli(tmp_path, *extra)
+        assert exit_code == 2, f"{extra} should be rejected as a user error"
+        assert expected in capsys.readouterr().err
+        assert not report_md.exists() and not report_json.exists(), f"{extra} must not write a report"
+
+
+def test_broken_baseline_still_writes_the_report(tmp_path) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{not-json", encoding="utf-8")
+
+    exit_code, report_md, report_json = _run_cli(tmp_path, "--dry-run", "--baseline-json", str(baseline))
+
+    assert exit_code == 0
+    assert report_md.is_file() and report_json.is_file()
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["comparison"] is None
+    assert any("comparison skipped" in note for note in report["notes"])
+
+
+def test_benchmark_timeout_is_a_user_error(monkeypatch, tmp_path) -> None:
+    def _timeout(*args: object, **kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="vllm", timeout=1, output="partial stdout\n")
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    exit_code, report_md, report_json = _run_cli(tmp_path, "--bench-timeout-seconds", "1")
+
+    assert exit_code == 2
+    assert report_md.is_file()
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert any("timed out" in note for note in report["notes"])
+    assert any("partial stdout" in note for note in report["notes"])
+
+
+def test_reports_are_written_as_a_pair(monkeypatch, tmp_path) -> None:
+    reports = SimpleNamespace(report_md=str(tmp_path / "r.md"), report_json=str(tmp_path / "r.json"))
+    original_write_text = Path.write_text
+    calls = {"count": 0}
+
+    def _flaky_write_text(self, data, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("simulated disk failure")
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _flaky_write_text)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        _write_reports(reports, {"model": "m", "benchmark": parse_bench_output("")})
+
+    assert not (tmp_path / "r.md").exists(), "the markdown half must not be committed alone"
+    assert not (tmp_path / "r.json").exists()
+    assert not list(tmp_path.glob("*.tmp")), "temporary files must be cleaned up"
+
+
+def test_stage_rows_report_unmeasured_percentiles() -> None:
+    report = {
+        "model": "m",
+        "benchmark": parse_bench_output(""),
+        "stages": parse_proxy_metrics(SUMMARY_ONLY_METRICS),
+        "notes": [],
+    }
+    markdown = render_markdown(report)
+    row = next(line for line in markdown.splitlines() if line.startswith("| encode |"))
+
+    assert "| 4 | 24.0000 | 未采集 | 未采集 | 未采集 |" in row
