@@ -157,11 +157,11 @@ _PROBE_TIMEOUT = 1
 
 try:
     import uvloop  # type: ignore[import-not-found]
+    from uvloop import Loop as _Loop  # type: ignore[import-not-found]
 
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    _Loop = uvloop.Loop
 except ImportError:
-    _Loop = asyncio.SelectorEventLoop
+    from asyncio import SelectorEventLoop as _Loop
 
 
 class ServerRole(str, Enum):

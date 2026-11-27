@@ -716,7 +716,7 @@ def test_worker_connections_restart_and_shutdown(tmp_path, shared_listener):
         children = []
         try:
             deadline = time.monotonic() + 30
-            workers = set()
+            workers: set[int] = set()
             while len(workers) != 4 and time.monotonic() < deadline:
                 assert proc.poll() is None, log_path.read_text()
                 with contextlib.suppress(OSError, http.client.HTTPException):
