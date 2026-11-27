@@ -103,7 +103,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"vllm-ascend/MiniMax-M3.1-Flash-W4A8", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -160,7 +160,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"vllm-ascend/MiniMax-M3.1-Flash-W4A8", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -218,7 +218,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"vllm-ascend/MiniMax-M3.1-Flash-W4A8", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
