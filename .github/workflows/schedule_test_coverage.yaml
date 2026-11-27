@@ -166,7 +166,13 @@ jobs:
                   base_sha = git(root, "rev-parse", "HEAD")
                   suffix = helper.coverage_file_suffix(branch_name)
               else:
-                  git(root, "fetch", "origin", "main")
+                  # The PR checkout's origin is the fork. Its main is not the
+                  # upstream base, so pin the workflow repository's main instead.
+                  base_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+                  if base_repo:
+                      git(root, "fetch", f"https://github.com/{base_repo}.git", "main")
+                  else:
+                      git(root, "fetch", "origin", "main")
                   base_ref = "main"
                   base_sha = git(root, "rev-parse", "FETCH_HEAD")
                   suffix = ""
