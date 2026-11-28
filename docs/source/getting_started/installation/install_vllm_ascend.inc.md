@@ -35,9 +35,10 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-pip-install -->
     ```bash
-    pip install \
-        --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        "vllm=={{ release_vllm_version }}"
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
 
     pip install \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
