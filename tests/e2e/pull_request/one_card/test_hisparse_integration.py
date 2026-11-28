@@ -601,7 +601,10 @@ def test_random_request_unions(capture):
 
 
 @pytest.mark.parametrize("graph_producer,shared_group", [(False, True), (True, False)])
-def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared_group, record_property, monkeypatch):
+@pytest.mark.parametrize("padding", [0, 5])
+def test_direct_target_mirror_survives_legal_draft_writes(
+    graph_producer, shared_group, padding, record_property, monkeypatch
+):
     from types import SimpleNamespace
 
     from vllm.distributed import parallel_state
@@ -738,7 +741,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
         assert isinstance(proxy, HostMirrorConnector)
         scheduler_output = SimpleNamespace(has_sync_kv_loads=True)
         input_batch = SimpleNamespace(
-            has_prefill=False, num_tokens=written.numel(), num_tokens_after_padding=written.numel()
+            has_prefill=False, num_tokens=written.numel(), num_tokens_after_padding=written.numel() + padding
         )
         values = torch.full((written.numel(), width), 237, dtype=torch.uint8, device=source.device)
         valid = torch.tensor([written.numel()], dtype=torch.int32, device=source.device)

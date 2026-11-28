@@ -181,7 +181,7 @@ class HostMirrorConnector:
             and input_batch is not None
             and attn_metadata is not None
             and not input_batch.has_prefill
-            and 0 < input_batch.num_tokens == input_batch.num_tokens_after_padding
+            and input_batch.num_tokens > 0
         )
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 

@@ -13,7 +13,8 @@ from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.mark.parametrize("extra_position", [None, "before", "between", "after"])
-def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch, extra_position):
+@pytest.mark.parametrize("num_tokens_after_padding", [1, 8])
+def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch, extra_position, num_tokens_after_padding):
     from vllm.distributed import parallel_state
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -74,7 +75,7 @@ def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch, extra_po
     proxy = host_mirror.overlap_target_host_mirror(runner)
     assert isinstance(proxy, host_mirror.HostMirrorConnector)
     scheduler_output = NS(has_sync_kv_loads=True, skip_drafts=False)
-    batch = NS(has_prefill=False, num_tokens=1, num_tokens_after_padding=1)
+    batch = NS(has_prefill=False, num_tokens=1, num_tokens_after_padding=num_tokens_after_padding)
     proxy.begin_execution(True)
     proxy.pre_forward(scheduler_output, batch, attn_metadata={})
     proxy.finish_forward()
@@ -96,6 +97,38 @@ def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch, extra_po
     worker.is_host_writer = True
     mooncake.connector_worker.kv_transfer_config.is_kv_consumer = False
     assert host_mirror.overlap_target_host_mirror(runner) is inner
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["step_disabled", "no_sync_loads", "prefill", "zero_tokens", "missing_batch", "missing_metadata"],
+)
+def test_host_mirror_ineligible_forward_keeps_connector_finish(monkeypatch, reason):
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
+
+    current_stream = Mock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", current_stream)
+    connector = Mock(_disabled=False)
+    worker, output_stream, sources = Mock(), Mock(), Mock()
+    proxy = HostMirrorConnector(connector, worker, output_stream, sources)
+    scheduler_output = NS(has_sync_kv_loads=reason != "no_sync_loads")
+    batch = NS(has_prefill=reason == "prefill", num_tokens=0 if reason == "zero_tokens" else 1)
+    batch.num_tokens_after_padding = 8
+    if reason == "missing_batch":
+        batch = None
+    metadata = None if reason == "missing_metadata" else {}
+
+    proxy.begin_execution(reason != "step_disabled")
+    result = proxy.pre_forward(scheduler_output, batch, attn_metadata=metadata)
+    proxy.finish_forward()
+
+    assert result is connector.pre_forward.return_value
+    connector.pre_forward.assert_called_once_with(scheduler_output, batch, attn_metadata=metadata)
+    connector.finish_forward.assert_called_once_with()
+    sources.can_defer.assert_not_called()
+    worker._finish_mirror_phase.assert_not_called()
+    output_stream.wait_event.assert_not_called()
+    current_stream.assert_not_called()
 
 
 @pytest.mark.parametrize("shared", [False, True])
