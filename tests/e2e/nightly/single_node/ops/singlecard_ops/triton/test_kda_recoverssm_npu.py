@@ -646,7 +646,7 @@ def test_recoverssm_matches_fp64_small_norms(amplitude, heads, record_property):
 
 
 @pytest.mark.parametrize("capacity", [4, 8])
-@pytest.mark.parametrize("heads", [4, 16])
+@pytest.mark.parametrize("heads", [4, 12, 16])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_kimi_request_records_match_fp64_kda(capacity, heads, record_property):
@@ -654,7 +654,11 @@ def test_kimi_request_records_match_fp64_kda(capacity, heads, record_property):
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(51134)
     device, dim = "npu", 128
-    q, k, v, gate = (torch.randn(1, capacity, heads, dim, dtype=torch.bfloat16, device=device) for _ in range(4))
+    q, k, v = (torch.randn(1, capacity, heads, dim, dtype=torch.bfloat16, device=device) for _ in range(3))
+    # Match the fused B/F/G projection, including the offset of F within each row.
+    projection_dim = heads * dim
+    bfg = torch.randn(capacity, heads + 2 * projection_dim, dtype=q.dtype, device=device)
+    gate = bfg[:, heads : heads + projection_dim].view_as(q)
     raw_beta = torch.randn(1, capacity, heads, dtype=torch.bfloat16, device=device)
     a_log = torch.randn(heads, device=device) * 0.1
     bias = torch.randn(heads * dim, device=device) * 0.1

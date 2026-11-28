@@ -189,12 +189,16 @@ def test_padded_and_mixed_gates_accept_full_projection_copy(runtime):
         torch.testing.assert_close(selected, expected)
 
 
-def test_recoverssm_postprocess_keeps_beta_raw(runtime):
+def test_recoverssm_postprocess_keeps_f_and_beta_as_projection_views(runtime):
     runtime.model.use_recoverssm = True
-    packed = torch.randn(4, 3084, dtype=torch.bfloat16)
-    beta, _, _ = runtime.scope["_postprocess_bfg"](runtime.model, packed)
+    packed = torch.randn(136, 3084, dtype=torch.bfloat16)
+    beta, gate, _ = runtime.scope["_postprocess_bfg"](runtime.model, packed)
     torch.testing.assert_close(beta, packed[:, :12].unsqueeze(0), rtol=0, atol=0)
-    assert ("sigmoid", "main") not in runtime.events
+    expected_gate = packed[:, 12:1548].view(1, 136, 12, 128)
+    torch.testing.assert_close(gate, expected_gate, rtol=0, atol=0)
+    assert gate.data_ptr() == expected_gate.data_ptr()
+    assert gate.stride()[1:] == (3084, 128, 1)
+    assert not runtime.events
 
 
 def test_non_bfg_caller_keeps_recurrent_gate_materialization(runtime):
