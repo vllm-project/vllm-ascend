@@ -1,0 +1,11 @@
+pr: 23205
+entries:
+  - category: performance
+    text: >
+      Improved eager decode throughput for GDN hybrid-attention models
+      (Qwen3.5 family) on A2 by fusing the decode-step QKV split, l2norm and
+      gating sequence into a single launch: decode output throughput is about
+      28% higher on Qwen3.6-27B W8A8 at C16 with 512/512 input/output, and
+      about 12% higher with MTP speculative decoding on Qwen3.8-27B W8A8.
+      Enabled by default; set VLLM_ASCEND_GDN_FUSED_PREPARE=0 to disable.
+    hardware: [A2]

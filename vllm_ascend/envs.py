@@ -90,6 +90,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Fuse the GDN decode-step host sequence (three QKV split-contiguous
+    # copies, the gating launch and two l2norm launches) into one Triton
+    # launch to close NPU idle gaps in the eager decode path. Layouts the
+    # fused kernel does not cover automatically fall back. 1: enabled
+    # (default), 0: disabled.
+    "VLLM_ASCEND_GDN_FUSED_PREPARE": lambda: _bool_env("VLLM_ASCEND_GDN_FUSED_PREPARE", True),
 }
 
 # end-env-vars-definition
