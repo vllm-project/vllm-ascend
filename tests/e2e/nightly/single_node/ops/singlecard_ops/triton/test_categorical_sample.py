@@ -17,6 +17,152 @@ VOCAB_SIZE = 151936
 SUPPORTED_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
+@pytest.mark.parametrize("with_bias", [False, True])
+@pytest.mark.parametrize("draft_vocab,target_vocab", [(9001, 32768), (32000, 248320)])
+def test_compact_sampling_maps_cache_slots_and_greedy_ties(dtype, with_bias, draft_vocab, target_vocab):
+    torch.manual_seed(41)
+    batch = 4
+    mapping = torch.randperm(target_vocab, device=DEVICE)[:draft_vocab].sort().values.contiguous()
+    idx = torch.tensor([4, 0, 3, 1], dtype=torch.int32, device=DEVICE)
+    temperature = torch.tensor([0.0, 0.7, 1.0, 0.0, 1.3, 0.0], device=DEVICE)
+    seeds, pos = _seed_and_pos(batch, 6)
+    cache = torch.full((6, 3, draft_vocab), float("-inf"), dtype=dtype, device=DEVICE)
+    expected = cache.cpu()
+    mapping_cpu, idx_cpu = mapping.cpu(), idx.cpu().long()
+    logits = torch.randn(batch, draft_vocab, dtype=dtype, device=DEVICE)
+    bias = torch.full_like(logits, 0.125, dtype=torch.float32) if with_bias else None
+    # Cross coarse-block ties preserve the smallest target id.
+    logits[:, 0] = 10
+    logits[:, 8200] = 10
+    for step in range(2):
+        if step:
+            logits[:, 0] = float("-inf")
+        sampled = categorical_sample(
+            logits,
+            idx,
+            temperature,
+            seeds,
+            pos,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=torch.tensor(step, dtype=torch.int32, device=DEVICE),
+            vocab_mapping=mapping,
+            bias=bias,
+        )
+        effective = logits if bias is None else (logits.float() + bias).to(dtype)
+        expected[idx_cpu, step] = effective.cpu()
+        torch.testing.assert_close(cache.cpu(), expected, rtol=0, atol=0)
+        assert torch.isin(sampled.cpu(), mapping_cpu).all()
+        greedy = temperature.cpu()[idx_cpu] == 0
+        dense = torch.full((batch, target_vocab), float("-inf"), dtype=dtype)
+        dense[:, mapping_cpu] = effective.cpu()
+        torch.testing.assert_close(sampled.cpu()[greedy], dense.argmax(-1)[greedy], rtol=0, atol=0)
+
+
+def test_compact_sampling_preserves_all_masked_fallback():
+    logits = torch.full((2, 4), float("-inf"), device=DEVICE)
+    idx = torch.arange(2, dtype=torch.int32, device=DEVICE)
+    mapping = torch.tensor([2, 3, 7, 11], device=DEVICE)
+    temperature = torch.tensor([0.0, 1.0], device=DEVICE)
+    seeds, pos = _seed_and_pos(2, 2)
+    sampled = categorical_sample(logits, idx, temperature, seeds, pos, True, is_drafting=False, vocab_mapping=mapping)
+    assert sampled.cpu().tolist() == [0, 0]
+
+
+@pytest.mark.parametrize("batch", [0, 2])
+def test_compact_sampling_empty_batch_and_single_token_vocab(batch):
+    logits = torch.zeros(batch, 1, device=DEVICE)
+    idx = torch.arange(batch, dtype=torch.int32, device=DEVICE)
+    mapping = torch.tensor([11], device=DEVICE)
+    temperature = torch.tensor([0.0, 0.7], device=DEVICE)
+    seeds, pos = _seed_and_pos(batch, 2)
+
+    sampled = categorical_sample(logits, idx, temperature, seeds, pos, True, is_drafting=False, vocab_mapping=mapping)
+
+    assert sampled.dtype == torch.int64
+    assert sampled.cpu().tolist() == [11] * batch
+
+
+def test_compact_sampling_matches_expected_distribution():
+    count = 4096
+    logits = torch.tensor([0.0, 0.5, 1.0, 1.5], device=DEVICE).expand(count, -1).contiguous()
+    mapping = torch.tensor([0, 2, 7, 11], device=DEVICE)
+    idx = torch.arange(count, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(count, device=DEVICE)
+    seeds, pos = _seed_and_pos(count, count)
+    sampled = categorical_sample(logits, idx, temperature, seeds, pos, True, is_drafting=False, vocab_mapping=mapping)
+    observed = torch.bincount(sampled.cpu(), minlength=16).float() / count
+    expected = torch.zeros(16)
+    expected[mapping.cpu()] = logits[0].cpu().softmax(-1)
+    # A deterministic seed set with enough draws to detect mapping/mass bugs.
+    torch.testing.assert_close(observed, expected, rtol=0, atol=0.025)
+
+
+def test_compact_drafting_preserves_step_seed_separation():
+    count = 1024
+    mapping = torch.tensor([0, 2, 7, 11], device=DEVICE)
+    logits = torch.tensor([0.0, 0.5, 1.0, 1.5], device=DEVICE).expand(count, -1).contiguous()
+    dense = torch.full((count, 16), float("-inf"), device=DEVICE)
+    dense[:, mapping] = logits
+    idx = torch.arange(count, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(count, device=DEVICE)
+    seeds, pos = _seed_and_pos(count, count)
+    compact_cache = torch.empty(count, 2, 4, device=DEVICE)
+    dense_cache = torch.empty(count, 2, 16, device=DEVICE)
+    draws = []
+    for step in range(2):
+        col = torch.tensor(step, dtype=torch.int32, device=DEVICE)
+        compact_draw = categorical_sample(
+            logits,
+            idx,
+            temperature,
+            seeds,
+            pos,
+            True,
+            is_drafting=True,
+            logits_cache=compact_cache,
+            logits_cache_col=col,
+            vocab_mapping=mapping,
+        )
+        dense_draw = categorical_sample(
+            dense,
+            idx,
+            temperature,
+            seeds,
+            pos,
+            True,
+            is_drafting=True,
+            logits_cache=dense_cache,
+            logits_cache_col=col,
+        )
+        torch.testing.assert_close(compact_draw, dense_draw, rtol=0, atol=0)
+        draws.append(compact_draw.cpu())
+    # Revisiting a position at another speculative step must use a fresh draw.
+    assert (draws[0] != draws[1]).float().mean() > 0.2
+
+
+def test_compact_sampling_distribution_across_hierarchy_boundaries():
+    count, draft_vocab, target_vocab = 4096, 9001, 12000
+    torch.manual_seed(63)
+    mapping = torch.randperm(target_vocab, device=DEVICE)[:draft_vocab].sort().values.contiguous()
+    support = torch.tensor([0, 1023, 1024, 4095, 4096, 8191, 8192, 9000], device=DEVICE)
+    values = torch.arange(8, dtype=torch.float32, device=DEVICE) * 0.2
+    logits = torch.full((count, draft_vocab), float("-inf"), device=DEVICE)
+    logits[:, support] = values
+    idx = torch.arange(count, dtype=torch.int32, device=DEVICE)
+    temperature = torch.full((count,), 0.7, device=DEVICE)
+    seeds, pos = _seed_and_pos(count, count)
+
+    sampled = categorical_sample(logits, idx, temperature, seeds, pos, True, is_drafting=False, vocab_mapping=mapping)
+
+    observed = torch.bincount(sampled.cpu(), minlength=target_vocab).float() / count
+    expected = torch.zeros(target_vocab)
+    expected[mapping[support].cpu()] = (values.cpu() / 0.7).softmax(-1)
+    torch.testing.assert_close(observed, expected, rtol=0, atol=0.025)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _npu_env():
     init_device_properties_triton()
