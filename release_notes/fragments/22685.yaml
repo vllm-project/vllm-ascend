@@ -1,0 +1,8 @@
+pr: 22685
+entries:
+  - category: feature
+    text: >-
+      Worker extensions configured through worker_extension_cls can now define
+      before_load_model and after_load_model callbacks to prepare loading
+      resources and inspect weights after successful model loading. Normal
+      Ascend loading keeps its existing no-argument loader behavior.
