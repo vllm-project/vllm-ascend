@@ -242,7 +242,11 @@ jobs:
           )
           if original.count(version_check) != 1:
               raise ValueError("Expected one PyTorch 2.10 version check in CMakeLists.txt")
-          cmake.write_text(original.replace(version_check, version_check.replace("2.10.0", "2.14.0")))
+          standard = "set(CMAKE_CXX_STANDARD 17)"
+          if original.count(standard) != 1:
+              raise ValueError("Expected one host extension C++ standard in CMakeLists.txt")
+          updated = original.replace(version_check, version_check.replace("2.10.0", "2.14.0"))
+          cmake.write_text(updated.replace(standard, "set(CMAKE_CXX_STANDARD 20)"))
           PY
 
       - name: Get csrc hash
