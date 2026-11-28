@@ -136,6 +136,19 @@ class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraph
         """
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
+            if not self.is_draft_model_prefill and self.speculator.attn_architecture == "FA3":
+                # The upstream per-step graph builds FA3 tiling outside capture and refreshes it before each replay.
+                schedule = self.vllm_config.speculative_config.num_speculative_tokens_per_batch_size
+                return super().capture(
+                    self.speculator._decode,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    progress_bar_desc=progress_bar_desc,
+                    specialize_spec_tokens=schedule is not None,
+                )
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
                 num_tokens = desc.num_tokens
@@ -184,6 +197,8 @@ class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraph
             "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
             "prefill" if self.is_draft_model_prefill else "decode",
         )
+        if self.speculator.attn_architecture == "FA3":
+            return super().run_fullgraph(desc)
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend

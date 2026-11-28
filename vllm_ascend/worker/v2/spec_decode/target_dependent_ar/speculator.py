@@ -48,6 +48,7 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
+from vllm_ascend.platform import FA3_BACKEND
 from vllm_ascend.utils import model_supports_dcp
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -77,6 +78,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     DSA and SFA manage their draft state in their metadata builders.
     """
 
+    attn_architecture: str | None = None
+    _fa3_decode_metadata: dict[str, Any] | None = None
     model_state: "AscendModelState"
 
     def supports_batch_sharded_draft_logits(self) -> bool:
@@ -93,7 +96,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
 
-        self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
         self._init_dcp()
@@ -389,6 +391,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self.attn_architecture = "QSA"
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
+        elif self.attn_backend.full_cls_name() == FA3_BACKEND:
+            self.attn_architecture = "FA3"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
@@ -479,27 +483,26 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
         num_speculative_steps: int | None = None,
     ) -> None:
-        """Minimal override to handle the merged multi-step graph in FULL mode.
-
-        In FULL mode the captured graph already contains all speculative
-        steps, so ``run_fullgraph`` is called once instead of once per
-        step.  For PIECEWISE / NONE modes we delegate to the upstream
-        ``_multi_step_decode`` which iterates over steps and calls
-        ``_generate_draft`` per step.
-        """
+        """Replay the merged draft graph, or let upstream prepare FA3 tiling before each step."""
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            return
-        # vLLM #60335 added `num_speculative_steps` on main.
-        super()._multi_step_decode(
-            num_reqs,
-            skip_attn,
-            batch_desc,
-            num_tokens_across_dp,
-            seq_lens_cpu_upper_bound,
-            num_speculative_steps,
-        )
+            if self.attn_architecture != "FA3":
+                assert self.decode_cudagraph_manager is not None
+                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                return
+            if all(group.backend.full_cls_name() == FA3_BACKEND for groups in self.attn_groups for group in groups):
+                self._fa3_decode_metadata = {}
+
+        try:
+            super()._multi_step_decode(
+                num_reqs,
+                skip_attn,
+                batch_desc,
+                num_tokens_across_dp,
+                seq_lens_cpu_upper_bound,
+                num_speculative_steps,
+            )
+        finally:
+            self._fa3_decode_metadata = None
 
     def _prefill(
         self,
@@ -549,6 +552,14 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata for uniform and explicit query layouts."""
+        if step > 1 and self._fa3_decode_metadata:
+            # Slot mappings and lengths advance in place. The block tables stay fixed within the round.
+            for groups in self.attn_groups:
+                for group in groups:
+                    group.get_metadata_builder(0).refresh_scheduler_metadata(
+                        self._fa3_decode_metadata[group.layer_names[0]]
+                    )
+            return self._fa3_decode_metadata
         assert self.input_batch is not None
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
@@ -590,6 +601,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 causal,
                 dcp_local_seq_lens,
             )
+        if step == 1 and self._fa3_decode_metadata is not None:
+            self._fa3_decode_metadata = attn_metadata
         if attn_metadata is not None:
             for metadata in attn_metadata.values():
                 if metadata is None:
@@ -683,9 +696,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if attn_metadata is None:
             return
 
-        # DSA/SFA manage draft state in their metadata builders; QSA has no
-        # host-side FIA fields to patch here.
-        if self.attn_architecture in ("DSA", "SFA", "QSA"):
+        # These backends do not consume host-side FIA decode parameters.
+        if self.attn_architecture in ("DSA", "SFA", "QSA", "FA3"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))

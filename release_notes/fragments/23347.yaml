@@ -1,0 +1,4 @@
+pr: 23347
+entries:
+  - category: feature
+    text: Hybrid MTP models on Model Runner V2 can use paged FA3 for supported target and draft attention on A3 and Ascend 950, including multi-step graph replay, with flash-attn-npu 0.5.1 or newer.

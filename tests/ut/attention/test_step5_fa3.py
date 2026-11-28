@@ -92,7 +92,7 @@ def test_step5_unsupported_configurations_fall_back(selection, fault):
         assert "flash_attention_v3" not in result
 
 
-@pytest.mark.parametrize("num_reqs", [1, 2, 4])
+@pytest.mark.parametrize("num_reqs", [1, 2, 4, 16])
 def test_step5_mtp_graph_padding_bounds_scheduler_batch(fa3, num_reqs):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.capture_sizes, builder.capture_query_len = {16}, 4
@@ -114,6 +114,7 @@ def test_step5_mtp_graph_padding_bounds_scheduler_batch(fa3, num_reqs):
 
     def scheduler(**kwargs):
         assert kwargs["batch_size"] == num_reqs
+        assert kwargs["max_seqlen_q"] == (1 if num_reqs == 16 else 4)
         assert kwargs["cu_seqlens_q"].numel() == num_reqs + 1
         assert kwargs["cache_seqlens"].numel() == num_reqs
         return torch.zeros(8, dtype=torch.uint8)
