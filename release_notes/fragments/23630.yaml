@@ -1,0 +1,7 @@
+pr: 23630
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup assertion when DCP is enabled with P/D disaggregation or KV pooling
+      and `--cp-kv-cache-interleave-size` is omitted. The interleave now defaults to the KV-cache
+      block size when `--dcp-kv-cache-interleave-size` is left at its default.

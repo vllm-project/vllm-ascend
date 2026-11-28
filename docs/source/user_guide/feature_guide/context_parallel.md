@@ -174,13 +174,12 @@ DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add rank
 
 The following constraint applies to both standalone DCP and PCP+DCP:
 
-- In a KV-cache transfer scenario such as KV pooling or P/D disaggregation, set `cp_kv_cache_interleave_size` to the KV-cache `block_size` (default: 128):
+- On nodes using DCP with KV pooling or P/D disaggregation, vLLM Ascend uses the configured KV-cache block size when you omit `--cp-kv-cache-interleave-size` and leave the legacy `--dcp-kv-cache-interleave-size` at its default. An explicit value must equal the KV-cache block size. For Kimi K3.1 FP8, the Mooncake pull path also accepts a divisor of the KV-cache block size that is a positive multiple of the kernel block size.
 
     ```shell
     vllm serve deepseek-ai/DeepSeek-V2-Lite \
         --tensor-parallel-size 2 \
         --decode-context-parallel-size 2 \
-        --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
 
