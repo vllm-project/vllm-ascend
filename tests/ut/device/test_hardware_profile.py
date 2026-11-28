@@ -59,6 +59,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.ENGRAM_UNROTATED_GATE,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
@@ -69,6 +70,7 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.ENGRAM_ROTATED_GATE,
+        HardwareCapability.ENGRAM_UNROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
