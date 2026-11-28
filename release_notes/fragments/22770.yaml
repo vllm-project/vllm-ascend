@@ -1,0 +1,4 @@
+pr: 22770
+entries:
+  - category: bugfix
+    text: Fixed unnecessary prefill recomputation when MemCache layerwise KV pooling reported an SSD copy before a readable memory copy of the same prefix.
