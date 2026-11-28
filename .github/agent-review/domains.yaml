@@ -59,3 +59,8 @@ domains:
       - "tests/ut/spec_decode/**"
       - "tests/ut/_310p/spec_decode/**"
       - "tests/e2e/**/spec_decode/**"
+  - name: triton
+    description: Triton operator contracts, kernel indexing, numerics and specialization
+    paths:
+      - "vllm_ascend/ops/triton/**"
+      - "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/**"
