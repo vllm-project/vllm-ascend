@@ -355,6 +355,7 @@ def test_setup_preserves_upstream_decode_sharding_policy():
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             dyntra_lb_config=SimpleNamespace(enabled=False),
+            decoder_append_prefill_enable=False,
             batch_job_sched_config=SimpleNamespace(enabled=False),
         )
     )
