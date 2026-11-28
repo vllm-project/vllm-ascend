@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import vllm.v1.worker.gpu.buffer_utils as buffer_utils
 from vllm.config import VllmConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -16,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.gpu.states import RequestState
 
 import vllm_ascend.core.dyntra_lb_scheduler as dyntra_lb_scheduler_module
 from tests.ut.kv_offload.utils import (
@@ -31,6 +33,10 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_block_size,
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
+)
+from vllm_ascend.core.recompute_scheduler import (
+    AsyncDyntraLBRecomputeScheduler,
+    DyntraLBRecomputeScheduler,
 )
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
@@ -1100,10 +1106,11 @@ def test_dyntra_lb_paused_request_resumes_into_scheduled_new_reqs():
     resumed_output = scheduler.schedule()
 
     # Model Runner V2 transports readmitted requests as new payloads, including
-    # the full token list and block table.
+    # the full token list and block table, and evicts the prior worker slot.
     assert [data.req_id for data in resumed_output.scheduled_new_reqs] == [request.request_id]
     assert resumed_output.scheduled_new_reqs[0].block_ids == block_ids
     assert resumed_output.scheduled_cached_reqs.req_ids == []
+    assert request.request_id in resumed_output.preempted_req_ids
 
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in scheduler._lb_paused_req_ids
@@ -1481,6 +1488,7 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     stale = SimpleNamespace(request_id="stale", num_stale_output_tokens=1)
     legacy = SimpleNamespace(request_id="legacy")
     scheduler._lb_paused_req_ids = {"stale", "legacy", "paused", "free"}
+    scheduler._pending_lb_paused_req_ids = {"stale", "legacy", "paused", "free"}
     preempt_calls = []
     monkeypatch.setattr(
         Scheduler,
@@ -1491,9 +1499,11 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     scheduler._preempt_request(legacy, 2.0)
     assert preempt_calls == [("stale", (), {"drop_stale_output": True}), ("legacy", (), {})]
     assert scheduler._lb_paused_req_ids == {"paused", "free"}
+    assert scheduler._pending_lb_paused_req_ids == {"paused", "free"}
 
     free_req = create_request(request_id=3)
     scheduler._lb_paused_req_ids.add(free_req.request_id)
+    scheduler._pending_lb_paused_req_ids.add(free_req.request_id)
     monkeypatch.setattr(
         Scheduler,
         "_free_request",
@@ -1501,6 +1511,7 @@ def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
     )
     assert scheduler._free_request(free_req, delay_free_blocks=True) == {"ok": True}
     assert free_req.request_id not in scheduler._lb_paused_req_ids
+    assert free_req.request_id not in scheduler._pending_lb_paused_req_ids
 
 
 # Deferred block freeing (vllm-project/vllm#49675): with async scheduling and a
@@ -1722,3 +1733,164 @@ def test_dyntra_resumable_output_preserves_session(scheduler_cls, buffered_input
     assert not scheduler._lb_paused_req_ids
     assert scheduler.num_waiting_for_streaming_input == 0
     assert not any(scheduler.kv_cache_manager.get_block_ids(request.request_id))
+
+
+class _CpuUvaBuffer:
+    """CPU-only stand-in for patch_uva.UvaBufferWrapper when NPU hooks are absent."""
+
+    def __init__(self, size: int | tuple[int, ...], dtype: torch.dtype):
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+        self.np = self.cpu.numpy()
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        return self.cpu if n is None else self.cpu[:n]
+
+
+def _replay_worker_request_state(req_states: RequestState, scheduler_output: Any) -> None:
+    """Replay SchedulerOutput through real RequestState mirroring GPUModelRunner."""
+    evicted = set(scheduler_output.finished_req_ids) | set(scheduler_output.preempted_req_ids or ())
+    for req_id in sorted(evicted):
+        req_states.remove_request(req_id)
+    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+        assert req_id in req_states.req_id_to_index
+    for new_req in scheduler_output.scheduled_new_reqs:
+        req_states.remove_request(new_req.req_id)
+        req_states.add_request(
+            req_id=new_req.req_id,
+            prompt_len=new_req.prompt_len,
+            all_token_ids=new_req.prefill_token_ids,
+            num_computed_tokens=new_req.num_computed_tokens,
+            max_tokens=new_req.sampling_params.max_tokens if new_req.sampling_params else 1,
+        )
+
+
+@pytest.mark.parametrize(
+    "scheduler_cls",
+    [
+        DyntraLBScheduler,
+        AsyncDyntraLBScheduler,
+        DyntraLBRecomputeScheduler,
+        AsyncDyntraLBRecomputeScheduler,
+    ],
+)
+def test_dyntra_lb_pause_evicts_worker_request_slot_and_resumes_losslessly(scheduler_cls, monkeypatch):
+    """Pausing a running request must free its MRV2 RequestState slot without freeing KV."""
+    monkeypatch.setattr(buffer_utils, "UvaBuffer", _CpuUvaBuffer)
+    monkeypatch.setattr(buffer_utils, "NonUvaBuffer", _CpuUvaBuffer)
+    vllm_config = make_dyntra_test_config(max_num_seqs=2, max_num_batched_tokens=128, block_size=16)
+    vllm_config.kv_transfer_config = None
+    vllm_config.scheduler_config.async_scheduling = issubclass(scheduler_cls, AsyncScheduler)
+    scheduler = create_dyntra_lb_scheduler(vllm_config, scheduler_cls=scheduler_cls)
+    req_states = RequestState(
+        max_num_reqs=2,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        num_speculative_steps=0,
+        vocab_size=64,
+        device=torch.device("cpu"),
+        use_dense_all_token_ids=True,
+    )
+
+    long_req = create_request(request_id=1, num_tokens=24, max_tokens=4, block_size=16)
+    scheduler.add_request(long_req)
+    step1 = scheduler.schedule()
+    _replay_worker_request_state(req_states, step1)
+    scheduler.update_from_output(step1, create_model_runner_output([long_req]))
+    assert set(req_states.req_id_to_index) == {long_req.request_id}
+
+    preserved_blocks = scheduler.kv_cache_manager.get_blocks(long_req.request_id).get_block_ids()
+    saved_computed = long_req.num_computed_tokens
+    saved_tokens = list(long_req._all_token_ids)
+
+    short_1 = create_request(request_id=2, num_tokens=8, max_tokens=1, block_size=16)
+    short_2 = create_request(request_id=3, num_tokens=8, max_tokens=4, block_size=16)
+    scheduler.add_request(short_1)
+    scheduler.add_request(short_2)
+
+    scheduler.prepare_dyntra_lb_step()
+    scheduler.modifications = {"out_blk": [2], "in_blk": [1, 1], "freeze": False}
+    step2 = scheduler.schedule()
+
+    # Physical KV blocks stay retained while the paused request evicts its worker slot.
+    assert long_req.status == RequestStatus.PREEMPTED
+    assert long_req in scheduler.kv_holding_waiting
+    assert scheduler.kv_cache_manager.get_blocks(long_req.request_id).get_block_ids() == preserved_blocks
+    assert [r.req_id for r in step2.scheduled_new_reqs] == [short_1.request_id, short_2.request_id]
+    _replay_worker_request_state(req_states, step2)
+    assert long_req.request_id in step2.preempted_req_ids
+    assert set(req_states.req_id_to_index) == {short_1.request_id, short_2.request_id}
+    assert req_states.free_indices == []
+
+    # Subsequent step while still paused must not re-emit eviction.
+    scheduler.update_from_output(step2, create_model_runner_output([short_1, short_2]))
+    assert short_1.request_id in scheduler.finished_req_ids
+    scheduler.prepare_dyntra_lb_step()
+    scheduler.modifications = {"out_blk": [], "in_blk": [], "freeze": True}
+    step3 = scheduler.schedule()
+    assert long_req.request_id not in step3.preempted_req_ids
+    _replay_worker_request_state(req_states, step3)
+    scheduler.update_from_output(step3, create_model_runner_output([short_2]))
+
+    # Resume long_req into the slot freed by short_1 with preserved blocks and tokens.
+    scheduler.modifications = None
+    step4 = scheduler.schedule()
+    resumed = next(r for r in step4.scheduled_new_reqs if r.req_id == long_req.request_id)
+    assert resumed.block_ids == preserved_blocks
+    assert resumed.num_computed_tokens == saved_computed
+    assert resumed.prefill_token_ids == saved_tokens
+    _replay_worker_request_state(req_states, step4)
+    idx = req_states.req_id_to_index[long_req.request_id]
+    assert req_states.num_computed_tokens_np[idx] == saved_computed
+    assert req_states.prefill_len.np[idx] == len(saved_tokens)
+
+
+def test_dyntra_lb_pause_hides_lb_paused_req_from_connectors(monkeypatch):
+    """KV/EC connectors must not see LB-paused requests as KV-freeing preemptions."""
+    vllm_config = make_dyntra_test_config(max_num_seqs=2, max_num_batched_tokens=128, block_size=16)
+    scheduler = create_dyntra_lb_scheduler(vllm_config, scheduler_cls=DyntraLBScheduler)
+    assert scheduler.connector is not None
+
+    kv_meta_refs: list[set[str]] = []
+    ec_meta_refs: list[set[str]] = []
+
+    orig_build_kv_meta = scheduler.connector.build_connector_meta
+
+    def _recording_build_kv_meta(scheduler_output):
+        # Retain the direct reference just like AscendConnectorMetadata does.
+        kv_meta_refs.append(scheduler_output.preempted_req_ids)
+        return orig_build_kv_meta(scheduler_output)
+
+    class _FakeECConnector:
+        def build_connector_meta(self, scheduler_output):
+            ec_meta_refs.append(scheduler_output.preempted_req_ids)
+            return SimpleNamespace(preempted_req_ids=scheduler_output.preempted_req_ids)
+
+        def take_unavailable_requests(self):
+            return ()
+
+        def update_connector_output(self, connector_output):
+            del connector_output
+
+        def get_ec_connector_stats(self):
+            return None
+
+    monkeypatch.setattr(scheduler.connector, "build_connector_meta", _recording_build_kv_meta)
+    scheduler.ec_connector = _FakeECConnector()  # type: ignore[assignment]
+
+    long_req = create_request(request_id=1, num_tokens=24, max_tokens=4, block_size=16)
+    scheduler.add_request(long_req)
+    step1 = scheduler.schedule()
+    scheduler.update_from_output(step1, create_model_runner_output([long_req]))
+
+    short_req = create_request(request_id=2, num_tokens=8, max_tokens=4, block_size=16)
+    scheduler.add_request(short_req)
+    scheduler.prepare_dyntra_lb_step()
+    scheduler.modifications = {"out_blk": [2], "in_blk": [1], "freeze": False}
+    step2 = scheduler.schedule()
+
+    assert long_req.request_id in step2.preempted_req_ids
+    # Both snapshots and retained references inside connector metadata stay clean.
+    assert kv_meta_refs[-1] is not step2.preempted_req_ids
+    assert long_req.request_id not in kv_meta_refs[-1]
+    assert long_req.request_id not in ec_meta_refs[-1]
+    assert long_req.request_id not in step2.ec_connector_metadata.preempted_req_ids
