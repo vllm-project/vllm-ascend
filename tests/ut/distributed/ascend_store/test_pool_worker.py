@@ -491,7 +491,7 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
     def test_draft_layers_are_persistent_and_outside_target_reuse(self):
         worker = self.make_worker(reuse=True)
         self.assertEqual(worker.num_layers, 6)
-        self.assertEqual(worker._first_local_draft_layer, 4)
+        self.assertEqual(worker._dflash_draft_start_layer, 4)
         self.assertEqual(worker.prefetch_layer_map, {2: (1,), 3: (2,)})
         self.assertEqual(worker._reused_layers_by_group, {0: {1, 2, 3}})
         worker.layer_load_tasks = [[object()] for _ in range(6)]
@@ -521,7 +521,7 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
         self.assertEqual(worker.current_layer, 4)
         self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
         # Draft attention hooks must not transfer context KV a second time.
-        for name in worker.kv_cache_config.dflash_draft_layer_names:
+        for name in worker.dflash_draft_layer_names:
             connector.wait_for_layer_load(name)
             connector.save_kv_layer(name, None, None)
         self.assertEqual(worker.current_layer, 4)
@@ -630,8 +630,9 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
     def test_dspark_companion_cache_keeps_draft_ownership(self):
         worker = self.make_worker(draft_method="dspark")
         worker.configure_dspark_prefix_cache(MagicMock())
-        self.assertIsNone(worker._first_local_draft_layer)
-        self.assertFalse(worker.pool_draft_physical_ids)
+        self.assertIsNone(worker._dflash_draft_start_layer)
+        self.assertFalse(worker.dflash_draft_layer_names)
+        self.assertFalse(worker.dflash_draft_layer_indices)
         self.assertEqual(worker.num_layers, 4)
 
     def test_dspark_no_forward_and_load_only_do_not_save(self):
@@ -651,8 +652,9 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
 
     def test_dspark_reuse_keeps_draft_outside_ordinary_pool(self):
         worker = self.make_worker(draft_method="dspark", reuse=True)
-        self.assertIsNone(worker._first_local_draft_layer)
-        self.assertFalse(worker.pool_draft_physical_ids)
+        self.assertIsNone(worker._dflash_draft_start_layer)
+        self.assertFalse(worker.dflash_draft_layer_names)
+        self.assertFalse(worker.dflash_draft_layer_indices)
         self.assertEqual(worker.num_layers, 4)
 
 
