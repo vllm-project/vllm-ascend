@@ -1009,7 +1009,22 @@ def test_v18_dump_payload_carries_tp_rank_and_heads(tmp_path: Path):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
 
     cache = torch.randn(4, 8, 2, 16)  # [blocks, block_size, kv_heads, head_dim]
-    runner = SimpleNamespace(kv_caches={"L0": cache}, tp_rank=3, dp_rank=0, dcp_rank=0, dcp_size=1)
+    runner = SimpleNamespace(
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0, 2],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        tp_rank=3,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
     reader = KvCacheReader(runner)
     snaps = reader.snapshot_request_blocks(
         req_id="r1",
@@ -1032,6 +1047,12 @@ def test_v18c_list_kv_caches_use_global_layer_names(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches=[cache0, cache1],
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         model=SimpleNamespace(start_layer=14),
         tp_rank=0,
         dp_rank=0,
@@ -1053,8 +1074,19 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
 
     cache = torch.randn(2, 4, 1, 8)
+    # Fallback list name is layer_{start}; it must still be registered in
+    # kv_cache_groups so dump does not silent-fallback to group 0.
     runner = SimpleNamespace(
         kv_caches=[cache],
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["layer_14"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         model=SimpleNamespace(start_layer=14),
         tp_rank=0,
         dp_rank=0,
@@ -1069,8 +1101,33 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
     assert snaps[0].payload["layer"] == "layer_14"
 
 
+def test_v18d2_missing_kv_cache_groups_skips_dump(tmp_path: Path):
+    """No layer→group map: refuse silent group-0 dump (alex #1)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.randn(2, 4, 1, 8)
+    runner = SimpleNamespace(
+        kv_caches=[cache],
+        model=SimpleNamespace(start_layer=14),
+        tp_rank=0,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[0],
+        out_dir=tmp_path / "kv",
+    )
+    assert snaps == []
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
-def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
+@pytest.mark.parametrize(
+    "job_fields",
+    [{"incident_type": "token_repeat"}, {"incident_type": "manual_trigger", "manager_block_ids_by_group": [[]]}],
+)
+def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int, job_fields):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
     from vllm_ascend.observability.runtime_guard.rank_gate import dump_rank_tag
@@ -1078,6 +1135,15 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
     cache = torch.randn(2, 4, 1, 8)
     runner = SimpleNamespace(
         kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         tp_rank=tp_rank,
         dp_rank=0,
         dcp_rank=0,
@@ -1091,19 +1157,16 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
             submit_heavy=None,
         ),
         quota=MagicMock(),
+        wave_tracker=SimpleNamespace(current_wave=lambda: 2),
     )
     jobs = [
         {
             "req_id": "r1",
-            "incident_type": "token_repeat",
+            **job_fields,
         }
     ]
-    with patch(
-        "vllm_ascend.observability.runtime_guard.processor_dump.block_ids_for_request",
-        return_value=[0],
-    ):
-        RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
-    shard = tmp_path / "kv_cache" / "token_repeat" / "r1" / "wave_unknown" / dump_rank_tag(runner)
+    RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
+    shard = tmp_path / "kv_cache" / job_fields["incident_type"] / "r1" / "wave_unknown" / dump_rank_tag(runner)
     assert shard.is_dir()
     assert list(shard.glob("*.pt"))
 

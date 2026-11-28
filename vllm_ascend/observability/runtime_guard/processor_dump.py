@@ -25,9 +25,9 @@ from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.dump import (
     REQUEST_FINISHED_AT_DUMP_KEY,
     KvCacheReader,
-    block_ids_for_request,
     kv_dump_wave_dirname,
     parse_dump_arm_wave,
+    request_manager_blocks,
     write_kv_dump_skipped,
 )
 from vllm_ascend.observability.runtime_guard.rank_gate import (
@@ -36,7 +36,7 @@ from vllm_ascend.observability.runtime_guard.rank_gate import (
     should_dump_kv_on_rank,
     should_run_wave_sync_on_rank,
 )
-from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+from vllm_ascend.observability.runtime_guard.state import MANUAL_TRIGGER_TYPE, RequestGuardStore
 
 logger = init_logger_ascend(__name__)
 
@@ -48,6 +48,7 @@ class RuntimeGuardDumpMixin:
     runner: Any
     runtime_config: Any
     quota: Any
+    wave_tracker: Any
     action_executor: Any
     _deferred_kv_dump_jobs: list[dict[str, Any]]
     _kv_dump_jobs: list[dict[str, Any]]
@@ -228,12 +229,11 @@ class RuntimeGuardDumpMixin:
                 # Armed jobs always attempt D2H (①). Prefer frozen arm-time
                 # block_ids; fall back to live tables. Stamp finished caveat.
                 finished_at = bool(job.get(REQUEST_FINISHED_AT_DUMP_KEY)) or store.is_request_finished(req_id)
-                armed_bids = job.get("block_ids")
-                if isinstance(armed_bids, list) and armed_bids:
-                    block_ids = [int(x) for x in armed_bids]
-                else:
-                    block_ids = list(block_ids_for_request(self.runner, req_id, None))
-                if not block_ids:
+                rows = job.get("manager_block_ids_by_group")
+                # Manual prefill can arm before pages exist. Older jobs only carry group 0.
+                if rows is None or (incident_type == MANUAL_TRIGGER_TYPE and not any(rows)):
+                    rows = request_manager_blocks(self.runner, req_id, group0_pages=job.get("block_ids"))
+                if not any(rows):
                     logger.warning(
                         "[runtime_guard dump_kv] skip empty local block_ids req_id=%s rank=%s",
                         req_id,
@@ -246,12 +246,13 @@ class RuntimeGuardDumpMixin:
                 try:
                     for snap in reader.iter_request_snapshots(
                         req_id=req_id,
-                        block_ids=block_ids,
+                        manager_block_ids_by_group=rows,
                         out_dir=out_dir,
                     ):
                         produced += 1
                         # Stamp incident meta for async save failure markers.
                         snap.payload.setdefault("incident_type", incident_type)
+                        snap.payload["dump_copy_wave"] = self.wave_tracker.current_wave()
                         if wave_i is not None:
                             snap.payload.setdefault("dump_arm_wave", wave_i)
                         snap.payload.setdefault("dump_root", str(dump_root))
