@@ -208,6 +208,11 @@ class NPUWorker(GPUWorker):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         ascend_config = init_ascend_config(vllm_config)
+        if getattr(envs, "VLLM_RELOAD_MODE", None) == "direct" and ascend_config.enable_fused_mc2:
+            from vllm_ascend.model_loader.weight_reload import install_direct_reload_patch
+
+            install_direct_reload_patch()
+
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging(ascend_config.ascend_log_path)

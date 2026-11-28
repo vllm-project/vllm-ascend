@@ -67,6 +67,7 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.EXPERT_RELOAD_STORAGE_ALIAS,
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
@@ -97,6 +98,7 @@ _EXPECTED_CAPABILITIES = {
     ),
     AscendDeviceType.A5: frozenset(
         {
+            HardwareCapability.EXPERT_RELOAD_STORAGE_ALIAS,
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,

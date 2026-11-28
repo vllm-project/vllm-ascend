@@ -166,8 +166,7 @@ The repository contains runnable examples for weight transfer:
 - [`rlhf_sparse_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/182ea0448550a970e4f0ae3624fe35e38b37bc80/examples/rl/rlhf_sparse_hccl.py)
 
 Weight updates require `weight_nz_mode=0`. RL mode applies this setting
-automatically. For direct reload of MoE models, set `enable_fused_mc2=0`.
-Use layerwise reload with fused MC2 or MegaMoE.
+automatically. Fused MC2 still uses the NZ layout required by its expert kernel.
 
 #### Direct weight reload
 
@@ -176,6 +175,11 @@ Use the vLLM main revision in `.github/vllm-main-verified.commit` and set
 unquantized BF16 Qwen weights in place. The default is `layerwise`. Direct
 reload preserves the weight addresses used by captured decode graphs, so
 the server can replay those graphs after a successful update.
+
+For online full checkpoint updates, select fused MC2 (`enable_fused_mc2=1`)
+or BF16-capable MegaMoE (`enable_fused_mc2=2`). The BF16 validation used
+unquantized MoE, static expert placement, a separate shared expert, and
+`weight_nz_mode=0`, with speculative decoding disabled.
 
 ```bash
 VLLM_RELOAD_MODE=direct \
