@@ -152,6 +152,18 @@ a3-560t:
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
+      - name: Qwen3.8-Flash-Next-w4a8-A3
+        os: linux-aarch64-a3-800i-8
+        config_file_path: Qwen3.8-Flash-Next-w4a8-A3.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
+      - name: Qwen3.8-Flash-Next-w4a8-PD-Prefill-A3
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Qwen3.8-Flash-Next-w4a8-PD-Prefill-A3.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
+      - name: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: mr-v2-mtp-logprobs-a3
         os: linux-aarch64-a3-800i-2
         tests: tests/e2e/nightly/single_node/model_runner_v2/test_mtp_logprobs.py
@@ -352,6 +364,18 @@ a5:
       - name: singlecard-ops-a5
         os: linux-aarch64-a5-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
+      - name: Qwen3.8-Flash-Next-w4a8-mxfp-A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3.8-Flash-Next-w4a8-mxfp-A5.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
+      - name: Qwen3.8-Flash-Next-w4a8-mxfp-PD-Prefill-A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3.8-Flash-Next-w4a8-mxfp-PD-Prefill-A5.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
+      - name: Qwen3.8-Flash-Next-w4a8-mxfp-PD-Decode-A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3.8-Flash-Next-w4a8-mxfp-PD-Decode-A5.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: mr-v2-mtp-logprobs-a5
         os: linux-aarch64-a5-2
         tests: tests/e2e/nightly/single_node/model_runner_v2/test_mtp_logprobs.py

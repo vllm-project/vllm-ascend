@@ -1,0 +1,66 @@
+# Full GPQA on the colocated Qwen3.8 Flash Next service (TP4/DP1/EP on A5, MTP=3).
+test_cases:
+  - name: "Qwen3.8-Flash-Next-w4a8-mxfp-A5"
+    model: "Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HCCL_NPU_SOCKET_PORT_RANGE: "16700-16799"
+      SOC_VERSION: "ascend950dt_9582"
+      CC: "/usr/bin/g++"
+      CXX: "/usr/bin/g++"
+      SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "2400"
+      VLLM_RPC_TIMEOUT: "6000"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--served-model-name"
+      - "Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--data-parallel-size"
+      - "1"
+      - "--max-model-len"
+      - "141312"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--enable-expert-parallel"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_static_kernel":false,"enable_super_kernel":false}}'
+      - "--speculative-config"
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+    test_content: []
+    benchmarks:
+      acc_gpqa:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+        # Pooled-PD reference: 178/198, 178/198, 181/198; median 89.90% (PR #3).
+        # Colocated accuracy has not been measured; do not use the best PD score as its floor.
+        # Calibration-only floor; this does not check accuracy regression.
+        # After CI: use the colocated baseline, verify_mode: range, threshold: 5.
+        verify_mode: ge
+        baseline: 0

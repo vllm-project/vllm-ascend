@@ -1,0 +1,213 @@
+# Flash Next basic PD topology from the model guide, section 5.2.
+test_cases:
+  - name: Qwen3.8-Flash-Next-w4a8-mxfp-PD-Decode-A5
+    model: &model Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp
+    service_mode: pd
+    special_dependencies:
+      fastokens: "0.3.5"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
+      SOC_VERSION: "ascend950dt_9582"
+      CC: /usr/bin/g++
+      CXX: /usr/bin/g++
+      VLLM_RPC_TIMEOUT: "3600000"
+      HCCL_EXEC_TIMEOUT: "204"
+      HCCL_CONNECT_TIMEOUT: "120"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: AIV
+      ASCEND_BUFFER_POOL: "0:0"
+      HCCL_BUFFSIZE: "8192"
+    pd_server_envs:
+      - HCCL_NPU_SOCKET_PORT_RANGE: "61400-61499"
+        VLLM_USE_FASTOKENS: "1"
+        VLLM_ENGINE_READY_TIMEOUT_S: "2400"
+        HCCL_IF_BASE_PORT: "62000"
+      - HCCL_NPU_SOCKET_PORT_RANGE: "61500-61599"
+        VLLM_USE_FASTOKENS: "0"
+        VLLM_ENGINE_READY_TIMEOUT_S: "2400"
+        HCCL_IF_BASE_PORT: "63000"
+    pd_server_cmds:
+      # Prefill
+      - - *model
+        - --api-server-count
+        - "1"
+        - --host
+        - "0.0.0.0"
+        - --port
+        - $PREFILL_PORT
+        - --served-model-name
+        - *model
+        - --trust-remote-code
+        - --quantization
+        - ascend
+        - --tensor-parallel-size
+        - "2"
+        - --data-parallel-size
+        - "2"
+        - --data-parallel-rpc-port
+        - "13388"
+        - --max-model-len
+        - "143360"
+        - --max-num-seqs
+        - "64"
+        - --max-num-batched-tokens
+        - "8192"
+        - --gpu-memory-utilization
+        - "0.90"
+        - --engram-config
+        - '{"cpu_offload":true,"dp_shared_memory":true}'
+        - --enable-prefix-caching
+        - --mamba-cache-mode
+        - align
+        - --mamba-ssm-cache-dtype
+        - bfloat16
+        - --async-scheduling
+        - --enable-expert-parallel
+        - --compilation-config
+        - '{"cudagraph_mode":"NONE"}'
+        - --additional-config
+        - >-
+          {"enable_cpu_binding": true,
+           "enable_shared_expert_dp": true,
+           "enable_fused_mc2": 0,
+           "enable_flashcomm1": true,
+           "multistream_overlap_shared_expert": true,
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
+        - --speculative-config
+        - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+        - --kv-transfer-config
+        - >-
+          {"kv_connector": "MooncakeConnectorV2",
+           "kv_role": "kv_producer",
+           "kv_port": 30000,
+           "kv_connector_extra_config": {"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
+      # Decode (local prefix caching disabled; reuse happens on P)
+      - - *model
+        - --api-server-count
+        - "1"
+        - --host
+        - "0.0.0.0"
+        - --port
+        - $DECODE_PORT
+        - --served-model-name
+        - *model
+        - --trust-remote-code
+        - --enable-force-include-usage
+        - --renderer-num-workers
+        - "4"
+        - --quantization
+        - ascend
+        - --tensor-parallel-size
+        - "2"
+        - --data-parallel-size
+        - "2"
+        - --data-parallel-rpc-port
+        - "13389"
+        - --max-model-len
+        - "143360"
+        - --max-num-seqs
+        - "64"
+        - --max-num-batched-tokens
+        - "8192"
+        - --gpu-memory-utilization
+        - "0.90"
+        - --engram-config
+        - '{"cpu_offload":true,"dp_shared_memory":true}'
+        - --no-enable-prefix-caching
+        - --mamba-cache-mode
+        - align
+        - --mamba-ssm-cache-dtype
+        - bfloat16
+        - --async-scheduling
+        - --enable-expert-parallel
+        - --compilation-config
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - --additional-config
+        - >-
+          {"enable_cpu_binding": true,
+           "enable_shared_expert_dp": true,
+           "enable_fused_mc2": 0,
+           "enable_flashcomm1": true,
+           "multistream_overlap_shared_expert": true,
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false},
+           "scheduler_config": {"recompute_scheduler_enable":true}}
+        - --speculative-config
+        - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+        - --kv-transfer-config
+        - >-
+          {"kv_connector": "MooncakeConnectorV2",
+           "kv_role": "kv_consumer",
+           "kv_port": 30100,
+           "kv_connector_extra_config": {"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
+    test_content: []
+    # Measured references: https://github.com/zsponly/vllm-ascend/pull/3
+    # Evidence revision: 75dfd6092eac2353ee6cf9e20d8cb16e87c32814. Throughputs are aggregate tokens/s.
+    # Reference: A5 r177 / CANN 9.3.0 / vLLM 62d4bc3c / Ascend 4f49ae33.
+    # torch-npu 2.10.0.post7, AISBench 3.1.20261013; no separately applied PRs.
+    # Static kernel and SuperKernel are disabled for the nightly startup budget.
+    # Reported D throughput/TPOT use steady-stage samples; the runner checks total.
+    # Calibrate total output throughput with static kernel disabled on CI.
+    # Enable the Qwen3.x 0.97 gate only with that matching full-run baseline.
+    benchmarks:
+      prepare_decode_prompts:
+        case_type: curl_cmd
+        cmds:
+          - |
+            python - <<'PY'
+            from pathlib import Path
+            from ais_bench.benchmark.datasets.utils.datasets import get_data_path
+            from tools.aisbench import maybe_download_from_modelscope
+
+            for source, name, count in (
+                ("vllm-ascend/GSM8K-in131072-bs100-qwen3", "128k", 600),
+                ("vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen", "16k", 1000),
+            ):
+                src = Path(maybe_download_from_modelscope(source, repo_type="dataset"))
+                with (src / "test.jsonl").open("rb") as data:
+                    prompt = next(data).rstrip(b"\r\n") + b"\n"
+                out = Path(get_data_path(".")) / "qwen38_a5_decode" / name
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "train.jsonl").write_bytes(b"")
+                # Warm and measure the same native Qwen prompt (100% shared input).
+                (out / "test.jsonl").write_bytes(prompt * count)
+            PY
+      warmup_d_128k: &warmup_d_128k
+        case_type: performance
+        dataset_path_local: qwen38_a5_decode/128k
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        batch_size: 16
+        max_out_len: 1
+        request_rate: 0
+      pure_d_128k:
+        <<: *warmup_d_128k
+        num_prompts: 600
+        batch_size: 150
+        max_out_len: 1024
+        # Steady-stage reference (450 requests): output 4759.9300 tokens/s; TPOT 8.5 ms.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
+        # threshold: 0.97
+      warmup_d_16k: &warmup_d_16k
+        case_type: performance
+        dataset_path_local: qwen38_a5_decode/16k
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        batch_size: 16
+        max_out_len: 1
+        request_rate: 0
+      pure_d_16k:
+        <<: *warmup_d_16k
+        num_prompts: 1000
+        batch_size: 250
+        max_out_len: 1024
+        # Steady-stage reference (750 requests): output 10244.6925 tokens/s; TPOT 13.0 ms.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
+        # threshold: 0.97
