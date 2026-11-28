@@ -65,6 +65,8 @@ class HardwareCapability(Enum):
     BGMV_SGMV_META_REGISTRATION = auto()
     # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
     SCATTER_ND_CACHE_STORE = auto()
+    # Validated Triton contiguous indexer K row writes during small decode graphs.
+    SMALL_INDEXER_ROW_STORE = auto()
     # Extend SK cache writes to non-overlapping row-strided destinations.
     # A5 is excluded until arch35 handles their storage bounds correctly.
     SCATTER_ND_STRIDED_CACHE_STORE = auto()
@@ -405,6 +407,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.SMALL_INDEXER_ROW_STORE,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
