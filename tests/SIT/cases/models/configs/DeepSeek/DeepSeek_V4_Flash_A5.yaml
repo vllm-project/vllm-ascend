@@ -71,6 +71,12 @@ _benchmarks_per2: &benchmarks_per
 # ==========================================
 test_cases:
   - name: "DeepSeekV4_Flash_A5_Single_GPQA_Accuracy_Test_01"
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc
+      baseline: 0.7212
+      tolerance: 0.05
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
