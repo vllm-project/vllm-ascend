@@ -47,7 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     zmq_ctx,
 )
-from vllm_ascend.models.hy_v4_flash.cache import hy4_required_pages, is_hy4_packed_cache
+from vllm_ascend.models.hy_v4_flash.cache_config import hy4_required_pages, is_hy4_packed_cache
 
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):

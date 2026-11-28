@@ -35,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
 )
-from vllm_ascend.models.hy_v4_flash.cache import PACKED_CACHE_FORMAT, hy4_transfer_layout
+from vllm_ascend.models.hy_v4_flash.cache_config import PACKED_CACHE_FORMAT, hy4_transfer_layout
 
 from .helpers import (
     make_blocks,

@@ -54,6 +54,7 @@ with generic vLLM/Ascend settings.
 | `attention_decode.py` | Paged Decode selection, graph execution and incremental IndexPool. |
 | `attention_ops.py` | Shared geometry, projections, output gates and FP32 Decode attention. |
 | `cache.py`, `c8_attention.py` | Packed C8 cache reads/writes, stable compaction and CANN attention adapters. |
+| `cache_config.py` | Lightweight cache layout and transfer descriptors used by the common planner and Mooncake. |
 | `indexer.py` | IndexPool cache, FP8 encoding, selection and paged Decode updates. |
 | `engram.py`, `engram_hash.py`, `engram_ops.py` | Engram layers, hashes, CPU staging and row kernels. |
 | `dfly.py`, `dfly_speculator.py`, `dfly_ops.py` | Draft model, speculative execution and input preparation kernels. |

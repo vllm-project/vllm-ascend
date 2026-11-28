@@ -73,7 +73,7 @@ from .attention_ops import (
     reuse_prefill_metadata,
     uses_decode_fusions,
 )
-from .cache import PACKED_CACHE_FORMAT
+from .cache_config import PACKED_CACHE_FORMAT
 from .config import uses_prefill_ops
 
 logger = init_logger_ascend(__name__)
