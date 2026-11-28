@@ -23,18 +23,24 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_planning import (
+    align_hybrid_kv_cache_specs,
+    validate_shared_backing_kv_ratios,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -102,6 +108,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
+            kv_cache_spec = dict(kv_cache_spec)
             unify_hybrid_kv_cache_specs(kv_cache_spec)
 
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
@@ -110,6 +117,22 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         qwen4_exp_groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if qwen4_exp_groups is not None:
             return qwen4_exp_groups
+
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        is_block_outermost = bool(
+            cache_config is not None
+            and getattr(cache_config, "kv_cache_layout", None) is not None
+            and cache_config.get_resolved_kv_cache_layout().is_block_outermost
+        )
+        kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec, check_kv_ratios=False)
+        if (
+            pp_size == 1
+            and not is_block_outermost
+            and any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values())
+        ):
+            _validate_single_stage_hybrid_kv_ratios(kv_cache_spec)
 
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))
@@ -577,6 +600,100 @@ def get_ascend_kv_cache_config_from_groups(
     return _attach_transfer_and_speculation_metadata(vllm_config, kv_cache_config)
 
 
+def _validate_single_stage_hybrid_kv_ratios(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
+    """Validate K/V ratios per shared pool when all layers reside on one stage."""
+    has_non_replicated_target = any(
+        not (isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec) and not spec.dcp_sharded)
+        and not isinstance(spec, MambaSpec)
+        for spec in kv_cache_spec.values()
+    )
+    if has_non_replicated_target:
+        shared_pool = {
+            name: spec
+            for name, spec in kv_cache_spec.items()
+            if not (
+                isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec) and not spec.dcp_sharded
+            )
+        }
+        validate_shared_backing_kv_ratios(shared_pool)
+        return
+    validate_shared_backing_kv_ratios(kv_cache_spec)
+
+
+def _validate_hybrid_shared_backing_kv_ratios(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    """Validate K/V ratios among dense layers whose hybrid backing views overlap."""
+    if not isinstance(kv_cache_config, KVCacheConfig):
+        return
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) == "kimi_k31":
+        return
+    if (
+        is_step5_groups(kv_cache_config.kv_cache_groups)
+        or _get_glm5_next_cache_layout(kv_cache_config.kv_cache_groups) is not None
+        or get_qwen4_exp_pool_bytes_per_block(kv_cache_config.kv_cache_groups) is not None
+    ):
+        return
+
+    layer_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            layer_specs.update(group.kv_cache_spec.kv_cache_specs)
+        else:
+            for name in group.layer_names:
+                layer_specs[name] = group.kv_cache_spec
+
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_specs.values())
+    has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_specs.values())
+    if not (has_mamba and has_attention):
+        return
+
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if (
+        cache_config is not None
+        and getattr(cache_config, "kv_cache_layout", None) is not None
+        and cache_config.get_resolved_kv_cache_layout().is_block_outermost
+    ):
+        return
+
+    _validate_single_stage_hybrid_kv_ratios(layer_specs)
+
+    probe_blocks = max(kv_cache_config.num_blocks, 1)
+    spans: list[tuple[int, int, str, KVCacheSpec]] = []
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        for idx, name in enumerate(descriptor.layers):
+            spec = layer_specs.get(name)
+            if spec is None:
+                continue
+            layer_size = probe_blocks * spec.page_size_bytes
+            stride = (
+                descriptor.layer_stride if kv_cache_config.num_blocks > 0 else max(descriptor.layer_stride, layer_size)
+            )
+            start = descriptor.offset + idx * stride
+            end = start + layer_size
+            if end > start:
+                spans.append((start, end, name, spec))
+
+    if len(spans) <= 1:
+        return
+
+    spans.sort(key=lambda item: (item[0], item[1]))
+    cluster: dict[str, KVCacheSpec] = {spans[0][2]: spans[0][3]}
+    cluster_end = spans[0][1]
+    for start, end, name, spec in spans[1:]:
+        if start < cluster_end:
+            cluster[name] = spec
+            cluster_end = max(cluster_end, end)
+        else:
+            validate_shared_backing_kv_ratios(cluster)
+            cluster = {name: spec}
+            cluster_end = end
+    validate_shared_backing_kv_ratios(cluster)
+
+
 def _attach_transfer_and_speculation_metadata(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
@@ -594,6 +711,7 @@ def _attach_transfer_and_speculation_metadata(
     used for external cache loads, so the upstream default materializer's
     result carries it too.
     """
+    _validate_hybrid_shared_backing_kv_ratios(vllm_config, kv_cache_config)
     kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)

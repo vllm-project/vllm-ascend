@@ -321,6 +321,27 @@
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
 #
+# ** 9. File: platform/patch_kv_cache_layout.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.utils.resolve_kv_cache_layout`
+#      `vllm.v1.engine.core.resolve_kv_cache_layout`
+#    Why:
+#       `EngineCore` resolves the global KV cache layout before calling
+#       `get_global_kv_cache_groups`, so unaligned hybrid owner specs would
+#       otherwise report pre-planning page sizes (e.g. DCP-sharded target +
+#       replicated draft + Mamba state).
+#    How:
+#       Pass non-mutating planned spec copies from
+#       `effective_kv_cache_specs_for_layout` into `resolve_kv_cache_layout` so
+#       layout selection and grouping agree on effective page sizes while owner
+#       specs remain untouched.
+#    Related PR (if no, explain why):
+#       No upstream hook exposes builder-planned page sizes before layout
+#       selection yet.
+#    Future Plan:
+#       Remove once upstream runs builder page planning prior to layout
+#       selection or adds a `KVCacheConfigBuilder` hook.
+#
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
@@ -1138,16 +1159,14 @@
 #       the upstream kernel, or after an equivalent fix lands upstream.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
+#   1. `vllm.v1.worker.gpu.model_runner.get_kv_cache_spec`
 #    Why:
-#       The current v2 worker still goes through the shared upstream v1 helper
-#       to build KV cache specs. For Ascend MLA layers that helper returns the
-#       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
-#       logic expects `AscendMLAAttentionSpec`.
+#       Ascend Model Runner V2 requires C8-MXFP and HiSparse spec customization
+#       on per-layer owner specs before cross-worker planning.
 #    How：
-#       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
-#       upstream behavior while MLA layers are rewritten to
-#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
+#       Collect pure per-layer owner specs on each worker in registration order;
+#       cross-layer hybrid page alignment runs in `AscendKVCacheConfigBuilder`
+#       after Core merges worker specs.
 #    Related PR (if no, explain why):
 #       No. This is a plugin-side compatibility patch for the current upstream
 #       helper path.
