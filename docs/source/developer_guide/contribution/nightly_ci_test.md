@@ -263,7 +263,7 @@ defaults to 120 minutes (2h).
 | `DeepSeek-V4.1-Flash-W8A8-DSpark-PCP` | DeepSeek-V4.1-Flash W8A8 with DSpark and PCP |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 with MTP |
 | `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8 piecewise/full-graph test |
-| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 with MTP acceptance-rate test |
+| `acceptance_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 with MTP acceptance-rate test |
 | `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8 with SFA and DCP |
 | `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8 DSpark V2 |
 | `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8 MTP V2 |
