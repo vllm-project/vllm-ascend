@@ -40,7 +40,6 @@ class TestQuantMoELoRAEmptyOverlap(unittest.TestCase):
                 mlp_input = SimpleNamespace(
                     hidden_states=hidden_states,
                     dynamic_scale=None,
-                    dynamic_eplb=False,
                     lora_context=object(),
                     expanded_row_idx=object() if comm_type is MoECommType.ALLGATHER else None,
                     topk_ids=object() if comm_type is MoECommType.ALLGATHER else None,
@@ -51,6 +50,7 @@ class TestQuantMoELoRAEmptyOverlap(unittest.TestCase):
                     "DeviceOperator": device_operator,
                     "MoECommType": MoECommType,
                     "_EXTRA_CTX": SimpleNamespace(moe_comm_type=comm_type),
+                    "get_current_vllm_config_or_none": lambda: None,
                 }
                 exec(compile(module, str(source), "exec"), namespace)
 

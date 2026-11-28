@@ -21,7 +21,9 @@ import torch_npu
 
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.flashmla import FLASHMLA_BAND_MASK_MODE, FlashMLAConfig, FlashMLAImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl, DecodeMLAPreprocessResult
+from vllm_ascend.attention.utils import get_flashmla_ops
 from vllm_ascend.compilation.updatable_graph import ContextSource, UpdatableGraph
 from vllm_ascend.device.device_config import check_ascend_device_type, is_950
 
@@ -48,6 +50,61 @@ def require_a5():
     check_ascend_device_type()
     if not is_950():
         pytest.skip("FP8 MLA decode layout requires Ascend 950")
+
+
+@torch.inference_mode()
+def test_bf16_flashmla_band_at_model_limit_a5():
+    if get_flashmla_ops() is None:
+        pytest.skip("FlashMLA operators are unavailable")
+    window, kv_len, heads = 1024, 1028, 12
+    adapter = FlashMLAImpl.load(FlashMLAConfig(heads, 1.0, mask_mode=FLASHMLA_BAND_MASK_MODE, sliding_window=window))
+    query = torch.zeros((8, heads, LATENT_DIM + ROPE_DIM), device="npu", dtype=torch.bfloat16)
+    # Mark both ends of the window. Zero queries give each visible KV equal weight.
+    markers = torch.tensor([0, 1, 2, 3, 1024, 1025, 1026, 1027])
+    pages = (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    host_cache = torch.zeros((pages, BLOCK_SIZE, 1, LATENT_DIM + ROPE_DIM), dtype=torch.bfloat16)
+    host_cache[markers // BLOCK_SIZE, markers % BLOCK_SIZE, 0, torch.arange(len(markers))] = window
+    # Hybrid cache groups can leave padding between consecutive 128-token pages.
+    cache = torch.empty((pages, BLOCK_SIZE + 16, 1, LATENT_DIM + ROPE_DIM), device="npu", dtype=query.dtype)
+    cache = cache[:, :BLOCK_SIZE]
+    cache.copy_(host_cache)
+    block_table = torch.arange(pages, dtype=torch.int32, device="npu").unsqueeze(0)
+    kv = torch.tensor([kv_len], dtype=torch.int32, device="npu")
+    cu = torch.tensor([0, 8], dtype=torch.int32, device="npu")
+    used = torch.tensor([8], dtype=torch.int32, device="npu")
+    mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device="npu"), diagonal=1)
+    schedule = adapter.build_metadata(kv, cu, used)
+
+    def attention():
+        return adapter.attention(
+            query,
+            cache,
+            block_table=block_table,
+            cache_seqlens=kv,
+            cu_seqlens_q=cu,
+            metadata=schedule,
+            seqused_q=used,
+            attn_mask=mask,
+        )[0]
+
+    def assert_markers(output, valid):
+        # For a short first window, include the change in the softmax denominator.
+        positions = torch.arange(kv_len - valid, kv_len).unsqueeze(1)
+        left = (positions - window + 1).clamp_min(0)
+        visible = (left <= markers) & (markers <= positions)
+        expected = visible.float() * (window / (positions - left + 1))
+        actual = output[:, :valid, : len(markers)].float().cpu()
+        torch.testing.assert_close(actual, expected.expand(heads, -1, -1), atol=0.01, rtol=0)
+
+    assert_markers(attention(), 8)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        output = attention()
+    # Replay the same physical Q shape with a shortened valid prefix.
+    used.fill_(4)
+    schedule.copy_(adapter.build_metadata(kv, cu, used))
+    graph.replay()
+    assert_markers(output, 4)
 
 
 def _inputs(num_tokens, fp8, seed):
@@ -78,6 +135,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     impl.v_head_dim = VALUE_DIM
     impl.scale = (LATENT_DIM + ROPE_DIM) ** -0.5
     impl.enable_kv_nz = False
+    impl.sliding_window = None
     impl.support_fp8_attention = True
     impl.fa_quant_layer = fp8
     impl.fak_descale_float = torch.ones(1, device="npu")
@@ -195,6 +253,29 @@ def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculati
     _assert_output(actual, expected)
     _assert_output(explicit_copy, expected)
     _assert_output(actual, explicit_copy.cpu())
+
+
+@pytest.mark.e2e_coverage(
+    arch="", feature="fia_comparison", parallel="", deploy="", hardware="A5", quantization="", graph_mode="eager"
+)
+@torch.inference_mode()
+def test_mla_swa_left_boundary(monkeypatch):
+    window = 32
+    impl, metadata, _ = _case(monkeypatch, num_tokens=2, speculative=True, fp8=False)
+    impl.sliding_window = window
+    metadata.decode.seq_lens_list = [window + 1]
+    inputs = _inputs(2, fp8=False, seed=41)
+    # With zero queries, the marker at KV position 0 contributes 1 at
+    # query position window - 1 and falls outside the next query's window.
+    inputs.ql_nope.zero_()
+    inputs.q_pe.zero_()
+    inputs.k_nope.zero_()
+    inputs.k_nope[0, 0, 0, 0] = window
+    impl.W_UV.zero_()
+    impl.W_UV[:, 0, 0] = 1
+
+    output = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
+    torch.testing.assert_close(output[:, 0].float().cpu(), torch.tensor([1.0, 0.0]))
 
 
 @pytest.mark.e2e_coverage(

@@ -199,6 +199,11 @@ class RecomputeScheduler(Scheduler):
         assert [(req.request_id, req.client_index) for req in finished_reqs] == [
             (request.request_id, request.client_index)
         ]
+        logger.info(
+            "[PD-RECOMPUTE] Finish_recomputed_request: back to P, request_id=%s, client_index=%s",
+            request.request_id,
+            request.client_index,
+        )
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -432,7 +437,11 @@ class RecomputeScheduler(Scheduler):
                                     num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
                     else:
                         preempted_req = self.running.pop()
-
+                    logger.debug(
+                        "[PD-RECOMPUTE] Try to preempt or recompute: preempted_req_id=%s, step=%d",
+                        preempted_req.request_id,
+                        self.current_step,
+                    )
                     locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,
@@ -862,6 +871,20 @@ class RecomputeScheduler(Scheduler):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    if (
+                        self.vllm_config.kv_transfer_config is not None
+                        and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+                        and not request.kv_transfer_params
+                    ):
+                        logger.warning(
+                            "[D_NO_KV_TRANSFER_PARAMS] dp=%s request_id=%s prompt_len=%d: "
+                            "Request without KV transfer parameters may trigger local prefill "
+                            "on the decode node. If cross-DP synchronization is skipped, "
+                            "inconsistent MoE communication paths may cause the service to hang.",
+                            self.vllm_config.parallel_config.data_parallel_rank,
+                            request.request_id,
+                            request.num_prompt_tokens,
+                        )
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:

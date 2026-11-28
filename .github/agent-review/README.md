@@ -8,7 +8,7 @@ module own the review rules for it.
 
 ```text
 instructions.md        # output protocol; maintained by all maintainers
-allowlist.txt          # operators allowed to apply the label; maintainers
+allowlist.txt          # operators allowed to start reviews and use review commands
 L1/checklist.md        # cross-domain global rules; all maintainers
 domains.yaml           # coarse registry: path globs -> domain; maintainers
 L2/<domain>/           # ONE directory per domain; owned by that domain's

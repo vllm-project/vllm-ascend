@@ -872,9 +872,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
-        # PrefillNoCache doesn't need key_cache, but other modes do
-        # Only initialize/require cache for modes that actually use it
-        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
+        # PrefillNoCache doesn't need key_cache, but other modes do.
+        # A KV-sharing consumer layer has no K/V of its own (key is None) and can
+        # only read the producer layer's cache, so it always needs it.
+        needs_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache or key is None
+        if needs_cache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
                 if (
@@ -892,7 +894,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     f"mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
 
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and key is not None:
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
@@ -936,15 +938,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
         passed_value = value
+        prefill_no_cache = attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+        # `key is None` also holds for every layer in decode; a layer without its
+        # own K/V only reads the shared cache when it runs prefill.
+        reads_shared_kv = prefill_no_cache and key is None
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-        ):
+        if prefill_no_cache and self.attn_type != AttentionType.ENCODER_DECODER and not reads_shared_kv:
             key = key[:num_tokens]
             value = value[:num_tokens]
         if block_table is None:
@@ -1081,7 +1084,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_key=key,
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
-                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                    is_prefill_no_cache=prefill_no_cache and not reads_shared_kv,
                     sparse_mode=0 if is_decode else 3,
                 )
 
@@ -1454,6 +1457,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             return output.fill_(0)
 
         self._prepare_c8_scales(layer, query.device)
+        # A KV-sharing consumer layer skips _reshape_and_cache, so initialize the
+        # producer's cache here before reading it.
+        if key is None and self.key_cache is None and kv_cache is not None and len(kv_cache) > 1:
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
         float_key, float_value = None, None
         if self.vllm_config.kv_transfer_config is None:
             if key is not None and value is not None:
@@ -1783,16 +1790,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 FIA V1 TND for prefill states (PrefillNoCache uses float KV directly,
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
+        prefill_no_cache = attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+        reads_shared_kv = prefill_no_cache and key is None
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
         query = query[:num_tokens]
 
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-        ):
+        if prefill_no_cache and self.attn_type != AttentionType.ENCODER_DECODER and not reads_shared_kv:
             key = key[:num_tokens]
             value = value[:num_tokens]
 

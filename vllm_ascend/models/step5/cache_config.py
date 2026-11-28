@@ -43,7 +43,6 @@ from collections.abc import Callable
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -225,16 +224,14 @@ def get_step5_max_memory_usage(
 def get_step5_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
-    """Like upstream ``get_kv_cache_config_from_groups`` for layer-outer
-    layouts, but every tensor aliases one envelope-sized backing (the
-    widest group) and ``num_blocks`` is sized by that envelope.
+    """Describe Core's block count in one envelope-sized aliased backing.
+
+    The envelope is the widest group; Core already used its cost to select
+    ``num_blocks`` and apply any configured override.
     """
     envelope = _step5_envelope(kv_cache_groups)
-    pool_bytes_per_block = envelope
-    num_blocks = available_memory // pool_bytes_per_block
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
     page_sizes = {spec.page_size_bytes for group in kv_cache_groups for _, spec in _layer_specs(group)}
     group_widths = [_step5_group_width(group) for group in kv_cache_groups]

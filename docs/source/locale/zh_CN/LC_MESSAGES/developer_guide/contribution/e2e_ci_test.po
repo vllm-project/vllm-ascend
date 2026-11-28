@@ -54,10 +54,6 @@ msgid ""
 "The `tests/e2e/pull_request/` directory is organized by hardware category:"
 msgstr "`tests/e2e/pull_request/` 目录按硬件类别组织："
 
-msgid ""
-"310P tests use a `_310p` filename under the corresponding card directory:"
-msgstr "310P 测试在对应卡数目录下使用文件名包含 `_310p` 的文件："
-
 msgid "## Examples"
 msgstr "## 示例"
 
@@ -244,3 +240,8 @@ msgstr ""
 "  且斜杠前没有前导空格或多余字符。\n"
 "- 修复问题后要重新触发，请推送修复并再次发布 `/e2e`（或发布 `/run`\n"
 "  在最新提交上运行完整的 PR 门禁）。"
+
+msgid ""
+"310P tests use a subdirectory whose name contains `_310p` under the "
+"corresponding card directory:"
+msgstr "310P 测试使用对应卡目录下名称包含 `_310p` 的子目录："

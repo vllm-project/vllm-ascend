@@ -87,6 +87,8 @@ from vllm_ascend.distributed.utils import (
 )
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
+DRAIN_QUEUED_SAVES_TIMEOUT_S = 60.0
+DRAIN_QUEUED_SAVES_POLL_INTERVAL_S = 1.0
 
 
 class BaseKVPoolWorker(ABC):
@@ -1728,6 +1730,44 @@ class KVPoolWorker(BaseKVPoolWorker):
         send_thread.request_queue.join()
         send_thread.raise_if_failed()
 
+    def drain_queued_saves(self, timeout: float = DRAIN_QUEUED_SAVES_TIMEOUT_S) -> None:
+        """Wait until queued puts on this rank have left execute().
+
+        Called once before peer disconnect. ``DRAIN_QUEUED_SAVES_POLL_INTERVAL_S``
+        only rechecks the thread; ``timeout`` is the total deadline. A failed
+        send thread that already acknowledged its queue is logged so sleep can
+        still release memory. A dead thread that left items unacknowledged
+        raises. A live thread still blocked in the SDK send at the deadline
+        also raises, so disconnect is skipped and registrations stay intact.
+        """
+        send_thread = self.kv_send_thread
+        if not isinstance(send_thread, KVCacheStoreSendingThread):
+            return
+        queue = send_thread.request_queue
+        deadline = time.monotonic() + timeout
+        with queue.all_tasks_done:
+            while queue.unfinished_tasks:
+                send_thread.raise_if_failed()
+                if not send_thread.is_alive():
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                queue.all_tasks_done.wait(timeout=min(DRAIN_QUEUED_SAVES_POLL_INTERVAL_S, remaining))
+        if queue.unfinished_tasks:
+            if send_thread.is_alive():
+                raise RuntimeError(
+                    f"{send_thread.name} still blocked with {queue.unfinished_tasks} unfinished saves "
+                    f"after {timeout:g}s; leaving memory registrations intact"
+                )
+            raise RuntimeError(f"{send_thread.name} exited with {queue.unfinished_tasks} unfinished saves")
+        if send_thread._fatal_error is not None:
+            logger.error(
+                "KV send thread %s failed before disconnect: %s",
+                send_thread.name,
+                send_thread._fatal_error,
+            )
+
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.
 
@@ -1805,7 +1845,7 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _wait_for_block_zeroing_before_get(self) -> None:
         # A native GET can race with block zeroing on the prefill compute stream.
         # The async receiver runs on a different thread with a different current stream.
-        if not self.load_async and self.backend_name == "mooncake" and self.kv_role in ("kv_producer", "kv_both"):
+        if not self.load_async and self.kv_role in ("kv_producer", "kv_both"):
             torch.npu.current_stream().synchronize()
 
     def _load_kv_tp_mismatch(

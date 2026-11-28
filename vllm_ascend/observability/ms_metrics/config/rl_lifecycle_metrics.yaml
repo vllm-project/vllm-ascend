@@ -1,0 +1,8 @@
+# RL sleep/wake lifecycle. Durations of the NPUWorker methods.
+# wake_up takes a tags argument and has no sleep_opt argument.
+
+- symbol: vllm_ascend.worker.worker:NPUWorker.sleep
+  handler: vllm_ascend.observability.ms_metrics.handlers:sleep_handler
+
+- symbol: vllm_ascend.worker.worker:NPUWorker.wake_up
+  handler: vllm_ascend.observability.ms_metrics.handlers:wake_handler

@@ -838,6 +838,13 @@ Use `scheduler_config.enable_balance_scheduling` and
 The scheduler setting belongs under `scheduler_config` (the top-level form
 is deprecated); `fuse_muls_add` belongs under `ascend_compilation_config`.
 
+Balance scheduling itself is deprecated as of v0.33.0 and planned for removal
+in a future release. Enabled configurations remain active with a startup warning.
+Set `scheduler_config.enable_balance_scheduling=false` and remove the legacy
+top-level key to disable the global admission gate across DP ranks. This can
+change throughput, TTFT, and TPOT; remeasure them for your workload. See
+[RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229).
+
 **A2-specific environment variables:**
 
 - `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
@@ -4182,7 +4189,6 @@ Select the tab that matches your deployment hardware.
             export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
             export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
             export VLLM_ASCEND_DP_ALLREDUCE_ON_NPU=1
-            export DYNAMIC_EPLB=true
 
             unset ftp_proxy
             unset https_proxy
