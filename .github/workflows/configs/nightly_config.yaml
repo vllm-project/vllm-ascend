@@ -111,6 +111,10 @@ a3:
         config_file_path: MiniMax-M3_1-Flash-w4a8-PP-prefix-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/MiniMax
         size: 3
+      - name: DeepSeek-V4.1-Flash-W8A8-TP-asymmetric-PD
+        config_file_path: DeepSeek-V4.1-Flash-W8A8-TP-asymmetric-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 2
   double_node:
     test_config:
       - name: Kimi-K3-W4A8-E256-A3-PD-Accu-First100
