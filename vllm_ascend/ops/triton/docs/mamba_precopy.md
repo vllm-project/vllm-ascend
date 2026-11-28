@@ -14,6 +14,13 @@
   4. Temporal 状态由 `TEMPORAL_TILES` 个 CTA 分段复制，tail 由 tile 0 处理。
 - 支持模式：SD/DS 卷积布局、temporal 状态、V1/V2 请求索引、单 tile/多 tile temporal 复制。
 
+## 生产路径
+
+- 生产入口：upstream 符号 `vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel` 由
+  `vllm_ascend/triton_kernel_overrides.py` 注册表重绑到本实现，upstream 与 NPU 侧 mamba 状态
+  管理器（`vllm_ascend/worker/v2/model_states/mamba_hybrid.py`）的调用均经此路由。
+- 本文调用示例即生产调用形态（raw kernel `[grid]` 直调）。
+
 ## 参数说明
 
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
@@ -35,12 +42,15 @@
 | num_reqs | 输入 | 有效请求数。 | INT | Scalar |
 | COPY_BLOCK_SIZE | 属性 | 向量化复制宽度。 | tl.constexpr | Scalar |
 | CONV_STATE_DIM_FIRST | 属性 | 是否使用 DS 布局。 | tl.constexpr | Scalar |
-| HAS_IDX_MAPPING | 属性 | 是否使用请求映射。 | tl.constexpr | Scalar |
-| TEMPORAL_TILES | 属性 | temporal 复制 CTA 数量。 | tl.constexpr | Scalar |
+| HAS_IDX_MAPPING | 属性 | 是否使用请求映射；默认 `True`。 | tl.constexpr | Scalar |
+| ZERO_TEMPORAL_TOKEN_BIAS | 属性 | temporal 状态复制时是否将 token bias 清零（ReplaySSM 模型为 `True`）。 | tl.constexpr | Scalar |
+| TEMPORAL_TILES | 属性 | temporal 复制 CTA 数量；默认 `1`。 | tl.constexpr | Scalar |
 
 ## 约束说明
 
-- grid 必须为 `(num_reqs, num_layers * num_state_types, TEMPORAL_TILES)`。
+- grid：bulk 路径为 `(num_reqs, num_layers * num_state_types, TEMPORAL_TILES)`；
+  `TEMPORAL_TILES=1` 时第三维可省略，layerwise 生产调用即二维
+  `(num_reqs, num_layers * num_state_types)`（`program_id(2)` 恒为 0）。
 - `COPY_BLOCK_SIZE`、`TEMPORAL_TILES` 必须为正整数编译期常量。
 - 有效请求的列下标、偏移和 block ID 必须在合法范围内；卷积要求 `0 <= token_bias < conv_width`。
 - DS 布局必须提供正确的 row count 和 row stride；各状态元数据长度必须一致。
@@ -57,6 +67,7 @@ precopy_mamba_align_fused_kernel[grid](
     state_conv_widths, state_group_indices, state_dim_row_count,
     state_dim_row_stride, idx_mapping, num_reqs, COPY_BLOCK_SIZE=128,
     CONV_STATE_DIM_FIRST=False, HAS_IDX_MAPPING=True,
+    ZERO_TEMPORAL_TOKEN_BIAS=False,  # ReplaySSM 模型传 True
     TEMPORAL_TILES=temporal_tiles,
 )
 ```

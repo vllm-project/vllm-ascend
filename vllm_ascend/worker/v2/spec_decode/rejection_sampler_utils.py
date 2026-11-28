@@ -17,7 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from typing import Any, cast
+
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -40,6 +41,9 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_verify,
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -308,8 +312,9 @@ def _probabilistic_rejection_kernel(
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits: torch.Tensor | None,
+    # [max_num_reqs, num_speculative_steps, V] raw tensor, or the
+    # upstream DraftLogitsCache in the same positional slot.
+    draft_logits_cache: "torch.Tensor | DraftLogitsCache | None",
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
@@ -343,12 +348,16 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
-    use_entropy_verify: bool | None = None,
-    posterior_threshold: float = 0.95,
-    posterior_alpha: float = 0.4,
     # vLLM #65100 hints that masked vocab blocks may be skipped. The NPU
     # resampler keeps its full residual scan, which preserves the same result.
     skip_masked_vocab_blocks: bool = False,
+    # NPU-only entropy-verify knobs (#19460), kept in the tail so a
+    # keyword-only ``[grid]`` relaunch would still bind every upstream
+    # argument to its positional slot; plain calls bind by name and do
+    # not care about position.
+    use_entropy_verify: bool | None = None,
+    posterior_threshold: float = 0.95,
+    posterior_alpha: float = 0.4,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Upstream passes logits after applying sampling parameters. Resolve the
     # worker configuration here to keep its sampler and chunking flow unchanged.
@@ -356,14 +365,14 @@ def rejection_sample(
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
     # Upstream passes a `DraftLogitsCache` (values plus an optional per-row
-    # mapping) in the same positional slot.
-    draft_logits_cache = cast(Any, draft_logits)
+    # mapping) in the same positional slot; public callers (and the frozen
+    # one-card E2E) still pass the raw per-step tensor, which never carries
+    # a per-row mapping.
     if draft_logits_cache is None:
         draft_logits = None
         draft_logits_row_mapping = None
     elif isinstance(draft_logits_cache, torch.Tensor):
-        # Public callers (and the frozen one-card E2E) still pass the raw
-        # per-step tensor, which never carries a per-row mapping.
+        draft_logits = draft_logits_cache
         draft_logits_row_mapping = None
     else:
         draft_logits = draft_logits_cache.values

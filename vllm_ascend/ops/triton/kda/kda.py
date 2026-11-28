@@ -1433,6 +1433,7 @@ def kda_gate_fwd_kernel(
     A,
     y,
     g_bias,
+    lower_bound,
     beta: tl.constexpr,
     threshold: tl.constexpr,
     T,
@@ -1441,6 +1442,7 @@ def kda_gate_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
@@ -1477,13 +1479,20 @@ def kda_gate_fwd_kernel(
         b_bias = tl.load(g_bias + i_h * D + n_d, mask=bias_mask, other=0.0).to(tl.float32)
         b_g = b_g + b_bias[None, :]
 
-    # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
-    # When beta * x > threshold, use linear approximation x
-    # Use threshold to switch to linear when beta*x > threshold
-    g_scaled = b_g * beta
-    use_linear = g_scaled > threshold
-    sp = tl.where(use_linear, b_g, (1.0 / beta) * tl.log(1.0 + tl.exp(g_scaled)))
-    b_y = b_a * sp
+    if USE_LOWER_BOUND:
+        # Upstream's bounded gate: y = lower_bound * sigmoid(a * g), a
+        # closed form that replaces the softplus path. b_a carries the
+        # negated A here (see its load above), so the flip restores
+        # upstream's sign.
+        b_y = lower_bound * tl.sigmoid(-b_a * b_g)
+    else:
+        # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
+        # When beta * x > threshold, use linear approximation x
+        # Use threshold to switch to linear when beta*x > threshold
+        g_scaled = b_g * beta
+        use_linear = g_scaled > threshold
+        sp = tl.where(use_linear, b_g, (1.0 / beta) * tl.log(1.0 + tl.exp(g_scaled)))
+        b_y = b_a * sp
 
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1495,6 +1504,7 @@ def fused_kda_gate(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
+    lower_bound: float | None = None,
 ) -> torch.Tensor:
     """
     Forward pass for KDA gate:
@@ -1502,6 +1512,7 @@ def fused_kda_gate(
       param A: [H] or [1, 1, H, 1]
       beta: softplus beta parameter
       threshold: softplus threshold parameter
+      lower_bound: optional gate lower bound (bounded sigmoid path)
       return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
@@ -1522,6 +1533,7 @@ def fused_kda_gate(
         A,
         y,
         g_bias,
+        lower_bound or 0.0,
         beta,
         threshold,
         T,
@@ -1529,6 +1541,7 @@ def fused_kda_gate(
         head_k_dim,
         BD=next_power_of_2(head_k_dim),
         HAS_BIAS=g_bias is not None,
+        USE_LOWER_BOUND=lower_bound is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)
@@ -1546,10 +1559,12 @@ def chunk_kda_with_fused_gate(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    lower_bound: float = -5.0,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    # NPU-only parameter in the tail; **kwargs keeps upstream-only
+    # extras harmless.
     safe_gate: bool = False,
-    lower_bound: float = -5.0,
     **kwargs,
 ):
     """Prefill KDA from a raw gate projection, matching upstream FLA's API.

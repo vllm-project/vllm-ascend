@@ -707,7 +707,8 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   Both overrides below are read by the V2 Mamba-Hybrid state at call time:
 #   `_TEMPORAL_TILES` by the preprocess/precopy kernels (the precopy kernel
-#   itself is rebound by `worker/patch_triton.py`), and
+#   itself is rebound by the NPU Triton kernel override registration in
+#   `vllm_ascend/triton_kernel_overrides.py`), and
 #   `postprocess_mamba_fused_kernel` by
 #   `MambaSpecDecodeGPUContext.run_fused_postprocess_align`.
 #   1. `vllm.v1.worker.mamba_utils._TEMPORAL_TILES = 1`
@@ -759,9 +760,11 @@
 #    How：
 #       Rebind the two upstream symbols to the AscendC implementations in
 #       `vllm_ascend.ops.causal_conv1d`, dropping the CUDA-only block-table and
-#       spec-decode kwargs those kernels do not accept. The NPU Triton update
-#       kernel is layered on top in `worker/patch_triton.py`, so this module must
-#       be imported first (see `worker/__init__.py`).
+#       spec-decode kwargs those kernels do not accept. The AscendC wrappers
+#       are the live path: the retired `worker/patch_triton.py` tried to layer
+#       an NPU Triton update kernel on top, but that import never resolved (the
+#       symbol did not exist anywhere), so nothing is lost with the patch's
+#       retirement and no import order is required anymore.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatch hook for the
 #       causal_conv1d kernels.
@@ -994,20 +997,14 @@
 #    Future Plan:
 #       Remove this patch once upstream SP completes refactor.
 #
-# ** 21. File: worker/patch_triton.py**
+# ** 21. File: worker/patch_triton.py (reduced) **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
-#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
-#    Why:
-#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
-#    How：
-#       override triton ops in vLLM with ascend implementation
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       Remove this patch when vLLM support the dispatch function.
-#
-#   2. `triton.next_power_of_2`
+#   The Triton kernel overrides this file used to install are now registered
+#   with the official vLLM Triton kernel dispatcher through
+#   `vllm_ascend/triton_kernel_overrides.py` (installed by the NPUPlatform
+#   hook; see that table for the per-kernel rationale and removal plans).
+#   Only the one swap the dispatcher cannot express remains here.
+#   1. `triton.next_power_of_2`
 #    Why:
 #       The Triton version bundled with torch_npu on Ascend NPU
 #       does not include `next_power_of_2`, which is called by
@@ -1024,120 +1021,6 @@
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
-#   3. `vllm.third_party.flash_linear_attention.ops.kda`
-#    Why:
-#       GLM-5.3-Flash and Kimi KDA layers import `fused_recurrent_kda` /
-#       `chunk_kda_with_fused_gate` from upstream FLA. Those kernels are CUDA
-#       Triton; Ascend already has NPU Triton equivalents under
-#       `vllm_ascend.ops.triton.kda`.
-#    How：
-#       Rebind the FLA kda entry points to the NPU implementations before the
-#       model is constructed. The NPU wrappers expand GLM's bounded (safe)
-#       gate and beta sigmoid in Python because the NPU recurrent kernel does
-#       not fuse `COMPUTE_GATE` / `SIGMOID_BETA`.
-#    Related PR (if no, explain why):
-#       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
-#    Future Plan:
-#       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
-#
-#   4. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
-#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
-#    Why:
-#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
-#       apply_penalties also fails on large input shape because of the triton kernel limitation.
-#    How：
-#       override triton ops in vLLM with ascend implementation
-#       re-write apply_penalties kernel with minimum change to support large input shape.
-#       Bind compute_topk_scores in the sampler, prompt-logprob, and rejection
-#       sampler modules while preserving the upstream score interface.
-#    Test:
-#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       Remove this patch when vLLM support the dispatch function.
-#
-#   5. `vllm.v1.worker.gpu.metrics.logits.libdevice`
-#    Why:
-#       The upstream `get_num_nans` Triton kernel imports its libdevice
-#       functions from the default CUDA-oriented module. On Ascend, this makes
-#       Triton resolve CUDA libdevice symbols instead of the CANN equivalents,
-#       causing the kernel compilation to fail.
-#    How:
-#       Rebind `metrics.logits.libdevice` to
-#       `triton.language.extra.cann.libdevice`. Existing references to
-#       `get_num_nans` in the sampler and rejection sampler then use the CANN
-#       libdevice when the kernel is compiled.
-#    Related PR (if no, explain why):
-#       No. This is a Triton-Ascend backend compatibility patch for the
-#       upstream module-level libdevice import.
-#    Future Plan:
-#       Remove this patch once vLLM selects the Triton libdevice through a
-#       backend-dispatch mechanism.
-#
-#   6. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
-#      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
-#    Why:
-#       The upstream thinking-budget kernels expose two independent
-#       Triton-Ascend compiler limitations. A helper with pointer arguments and
-#       branch-local returns fails TTIR-to-Linalg materialization when called
-#       from a dynamic `tl.range`. The marker-cache kernel also uses chained
-#       runtime boolean expressions that older Triton-Ascend versions cannot
-#       compile.
-#    How:
-#       Replace the helper with complementary masked loads followed by
-#       `tl.where`, and replace chained three-term conditions in the
-#       marker-cache kernel with nested two-term conditions. The scan and
-#       thinking-budget semantics remain unchanged.
-#    Related PR (if no, explain why):
-#       No. These are Triton-Ascend compiler compatibility workarounds.
-#    Future Plan:
-#       Remove the `_load_effective_token` patch after the new Q4
-#       Triton-Ascend release is available. Remove the marker-cache kernel
-#       patch when Triton-Ascend 3.6.0 is the minimum supported version.
-#
-#   7. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
-#    Why:
-#       Ascend rejects an empty Triton launch grid because it produces
-#       `coreDim=0`.
-#    How:
-#       Replace the outer caller with an equivalent implementation that returns
-#       before launching the unchanged upstream kernel when the batch is empty.
-#    Future Plan:
-#       Remove this patch when upstream guards empty launch grids.
-#
-#   8. `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`
-#    Why:
-#       Triton-Ascend can allocate excessive UB space for the sampling-mask
-#       kernel when the logits vocabulary dimension has a stride greater than
-#       one, causing compilation to fail with UB overflow. Reducing the boolean
-#       keep mask directly also returns one per tile instead of the finite-logit
-#       count on Triton-Ascend. The upstream row-wise bit packing additionally
-#       lowers to scalar-heavy variable shifts and width-8 reductions.
-#       Speculative decoding also requires a separate mask for each committed
-#       token in the upstream request-major output layout.
-#    How:
-#       Make logits contiguous only when the vocabulary dimension is strided,
-#       cast the keep mask to int32 before reducing it, and use a 4096-element
-#       tile to keep the corrected reduction within the NPU UB limit. Accept
-#       `cu_num_logits` and `rows_per_request` for the upstream request-major
-#       API, reading logits row `cu_num_logits[req_idx] + slot_idx` and writing
-#       output row `req_idx * rows_per_request + slot_idx`. Mask inactive-slot
-#       loads so their masks and counts are zero. Read offsets and sampled counts
-#       on device for graph replay, and skip the kernel launch for empty batches.
-#       Return the five-field `SamplingMaskTensors`, including `rows_per_request`,
-#       with zero-width `token_ids` so upstream `tolists()` uses the exact bitmask
-#       fallback. Pack bits by transposing `[512, 8]` to `[8, 512]`, multiplying
-#       by compile-time bit weights, and reducing the contiguous 8-row axis so
-#       the backend emits vector transpose, multiply, and reduction instructions.
-#    Test:
-#       Regression coverage is in
-#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
-#    Related PR (if no, explain why):
-#       No. This is a Triton-Ascend compiler compatibility workaround.
-#    Future Plan:
-#       Remove this patch when Triton-Ascend can compile and efficiently lower
-#       the upstream kernel, or after an equivalent fix lands upstream.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`

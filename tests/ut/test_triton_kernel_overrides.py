@@ -1,0 +1,266 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""Unit tests for the NPU Triton kernel override registration table.
+
+Deliberately plain pytest functions (no ``TestBase``): importing this module
+must not trigger ``adapt_patch`` so the table is validated in isolation.
+"""
+
+import importlib
+import inspect
+from typing import Any
+
+import pytest
+
+from vllm_ascend.triton_kernel_overrides import (
+    TRITON_KERNEL_OVERRIDES,
+    register_triton_kernels,
+)
+
+# The retired patch/worker/patch_triton.py carried 34 assignments; two
+# were dead code, and the dispatcher's identity sweep collapsed the
+# rest into 23 registrations. The five flash_linear_attention entries
+# absorb the FLA and KDA swaps that the retired patch gained from
+# upstream syncs, and the thinking_budget entry absorbs the
+# device-function swap that used to be a manual lane (device functions
+# register as raw kernels -- swapped in directly, never wrapped).
+EXPECTED_OVERRIDE_COUNT = 23
+
+
+def _resolve(key: str):
+    """Resolve one table key the way the dispatcher does it.
+
+    Returns (host, attr, defining_module). The last dotted segment is the
+    attribute name; a module part ending in an uppercase name is a class
+    mount (module + class), otherwise the whole part is the module.
+    """
+    module_part, attr = key.rsplit(".", 1)
+    parts = module_part.split(".")
+    if parts[-1][:1].isupper():
+        module = importlib.import_module(".".join(parts[:-1]))
+        return getattr(module, parts[-1]), attr, ".".join(parts[:-1])
+    return importlib.import_module(module_part), attr, module_part
+
+
+@pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
+def test_key_targets_the_definition_module(key):
+    """Every key must point at the kernel's defining module.
+
+    A pure re-export copy resolves to the same object and happens to sweep
+    correctly, but a copy that wraps or rebinds does not: registration
+    succeeds with no warning while the real kernel keeps running upstream.
+    ``__module__`` is the machine-checkable definition site, so the rule
+    holds for every key.
+    """
+    host, attr, defining_module = _resolve(key)
+    original = getattr(host, attr)
+    # Unwrap classmethod/bound-method shells so __module__ is comparable.
+    func = getattr(original, "__func__", original)
+    assert func.__module__ == defining_module, (
+        f"{key!r} targets a copy site; the kernel is defined in "
+        f"{func.__module__!r}. Point the key at the defining module."
+    )
+
+
+@pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
+def test_impl_is_callable(key):
+    assert callable(TRITON_KERNEL_OVERRIDES[key])
+
+
+def test_table_covers_the_retired_patch():
+    assert len(TRITON_KERNEL_OVERRIDES) == EXPECTED_OVERRIDE_COUNT
+
+
+def test_register_triton_kernels_hands_over_the_whole_table(monkeypatch):
+    import vllm.triton_utils.dispatcher as dispatcher
+
+    import vllm_ascend.triton_kernel_overrides as overrides
+
+    seen = {}
+    monkeypatch.setattr(dispatcher, "register_kernels", lambda table: seen.update(table))
+    # Reset the idempotency latch: import_kernels may already have run in
+    # this session (vllm calls it at module level from _custom_ops.py etc.).
+    monkeypatch.setattr(overrides, "_kernels_registered", False)
+    register_triton_kernels()
+    assert seen == TRITON_KERNEL_OVERRIDES
+
+
+def _original_from_logits(dummy):
+    return dummy
+
+
+class Mount:
+    """Class-mount fixture for the no-implicit-cls tripwire below.
+
+    Must start uppercase: the dispatcher treats an uppercase-leading
+    segment in a key's module part as a class name, so an underscore
+    prefix would be misparsed as a submodule path and fail to import.
+    """
+
+    # Type-checkers only: the tripwire below installs a KernelOverride
+    # here at runtime, and a bare annotation declares the shape without
+    # creating a runtime attribute.
+    from_logits: Any
+
+
+def test_class_mount_receives_no_implicit_cls():
+    """Fallback tripwire for the one class-mount override.
+
+    KernelOverride is not a descriptor, so a class-mount override must not
+    receive an implicit cls/class argument at call time. The wrapper is
+    constructed directly rather than via register_kernels: the tripwire
+    targets call-time binding semantics, while register_kernels' identity
+    sweep is environment-sensitive (llvmlite's ffi.lib answers "__dict__"
+    lookups with a non-dict wrapper, crashing the sweep whenever
+    numba/llvmlite is loaded in the session). If this ever fails against
+    the CI vLLM, keep ``SamplingMaskTensors.from_logits`` as the only
+    manual assignment and migrate the remaining entries only.
+    """
+    from vllm.triton_utils.dispatcher import KernelOverride
+
+    received = []
+
+    def impl(*args):
+        received.append(args)
+        return args
+
+    Mount.from_logits = KernelOverride(_original_from_logits, impl)
+    Mount.from_logits(42)
+    # Exactly the explicit argument: no implicit class/host argument.
+    assert received == [(42,)]
+
+
+def test_fla_ops_reexport_is_identity_sweepable():
+    """The multi-hop FLA re-export must stay identity-sweepable.
+
+    chunk_gated_delta_rule is the only multi-hop chain in the table: the
+    ops package re-exports it from ops/chunk.py and the GDN layers
+    from-import the package copy. The dispatcher's sweep rebinds holders
+    by matching the original object's identity, so the package copy must
+    be the very object the key's defining attribute holds; if upstream
+    ever wraps or rebinds the package copy, the sweep silently misses it
+    and the GDN layers keep the upstream kernel.
+
+    Unregistered sessions (this suite) pin the sweepable precondition;
+    registered sessions (the e2e conftest) additionally check the
+    installed wrapper delegates to the NPU implementation. Invoking
+    register_kernels here would repeat the environment-sensitive sweep
+    that the class-mount test above avoids.
+    """
+    import vllm.third_party.flash_linear_attention.ops as fla_ops
+    import vllm.third_party.flash_linear_attention.ops.chunk as chunk_mod
+    from vllm.triton_utils.dispatcher import KernelOverride
+
+    from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+
+    shared = chunk_mod.chunk_gated_delta_rule
+    assert fla_ops.chunk_gated_delta_rule is shared
+    if isinstance(shared, KernelOverride):
+        assert shared.func is chunk_gated_delta_rule
+
+
+# Reviewed deviations from the signature contract below. Everything
+# else must mirror the original's signature: the dispatcher forwards
+# plain calls verbatim, so a caller's keyword must name an explicit
+# parameter of the impl (an impl-side **kwargs would swallow it
+# silently), and common parameters must keep their relative order so
+# a keyword-only [grid] relaunch binds them to the right slots.
+_KNOWN_SIGNATURE_DEVIATIONS = {
+    # upstream's mask_value has no Ascend parameter; no caller passes it.
+    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": ("mask_value not implemented (latent, follow-up)"),
+}
+
+
+def _kernel_arg_names(kernel):
+    """The dispatcher's own extraction, mirrored for the contract test."""
+    names = getattr(kernel, "arg_names", None)
+    if names is None:
+        fn = getattr(kernel, "func", kernel)
+        names = tuple(inspect.signature(fn).parameters)
+    return tuple(names)
+
+
+def _explicit_arg_names(kernel):
+    """The extraction minus the ``**kwargs`` catch-all.
+
+    The catch-all's own name is never a caller-side keyword, and the
+    open names behind it cannot be enumerated statically; the impl
+    covers those with its own ``**kwargs`` or by absorbing the known
+    ones explicitly. A plain function yields its signature, so the
+    VAR_KEYWORD kind filters any catch-all name; a registered
+    override or Triton kernel only exposes plain names, so the
+    conventional "kwargs" is skipped there.
+    """
+    if getattr(kernel, "arg_names", None) is None:
+        fn = getattr(kernel, "func", kernel)
+        params = inspect.signature(fn).parameters
+        return tuple(n for n, p in params.items() if p.kind is not inspect.Parameter.VAR_KEYWORD)
+    return tuple(n for n in kernel.arg_names if n != "kwargs")
+
+
+@pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
+def test_impl_signature_mirrors_the_original(key):
+    """Plain-call forwarding makes the impl's signature a contract.
+
+    The dispatcher forwards plain calls verbatim, so every explicit
+    argument name of the original must exist on the impl explicitly --
+    an impl-side ``**kwargs`` would swallow a renamed or dropped name
+    silently, which is exactly the failure to catch; it only
+    legitimately absorbs caller-only extras that the original's own
+    ``**kwargs`` accepts. Common parameters must keep their relative
+    order so a keyword-only ``[grid]`` relaunch binds them to the right
+    slots; and an impl-only parameter must be optional or upstream
+    call sites would fail on it. Triton-kernel impls only expose names
+    (no default metadata), so the optionality check covers plain
+    callables.
+    """
+    if key in _KNOWN_SIGNATURE_DEVIATIONS:
+        pytest.skip(_KNOWN_SIGNATURE_DEVIATIONS[key])
+    host, attr, _ = _resolve(key)
+    original_names = _explicit_arg_names(getattr(host, attr))
+    impl = TRITON_KERNEL_OVERRIDES[key]
+    impl_params = None
+    if hasattr(impl, "arg_names"):
+        # A Triton kernel has no **kwargs; every name is explicit.
+        impl_explicit = _kernel_arg_names(impl)
+    else:
+        impl_params = inspect.signature(impl).parameters
+        impl_explicit = tuple(n for n, p in impl_params.items() if p.kind is not inspect.Parameter.VAR_KEYWORD)
+    missing = [n for n in original_names if n not in impl_explicit]
+    assert not missing, (
+        f"{key!r}: impl lacks the original parameters {missing}; verbatim "
+        "call sites pass them by name and an impl-side **kwargs would "
+        "swallow them silently."
+    )
+    common_original = [n for n in original_names if n in impl_explicit]
+    common_impl = [n for n in impl_explicit if n in original_names]
+    assert common_original == common_impl, (
+        f"{key!r}: common parameters changed relative order "
+        f"(original: {common_original}, impl: {common_impl}); a "
+        "keyword-only [grid] relaunch would bind them to wrong slots."
+    )
+    if impl_params is not None:
+        extra_required = [
+            n
+            for n, p in impl_params.items()
+            if p.kind is not inspect.Parameter.VAR_KEYWORD
+            and n not in original_names
+            and p.default is inspect.Parameter.empty
+        ]
+        assert not extra_required, (
+            f"{key!r}: impl-only parameters {extra_required} lack defaults; upstream call sites would fail on them."
+        )

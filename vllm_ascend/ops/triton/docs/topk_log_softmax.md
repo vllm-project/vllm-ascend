@@ -18,7 +18,7 @@
   4. Gather: loop over candidates in blocks of at most 8192 columns. Use `candidate_offsets < topk` when loading token IDs and logits and storing the resulting fp32 logprobs.
 
   The row is read twice from global memory rather than staged in UB, which keeps UB usage bounded by `BLOCK_SIZE` instead of by `vocab_size`. `multibuffer=False` is passed at launch for the same reason.
-- **Supported devices**: Atlas A2, Atlas A3, and 950PR/950DT. The large-candidate update was validated on A3 and 950DT in the MRV2 eager service. The direct kernel was also tested in NPU graph replay with changing candidate IDs and logits.
+- **Supported devices**: Atlas A2, Atlas A3, and 950PR/950DT. The large-candidate update was validated on A3 and 950DT in the MRV2 eager service. The direct kernel was also tested in NPU graph replay with changing candidate IDs and logits. The kernel is registered over the upstream implementation via `vllm_ascend/triton_kernel_overrides.py` and runs in the sampler post-processing path, i.e. eagerly, outside ACL Graph capture.
 
 ## Parameters
 
@@ -46,7 +46,7 @@
 
 ## Origin and Differences
 
-- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is installed over the upstream symbols by `vllm_ascend/patch/worker/patch_triton.py` (`logprob.compute_token_logprobs`, and `compute_topk_scores` in `sampler`, `prompt_logprob` and `rejection_sampler`).
+- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is registered over the upstream symbols in `vllm_ascend/triton_kernel_overrides.py` (`logprob.compute_token_logprobs`, and `compute_topk_scores` for `sampler`, `prompt_logprob` and `rejection_sampler`).
 - **Differences**:
     - Candidate gathers follow upstream [#46746](https://github.com/vllm-project/vllm/pull/46746) with bounded streaming; Ascend uses an 8192-column cap rather than the upstream 1024-column cap.
     - NPU adaptation for performance: the vocabulary tile is pinned to `BLOCK_SIZE = 12944` and the kernel is launched with `multibuffer=False`, both sized against the UB budget of the vector core; `tl.maximum` carries `propagate_nan=tl.PropagateNan.ALL` as a compatibility workaround after the NPU-IR upgrade. The companion `_ranks_kernel` used by `compute_topk_scores` is parallelized over `get_vectorcore_num()` cores with a `rows_per_core` row loop (and `do_not_specialize` on `batch_size` / `rows_per_core`) instead of one program per request, because an NPU has far fewer, much wider cores than a GPU has SMs.

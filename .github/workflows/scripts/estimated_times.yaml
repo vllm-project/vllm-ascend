@@ -85,6 +85,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 90
   tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 130
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
+  tests/e2e/pull_request/one_card/test_kernel_override_table_import.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 280
   tests/e2e/pull_request/one_card/test_minicpm.py: 210
   tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 440

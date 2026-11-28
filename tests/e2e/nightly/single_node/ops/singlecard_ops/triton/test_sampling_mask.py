@@ -20,7 +20,6 @@ def _from_logits(logits, num_sampled_tokens, max_num_kept=512, cu_num_logits=Non
     if cu_num_logits is None:
         cu_num_logits = torch.arange(len(num_sampled_tokens) + 1, dtype=torch.int32, device=logits.device)
     return sampling_mask_from_logits_npu(
-        SamplingMaskTensors,
         logits,
         cu_num_logits,
         num_sampled_tokens,

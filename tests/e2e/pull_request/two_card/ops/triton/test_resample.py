@@ -1038,7 +1038,7 @@ def test_entropy_verify_uses_unscaled_recovery():
     mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
     sampled, counts = rejection_sample(
         target_logits=p.log().repeat(num_reqs * (steps + 1), 1),
-        draft_logits=torch.stack([q_first, q, q]).log()[None].expand(num_reqs, -1, -1).contiguous(),
+        draft_logits_cache=torch.stack([q_first, q, q]).log()[None].expand(num_reqs, -1, -1).contiguous(),
         draft_sampled=torch.tensor([0, 1, 0, 0], dtype=torch.int64, device=DEVICE).repeat(num_reqs),
         cu_num_logits=torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (steps + 1),
         pos=_position_tensor(num_reqs * (steps + 1)),

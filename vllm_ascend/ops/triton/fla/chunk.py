@@ -14,7 +14,6 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
@@ -43,6 +42,12 @@ def chunk_gated_delta_rule_fwd(
     use_triton_recurrence: bool = False,
     checkpoint_state_dtype: torch.dtype = torch.float32,
 ):
+    # Deferred import: the upstream module runs a triton device query at
+    # import time, which would initialize the NPU before the worker has
+    # selected the device (#19210). Importing it here keeps the kernel
+    # override table loadable without device side effects.
+    from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
+
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
     cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
@@ -342,12 +347,15 @@ def chunk_gated_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    prebuilt_meta=None,
-    head_first: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
+    # NPU-only parameters stay in the tail with defaults so a
+    # keyword-only [grid] relaunch binds every upstream argument to
+    # its slot (plain callers pass both by name).
+    prebuilt_meta=None,
+    head_first: bool = False,
 ):
     r"""
     Args:

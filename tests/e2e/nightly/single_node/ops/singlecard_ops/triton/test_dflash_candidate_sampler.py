@@ -248,7 +248,7 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
     query_len = steps + 1
     sampled, num_sampled = rejection_sample(
         target_logits=target.log().expand(num_reqs * query_len, -1).contiguous(),
-        draft_logits=logits,
+        draft_logits_cache=logits,
         draft_sampled=torch.cat((torch.zeros(num_reqs, 1, dtype=torch.int64), tokens), dim=1).flatten().to(device),
         cu_num_logits=torch.arange(num_reqs + 1, dtype=torch.int32, device=device) * query_len,
         pos=torch.tensor([9, 10, 11], dtype=torch.int32, device=device).repeat(num_reqs),

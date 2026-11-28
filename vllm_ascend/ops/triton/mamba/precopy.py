@@ -129,9 +129,9 @@ def precopy_mamba_align_fused_kernel(
     num_reqs,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
-    HAS_IDX_MAPPING: tl.constexpr,
-    TEMPORAL_TILES: tl.constexpr = 1,
+    HAS_IDX_MAPPING: tl.constexpr = True,
     ZERO_TEMPORAL_TOKEN_BIAS: tl.constexpr = False,
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)

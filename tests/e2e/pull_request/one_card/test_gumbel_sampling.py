@@ -9,6 +9,7 @@
 
 import pytest
 import torch
+from vllm.triton_utils.dispatcher import KernelOverride
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
@@ -594,8 +595,12 @@ class TestGumbelSampling:
 
     def test_dspark_uses_ascend_gumbel(self):
         """Exercise the inherited DSpark entry point with real NPU sampling."""
-        # Check the installed implementation, not this test module's API wrapper.
-        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is categorical_sample
+        # Check the installed implementation, not this test module's API
+        # wrapper: the dispatcher rebinds the from-import copy to a
+        # KernelOverride, so compare the impl the wrapper holds.
+        wrapper = DSparkSpeculator._sample_logits.__globals__["gumbel_sample"]
+        assert isinstance(wrapper, KernelOverride)
+        assert wrapper.func is categorical_sample
         speculator = DSparkSpeculator.__new__(DSparkSpeculator)
         speculator._d2t_scatter_index = None
         speculator.acceptance_estimator = None
@@ -658,9 +663,9 @@ class TestGumbelSampling:
             num_speculative_steps=num_steps,
             use_entropy_verify=False,
         )
-        sampled, counts = rejection_sample(**inputs, draft_logits=cache, temperature=temperature)
+        sampled, counts = rejection_sample(**inputs, draft_logits_cache=cache, temperature=temperature)
         expected, expected_counts = rejection_sample(
-            **inputs, draft_logits=cache / temp, temperature=torch.ones_like(temperature)
+            **inputs, draft_logits_cache=cache / temp, temperature=torch.ones_like(temperature)
         )
         assert torch.equal(counts, expected_counts)
         # Output slots after the first rejection are unspecified.

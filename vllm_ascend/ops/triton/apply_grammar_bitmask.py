@@ -81,49 +81,52 @@ def _apply_grammar_bitmask_kernel_impl(
         tl.store(ptrs, tl.where(blocked, negative_inf, values), mask=valid)
 
 
-class _ApplyGrammarBitmaskKernelLauncher:
-    """Map the upstream logical grid to the Ascend VectorCore launch grid."""
+def apply_grammar_bitmask_npu(
+    logits_ptr,
+    logits_stride,
+    logits_indices_ptr,
+    cu_num_logits_ptr,
+    bitmask_ptr,
+    bitmask_stride,
+    vocab_size,
+    MASK_STRIDE,
+    BLOCK_SIZE,
+):
+    """Plain-callable launch adapter for the kernel dispatcher.
 
-    def __getitem__(self, grid):
-        num_masks, num_vocab_blocks = grid
-        total_tasks = num_masks * num_vocab_blocks
+    The dispatcher's KernelOverride drops the launch grid, so the
+    VectorCore grid remap that used to live in the retired launcher's
+    __getitem__ is derived here from the launch arguments -- the same
+    expressions the upstream caller uses for its logical grid.
+    """
+    num_masks = bitmask_ptr.shape[0]
+    num_vocab_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    total_tasks = num_masks * num_vocab_blocks
 
-        init_device_properties_triton()
-        num_programs = min(get_vectorcore_num(), total_tasks)
+    init_device_properties_triton()
+    num_programs = min(get_vectorcore_num(), total_tasks)
 
-        def launch(
-            logits_ptr,
-            logits_stride,
-            logits_indices_ptr,
-            cu_num_logits_ptr,
-            bitmask_ptr,
-            bitmask_stride,
-            vocab_size,
-            MASK_STRIDE,
-            BLOCK_SIZE,
-        ):
-            if num_masks == 0:
-                return None
-            # Disable MULTIBUFFER to better utilize the UB buffer, which gives
-            # a significant performance improvement on A2/A3. It can be enabled
-            # again on A5.
-            return _apply_grammar_bitmask_kernel_impl[(num_programs,)](
-                logits_ptr,
-                logits_stride,
-                logits_indices_ptr,
-                cu_num_logits_ptr,
-                bitmask_ptr,
-                bitmask_stride,
-                vocab_size,
-                total_tasks,
-                NUM_PROGRAMS=num_programs,
-                NUM_VOCAB_BLOCKS=num_vocab_blocks,
-                MASK_STRIDE=MASK_STRIDE,
-                BLOCK_SIZE=BLOCK_SIZE,
-                multibuffer=False,
-            )
+    # An empty bitmask would launch a coreDim=0 grid, which NPU rejects.
+    # The upstream caller returns before any launch when there are no
+    # grammar requests, so this guard is defensive only.
+    if num_masks == 0:
+        return None
 
-        return launch
-
-
-_apply_grammar_bitmask_kernel = _ApplyGrammarBitmaskKernelLauncher()
+    # Disable MULTIBUFFER to better utilize the UB buffer, which gives
+    # a significant performance improvement on A2/A3. It can be enabled
+    # again on A5.
+    return _apply_grammar_bitmask_kernel_impl[(num_programs,)](
+        logits_ptr,
+        logits_stride,
+        logits_indices_ptr,
+        cu_num_logits_ptr,
+        bitmask_ptr,
+        bitmask_stride,
+        vocab_size,
+        total_tasks,
+        NUM_PROGRAMS=num_programs,
+        NUM_VOCAB_BLOCKS=num_vocab_blocks,
+        MASK_STRIDE=MASK_STRIDE,
+        BLOCK_SIZE=BLOCK_SIZE,
+        multibuffer=False,
+    )

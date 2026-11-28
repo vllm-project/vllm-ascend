@@ -119,7 +119,7 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_
 
 sampled, counts = rejection_sample(
     target_logits=processed_target_logits,
-    draft_logits=draft_logits,  # Or None for a one-hot/greedy draft.
+    draft_logits_cache=draft_logits,  # Or None for a one-hot/greedy draft.
     draft_sampled=draft_sampled,
     cu_num_logits=cu_num_logits,
     pos=positions,
