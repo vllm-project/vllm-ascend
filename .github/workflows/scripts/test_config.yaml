@@ -118,6 +118,9 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  # Model-free SDK mapping diagnostics must use the A5 four-device allocation.
+  tests/e2e/pull_request/four_card/test_a5_pd_device_mapping\.py$:
+    default: a5-4
   # CANN V2 QLI selection and graph replay require A5.
   tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5\.py$:
     default: a5-4
