@@ -411,6 +411,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], ...]:
+        state_num_spec = getattr(self, "num_mamba_state_speculative_tokens", self.num_spec)
         shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
@@ -418,9 +419,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_k_dim,
             self.head_v_dim,
             self.conv_kernel_size,
-            self.num_spec,
+            state_num_spec,
         )
         if getattr(self, "use_gdn_recoverssm", False):
+            if state_num_spec != self.num_spec:
+                raise ValueError("GDN RecoverSSM requires matching allocated and logical speculative windows.")
             return (
                 *shapes,
                 (self.num_v_heads // self.tp_size, self.num_spec + 1, self.head_v_dim + self.head_k_dim + 1),

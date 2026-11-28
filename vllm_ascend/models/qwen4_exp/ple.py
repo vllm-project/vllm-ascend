@@ -290,7 +290,9 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                 conv_state = conv_state.transpose(-1, -2)
             conv_weights = self.conv1d.weight.squeeze(1)
 
-            state_capacity = self.conv_state_len + self.num_spec_tokens
+            # Both peers must address the history at the same offset in the page.
+            state_num_spec = getattr(self, "num_mamba_state_speculative_tokens", self.num_spec_tokens)
+            state_capacity = self.conv_state_len + state_num_spec
             if state_capacity > 0:
                 if conv_state.size(1) < state_capacity:
                     raise RuntimeError(

@@ -465,6 +465,19 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
 For 950DT products, basic PD, the image-and-text 10k case, and the long-context case use the same Docker container setup from [Section 4.1](#41-docker-image-installation), under the `950DT products` tab.
 
+With a vLLM build that supports `mamba_state_num_speculative_tokens`, 950DT
+deployments using MooncakeConnectorV2 Pull, equal TP, and aligned Mamba caching
+can select a smaller MTP depth on prefill. For example, keep
+`num_speculative_tokens` at 3 on decode, and set these fields on prefill:
+
+```json
+{"method": "mtp", "num_speculative_tokens": 1, "mamba_state_num_speculative_tokens": 3}
+```
+
+Use the same physical state window on both sides. This configuration is for
+eager prefill with ordinary GDN and PLE states. It requires ReplaySSM and
+RecoverSSM to be disabled.
+
 !!! note
 
     Set the IP and interface variables in each terminal; `nic_name` must own `local_ip`. The communication exports use these values, and `no_proxy`/`NO_PROXY` bypass HTTP proxies for the service addresses.

@@ -236,7 +236,10 @@ def _make_ple_layer(state: torch.Tensor, dispatch: object) -> SimpleNamespace:
     )
 
 
-def test_ple_wrap_dispatches_sd_state(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("logical_depth, physical_depth", [(3, None), (1, 3)])
+def test_ple_wrap_dispatches_sd_state(
+    monkeypatch: pytest.MonkeyPatch, logical_depth: int, physical_depth: int | None
+) -> None:
     updates: list[bool] = []
     monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
     monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
@@ -247,6 +250,9 @@ def test_ple_wrap_dispatches_sd_state(monkeypatch: pytest.MonkeyPatch) -> None:
     # SD layout: [slots, window, channels]. The trailing capacity is kept.
     state = torch.randn(3, 14, 4)
     layer = _make_ple_layer(state, lambda **kwargs: calls.append(kwargs))
+    layer.num_spec_tokens = logical_depth
+    if physical_depth is not None:
+        layer.num_mamba_state_speculative_tokens = physical_depth
     metadata = _DummyPLEMetadata()
     mamba_utils = _install_ple_forward_context(monkeypatch, {layer.prefix: metadata})
     monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
@@ -266,7 +272,7 @@ def test_ple_wrap_dispatches_sd_state(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kwargs["residual"] is residual
     assert kwargs["outer_residual"] is outer_residual
     assert kwargs["metadata"] is metadata
-    assert kwargs["conv_state"].shape == (3, 12, 4)
+    torch.testing.assert_close(kwargs["conv_state"], state[:, -12:, :])
     assert kwargs["conv_weights"].shape == (4, 4)
     assert kwargs["conv_weights"].dtype == inputs.dtype
 
