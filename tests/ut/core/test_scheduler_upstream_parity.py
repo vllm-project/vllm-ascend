@@ -302,6 +302,10 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
     ),
     "-                preempted_reqs.append(preempted_req)",
     (
+        "+                logger.debug('[PD-RECOMPUTE] Try to preempt or recompute: "
+        "preempted_req_id=%s, step=%d', preempted_req.request_id, self.current_step)"
+    ),
+    (
         "+                locally_preempted = self._preempt_or_recompute(preempted_req, scheduled_timestamp, "
         "drop_stale_output=self.requires_kv_delivery)"
     ),
@@ -373,6 +377,26 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
         "<= self.max_model_len:"
     ),
     "                         if padded_num_tokens > request_token_budget:",
+    "@@",
+    "             if request.status not in (RequestStatus.WAITING, RequestStatus.PREEMPTED):",
+    "                 raise RuntimeError(f'Invalid request status: {request.status}')",
+    "             scheduled_new_reqs.append(request)",
+    (
+        "+            if request.status == RequestStatus.WAITING and "
+        "self.vllm_config.kv_transfer_config is not None and "
+        "(self.vllm_config.kv_transfer_config.kv_role == 'kv_consumer') and "
+        "(not request.kv_transfer_params):"
+    ),
+    (
+        "+                logger.warning('[D_NO_KV_TRANSFER_PARAMS] dp=%s request_id=%s prompt_len=%d: "
+        "Request without KV transfer parameters may trigger local prefill on the decode node. "
+        "If cross-DP synchronization is skipped, inconsistent MoE communication paths may cause "
+        "the service to hang.', self.vllm_config.parallel_config.data_parallel_rank, "
+        "request.request_id, request.num_prompt_tokens)"
+    ),
+    "             if self.lora_config and request.lora_request:",
+    "                 scheduled_loras.add(request.lora_request.lora_int_id)",
+    "             req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)",
     "@@",
     "     assert len(scheduled_new_reqs) + len(scheduled_running_reqs) <= len(self.running)",
     (
