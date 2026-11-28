@@ -1238,13 +1238,32 @@ vLLM Ascend revision.
 
     #### 5.2.1.4 Deploy the PD Proxy
 
-    After all Prefill and Decode engines are ready, deploy the proxy as described
-    in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
-    Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
-    `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
-    `<DECODE_NODE_IP>:7115`. Add `--workers 4` to the proxy command to run four
-    proxy worker processes with shared scheduling state. This does not change
-    the number of Prefill or Decode engines.
+    After all Prefill and Decode engines are ready, run the following command
+    in a separate Bash terminal on the Prefill node. Set `P_IP` and `D_IP` to
+    the actual node IP addresses. This deployment uses the non-layerwise proxy
+    with four Prefill endpoints and sixteen Decode endpoints:
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --workers 4 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports {7100..7103} \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports {7100..7115}
+    ```
+
+    `--workers 4` starts four proxy worker processes with shared scheduling
+    state. This does not change the number of Prefill or Decode engines.
+    For more details, see
+    [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     #### 5.2.1.5 Key Parameter Descriptions
 
@@ -2382,14 +2401,36 @@ Select the tab for the target hardware.
     ##### 5.3.2.4 Startup and Verification
 
     Start the components in this order: Memcache MetaService, standalone Memcache
-    on both Prefill and Decode nodes, Prefill engines, Decode engines, and then the
+    on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
     PD proxy.
 
     Wait until both standalone Memcache processes report successful initialization
     before starting the Decode engines. Then wait until every Decode engine reports
-    `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-    same endpoint mapping and `--workers 4` setting described in
-    [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+    `Application startup complete` before starting Prefill. After every Prefill
+    engine is ready, run the following command in a separate Bash terminal on
+    the Prefill node. Set `P_IP` and `D_IP` to the actual node IP addresses.
+    This recipe enables `use_layerwise: true` in both `MooncakeConnectorV2`
+    children, so it uses the layerwise proxy:
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports {7100..7103} \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports {7100..7115}
+    ```
+
+    The Decode node must be able to reach `http://<PREFILL_IP>:1999/v1/metaserver`
+    for the layerwise transfer callback. The layerwise proxy requires a reachable
+    `--host` address instead of `0.0.0.0` and does not accept `--workers`.
 
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Check all Prefill ranks for increased
