@@ -1238,13 +1238,32 @@ vLLM Ascend revision.
 
     #### 5.2.1.4 Deploy the PD Proxy
 
-    After all Prefill and Decode engines are ready, deploy the proxy as described
-    in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
-    Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
-    `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
-    `<DECODE_NODE_IP>:7115`. Add `--workers 4` to the proxy command to run four
-    proxy worker processes with shared scheduling state. This does not change
-    the number of Prefill or Decode engines.
+    After all Prefill and Decode engines are ready, run the following command
+    in a separate Bash terminal on the Prefill node. Set `P_IP` and `D_IP` to
+    the actual node IP addresses. This deployment uses the non-layerwise proxy
+    with four Prefill endpoints and sixteen Decode endpoints:
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --workers 4 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports {7100..7103} \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports {7100..7115}
+    ```
+
+    `--workers 4` starts four proxy worker processes with shared scheduling
+    state. This does not change the number of Prefill or Decode engines.
+    For more details, see
+    [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     #### 5.2.1.5 Key Parameter Descriptions
 
@@ -2034,7 +2053,8 @@ Select the tab for the target hardware.
     Prefill DP4/PCP4/TP1 with EPLB, Decode DP16/TP1 with a 432-token budget and
     72 sequences, and `weight_nz_mode: 2` on both roles. Both containers must
     include `fastokens>=0.3.5`.
-    `MooncakeConnectorV2` uses its default non-layerwise pull mode; keep the
+    Enable layerwise P-to-D KV transfer by setting `use_layerwise: true` in the
+    `MooncakeConnectorV2` child on both Prefill and Decode nodes. Keep the
     `AscendStoreConnector` child for pool access. Check connector port allocations
     as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
@@ -2089,6 +2109,20 @@ Select the tab for the target hardware.
     ock.mmc.local_service.max.dram.size = 1024GB
     ock.mmc.local_service.storage.enabled = false
     ```
+
+    To additionally enable **SSD pooling**, update or add the following settings
+    in `mmc-local-standalone.conf`:
+
+    ```ini
+    ock.mmc.local_service.storage.enabled = true
+    ubsio.disk.path = <SSD_DEVICE_PATH>
+    ubsio.mem.size_in_gb = 50
+    ubsio.standalone.device_count = 1
+    ubsio.standalone.force_new_disk = true
+    ```
+
+    Replace `<SSD_DEVICE_PATH>` with the path to the dedicated block device for
+    SSD pooling.
 
     `world_size` is the maximum number of LocalServices that can join the pool, not
     the DP size. Changing it after LocalServices connect requires restarting
@@ -2241,7 +2275,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_producer",
-                        "kv_port":"30000"
+                        "kv_port":"30000",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2339,7 +2376,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_consumer",
-                        "kv_port":"30100"
+                        "kv_port":"30100",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2380,9 +2420,31 @@ Select the tab for the target hardware.
 
     Wait until both standalone Memcache processes report successful initialization
     before starting the Decode engines. Then wait until every Decode engine reports
-    `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-    same endpoint mapping and `--workers 4` setting described in
-    [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+    `Application startup complete` before starting Prefill. After every Prefill
+    engine is ready, run the following command in a separate Bash terminal on
+    the Prefill node. Set `P_IP` and `D_IP` to the actual node IP addresses.
+    This recipe enables `use_layerwise: true` in both `MooncakeConnectorV2`
+    children, so it uses the layerwise proxy:
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports {7100..7103} \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+                        "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports {7100..7115}
+    ```
+
+    The Decode node must be able to reach `http://<PREFILL_IP>:1999/v1/metaserver`
+    for the layerwise transfer callback. The layerwise proxy requires a reachable
+    `--host` address.
 
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Check all Prefill ranks for increased
@@ -2894,8 +2956,8 @@ deployments of DeepSeek-V4.1-Flash-1017.
 
 | Dataset | Hardware | Score | generation_kwargs |
 |---------|----------|-------|-------------------|
-| GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
-| GPQA | 950DT products | 90.4 | `temperature=1.0, top_p=1.0` |
+| GPQA | A3 series | 92.42 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
+| GPQA | 950DT products | 91.92 | `temperature=1.0, top_p=1.0` |
 
 ## 8 Performance Evaluation
 
