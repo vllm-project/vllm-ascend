@@ -147,14 +147,11 @@ def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.devic
     return DeepseekV41WeightSource(case, device)
 
 
-# DeepSeek-V4.1 weight-transfer coverage, without Engram.
+# DeepSeek-V4.1 weight-transfer coverage.
 #
-# Engram is off (`engram_layer_ids: []`) because this branch's loader ignores
-# `loaded_weight` and re-reads the table from the bound checkpoint: a payload that
-# differs from that checkpoint either streams stale rows or fails on a missing shard,
-# and serving a synthesised checkpoint instead would make the lane green without
-# testing the update. Its coverage returns with the loader change that installs a
-# transferred table.
+# TODO(#22162): Engram is off (`engram_layer_ids: []`) until the loader installs a
+# transferred table; serving a synthesised checkpoint instead would only make the
+# lane look green.
 #
 # `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only.
 DEEPSEEK_V41_CASE = WeightUpdateModelCase(

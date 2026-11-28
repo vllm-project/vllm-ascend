@@ -153,9 +153,7 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config_path = _model_file(case.model, "config.json")
-        assert config_path is not None, f"{case.id}: could not resolve config.json"
-        config = AutoConfig.from_pretrained(str(config_path.parent), trust_remote_code=case.trust_remote_code)
+        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
@@ -266,13 +264,12 @@ class FixedRandomWeightSource(WeightSource):
         published file nor survives vLLM's config validation once
         ``num_hidden_layers`` is reduced.
         """
+        from huggingface_hub import hf_hub_download
         from safetensors.torch import save_file
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        config_path = _model_file(self._case.model, "config.json")
-        assert config_path is not None, f"{self._case.id}: could not resolve config.json"
-        shutil.copyfile(config_path, target / "config.json")
+        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
