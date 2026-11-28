@@ -343,6 +343,16 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
 
+    def test_eplb_expert_placement_path_validation(self):
+        self.assertIsNone(EplbConfig().expert_placement_path)
+        self.assertEqual(
+            EplbConfig(expert_placement_path="  /tmp/placement.json  ").expert_placement_path,
+            "/tmp/placement.json",
+        )
+        for invalid_path in ("", "   ", ".json", "/tmp/.json", "/tmp/placement.txt"):
+            with self.subTest(path=invalid_path), self.assertRaisesRegex(ValueError, "expert_placement_path"):
+                EplbConfig(expert_placement_path=invalid_path)
+
     def test_stair_config_defaults_and_overrides(self):
         defaults = EplbConfig().stair_config
         config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})

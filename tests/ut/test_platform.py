@@ -670,18 +670,23 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_preserves_v2_placement_export(self):
+    def test_validate_eplb_config_expert_placement_path(self):
         vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.parallel_config.eplb_config.use_async = False
-        vllm_config.additional_config = {"eplb_config": {"placement_export_path": "placement.json"}}
-
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.additional_config = {"eplb_config": {"expert_placement_path": "/tmp/placement.json"}}
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
+        self.assertEqual(vllm_config.additional_config["eplb_config"]["expert_placement_path"], "/tmp/placement.json")
 
-        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
-        self.assertEqual(vllm_config.additional_config["eplb_config"]["placement_export_path"], "placement.json")
+        vllm_config.parallel_config.enable_eplb = False
+        with self.assertRaisesRegex(ValueError, "requires --enable-eplb"):
+            _validate_eplb_config(vllm_config)
+
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.additional_config = {"eplb_config": {"expert_placement_path": "/tmp/.json"}}
+        with self.assertRaisesRegex(ValueError, "must point to a .json file"):
+            _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()

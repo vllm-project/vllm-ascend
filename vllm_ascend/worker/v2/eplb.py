@@ -47,7 +47,7 @@ class AscendEPLBController(EPLBController):
         super().__init__(parallel_config, device)
         ascend_eplb_config = ascend_eplb_config or EplbConfig()
         self.load_collection_phase = ascend_eplb_config.load_collection_phase
-        self.placement_export_path = ascend_eplb_config.placement_export_path
+        self.expert_placement_path = ascend_eplb_config.expert_placement_path
         # The communicator choice needs one binding class on every EPLB rank,
         # so reach a group consensus before the policy or state is built.
         stair_config = (
@@ -66,8 +66,17 @@ class AscendEPLBController(EPLBController):
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
             self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
-            if self.placement_export_path is not None:
-                self.state.enable_placement_export(self.placement_export_path)
+            if self.expert_placement_path is not None:
+                self.state.enable_placement_export(self.expert_placement_path)
+
+    def maybe_start_async_loop(
+        self,
+        eplb_models_added: bool,
+        load_dummy_weights: bool = False,
+    ) -> None:
+        if not load_dummy_weights and self.state is not None and self.expert_placement_path is not None:
+            self.state.setup_pp_placement_export()
+        super().maybe_start_async_loop(eplb_models_added, load_dummy_weights)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -83,8 +92,15 @@ class AscendEPLBController(EPLBController):
     ) -> bool:
         # The upstream controller checks target EPLB, which can differ from
         # the replicated draft's setting.
-        if speculator is not None and not speculator.vllm_config.parallel_config.enable_eplb:
-            return False
+        if speculator is not None:
+            draft_vllm_config = getattr(speculator, "draft_vllm_config", None)
+            draft_parallel_config = (
+                draft_vllm_config.parallel_config
+                if draft_vllm_config is not None
+                else speculator.vllm_config.parallel_config
+            )
+            if not draft_parallel_config.enable_eplb:
+                return False
         return super().maybe_register_speculator(speculator, speculative_config, load_dummy_weights)
 
     def prepare_forward(
@@ -99,7 +115,7 @@ class AscendEPLBController(EPLBController):
         supports_allgather = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
         if not state.uses_custom_load_stats or supports_allgather:
             state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-            if not supports_allgather:
+            if not supports_allgather and self.expert_placement_path is None:
                 return
         if supports_allgather:
             state._uses_phase_filter = self.load_collection_phase != "all"
