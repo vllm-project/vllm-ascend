@@ -1,0 +1,9 @@
+pr: 23518
+entries:
+  - category: bugfix
+    text: >-
+      Decode-only MRv2 deployments of CANN MegaMoe models no longer fail at
+      startup during profiling with "MegaMoe received N tokens per rank, but
+      its symmetric buffer was allocated for at most M" when
+      --max-num-batched-tokens exceeds the decode graph budget. Runtime
+      behavior, symmetric buffer size and memory usage are unchanged.
