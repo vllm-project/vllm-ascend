@@ -119,6 +119,9 @@ variants:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
         docker_serve_command: "vllm serve"
+        docker_shm_size: 1g
+        install:
+          pip: false
 
   ascend_w8a8_a3:
     model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8
@@ -186,7 +189,7 @@ variants:
     min_vllm_version: 0.30.0
     default_modes:
       spec_decoding: mtp
-    extra_args:
+    extra_args: &mx_serving_args
       - '--host'
       - '0.0.0.0'
       - '--port'
@@ -209,7 +212,7 @@ variants:
       - '--additional-config'
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
       - '--enable-prefix-caching'
-    extra_env:
+    extra_env: &mx_serving_env
       VLLM_USE_MODELSCOPE: 'True'
       VLLM_USE_V2_MODEL_RUNNER: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
@@ -222,8 +225,68 @@ variants:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: "vllm serve"
+        docker_shm_size: 500g
+        install:
+          pip: false
+
+  ascend_w8a8c8_mxfp8_a5:
+    model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8
+    precision: mxfp8
+    label: W8A8C8 MXFP8 (950DT)
+    vram_minimum_gb: 80
+    supported_hardware: [ascend_950dt]
+    supported_frontends: [python]
+    tp: 1
+    min_vllm_version: 0.30.0
+    default_modes:
+      spec_decoding: mtp
+    extra_args: *mx_serving_args
+    extra_env: *mx_serving_env
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: "vllm serve"
+        docker_shm_size: 500g
+        install:
+          pip: false
+        extra_args: ['--kv-cache-dtype', mxfp8]
 
 presets:
+  ascend_a2_w8a8_tp2_ep:
+    label: A2 tutorial, TP2 with expert parallelism (4096 tokens)
+    hardware: ascend_910b
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_a2
+    source:
+      label: Qwen3.6-35B-A3B single-node deployment on A2
+      href: https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment
+      key: A2 Series / A3 Series
+      revision: 638d7184045f149b07bd904690772a6544126200
+    select:
+      frontend: python
+      features:
+        spec_decoding: mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+    json_args:
+      --speculative-config: {method: mtp}
+    args:
+      - '--data-parallel-size'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '4096'
+      - '--trust-remote-code'
+      - '--served-model-name'
+      - qwen3.6
+      # The builder's Verify and Benchmark commands send the checkpoint ID.
+      - Eco-Tech/Qwen3.6-35B-A3B-w8a8
+    runbook: >-
+      Select this preset for the tutorial's 4096-token batch. Baseline retains
+      the 8192-token A2 launch. Both use the recipe's v0.32.0rc1 A2 image.
+      Apply the host CPU and NUMA settings from section 5.1 when appropriate.
+
   ascend_a3_w8a8_tp2_ep:
     label: A3 W8A8 TP2 with expert parallelism
     hardware: ascend_910c
@@ -260,6 +323,70 @@ presets:
       already in the host's ModelScope cache, mount that cache at the same path
       inside the container. Section 5.1 also lists the host CPU and NUMA settings.
 
+  ascend_950dt_w8a8_mxfp8_tp1:
+    label: 950DT W8A8 MXFP8, single NPU
+    hardware: ascend_950dt
+    strategy: single_node_tp
+    variants: [ascend_w8a8_mxfp8_a5]
+    default: true
+    source:
+      label: Qwen3.6-35B-A3B single-node deployment on 950DT
+      href: https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment
+      key: 950DT Products
+      revision: 638d7184045f149b07bd904690772a6544126200
+    select:
+      frontend: python
+      features:
+        spec_decoding: mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: '0'
+    json_args:
+      --speculative-config: {method: mtp}
+    args:
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - qwen3.6
+      - Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8
+    runbook: >-
+      Use the A5 container from section 4.1. Wait for static kernel compilation
+      and graph capture to finish before sending the health check.
+
+  ascend_950dt_w8a8c8_mxfp8_tp1:
+    label: 950DT W8A8C8 MXFP8, single NPU
+    hardware: ascend_950dt
+    strategy: single_node_tp
+    variants: [ascend_w8a8c8_mxfp8_a5]
+    default: true
+    source:
+      label: Qwen3.6-35B-A3B single-node deployment on 950DT
+      href: https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment
+      key: 950DT Products
+      revision: 638d7184045f149b07bd904690772a6544126200
+    select:
+      frontend: python
+      features:
+        spec_decoding: mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: '0'
+    json_args:
+      --speculative-config: {method: mtp}
+    args:
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - qwen3.6
+      - Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8
+    runbook: >-
+      Use the A5 container from section 4.1. Wait for static kernel compilation
+      and graph capture to finish before sending the health check.
+
 hardware_notes:
   ascend_910b:
     title: A2 runs on two NPUs with v0.32.0rc1
@@ -272,6 +399,19 @@ hardware_notes:
       label: Ascend A2 deployment
       href: '#ascend-a2-deployment'
 
+  ascend_910c:
+    title: A3 W8A8 on two NPUs
+    body: Select W8A8 (Ascend A3) and single-node TP to run TP2 with EP on devices 0 and 1.
+    link:
+      label: A3 and 950DT deployment
+      href: '#ascend-a3-and-950dt-deployment'
+  ascend_950dt:
+    title: 950DT MXFP8 on one NPU
+    body: Select the W8A8 or W8A8C8 MXFP8 checkpoint. The C8 checkpoint also uses MXFP8 KV cache.
+    link:
+      label: A3 and 950DT deployment
+      href: '#ascend-a3-and-950dt-deployment'
+
 guide_sections:
   ascend: |
     ## Ascend A2 deployment
@@ -282,3 +422,29 @@ guide_sections:
     in the Features row when you need them (`--enable-auto-tool-choice
     --tool-call-parser qwen3_coder`, `--reasoning-parser qwen3`,
     `--mm-encoder-tp-mode data`).
+
+    The A2 tutorial preset uses a batch budget of 4096. Select Baseline for
+    the verified 8192-token configuration. Both run the
+    [W8A8 weights](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+
+    ## Ascend A3 and 950DT deployment
+
+    On A3, choose W8A8 and single-node TP for two-device TP2 with EP. On
+    950DT, single-node TP serves the
+    [W8A8 MXFP8 weights](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8)
+    on device 0. Select [W8A8C8 MXFP8](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8)
+    to use the C8 checkpoint with `--kv-cache-dtype mxfp8`. These presets
+    enable MTP with three speculative tokens and accept the API name `qwen3.6`.
+
+    Follow the [container setup](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#41-docker-image-installation)
+    for host mounts, including the ModelScope cache for pre-downloaded weights.
+    For Atlas 300I Duo, follow the two-device TP2 launch in the
+    [single-node tutorial](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment).
+    The Recipes 310P3 profile represents one logical NPU. The same tutorial
+    lists BF16 and 950DT W4A8-MXFP weights in its prerequisites.
+
+    After startup, check `/health` and run the
+    [completion request](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#6-functional-verification).
+    The tutorial includes [accuracy evaluation](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#7-accuracy-evaluation),
+    [benchmark instructions](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#8-performance-evaluation) and
+    [throughput and latency tuning](https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#91-recommended-configurations).
