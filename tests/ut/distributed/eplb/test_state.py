@@ -612,3 +612,76 @@ def test_failed_shared_session_exits_from_foreground_before_reusing_resources(en
     assert fatal.value.__cause__ is error
     assert state._hixl_session is session
     session.close.assert_not_called()
+
+
+def _auto_export_state():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._suspended = False
+    state.is_async = False
+    state.model_states = {"model": object()}
+    state.parallel_config = SimpleNamespace(enable_elastic_ep=False)
+    state._has_fresh_recorded_load = False
+    state._has_global_fresh_recorded_load = lambda: True
+    state.export_after_rearranges = 3
+    state._rearrange_cycles = 0
+    state._export_state = "idle"
+    return state
+
+
+def test_export_arms_once_after_configured_rearrange_cycles(monkeypatch):
+    monkeypatch.setattr(
+        upstream_eplb_state.EplbState,
+        "rearrange",
+        lambda self, is_profile=False, rank_mapping=None: None,
+    )
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", MagicMock())
+    state = _auto_export_state()
+
+    for expected in (1, 2):
+        state.rearrange()
+        assert state._rearrange_cycles == expected
+        assert not state.take_export_request()
+
+    state.rearrange()
+    assert state._rearrange_cycles == 3
+    assert state.take_export_request()
+    # One shot: the request is consumed once and the counter stops arming.
+    assert not state.take_export_request()
+    state.rearrange()
+    assert state._rearrange_cycles == 3
+    assert not state.take_export_request()
+
+
+def test_export_ignores_gated_and_profile_rearrangements(monkeypatch):
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", MagicMock())
+    state = _auto_export_state()
+    state.export_after_rearranges = 1
+    state._has_fresh_recorded_load = False
+    state._has_global_fresh_recorded_load = lambda: False
+
+    # No rank recorded load since the previous rearrangement: gated, not counted.
+    assert state.rearrange() is None
+    assert state._rearrange_cycles == 0
+    assert not state.take_export_request()
+
+    state.rearrange(is_profile=True)
+    assert state._rearrange_cycles == 0
+    assert not state.take_export_request()
+
+
+def test_custom_async_step_without_load_does_not_count_a_cycle():
+    state = _auto_export_state()
+    state.export_after_rearranges = 1
+    state.is_async = True
+    # `uses_custom_load_stats` follows the policy, so give it a preparing one.
+    state.policy = SimpleNamespace(prepare_local_load_stats=lambda samples: samples)
+    state.collect_global_load_stats = MagicMock(return_value=None)
+    state.publish_async_load_stats = MagicMock()
+
+    # No load was collected, so nothing reached the async worker: no cycle ran.
+    assert state.rearrange() is None
+    state.publish_async_load_stats.assert_not_called()
+    assert state._rearrange_cycles == 0
+    assert not state.take_export_request()

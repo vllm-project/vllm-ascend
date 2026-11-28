@@ -1,0 +1,10 @@
+pr: 22894
+entries:
+  - category: feature
+    text: >-
+      Added `eplb_config.expert_placement_path` and `eplb_config.export_after_rearranges`
+      so an engine running dynamic EPLB exports its committed
+      deployment once, in the first forward gap after the configured number of
+      completed rearrangements, and keeps serving. The file records placements and
+      validation metadata, not weights; a registered MoE draft that enables EPLB is
+      exported together with the target.

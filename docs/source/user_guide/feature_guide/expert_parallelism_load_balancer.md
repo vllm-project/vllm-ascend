@@ -123,9 +123,10 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
-fields under `additional_config.eplb_config` are `load_collection_phase` and
-`stair_config`; any other field is rejected at startup.
+They must not be placed in `--additional-config`: the EPLB fields under
+`additional_config.eplb_config` are `load_collection_phase`, `stair_config`,
+`expert_placement_path` and `export_after_rearranges`.
+Unsupported legacy fields are warned about and ignored.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
@@ -191,6 +192,81 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
+
+#### Deployment Export
+
+Dynamic EPLB is the only runtime mode. For a workload whose expert distribution
+is stable, calibrate dynamically and export the committed deployment so it can
+be inspected, diffed, or shipped to another deployment. The exported file
+contains placements and validation metadata, not weights.
+
+Run the offline calibration example with representative prompts (one prompt
+per line); adjust the window, rounds and traffic to obtain a useful deployment:
+
+```bash
+python examples/eplb/export_placement.py \
+  --model Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 4 \
+  --num-redundant-experts 4 \
+  --prompts /data/calibration-prompts.txt \
+  --rounds 10 \
+  --export-after-rearranges 5 \
+  --output /shared/eplb/deployment.json
+```
+
+Export finishes an active migration through the normal weight/map commit
+boundary before taking a cross-rank consistent snapshot. It does not force a
+new plan or guarantee calibration convergence. A short calibration may export
+the unchanged initial deployment.
+
+A long-running server, or an offline `LLM` you do not want to interrupt, can
+export on its own: set `export_after_rearranges` together with
+`expert_placement_path`.
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --additional-config '{"eplb_config":{"expert_placement_path":"/shared/eplb/deployment.json","export_after_rearranges":5}}'
+```
+
+The worker exports once, in the first forward gap after the configured number
+of completed rearrangements, and keeps serving. Rearrangements that are
+skipped for lack of fresh load, profile rearrangements and elastic-EP
+remappings do not count. The file name gains a `.<kv_role>.dp<rank>` suffix
+(`deployment.standalone.dp0.json` without PD disaggregation), so PD roles and
+DP ranks never overwrite each other. The export blocks that single forward by
+about the time needed to copy the placement to host memory and write it.
+
+All ranks must be given the same `expert_placement_path` so they agree on the
+file name they expect.
+
+| Ascend field | Default | Meaning |
+| --- | --- | --- |
+| `expert_placement_path` | unset | Export target for the calibrated deployment. |
+| `export_after_rearranges` | unset | Export the deployment once, in the first forward gap after this many completed rearrangements. The file name gains a `.<kv_role>.dp<rank>` suffix. |
+
+The deployment file records the P/D role it was calibrated on
+(`placement_scope`: `prefill`, `decode`, or `mixed`). The engine derives
+it from `kv_role` when PD disaggregation is configured, and otherwise from
+`load_collection_phase` (`all` becomes `mixed`). PD roles therefore name their
+files differently:
+
+```text
+P node:  kv_role=kv_producer, prefill_deployment.json
+D node:  kv_role=kv_consumer, decode_deployment.json
+```
+
+Initial export support requires PP=1 and one target MoE model. When a
+registered MoE draft enables EPLB, it is rebalanced together with the target,
+and the version 3 deployment file stores the draft placement as well. MTP
+remains supported when the draft disables EPLB and redundant draft experts.
+Files are validated against the runtime. The same model identifier and
+revision are required; a structural fingerprint does not detect overwritten
+checkpoint contents under an unchanged name.
+
+See the [deployment design](../../developer_guide/Design_Documents/eplb_placement.md)
+for transaction ordering, invariants and testing requirements.
 
 #### MRv2 Constraints
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 from copy import copy, deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -11,8 +12,17 @@ from vllm.config.parallel import ParallelConfig
 
 from vllm_ascend import ascend_config
 from vllm_ascend import logger as ascend_logger
+from vllm_ascend import platform as ascend_platform
+from vllm_ascend.distributed.eplb.config import validate_eplb_config
 from vllm_ascend.patch.worker import patch_dspark
-from vllm_ascend.platform import _validate_eplb_config
+
+
+@pytest.fixture(autouse=True)
+def _reload_platform_module():
+    # Some platform tests reload the module while ``init_ascend_config`` is
+    # patched; restore the real module in this worker before constructing
+    # VllmConfig fixtures here.
+    importlib.reload(ascend_platform)
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +43,7 @@ def test_invalid_target_is_still_rejected(phase):
         speculative_config=object(),
     )
     with pytest.raises(ValueError, match="requires --enable-eplb"):
-        _validate_eplb_config(config)
+        validate_eplb_config(config)
 
 
 def test_draft_marker_restored_after_nested_failure():

@@ -279,18 +279,32 @@ class AscendWarmupConfig:
 
 @config
 class EplbConfig:
-    """Ascend extensions to the upstream Model Runner V2 EPLB configuration."""
+    """Ascend extensions to the upstream EPLB configuration."""
 
-    # Model Runner V2 only. Restricts which batch phase contributes to the
-    # upstream EPLB expert-load window; any prefill request marks the batch
-    # as prefill.
+    # Restricts which batch phase contributes to the upstream EPLB
+    # expert-load window; any prefill request marks the batch as prefill.
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
+    # Committed-deployment export target: a calibrated placement is written
+    # here once the configured number of rearrange cycles has completed.
+    expert_placement_path: str | None = None
+    # One-shot committed-deployment export: dump the placement after this many
+    # completed rearrange cycles instead of waiting for an external RPC.
+    export_after_rearranges: int | None = None
 
     @model_validator(mode="after")
     def _validate_config(self):
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
+        if self.expert_placement_path is not None and not self.expert_placement_path:
+            raise ValueError("eplb_config.expert_placement_path must be a non-empty path")
+        if self.export_after_rearranges is not None:
+            if self.expert_placement_path is None:
+                raise ValueError("eplb_config.export_after_rearranges requires eplb_config.expert_placement_path")
+            if self.export_after_rearranges < 1:
+                raise ValueError("eplb_config.export_after_rearranges must be >= 1")
+        if self.expert_placement_path is not None and self.export_after_rearranges is None:
+            raise ValueError("eplb_config.expert_placement_path requires eplb_config.export_after_rearranges")
 
         return self
 
