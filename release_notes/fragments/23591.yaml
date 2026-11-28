@@ -1,0 +1,8 @@
+pr: 23591
+entries:
+  - category: feature
+    text: >-
+      The layerwise PD example proxy now accepts Anthropic Messages on
+      `/v1/messages` and foreground OpenAI Responses on `/v1/responses`.
+      Both endpoints support streaming and can resume text generation when
+      the backend reports a recompute stop.
