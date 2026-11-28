@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.request import RequestStatus
 
 from tests.ut.kvpp_utils import make_layer_cache_configs, release_pcp_kwargs
 from vllm_ascend.core import kv_cache_config_builder
@@ -404,7 +405,11 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     assert all(manager.cache_hit_alignment_tokens == 16 for manager in coordinator.single_type_managers)
     hashes = [bytes([index + 1]) * 32 for index in range(8)]
     request = SimpleNamespace(
-        request_id="partial", block_hashes=hashes, num_prompt_tokens=129, shared_prefix_boundary=None
+        request_id="partial",
+        block_hashes=hashes,
+        num_prompt_tokens=129,
+        shared_prefix_boundary=None,
+        status=RequestStatus.RUNNING,
     )
     for manager in coordinator.single_type_managers:
         manager.allocate_new_blocks(request.request_id, 128, 128)
