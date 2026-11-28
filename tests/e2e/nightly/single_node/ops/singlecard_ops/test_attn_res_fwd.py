@@ -36,8 +36,9 @@ def assert_precision(actual, expected):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="AttnResFwd is configured for Ascend A3/A5",
+    get_ascend_device_type()
+    not in (AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType.A6),
+    reason="AttnResFwd is configured for Ascend A3/A5/A6",
 )
 @pytest.mark.parametrize(
     "tokens,valid,with_add,with_output_norm,optimize_prefill,mix",

@@ -191,6 +191,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
+elif [[ "$SOC_VERSION" =~ ^ascend960dt ]]; then
+    log "matched SOC branch: ascend960dt"
+    CUSTOM_OPS_ARRAY=(
+        "attn_res_fwd"
+    )
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend960dt"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     log "matched SOC branch: ascend950"
     # ASCEND950 (A5) series

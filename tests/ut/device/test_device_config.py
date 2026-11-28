@@ -30,6 +30,7 @@ def clear_device_config_cache():
         ("ASCEND910_9363", AscendDeviceType.A3),
         ("ascend310p3vir08", AscendDeviceType._310P),
         ("ascend950_9599", AscendDeviceType.A5),
+        ("ascend960dt", AscendDeviceType.A6),
     ],
 )
 def test_device_type_from_soc_version(soc_version, expected):
@@ -44,6 +45,7 @@ def test_device_type_from_soc_version(soc_version, expected):
         (256, AscendDeviceType.A3),
         (203, AscendDeviceType._310P),
         (260, AscendDeviceType.A5),
+        (270, AscendDeviceType.A6),
     ],
 )
 def test_device_type_from_runtime_soc(soc_version, expected):

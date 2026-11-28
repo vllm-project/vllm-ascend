@@ -144,6 +144,13 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.UNRESTRICTED_MLAPO,
         }
     ),
+    AscendDeviceType.A6: frozenset(
+        {
+            HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
+            HardwareCapability.STANDARD_WORKER_PATCHES,
+        }
+    ),
 }
 
 
@@ -160,6 +167,7 @@ _EXPECTED_WEIGHT_FORMATS = {
     AscendDeviceType.A3: _INT4_WEIGHT_FORMATS,
     AscendDeviceType._310P: _STANDARD_WEIGHT_FORMATS,
     AscendDeviceType.A5: _FP8_WEIGHT_FORMATS,
+    AscendDeviceType.A6: _STANDARD_WEIGHT_FORMATS,
 }
 
 
@@ -224,6 +232,18 @@ _EXPECTED_WEIGHT_FORMATS = {
             MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             QuantizationBackendFamily.STANDARD,
             _FP8_WEIGHT_FORMATS,
+        ),
+        (
+            AscendDeviceType.A6,
+            AttentionBackendFamily.STANDARD,
+            CPUBindingMode.TOPO_AFFINITY,
+            "vllm_ascend.worker.worker.NPUWorker",
+            DeviceAdaptorFamily.STANDARD,
+            DeviceAddressingMode.DIRECT,
+            WeightLayoutPolicy.CONFIGURABLE,
+            MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
+            QuantizationBackendFamily.STANDARD,
+            _STANDARD_WEIGHT_FORMATS,
         ),
     ],
 )

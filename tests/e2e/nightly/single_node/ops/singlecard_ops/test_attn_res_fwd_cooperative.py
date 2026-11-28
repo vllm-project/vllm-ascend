@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A2/A3/A5 whole-row and H-split paths, plus bank mutation coverage."""
+"""A2/A3/A5/A6 whole-row and H-split paths, plus bank mutation coverage."""
 
 import pytest
 import torch
 import torch_npu
 
-COOPERATIVE_SOC_VERSIONS = frozenset(range(220, 226)) | frozenset(range(250, 257)) | {260}
+COOPERATIVE_SOC_VERSIONS = frozenset(range(220, 226)) | frozenset(range(250, 257)) | {260, 270}
 
 
 @pytest.fixture(scope="module", autouse=True)
 def require_cooperative_custom_operator():
     if not torch.npu.is_available() or torch_npu.npu.get_soc_version() not in COOPERATIVE_SOC_VERSIONS:
-        pytest.skip("Cooperative AttnResFwd requires an A2/A3/A5 build and device")
+        pytest.skip("Cooperative AttnResFwd requires an A2/A3/A5/A6 build and device")
     if not hasattr(torch.ops._C_ascend, "attn_res_fwd"):
         from vllm_ascend.device.device_config import check_ascend_device_type
         from vllm_ascend.utils import bootstrap_custom_op_env

@@ -10,7 +10,7 @@
 This module is the boundary between hardware identity and shared business
 logic. Detection maps a SoC to one immutable :class:`HardwareProfile`; code
 outside the device package then asks that profile about a semantic contract
-instead of branching on an A2, A3, A5, or 310P name.
+instead of branching on an A2, A3, A5, A6, or 310P name.
 
 The profile uses three kinds of fields:
 
@@ -561,6 +561,27 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
                     HardwareCapability.NPU_TOP_K_TOP_P,
+                }
+            ),
+        ),
+        # Keep A6 capabilities conservative until the broader stack is
+        # validated on 960DT; this profile enables custom-op runtime support.
+        AscendDeviceType.A6: HardwareProfile(
+            _device_type=AscendDeviceType.A6,
+            attention_backend_family=AttentionBackendFamily.STANDARD,
+            cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
+            default_worker_cls=_DEFAULT_WORKER_CLS,
+            device_adaptor_family=DeviceAdaptorFamily.STANDARD,
+            device_addressing_mode=DeviceAddressingMode.DIRECT,
+            weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
+            moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
+            quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_STANDARD_WEIGHT_FORMATS,
+            capabilities=frozenset(
+                {
+                    HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+                    HardwareCapability.RUNTIME_CUSTOM_OPS,
+                    HardwareCapability.STANDARD_WORKER_PATCHES,
                 }
             ),
         ),

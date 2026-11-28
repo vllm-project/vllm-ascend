@@ -20,6 +20,7 @@ class AscendDeviceType(Enum):
     A3 = 1
     _310P = 2
     A5 = 3
+    A6 = 4
 
 
 _SOC_VERSION_TO_DEVICE_TYPE = {
@@ -46,6 +47,7 @@ _SOC_VERSION_TO_DEVICE_TYPE = {
     "ascend310p3vir01": AscendDeviceType._310P,
     "ascend310p3vir02": AscendDeviceType._310P,
     "ascend310p3vir04": AscendDeviceType._310P,
+    "ascend960dt": AscendDeviceType.A6,
     "ascend310p3vir08": AscendDeviceType._310P,
 }
 
@@ -73,4 +75,6 @@ def device_type_from_runtime_soc(soc_version: int) -> AscendDeviceType:
         return AscendDeviceType._310P
     if soc_version == 260:
         return AscendDeviceType.A5
+    if soc_version == 270:
+        return AscendDeviceType.A6
     raise RuntimeError(f"Cannot support runtime soc_version: {soc_version}.")
