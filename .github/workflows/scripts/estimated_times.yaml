@@ -164,9 +164,9 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 1520
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
-  tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 300
+  tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 900
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 1500
-  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
+  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 1200
   tests/e2e/pull_request/four_card/rlhf/consistency/batch_invariant/test_qwen.py: 360
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
@@ -190,7 +190,9 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600
   tests/e2e/pull_request/four_card/model_runner_v2/test_kimi_k3.py: 720
-  tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 420
+  # Conservative per-job scheduling budget for the GLM-5.3-Flash functional smoke.
+  tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 900
+  # Conservative per-job scheduling budget for the HIF8 C8 KV cache smoke
   tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8.py: 180
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 100
   tests/e2e/pull_request/one_card/test_mla_precision.py: 100
