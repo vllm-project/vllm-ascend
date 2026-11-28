@@ -300,6 +300,7 @@ def _make_kimi_k31_bf16_dcp_config():
         ),
         speculative_config=SimpleNamespace(
             method="dspark",
+            enforce_eager=False,
             num_speculative_tokens_per_batch_size=None,
             draft_parallel_config=None,
             draft_tensor_parallel_size=8,
@@ -320,6 +321,7 @@ def test_kimi_k31_bf16_dcp_accepts_gqa_draft_with_tp_heads():
     assert config.parallel_config.decode_context_parallel_size == 8
 
 
+@pytest.mark.parametrize("draft_eager", [None, False])
 @pytest.mark.parametrize(
     ("role", "enforce_eager", "mode", "expected_mode"),
     [
@@ -330,15 +332,41 @@ def test_kimi_k31_bf16_dcp_accepts_gqa_draft_with_tp_heads():
         ("kv_consumer", False, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE),
     ],
 )
-def test_kimi_k31_bf16_dcp_graph_policy(role, enforce_eager, mode, expected_mode):
+def test_kimi_k31_bf16_dcp_graph_policy(role, enforce_eager, mode, expected_mode, draft_eager):
     config = _make_kimi_k31_bf16_dcp_config()
     config.model_config.enforce_eager = enforce_eager
+    config.speculative_config.enforce_eager = draft_eager
     config.kv_transfer_config = None if role is None else SimpleNamespace(kv_role=role)
     config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
     _configure_kimi_k31_bf16_dcp_graph(config)
     assert config.model_config.enforce_eager is (expected_mode == CUDAGraphMode.NONE)
-    assert config.speculative_config.enforce_eager
+    assert config.speculative_config.enforce_eager is (True if expected_mode == CUDAGraphMode.NONE else draft_eager)
     assert config.compilation_config.cudagraph_mode == expected_mode
+
+
+@pytest.mark.parametrize(
+    ("method", "architecture", "use_mla", "draft_eager"),
+    [
+        ("dspark", "Qwen3DSparkModel", False, True),
+        ("dspark", "K3DSparkModel", True, False),
+        ("eagle3", "Qwen3DSparkModel", False, False),
+    ],
+)
+def test_kimi_k31_decode_keeps_target_graph_with_eager_draft(method, architecture, use_mla, draft_eager):
+    config = _make_kimi_k31_bf16_dcp_config()
+    config.model_config.enforce_eager = False
+    config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
+    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    spec = config.speculative_config
+    spec.method = method
+    spec.draft_model_config.architectures = [architecture]
+    spec.draft_model_config.use_mla = use_mla
+    spec.enforce_eager = draft_eager
+
+    _configure_kimi_k31_bf16_dcp_graph(config)
+    assert spec.enforce_eager is True
+    assert config.model_config.enforce_eager is False
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8"])

@@ -36,6 +36,7 @@ enum class SFA_LAYOUT {
     BSND = 0,
     TND = 1,
     PA_BSND = 2,
+    PA_KR_BSND = 5,
 };
 
 enum class SFATemplateMode {

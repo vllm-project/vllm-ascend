@@ -1849,16 +1849,31 @@ def _validate_kimi_k31_bf16_dcp(vllm_config: VllmConfig) -> bool:
 def _configure_kimi_k31_bf16_dcp_graph(vllm_config: VllmConfig) -> None:
     from vllm.config.compilation import CUDAGraphMode
 
-    if vllm_config.speculative_config is not None:
-        vllm_config.speculative_config.enforce_eager = True
+    from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 
+    spec = vllm_config.speculative_config
     kv_transfer_config = vllm_config.kv_transfer_config
-    if (
+    decode_graph = (
         not vllm_config.model_config.enforce_eager
         and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
         and kv_transfer_config is not None
         and kv_transfer_config.kv_role == "kv_consumer"
+    )
+    if (
+        decode_graph
+        and spec is not None
+        and not spec.enforce_eager
+        and uses_kimi_k31_gqa_draft(vllm_config)
+        and not spec.draft_model_config.use_mla
     ):
+        logger.info_once(
+            "Kimi K3.1 allows FULL_DECODE_ONLY for the target and GQA DSpark draft (draft DCP=1) on Decode."
+        )
+        return
+
+    if spec is not None:
+        spec.enforce_eager = True
+    if decode_graph:
         logger.info_once("Kimi K3.1 sharded BF16 indexer enables FULL_DECODE_ONLY for the target on Decode.")
         return
 

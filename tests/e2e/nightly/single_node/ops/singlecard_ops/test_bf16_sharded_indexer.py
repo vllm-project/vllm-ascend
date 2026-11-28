@@ -101,19 +101,24 @@ def _reference_candidates(query, weights, keys, table, request_rows, visible, to
     return expected_ids, expected_scores
 
 
+@pytest.mark.parametrize("pages,windows,pages_per_window", [(17, 1, 17), (133, 3, 45)])
 @torch.inference_mode()
-def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadata_size):
+def test_native_bf16_indexer_dcp_windows_and_graph_replay(
+    native_indexer_metadata_size, pages, windows, pages_per_window
+):
     rows, heads, dim, page_size, topk = 6, 32, 128, 128, 2048
     first_valid_page = 2
     generator = torch.Generator().manual_seed(802)
     # Integer-valued inputs produce exact FP32 scores even with different
     # reduction orders. Negative weights exercise signed candidate scores.
     query = torch.randint(-1, 2, (rows, heads, dim), generator=generator).bfloat16()
-    query[1].zero_()  # More than K identical scores across three windows.
-    weights = torch.randint(-2, 3, (rows, heads), generator=generator).float()
-    keys = torch.randint(-2, 3, (135, page_size, 1, dim), generator=generator).bfloat16()
+    query[1].zero_()  # More than K identical scores.
+    weights = torch.randint(-2, 3, (rows, heads), generator=generator).to(
+        torch.bfloat16 if windows == 1 else torch.float32
+    )
+    keys = torch.randint(-2, 3, (pages + first_valid_page, page_size, 1, dim), generator=generator).bfloat16()
     keys[:first_valid_page].fill_(1000)
-    # Put a winner in the last real page of the 133-page DCP8 table.
+    # Put a winner in the last real page of the DCP8 table.
     keys[-1, 123].fill_(64)
     query[0].fill_(1)
     weights[0].fill_(1)
@@ -138,7 +143,7 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadat
             heads,
             metadata_size=native_indexer_metadata_size,
         )
-        assert plan.windows == 3 and plan.block_table.shape == (3 * rows, 45)
+        assert plan.windows == windows and plan.block_table.shape == (windows * rows, pages_per_window)
         return lightning_indexer_v2_candidates(device_q, device_w, device_k, plan, topk)
 
     stripe = 768
@@ -154,9 +159,10 @@ def test_native_bf16_indexer_dcp_windows_and_graph_replay(native_indexer_metadat
             0,
         ]
         # Count ownership directly, independently of the DCP metadata formula.
-        return torch.tensor(
-            [sum(token // stripe % 8 == rank for token in range(n)) for n in global_lengths], dtype=torch.int32
-        )
+        lengths = [
+            min(pages * page_size, sum(token // stripe % 8 == rank for token in range(n))) for n in global_lengths
+        ]
+        return torch.tensor(lengths, dtype=torch.int32)
 
     def check(actual, visible):
         expected = _reference_candidates(query, weights, keys, table, request_rows, visible, topk, first_valid_page)

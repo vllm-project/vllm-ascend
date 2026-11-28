@@ -1,10 +1,11 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
+// Load the toolkit ACL declarations before torch_npu includes its bundled copy.
+#include "acl/acl.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
-#include "acl/acl_base_rt.h"
 #include "utils.h"
 
 /*
@@ -277,8 +278,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     if (return_softmax_lse) {
         if (query.dim() == DIM_3) {
             const auto layout_kv_str = std::string(layout_kv);
-            const auto kv_head_num =
-                layout_kv_str == "PA_BSND" ? key.sym_size(DIM_2) : key.sym_size(DIM_1);
+            const bool paged = layout_kv_str == "PA_BSND" || layout_kv_str == "PA_KR_BSND";
+            const auto kv_head_num = key.sym_size(paged ? DIM_2 : DIM_1);
             softmax_size = {
                 kv_head_num,
                 query.sym_size(DIM_0),

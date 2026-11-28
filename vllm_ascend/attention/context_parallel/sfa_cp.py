@@ -48,6 +48,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.quantization.methods import AscendLinearScheme
@@ -1440,6 +1441,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     supports_sequence_parallel_input: bool = False
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+    _paired_page_sfa: bool = False
 
     def __init__(
         self,
@@ -1494,6 +1496,23 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 break
         if self._dcp_index_topk <= 0:
             raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        result = super().process_weights_after_loading(act_dtype)
+        if (
+            self.is_kimi_k31
+            and not self.uses_packed_sfa_main_cache
+            and act_dtype == torch.bfloat16
+            and self.kv_lora_rank == 512
+            and self.qk_rope_head_dim == 64
+            and self.W_UV.device.type == "npu"
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+            and not enable_sfa_dcp_force_tmajor_restore()
+        ):
+            from vllm_ascend.ops.sfa_paired_page import paired_page_sfa_available
+
+            self._paired_page_sfa = paired_page_sfa_available(self.W_UV.device)
+        return result
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         # K3.1 PROLOG_V3 writes DCP owner slots without PCP.

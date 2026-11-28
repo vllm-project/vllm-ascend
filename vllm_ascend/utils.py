@@ -739,6 +739,7 @@ def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | N
         raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
 
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    logger.info("Loaded HIXL LocalCommRes for physical NPU %s from %s", npu_id, local_comm_res_file)
 
 
 @functools.cache

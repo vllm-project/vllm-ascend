@@ -55,6 +55,19 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttention(voi
                                                                             aclOpExecutor *executor,
                                                                             const aclrtStream stream);
 
+// The paired-page ABI passes a single descriptor for both latent K/V and RoPE.
+__attribute__((visibility("default"))) aclnnStatus aclnnVllmSfaPairedPageGetWorkspaceSize(
+    const aclTensor *query, const aclTensor *pages, const aclTensor *sparseIndices,
+    const aclTensor *blockTable, const aclTensor *actualSeqLengthsQuery,
+    const aclTensor *actualSeqLengthsKv, const aclTensor *queryRope, double scaleValue,
+    int64_t sparseBlockSize, int64_t sparseMode, int64_t preTokens, int64_t nextTokens,
+    int64_t attentionMode, bool returnSoftmaxLse, const aclTensor *attentionOut,
+    const aclTensor *softmaxMax, const aclTensor *softmaxSum,
+    uint64_t *workspaceSize, aclOpExecutor **executor);
+
+__attribute__((visibility("default"))) aclnnStatus aclnnVllmSfaPairedPage(
+    void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, const aclrtStream stream);
+
 
 #ifdef __cplusplus
 }

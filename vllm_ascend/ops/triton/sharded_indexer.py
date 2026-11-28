@@ -3,6 +3,7 @@
 """Candidate transport and causal metadata for a token-sharded indexer."""
 
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.sparse_index_remap import _sort
@@ -105,57 +106,79 @@ def _pack_li_v2_window_queries(
     weights,
     packed_query,
     packed_weights,
+    dense,
     q_row_stride,
     q_head_stride,
     q_dim_stride,
     w_row_stride,
     w_head_stride,
     ROWS: tl.constexpr,
+    BATCHES: tl.constexpr,
+    SCORE_ELEMENTS: tl.constexpr,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     HEAD_BLOCK: tl.constexpr,
     DIM_BLOCK: tl.constexpr,
+    FILL_BLOCK: tl.constexpr,
+    COPY_Q: tl.constexpr,
+    COPY_W: tl.constexpr,
 ):
     batch = tl.program_id(0).to(tl.int64)
-    row = batch % ROWS
-    head = tl.arange(0, HEAD_BLOCK)
-    dim = tl.arange(0, DIM_BLOCK)
-    q = tl.load(
-        query + row * q_row_stride + head[:, None] * q_head_stride + dim[None, :] * q_dim_stride,
-        mask=(head[:, None] < HEADS) & (dim[None, :] < DIM),
-        other=0,
-    )
-    w = tl.load(weights + row * w_row_stride + head * w_head_stride, mask=head < HEADS, other=0)
-    tl.store(
-        packed_query + batch * HEADS * DIM + head[:, None] * DIM + dim[None, :],
-        q,
-        mask=(head[:, None] < HEADS) & (dim[None, :] < DIM),
-    )
-    tl.store(packed_weights + batch * HEADS + head, w.to(tl.float32), mask=head < HEADS)
+    if batch < BATCHES:
+        row = batch % ROWS
+        head = tl.arange(0, HEAD_BLOCK)
+        if COPY_Q:
+            dim = tl.arange(0, DIM_BLOCK)
+            mask = (head[:, None] < HEADS) & (dim[None, :] < DIM)
+            q = tl.load(
+                query + row * q_row_stride + head[:, None] * q_head_stride + dim[None, :] * q_dim_stride,
+                mask=mask,
+                other=0,
+            )
+            tl.store(packed_query + batch * HEADS * DIM + head[:, None] * DIM + dim[None, :], q, mask=mask)
+        if COPY_W:
+            w = tl.load(weights + row * w_row_stride + head * w_head_stride, mask=head < HEADS, other=0)
+            tl.store(packed_weights + batch * HEADS + head, w.to(tl.float32), mask=head < HEADS)
+    # Every program owns a disjoint score tile. The first BATCHES programs
+    # also pack inputs, so short contexts need only one program per query.
+    offset = batch * FILL_BLOCK + tl.arange(0, FILL_BLOCK)
+    tl.store(dense + offset, -float("inf"), mask=offset < SCORE_ELEMENTS)
 
 
-def pack_li_v2_window_queries(query, weights, windows):
-    """Pack strided BF16 queries and FP32 scoring weights in CANN request order."""
-    if windows == 1:
-        return query.contiguous(), weights.float().contiguous()
+def pack_li_v2_window_queries(query, weights, windows, dense):
+    """Prepare CANN inputs and initialize the contiguous FP32 score scratch."""
+    copy_q = windows != 1 or not query.is_contiguous()
+    copy_w = windows != 1 or weights.dtype != torch.float32 or not weights.is_contiguous()
+    if not (copy_q or copy_w):
+        dense.fill_(-torch.inf)
+        logger.info_once("Kimi K3.1 LightningIndexerV2 score_scratch_init=fill (Q and weights ready)", scope="process")
+        return query, weights
     rows, heads, dim = query.shape
     batches = windows * rows
-    packed_query = torch.empty((batches, heads, dim), device=query.device, dtype=query.dtype)
-    packed_weights = torch.empty((batches, heads), device=weights.device, dtype=torch.float32)
+    packed_query = torch.empty((batches, heads, dim), device=query.device, dtype=query.dtype) if copy_q else query
+    packed_weights = torch.empty((batches, heads), device=weights.device, dtype=torch.float32) if copy_w else weights
     if batches:
-        _pack_li_v2_window_queries[(batches,)](
+        fill_block = 2048
+        _pack_li_v2_window_queries[(max(batches, triton.cdiv(dense.numel(), fill_block)),)](
             query,
             weights,
             packed_query,
             packed_weights,
+            dense,
             *query.stride(),
             *weights.stride(),
             rows,
+            batches,
+            dense.numel(),
             heads,
             dim,
             triton.next_power_of_2(heads),
             triton.next_power_of_2(dim),
+            fill_block,
+            copy_q,
+            copy_w,
         )
+        logger.info_once("Kimi K3.1 LightningIndexerV2 score_scratch_init=query_weight_pack", scope="process")
     return packed_query, packed_weights
 
 

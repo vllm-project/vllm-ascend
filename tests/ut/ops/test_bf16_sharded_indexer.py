@@ -45,6 +45,7 @@ def install_li_v2_cpu_kernels(monkeypatch):
     language = _RestoreLanguage(programs=1)
     triton = SimpleNamespace(cdiv=lambda x, y: (x + y - 1) // y, next_power_of_2=lambda x: 1 << (x - 1).bit_length())
     module = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    launches = []
 
     class Kernel:
         def __init__(self, name):
@@ -52,6 +53,7 @@ def install_li_v2_cpu_kernels(monkeypatch):
 
         def __getitem__(self, grid):
             def launch(*args):
+                launches.append(self.function.__name__)
                 args = [Pointer(x) if isinstance(x, torch.Tensor) else x for x in args]
                 for index in itertools.product(*(range(dim) for dim in grid)):
                     language.index = index
@@ -60,9 +62,41 @@ def install_li_v2_cpu_kernels(monkeypatch):
             return launch
 
     for name in ("build_li_v2_batched_inputs", "pack_li_v2_window_queries", "restore_li_v2_scores"):
-        scope = {"torch": torch, "triton": triton, "_" + name: Kernel("_" + name)}
+        scope = {"torch": torch, "triton": triton, "logger": Mock(), "_" + name: Kernel("_" + name)}
         setattr(module, name, load_function("../sharded_indexer.py", name, scope))
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module, launches
+
+
+@pytest.mark.parametrize(
+    "windows,strided_q,weight_dtype",
+    [(1, False, torch.float32), (1, True, torch.float32), (1, False, torch.bfloat16), (3, False, torch.float32)],
+)
+def test_window_pack_initializes_score_scratch_in_one_launch(monkeypatch, windows, strided_q, weight_dtype):
+    ops, launches = install_li_v2_cpu_kernels(monkeypatch)
+    query = torch.arange(48, dtype=torch.bfloat16).view(2, 3, 8)
+    if strided_q:
+        query = query[:, :, 1::2]
+    weights = torch.arange(6, dtype=weight_dtype).view(2, 3)
+    # The partial last fill tile must leave the allocation's guards untouched.
+    storage = torch.full((2 * 2053 + 2,), 17.0)
+    dense = storage[1:-1].view(2, 2053)
+    fill = Mock(wraps=dense.fill_)
+    monkeypatch.setattr(dense, "fill_", fill)
+    q, w = ops.pack_li_v2_window_queries(query, weights, windows, dense)
+    assert torch.isneginf(dense).all()
+    assert storage[[0, -1]].tolist() == [17.0, 17.0]
+    assert q.is_contiguous() and w.is_contiguous()
+    torch.testing.assert_close(q, query.repeat(windows, 1, 1))
+    torch.testing.assert_close(w, weights.float().repeat(windows, 1))
+    assert (q is query) == (windows == 1 and not strided_q)
+    assert (w is weights) == (windows == 1 and weight_dtype == torch.float32)
+    if q is query and w is weights:
+        fill.assert_called_once()
+        assert launches == []
+    else:
+        fill.assert_not_called()
+        assert launches == ["_pack_li_v2_window_queries"]
 
 
 @pytest.mark.parametrize("cols,windows,pages_per_window", [(1, 1, 1), (133, 3, 45)])

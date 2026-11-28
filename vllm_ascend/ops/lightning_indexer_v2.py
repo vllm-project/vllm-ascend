@@ -158,15 +158,17 @@ def lightning_indexer_v2_candidates(
     page_size = key_cache.shape[1]
     # Start in logical token order, including holes. A stable sort then selects
     # the earliest local ID on ties, independent of CANN's native Top-K order.
-    dense = torch.full((rows, max(topk, plan.capacity)), -torch.inf, device=query.device, dtype=torch.float32)
+    dense = torch.empty((rows, max(topk, plan.capacity)), device=query.device, dtype=torch.float32)
     if rows and plan.windows:
-        q, w = pack_li_v2_window_queries(query, weights, plan.windows)
+        q, w = pack_li_v2_window_queries(query, weights, plan.windows, dense)
         width = plan.block_table.shape[1] * page_size
         indices, scores = torch.ops._C_ascend.npu_lightning_indexer_v2(
             q, key_cache, w, plan.cu_query, plan.visible_lengths, plan.block_table, plan.metadata, width
         )
         restore_li_v2_scores(indices, scores, plan.valid_pages, plan.visible_lengths, dense, 0, page_size, rows)
         del indices, scores, q, w
+    else:
+        dense.fill_(-torch.inf)
     best_scores, order = torch.sort(dense, dim=-1, descending=True, stable=True)
     best_scores = best_scores[:, :topk]
     best_ids = order[:, :topk]

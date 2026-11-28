@@ -69,7 +69,8 @@ enum class SFALayout : uint32_t {
     TND = 1,
     PA_BSND = 2,
     BNSG = 3,
-    NTG = 4
+    NTG = 4,
+    PA_KR_BSND = 5
 };
 
 struct SFATilingShapeCompareParam {

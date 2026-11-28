@@ -24,6 +24,7 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -71,6 +72,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
+        self._serving_draft_batch = False
         self.attn_architecture: str | None = None
         self._draft_mla_uses_device_lengths = False
         self._init_dcp()
@@ -176,6 +178,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+        if self.query_cudagraph_manager.is_kimi_gqa_draft:
+            logger.info(
+                "Kimi K3.1 DSpark draft graph stage=init mode=%s query_tokens_per_req=%d "
+                "max_num_reqs=%d target_capture_sizes=%s draft_capture_sizes=%s",
+                self.query_cudagraph_manager.cudagraph_mode.name,
+                self.num_query_per_req,
+                self.max_num_reqs,
+                self.vllm_config.compilation_config.cudagraph_capture_sizes,
+                self.query_cudagraph_manager.capture_sizes,
+            )
 
     @torch.inference_mode()
     def get_draft_context_group_layout(self) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:
@@ -467,6 +479,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         is_profile: bool = False,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+        self._serving_draft_batch = not (dummy_run or is_profile)
         assert self.input_batch is not None
         # TODO: Remove the adaptive verification condition once upstream vLLM
         # synchronizes the draft DP shape independently of the target.

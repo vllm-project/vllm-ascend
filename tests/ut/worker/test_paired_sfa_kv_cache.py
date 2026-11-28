@@ -497,6 +497,19 @@ def make_bf16_swa_cache(config, monkeypatch, page, *, private=False, split_budge
     return plan, attn_groups, caches, indexers, drafts
 
 
+def test_dcp_sfa_reads_original_kernel_pages_from_mrv2(monkeypatch, vllm_config):
+    from vllm_ascend.device.device_op import _sfa_paired_pages
+
+    plan, groups, caches, _, _ = make_bf16_swa_cache(vllm_config, monkeypatch, page=896)
+    for name in groups[0].layer_names:
+        k, rope = caches[name]
+        pages = _sfa_paired_pages(k, rope)
+        assert pages is not None and pages.is_contiguous()
+        assert pages.shape == (plan.num_blocks * 7, BLOCK_SIZE, 1, 576)
+        assert pages.data_ptr() == k.data_ptr()
+        assert rope.data_ptr() == pages.data_ptr() + BLOCK_SIZE * 512 * k.element_size()
+
+
 @pytest.mark.skipif(not supports_k31_draft_separate_pool(), reason="Installed vLLM has a single KV block pool")
 def test_worker_zero_and_cow_use_independent_pool_ids(monkeypatch, vllm_config):
     from vllm.v1.core.sched.output import SchedulerOutput

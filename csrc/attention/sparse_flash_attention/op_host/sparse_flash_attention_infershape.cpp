@@ -66,6 +66,15 @@ ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, lse_flag);
     bool return_softmax_lse = (lse_flag != nullptr)? *lse_flag : false;
 
+    if (return_softmax_lse && inputLayoutKeyPtrStr == "PA_KR_BSND") {
+        // This layout enforces one KV head, including when GE infers the outputs before T and H are known.
+        const bool knownQueryRank = queryShape->GetDimNum() == DIM_NUM_3;
+        const int64_t tokens = knownQueryRank ? queryShape->GetDim(DIM_INDEX_0) : -1;
+        const int64_t heads = knownQueryRank ? queryShape->GetDim(DIM_INDEX_1) : -1;
+        *softmaxMaxShape = gert::Shape({1, tokens, heads});
+        *softmaxSumShape = *softmaxMaxShape;
+        return GRAPH_SUCCESS;
+    }
     if(return_softmax_lse){
         if(queryShape->GetDimNum() == DIM_NUM_3){
             if (inputLayoutKeyPtrStr == "PA_BSND") {

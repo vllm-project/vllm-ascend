@@ -370,6 +370,11 @@ class ModelWithContext(nn.Module):
     def markov_bias(self, markov_embed: torch.Tensor):
         return self.original_model.markov_bias(markov_embed)
 
+    def apply_markov_bias_gathered(
+        self, markov_embed: torch.Tensor, logits: torch.Tensor, values: torch.Tensor, index: torch.Tensor
+    ):
+        return self.original_model.apply_markov_bias_gathered(markov_embed, logits, values, index)
+
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)
 

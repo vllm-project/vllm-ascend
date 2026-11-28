@@ -3098,6 +3098,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("is_minimax_sparse_attention_split_kv_available", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::is_minimax_sparse_attention_split_kv_available);
 
+    ops.def("is_sfa_paired_page_available() -> bool");
+    ops.impl("is_sfa_paired_page_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_sfa_paired_page_available);
+
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
         "                           Tensor sparse_indices, float scale_value, *,"

@@ -1,10 +1,13 @@
 from collections.abc import Callable, Mapping
+from copy import copy
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -23,6 +26,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
@@ -37,6 +41,25 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         decode_query_len: int,
         speculator: Any = None,
     ):
+        self.is_kimi_gqa_draft = uses_kimi_k31_gqa_draft(vllm_config)
+        self._logged_serving_replay = False
+        compilation = vllm_config.compilation_config
+        sizes = compilation.cudagraph_capture_sizes
+        if self.is_kimi_gqa_draft and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and sizes:
+            # Each TP rank processes every draft token with a shard of the heads.
+            # Fit whole draft requests inside the token and request limits.
+            limit = min(
+                max(sizes),
+                compilation.max_cudagraph_capture_size,
+                vllm_config.scheduler_config.max_num_seqs * decode_query_len,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+            )
+            limit -= limit % decode_query_len
+            draft_sizes = sorted({min(round_up(size, decode_query_len), limit) for size in sizes}) if limit else []
+            vllm_config = copy(vllm_config)
+            vllm_config.compilation_config = copy(compilation)
+            vllm_config.compilation_config.cudagraph_capture_sizes = draft_sizes
+            vllm_config.compilation_config.max_cudagraph_capture_size = limit
         super().__init__(
             vllm_config,
             device,
@@ -82,6 +105,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 causal,
                 progress_bar_desc,
             )
+        if self.is_kimi_gqa_draft and self.graphs:
+            logger.info(
+                "Kimi K3.1 DSpark draft graph stage=capture captured_token_sizes=%s", self.captured_token_counts()
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -92,10 +119,19 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
         if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, draft_attn_metadatas)
+            result = self._updatable_graph_replay(desc, draft_attn_metadatas)
         else:
             # This will be removed once the refactoring is fully complete.
-            return self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
+            result = self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
+        if self.is_kimi_gqa_draft and not self._logged_serving_replay and self.speculator._serving_draft_batch:
+            logger.info(
+                "Kimi K3.1 DSpark draft graph stage=replay mode=FULL requests=%d padded_requests=%d tokens=%d",
+                self.speculator.input_batch.num_reqs,
+                desc.num_reqs,
+                desc.num_tokens,
+            )
+            self._logged_serving_replay = True
+        return result
 
     def _graph_replay(self, desc, attn_backend, num_tokens, draft_attn_metadatas):
         self.update_stream.wait_stream(torch.npu.current_stream())

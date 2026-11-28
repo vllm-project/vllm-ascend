@@ -70,27 +70,35 @@ def test_quantized_dcp_passes_packed_query_without_split(restore_perm, force_tma
 
 
 @pytest.mark.parametrize(
-    "heads,force_tmajor,strided_cache",
-    [(32, False, True), (96, False, True), (96, True, True), (96, False, False)],
+    "heads,force_tmajor,strided_cache,paired_enabled",
+    [
+        (32, False, True, False),
+        (96, False, True, False),
+        (96, False, True, True),
+        (96, True, True, True),
+        (96, False, False, True),
+    ],
 )
-def test_kimi_bf16_dcp_layout_at_native_sfa(heads, force_tmajor, strided_cache):
+def test_kimi_bf16_dcp_layout_at_native_sfa(heads, force_tmajor, strided_cache, paired_enabled):
     from vllm_ascend.attention.context_parallel import sfa_cp
     from vllm_ascend.device import device_op
 
     impl = _make_impl(0)
     impl.is_kimi_k31 = impl._local_topk = True
     impl.enable_sparse_sfa_turboquant = False
-    impl.qk_rope_head_dim, impl.scale, impl.dcp_group = 2, 1.0, object()
-    packed = torch.randn(heads, 3, 10, dtype=torch.bfloat16)
-    q, qr = packed.transpose(0, 1).split((8, 2), dim=-1)
+    impl.qk_rope_head_dim, impl.scale, impl.dcp_group = 64, 1.0, object()
+    impl._paired_page_sfa = paired_enabled
+    packed = torch.randn(heads, 3, 576, dtype=torch.bfloat16)
+    q, qr = packed.transpose(0, 1).split((512, 64), dim=-1)
     handle = Mock()
     lengths = torch.tensor([3], dtype=torch.int32)
     table = torch.tensor([[1, 0]], dtype=torch.int32)
     indices = torch.zeros(3, 1, 8, dtype=torch.int32)
-    gather = DCPGatherContext(packed, handle, (1, 0, 2), (8, 2))
+    gather = DCPGatherContext(packed, handle, (1, 0, 2), (512, 64))
     metadata = SimpleNamespace(dcp_context=SimpleNamespace(gather_context=gather, seq_lens=lengths, block_table=table))
-    pages = torch.randn(2, 4 * 10, dtype=torch.bfloat16)
-    k, kr = (plane.view(2, 4, 1, -1) for plane in pages.split((32, 8), dim=-1))
+    # Give the layer a non-zero offset in the shared allocation.
+    pages = torch.randn(3, 128 * 576, dtype=torch.bfloat16)[1:]
+    k, kr = (plane.view(2, 128, 1, -1) for plane in pages.split((128 * 512, 128 * 64), dim=-1))
     if not strided_cache:
         k, kr = k.contiguous(), kr.contiguous()
 
@@ -117,12 +125,26 @@ def test_kimi_bf16_dcp_layout_at_native_sfa(heads, force_tmajor, strided_cache):
         result = impl._execute_sparse_flash_attention_process(None, None, (k, kr), indices, metadata, lengths, lengths)
     handle.wait.assert_called_once()
     assert prep_q.call_count == int(not force_tmajor)
-    assert prep_kv.call_count == int(not force_tmajor and strided_cache)
+    copied = not paired_enabled and not force_tmajor and strided_cache
+    direct = paired_enabled and not force_tmajor and strided_cache
+    assert prep_kv.call_count == int(copied)
     native = sfa.call_args.kwargs
     assert native["sparse_indices"] is indices and native["block_table"] is table
     assert native["return_softmax_lse"] and native["sparse_mode"] == 0
     assert native["value"] is native["key"]
-    for name, expected in (("query", expected_q), ("query_rope", expected_qr), ("key", k), ("key_rope", kr)):
+    if direct:
+        assert native["layout_kv"] == "PA_KR_BSND"
+        assert native["key_rope"] is native["key"] and native["key"].data_ptr() == pages.data_ptr()
+        expect_k = expect_r = pages.view(2, 128, 1, 576)
+    else:
+        assert native["layout_kv"] == "PA_BSND"
+        expect_k, expect_r = k, kr
+    for name, expected in (
+        ("query", expected_q),
+        ("query_rope", expected_qr),
+        ("key", expect_k),
+        ("key_rope", expect_r),
+    ):
         torch.testing.assert_close(native[name], expected)
         if not force_tmajor:
             assert native[name].is_contiguous()
@@ -132,8 +154,60 @@ def test_kimi_bf16_dcp_layout_at_native_sfa(heads, force_tmajor, strided_cache):
         merge.call_args.kwargs["softmax_sum"], total[..., :heads].transpose(0, 1).reshape(3, heads, 1)
     )
     route = "separate_pad" if force_tmajor else "fused_query_pair"
-    cache_route = "fused_kv_pair" if not force_tmajor and strided_cache else "native"
+    cache_route = "paired_page_direct" if direct else "fused_kv_pair" if copied else "native"
     assert any(c.args[1:3] == (route, cache_route) for c in log.call_args_list)
+
+
+@pytest.mark.parametrize(
+    "dtype,force_restore,expect_probe",
+    [
+        (torch.bfloat16, False, True),
+        (torch.float16, False, False),
+        (torch.bfloat16, True, False),
+    ],
+)
+def test_dcp_paired_page_probe_at_weight_load(dtype, force_restore, expect_probe):
+    from vllm_ascend.attention.context_parallel import sfa_cp
+
+    impl = _make_impl(0)
+    impl.is_kimi_k31 = True
+    impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.kv_lora_rank, impl.qk_rope_head_dim = 512, 64
+    impl.W_UV = SimpleNamespace(device=SimpleNamespace(type="npu"))
+    profile = SimpleNamespace(device_adaptor_family=sfa_cp.DeviceAdaptorFamily.FP8_OPTIMIZED)
+    with (
+        patch.object(sfa_cp.AscendSFAImpl, "process_weights_after_loading") as base,
+        patch.object(sfa_cp, "get_current_hardware_profile", return_value=profile),
+        patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=force_restore),
+        patch("vllm_ascend.ops.sfa_paired_page.paired_page_sfa_available", return_value=True) as probe,
+    ):
+        impl.process_weights_after_loading(dtype)
+    base.assert_called_once_with(dtype)
+    assert impl._paired_page_sfa is expect_probe
+    if expect_probe:
+        probe.assert_called_once_with(impl.W_UV.device)
+    else:
+        probe.assert_not_called()
+
+
+def test_sfa_paired_pages_rejects_other_cache_layouts():
+    from vllm_ascend.device.device_op import _sfa_paired_pages
+
+    block = 128
+    flat = torch.empty(3, block * 576, dtype=torch.bfloat16)
+
+    def split(owner):
+        return (
+            owner[:, : block * 512].view(2, block, 1, 512),
+            owner[:, block * 512 : block * 576].view(2, block, 1, 64),
+        )
+
+    k, kr = split(flat[:2])
+    assert _sfa_paired_pages(k, split(flat.clone()[:2])[1]) is None
+    assert _sfa_paired_pages(k, split(flat[1:])[1]) is None
+    assert _sfa_paired_pages(*flat[:2].view(2, block, 1, 576).split((512, 64), -1)) is None
+    assert _sfa_paired_pages(*split(torch.empty(2, block * 576 + 64, dtype=k.dtype))) is None
+    assert _sfa_paired_pages(*split(flat.flatten()[1 : 1 + 2 * block * 576].view(2, -1))) is None
 
 
 @pytest.mark.parametrize("force_restore", [True, False])

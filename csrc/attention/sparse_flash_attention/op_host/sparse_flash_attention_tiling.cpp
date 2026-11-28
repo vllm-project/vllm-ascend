@@ -61,8 +61,8 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
 
 const std::map<std::string, std::vector<SFALayout>> LAYOUT_SUPPORT_MAP = {
     {QUERY_NAME,             {SFALayout::BSND, SFALayout::TND}},
-    {KEY_NAME,               {SFALayout::BSND, SFALayout::TND, SFALayout::PA_BSND}},
-    {VALUE_NAME,             {SFALayout::BSND, SFALayout::TND, SFALayout::PA_BSND}},
+    {KEY_NAME,               {SFALayout::BSND, SFALayout::TND, SFALayout::PA_BSND, SFALayout::PA_KR_BSND}},
+    {VALUE_NAME,             {SFALayout::BSND, SFALayout::TND, SFALayout::PA_BSND, SFALayout::PA_KR_BSND}},
     {ATTEN_OUT_NAME,         {SFALayout::BSND, SFALayout::TND}},
     {SOFTMAX_MAX_NAME,       {SFALayout::BNSG, SFALayout::NTG}},
     {SOFTMAX_SUM_NAME,       {SFALayout::BNSG, SFALayout::NTG}},
@@ -112,6 +112,7 @@ static const std::map<SFALayout, std::vector<SFAAxis>> SFA_LAYOUT_AXIS_MAP = {
     {SFALayout::BSND, {SFAAxis::B, SFAAxis::S, SFAAxis::N, SFAAxis::D}},
     {SFALayout::TND, {SFAAxis::T, SFAAxis::N, SFAAxis::D}},
     {SFALayout::PA_BSND, {SFAAxis::Bn, SFAAxis::Bs, SFAAxis::N, SFAAxis::D}},
+    {SFALayout::PA_KR_BSND, {SFAAxis::Bn, SFAAxis::Bs, SFAAxis::N, SFAAxis::D}},
     {SFALayout::BNSG, {SFAAxis::B, SFAAxis::N, SFAAxis::S, SFAAxis::G}},
     {SFALayout::NTG, {SFAAxis::N, SFAAxis::T, SFAAxis::G}},
 };
@@ -120,6 +121,7 @@ static const std::map<SFALayout, size_t> SFA_LAYOUT_DIM_MAP = {
     {SFALayout::BSND, DIM_NUM_FOUR},
     {SFALayout::TND, DIM_NUM_THREE},
     {SFALayout::PA_BSND, DIM_NUM_FOUR},
+    {SFALayout::PA_KR_BSND, DIM_NUM_FOUR},
     {SFALayout::BNSG, DIM_NUM_FOUR},
     {SFALayout::NTG, DIM_NUM_THREE},
 };
@@ -184,12 +186,18 @@ string SFADebugTilingContext(const gert::TilingContext *context)
     return oss.str();
 }
 
+static bool IsPagedLayout(SFALayout layout)
+{
+    return layout == SFALayout::PA_BSND || layout == SFALayout::PA_KR_BSND;
+}
+
 std::string SFALayoutToSerialString(SFALayout layout)
 {
     switch (layout) {
         case SFALayout::BSND: return "BSND";
         case SFALayout::TND: return "TND";
         case SFALayout::PA_BSND: return "PA_BSND";
+        case SFALayout::PA_KR_BSND: return "PA_KR_BSND";
         case SFALayout::BNSG: return "BNSG";
         case SFALayout::NTG: return "NTG";
         default: return "UNKNOWN";
@@ -255,7 +263,7 @@ void SFAMlaTiling::GenTilingKey()
     uint32_t layoutQuery = static_cast<uint32_t>(sfaInfo_->qLayout);
     uint32_t layoutKV = static_cast<uint32_t>(sfaInfo_->kvLayout);
     uint32_t pageAttention = 0U;
-    if (sfaInfo_->kvLayout == SFALayout::PA_BSND) {
+    if (IsPagedLayout(sfaInfo_->kvLayout)) {
         pageAttention = 1U;
     }
 
@@ -541,7 +549,7 @@ ge::graphStatus SFATilingCheck::GetExpectedShape(gert::Shape &shapeExpected,
         shapeExpected = gert::Shape({param.B, param.S, param.N, param.D});
     } else if (layout == SFALayout::TND) {
         shapeExpected = gert::Shape({param.T, param.N, param.D});
-    } else if (layout == SFALayout::PA_BSND) {
+    } else if (IsPagedLayout(layout)) {
         shapeExpected = gert::Shape({param.Bn, param.Bs, param.N, param.D});
     } else if (layout == SFALayout::BNSG) {
         shapeExpected = gert::Shape({param.B, param.N, param.S, param.G});
@@ -1182,6 +1190,15 @@ ge::graphStatus SFATilingCheck::CheckVAndKRopeShapeForPageAttention()
     shapeParams.Bn = blockNum;
     shapeParams.N = n2Size_;
     shapeParams.Bs = blockSize_;
+    if (kvLayout_ == SFALayout::PA_KR_BSND) {
+        shapeParams.D = qkHeadDim_ + ropeHeadDim_;
+        if (CompareShape(shapeParams, keyShapeCmp_, kvLayout_, KEY_NAME) != ge::GRAPH_SUCCESS ||
+            CompareShape(shapeParams, valueShapeCmp_, kvLayout_, VALUE_NAME) != ge::GRAPH_SUCCESS ||
+            CompareShape(shapeParams, keyRopeShapeCmp_, kvLayout_, KEY_ROPE_NAME) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
     shapeParams.D = vHeadDim_;
     shapeParams.T = kvTSize_;
     if (CompareShape(shapeParams, valueShapeCmp_, kvLayout_, VALUE_NAME) != ge::GRAPH_SUCCESS) {
@@ -1790,7 +1807,7 @@ ge::graphStatus SFAInfoParser::GetS1Size()
 
 ge::graphStatus SFAInfoParser::GetKvStorageMode()
 {
-    if (kvLayout_ == SFALayout::PA_BSND) {
+    if (IsPagedLayout(kvLayout_)) {
         kvStorageMode_ = KvStorageMode::PAGE_ATTENTION;
     } else {
         kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
@@ -1804,6 +1821,7 @@ ge::graphStatus SFAInfoParser::GetKvLayout()
     const map<string, SFALayout> layoutKVMap = {
         {"BSND",        SFALayout::BSND},
         {"PA_BSND",     SFALayout::PA_BSND},
+        {"PA_KR_BSND",  SFALayout::PA_KR_BSND},
         {"TND",         SFALayout::TND}
     };
 
@@ -1815,13 +1833,21 @@ ge::graphStatus SFAInfoParser::GetKvLayout()
         OP_LOGE(opName_, "layoutKV is %s, it is unsupported.", layout.c_str());
         return ge::GRAPH_FAILED;
     }
-    if (kvLayout_ != SFALayout::PA_BSND && qLayout_ != kvLayout_) {
-        OP_LOGE(opName_, "When layoutKV is not PA_BSND, layoutKV must be the same as layoutQ.");
+    if (kvLayout_ == SFALayout::PA_KR_BSND &&
+        (!isA5_ || qLayout_ != SFALayout::TND || inputQType_ != ge::DT_BF16 || inputKvType_ != ge::DT_BF16 ||
+         *opParamInfo_.sparseBlockSize != 1 || opParamInfo_.attentionMode == nullptr ||
+         *opParamInfo_.attentionMode != 2 || opParamInfo_.keyRope.tensor == nullptr ||
+         opParamInfo_.keyRope.desc == nullptr)) {
+        OP_LOGE(opName_, "PA_KR_BSND requires A5 BF16 TND, sparse_block_size=1, attention_mode=2 and packed key_rope.");
+        return ge::GRAPH_FAILED;
+    }
+    if (!IsPagedLayout(kvLayout_) && qLayout_ != kvLayout_) {
+        OP_LOGE(opName_, "Non-paged layoutKV must be the same as layoutQ.");
         return ge::GRAPH_FAILED;
     }
     uint32_t keyDimNum = opParamInfo_.key.shape->GetStorageShape().GetDimNum();
-    if (kvLayout_ == SFALayout::PA_BSND && keyDimNum != 4U) {
-        OP_LOGE(opName_, "When layoutKV is PA_BSND, kvDimNum must be 4, but now is %d.", keyDimNum);
+    if (IsPagedLayout(kvLayout_) && keyDimNum != 4U) {
+        OP_LOGE(opName_, "For paged layoutKV, kvDimNum must be 4, but now is %d.", keyDimNum);
         return ge::GRAPH_FAILED;
     }
 
@@ -1895,7 +1921,8 @@ ge::graphStatus SFAInfoParser::GetValueHeadDim()
 {
     // 获取vHeadDim基准值
     // 以value的D维度为基准
-    vHeadDim_ = GetAxisNum(valueShape_, SFAAxis::D, kvLayout_);
+    // The packed descriptor covers both planes. The output still has the latent width of Q.
+    vHeadDim_ = kvLayout_ == SFALayout::PA_KR_BSND ? qkHeadDim_ : GetAxisNum(valueShape_, SFAAxis::D, kvLayout_);
     return ge::GRAPH_SUCCESS;
 }
 

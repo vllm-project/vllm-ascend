@@ -30,7 +30,9 @@ extern "C" {
 
 namespace {
 
-extern aclnnStatus aclnnInnerSparseFlashAttentionGetWorkspaceSize(
+// libopapi_transformer also exports these generated names. Bind both calls
+// to the implementations generated from the OpDef in this vendor library.
+extern __attribute__((visibility("protected"))) aclnnStatus aclnnInnerSparseFlashAttentionGetWorkspaceSize(
     const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *sparse_indices,
     const aclTensor *blockTableOptional, const aclTensor *actualSeqLengthsQueryOptional, const aclTensor *actualSeqLengthsKvOptional,
     const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional, double scaleValue,
@@ -39,8 +41,8 @@ extern aclnnStatus aclnnInnerSparseFlashAttentionGetWorkspaceSize(
     bool returnSoftmaxLse, const aclTensor *attentionOut, const aclTensor *softmaxMax,
     const aclTensor *softmaxSum, uint64_t *workspaceSize, aclOpExecutor **executor);
 
-extern aclnnStatus aclnnInnerSparseFlashAttention(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
-                                         const aclrtStream stream);
+extern __attribute__((visibility("protected"))) aclnnStatus aclnnInnerSparseFlashAttention(
+    void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, const aclrtStream stream);
 
 class TensorHolder {
 public:
@@ -139,6 +141,30 @@ aclnnStatus aclnnSparseFlashAttention(void *workspace, uint64_t workspaceSize, a
 }
 
 } // namespace
+
+aclnnStatus aclnnVllmSfaPairedPageGetWorkspaceSize(
+    const aclTensor *query, const aclTensor *pages, const aclTensor *sparseIndices,
+    const aclTensor *blockTable, const aclTensor *actualSeqLengthsQuery,
+    const aclTensor *actualSeqLengthsKv, const aclTensor *queryRope, double scaleValue,
+    int64_t sparseBlockSize, int64_t sparseMode, int64_t preTokens, int64_t nextTokens,
+    int64_t attentionMode, bool returnSoftmaxLse, const aclTensor *attentionOut,
+    const aclTensor *softmaxMax, const aclTensor *softmaxSum,
+    uint64_t *workspaceSize, aclOpExecutor **executor)
+{
+    char layoutQ[] = "TND";
+    char layoutKV[] = "PA_KR_BSND";
+    return aclnnInnerSparseFlashAttentionGetWorkspaceSize(
+        query, pages, pages, sparseIndices, blockTable, actualSeqLengthsQuery,
+        actualSeqLengthsKv, queryRope, pages, scaleValue, sparseBlockSize, layoutQ,
+        layoutKV, sparseMode, preTokens, nextTokens, attentionMode, returnSoftmaxLse,
+        attentionOut, softmaxMax, softmaxSum, workspaceSize, executor);
+}
+
+aclnnStatus aclnnVllmSfaPairedPage(void *workspace, uint64_t workspaceSize,
+                                  aclOpExecutor *executor, const aclrtStream stream)
+{
+    return aclnnInnerSparseFlashAttention(workspace, workspaceSize, executor, stream);
+}
 
 #ifdef __cplusplus
 }

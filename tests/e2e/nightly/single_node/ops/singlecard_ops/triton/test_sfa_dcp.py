@@ -138,7 +138,7 @@ def test_prepare_sfa_query_pair_gathered_views_and_graph_replay(tokens, heads, o
 
 def _sfa_cache_planes(owner, block_size):
     # Each physical page holds all latent rows, then all positional rows.
-    # Skip a prefix in the backing allocation and leave a gap between pages.
+    # Skip a prefix in the backing allocation. The page pitch may include padding.
     pages = owner[1:]
     split = block_size * 512
     kv = pages[:, :split].unflatten(1, (block_size, 1, 512))
@@ -212,6 +212,127 @@ def test_prepare_sfa_kv_pair_native_attention():
         torch.testing.assert_close(value, expected, atol=0, rtol=0)
 
 
+def _capture_sfa_pair(calls):
+    graphs = []
+    results = []
+    for prepare in calls:
+        for _ in range(3):
+            prepare()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            results.append(prepare())
+        graphs.append(graph)
+        for _ in range(3):
+            graph.replay()
+    torch.npu.synchronize()
+    return graphs, results
+
+
+def _sfa_pair_replay_us(graphs):
+    # Alternate replay order to reduce frequency and cache-order bias.
+    # Timing events bracket only work submitted to the NPU stream.
+    samples = ([], [])
+    for sample in range(8):
+        order = (0, 1) if sample % 2 == 0 else (1, 0)
+        for index in order:
+            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+            start.record()
+            for _ in range(10):
+                graphs[index].replay()
+            end.record()
+            end.synchronize()
+            samples[index].append(start.elapsed_time(end) * 1000 / 10)
+    return [median(values) for values in samples]
+
+
+@pytest.mark.skipif("950" not in torch.npu.get_device_name(0), reason="A5 BF16 sparse attention")
+@pytest.mark.parametrize(
+    "block_size,pages,requests,table_width",
+    [(128, 64, 8, 19), (896, 64, 8, 19), (128, 5208, 32, 133)],
+    ids=["small-128", "small-896", "dcp8-decode-128-queries"],
+)
+def test_sfa_native_paired_pages_decode_replay_and_latency(block_size, pages, requests, table_width, record_property):
+    enable_custom_op()
+    generator = torch.Generator().manual_seed(928)
+    # One local shard. Pad the 96 gathered Kimi heads just as DCP8 does.
+    q_per_request, heads = 4, 96
+    tokens = requests * q_per_request
+    owner = torch.randn(pages + 1, block_size * 576, dtype=torch.bfloat16, generator=generator).npu()
+    kv, key_rope = _sfa_cache_planes(owner, block_size)
+    packed = owner[1:].view(pages, block_size, 1, 576)
+    gathered = torch.randn(heads, tokens, 576, dtype=torch.bfloat16, generator=generator).npu()
+    q, qr = prepare_sfa_query_pair(*gathered.transpose(0, 1).split((512, 64), -1), 128)
+    # Leave one unmapped logical page and skip the reserved physical page zero.
+    table = torch.stack(
+        [torch.randperm(pages - 1, generator=generator)[:table_width] + 1 for _ in range(requests)]
+    ).int()
+    table[:, 1] = -1
+    visible = table_width * block_size - 7
+    indices = torch.full((tokens, 1, 2048), -1, dtype=torch.int32)
+    for row in range(2, tokens):
+        selected = torch.randperm(visible, generator=generator)
+        selected = selected[selected // block_size != 1][:257].sort().values
+        indices[row, 0, : selected.numel()] = selected.int()
+    indices[0, 0, 0] = 0  # One value permits an exact independent check after a cache write.
+    kwargs = dict(
+        query=q,
+        query_rope=qr,
+        sparse_indices=indices.npu(),
+        scale_value=1 / 24,
+        sparse_block_size=1,
+        block_table=table.npu(),
+        actual_seq_lengths_query=torch.arange(q_per_request, tokens + 1, q_per_request, dtype=torch.int32).npu(),
+        actual_seq_lengths_kv=torch.full((requests,), visible, dtype=torch.int32).npu(),
+        layout_query="TND",
+        sparse_mode=0,
+        attention_mode=2,
+        return_softmax_lse=True,
+    )
+
+    def copy_and_attend():
+        k, kr = prepare_sfa_kv_pair(kv, key_rope)
+        return torch.ops._C_ascend.npu_sparse_flash_attention(
+            key=k, value=k, key_rope=kr, layout_kv="PA_BSND", **kwargs
+        )
+
+    def attend_packed():
+        return torch.ops._C_ascend.npu_sparse_flash_attention(
+            key=packed, value=packed, key_rope=packed, layout_kv="PA_KR_BSND", **kwargs
+        )
+
+    graphs, (reference, actual) = _capture_sfa_pair((copy_and_attend, attend_packed))
+    for step in range(2):
+        # Update only the selected row. Both captured graphs must observe the live backing and the remapped page.
+        if step:
+            table[:, [0, 2]] = table[:, [2, 0]]
+            kwargs["block_table"].copy_(table)
+        page = int(table[0, 0])
+        new_value = torch.randn((512,), dtype=torch.bfloat16, generator=generator)
+        kv[page, 0, 0].copy_(new_value)
+        key_rope[page, 0, 0].fill_(step + 1)
+        for graph in graphs:
+            graph.replay()
+        for out, expected in zip(actual, reference, strict=True):
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+        out, maximum, total = actual
+        assert out.shape == (tokens, 128, 512) and out.dtype == torch.bfloat16
+        assert maximum.shape == total.shape == (1, tokens, 128) and maximum.dtype == total.dtype == torch.float32
+        assert torch.equal(out[0].cpu(), new_value.expand(128, -1))
+        assert torch.count_nonzero(out[1]) == 0 and torch.count_nonzero(total[:, 1]) == 0
+        assert torch.isfinite(maximum[:, 2:]).all() and (total[:, 2:] > 0).all()
+
+    copy_sfa_us, paired_sfa_us = _sfa_pair_replay_us(graphs)
+    record_property("copy_sfa_us", copy_sfa_us)
+    record_property("paired_sfa_us", paired_sfa_us)
+    print(
+        f"SFA decode pages={pages} block_size={block_size} copy_sfa_us={copy_sfa_us:.3f} "
+        f"paired_sfa_us={paired_sfa_us:.3f}"
+    )
+    for graph in graphs:
+        graph.reset()
+
+
 @pytest.mark.parametrize("stage", ["query", "kv"])
 def test_sfa_pair_layout_latency(stage, record_property):
     tokens, heads, output_heads = 128, 96, 128
@@ -236,36 +357,10 @@ def test_sfa_pair_layout_latency(stage, record_property):
         def fused():
             return prepare_sfa_kv_pair(kv, kr)
 
-    graphs = []
-    results = []
-    for prepare in (separate, fused):
-        for _ in range(3):
-            prepare()
-        torch.npu.synchronize()
-        graph = torch.npu.NPUGraph()
-        with torch.npu.graph(graph):
-            results.append(prepare())
-        graphs.append(graph)
-        for _ in range(3):
-            graph.replay()
-    torch.npu.synchronize()
+    graphs, results = _capture_sfa_pair((separate, fused))
     for reference, actual in zip(*results, strict=True):
         assert torch.equal(reference, actual)
-
-    # Alternate replay order to reduce frequency and cache-order bias.
-    # Timing events bracket only work submitted to the NPU stream.
-    samples = ([], [])
-    for sample in range(8):
-        order = (0, 1) if sample % 2 == 0 else (1, 0)
-        for index in order:
-            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
-            start.record()
-            for _ in range(10):
-                graphs[index].replay()
-            end.record()
-            end.synchronize()
-            samples[index].append(start.elapsed_time(end) * 1000 / 10)
-    separate_us, fused_us = (median(values) for values in samples)
+    separate_us, fused_us = _sfa_pair_replay_us(graphs)
     record_property("separate_us", separate_us)
     record_property("fused_us", fused_us)
     print(f"SFA layout stage={stage} separate_us={separate_us:.3f} fused_us={fused_us:.3f}")

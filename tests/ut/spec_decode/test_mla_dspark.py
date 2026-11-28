@@ -263,6 +263,7 @@ def test_empty_metadata_is_a_noop(architecture):
 @pytest.mark.parametrize("fail", [False, True])
 def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
+    manager.is_kimi_gqa_draft = False
     manager.speculator = SimpleNamespace(attn_architecture=architecture)
     events = []
 

@@ -11,6 +11,8 @@ import torch
 from vllm.config import get_current_vllm_config, set_current_vllm_config
 from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -198,6 +200,45 @@ def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, n
         assert value.seq_lens is seq_lens[name]
 
 
+def test_kimi_draft_logs_capture_and_first_serving_replay(monkeypatch):
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=96, num_reqs=32, uniform_token_count=3)
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.is_kimi_gqa_draft = True
+    manager._logged_serving_replay = False
+    manager.graphs = {}
+    manager.speculator = SimpleNamespace(
+        model=torch.nn.Identity(),
+        _serving_draft_batch=False,
+        input_batch=SimpleNamespace(num_reqs=5, seq_lens_cpu_upper_bound=object()),
+        build_draft_attn_metadatas=lambda *args: [{}],
+        attn_backends={"draft.0": AscendKimiK31GQADraftAttentionBackend},
+    )
+    log = MagicMock()
+    monkeypatch.setattr(aclgraph_module.logger, "info", log)
+    monkeypatch.setattr(aclgraph_module, "communicator_switch", nullcontext)
+    monkeypatch.setattr(DFlashCudaGraphManager, "capture", lambda *args: None)
+    manager.capture(None, None, None, [], None, 4096)
+    log.assert_not_called()
+    monkeypatch.setattr(DFlashCudaGraphManager, "capture", lambda *args: manager.graphs.update({desc: object()}))
+    manager.capture(None, None, None, [], None, 4096)
+    log.assert_called_once_with("Kimi K3.1 DSpark draft graph stage=capture captured_token_sizes=%s", [96])
+    log.reset_mock()
+
+    monkeypatch.setattr(aclgraph_module, "use_updatable_graph", lambda backend: True)
+    replay = MagicMock(side_effect=["dummy", RuntimeError("update failed"), "first", "second"])
+    monkeypatch.setattr(manager, "_updatable_graph_replay", replay)
+    assert manager.run_fullgraph(desc) == "dummy"
+    manager.speculator._serving_draft_batch = True
+    with pytest.raises(RuntimeError, match="update failed"):
+        manager.run_fullgraph(desc)
+    log.assert_not_called()
+    assert manager.run_fullgraph(desc) == "first"
+    assert manager.run_fullgraph(desc) == "second"
+    log.assert_called_once_with(
+        "Kimi K3.1 DSpark draft graph stage=replay mode=FULL requests=%d padded_requests=%d tokens=%d", 5, 32, 96
+    )
+
+
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
     class _ContextProxy:
         active = False
@@ -235,6 +276,7 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
         speculative_config=object(),
     )
     manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.is_kimi_gqa_draft = False
     manager.speculator = speculator
     manager.update_stream = SimpleNamespace(wait_stream=lambda stream: None)
     manager.device = torch.device("cpu")
@@ -288,3 +330,69 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count, max_reqs, bucket
         assert desc.num_tokens == desc.num_reqs * query_count
         if expected_mode == CUDAGraphMode.FULL:
             assert desc.uniform_token_count == query_count
+
+
+@pytest.mark.parametrize(
+    "max_reqs,buckets,mode,eager,kimi,expected",
+    [
+        (32, [128], CUDAGraphMode.FULL_DECODE_ONLY, False, True, [96]),
+        (40, [128], CUDAGraphMode.FULL_DECODE_ONLY, False, True, [120]),
+        (43, [128], CUDAGraphMode.FULL_DECODE_ONLY, False, True, [126]),
+        (32, [8, 16, 32, 64, 96, 128], CUDAGraphMode.FULL_DECODE_ONLY, False, True, [9, 18, 33, 66, 96]),
+        (32, [2], CUDAGraphMode.FULL_DECODE_ONLY, False, True, []),
+        (32, [], CUDAGraphMode.FULL_DECODE_ONLY, False, True, []),
+        (32, [128], CUDAGraphMode.NONE, False, True, []),
+        (32, [128], CUDAGraphMode.FULL_DECODE_ONLY, True, True, []),
+        (32, [128], CUDAGraphMode.FULL_DECODE_ONLY, False, False, []),
+    ],
+)
+def test_kimi_gqa_draft_capture_buckets(monkeypatch, max_reqs, buckets, mode, eager, kimi, expected):
+    # Exercise the upstream speculator's backend capability check, Ascend's
+    # manager construction and the production descriptor lookup without an NPU.
+    monkeypatch.setattr(speculator_module.dflash_speculator, "DFlashCudaGraphManager", DFlashAclGraphManager)
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
+    monkeypatch.setattr(cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None)
+    register = MagicMock()
+    monkeypatch.setattr(aclgraph_module, "set_draft_graph_params", register)
+    speculative = SimpleNamespace(
+        method="dspark",
+        enforce_eager=eager,
+        uses_dynamic_speculative_decoding=lambda: False,
+        draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"]),
+    )
+    target_sizes = buckets.copy()
+    compilation = SimpleNamespace(cudagraph_capture_sizes=target_sizes, max_cudagraph_capture_size=128)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31" if kimi else "qwen3")),
+        parallel_config=SimpleNamespace(tensor_parallel_size=8, data_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_reqs, max_num_batched_tokens=512),
+        compilation_config=compilation,
+        speculative_config=speculative,
+    )
+    spec = _speculator(
+        vllm_config=config,
+        speculative_config=speculative,
+        num_query_per_req=3,
+        max_num_reqs=max_reqs,
+        device=torch.device("cpu"),
+        update_stream=object(),
+        attn_cg_support=SimpleNamespace(min_cg_support=AttentionCGSupport.UNIFORM_BATCH),
+    )
+    spec.init_cudagraph_manager(mode)
+    manager = spec.query_cudagraph_manager
+    assert manager.is_kimi_gqa_draft == kimi
+    assert manager.capture_sizes == expected
+    assert compilation.cudagraph_capture_sizes is target_sizes and target_sizes == buckets
+    assert compilation.max_cudagraph_capture_size == 128
+    if expected:
+        register.assert_called_once_with(expected)
+    else:
+        register.assert_not_called()
+    # Only capture_state and NPU graphs are mocked; candidates and dispatch are real.
+    manager._graphs_captured = True
+    for reqs in range(1, max_reqs + 1):
+        desc = manager.dispatch(reqs, 3 * reqs, 3, 0)
+        bucket = next((size for size in expected if size >= 3 * reqs), None)
+        assert desc.cg_mode == (CUDAGraphMode.FULL if bucket else CUDAGraphMode.NONE)
+        if bucket:
+            assert (desc.num_tokens, desc.num_reqs) == (bucket, bucket // 3)

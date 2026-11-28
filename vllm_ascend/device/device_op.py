@@ -52,6 +52,32 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+def _sfa_paired_pages(latent: torch.Tensor, rope: torch.Tensor) -> torch.Tensor | None:
+    """View pages laid out as [all latent rows, all rope rows] with no gap between pages."""
+    if latent.ndim != 4 or rope.ndim != 4 or latent.shape[:3] != rope.shape[:3]:
+        return None
+    pages, rows, heads, width = latent.shape
+    if heads != 1 or width != 512 or rope.shape[-1] != 64 or pages == 0 or rows == 0:
+        return None
+    page_stride = rows * (width + 64)
+    if (
+        latent.dtype != torch.bfloat16
+        or rope.dtype != latent.dtype
+        or latent.device != rope.device
+        or latent.stride(0) != page_stride
+        or rope.stride(0) != page_stride
+        or (latent.stride(1), latent.stride(3)) != (width, 1)
+        or (rope.stride(1), rope.stride(3)) != (64, 1)
+        or rope.storage_offset() - latent.storage_offset() != rows * width
+        or latent.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr()
+        or latent.data_ptr() % 32
+    ):
+        return None
+    # The last axis describes the physical span. Its rows are interpreted by
+    # PA_KR_BSND alone. Ordinary PA_BSND would give different token addresses.
+    return latent.as_strided((pages, rows, 1, 576), (page_stride, 576, 576, 1))
+
+
 class BaseDeviceAdaptor:
     native_dcp_indexer = False
 
@@ -734,7 +760,24 @@ class BaseDeviceAdaptor:
                 query_layout = "native"
             source_kv, source_kr = kv, key_rope
             kv_layout = "native"
-            if fuse_pairs and not kv.is_contiguous() and not key_rope.is_contiguous():
+            native_layout = "PA_BSND"
+            paired = None
+            if (
+                fuse_dcp_layout
+                and return_lse
+                and getattr(sfa_impl, "_paired_page_sfa", False) is True
+                and key_rope is not None
+                and q_pe is not None
+                and ql_nope.dtype == q_pe.dtype == torch.bfloat16
+                and ql_nope.shape[-1] == 512
+                and q_pe.shape[-1] == 64
+            ):
+                paired = _sfa_paired_pages(kv, key_rope)
+            if paired is not None:
+                kv = key_rope = paired
+                kv_layout = "paired_page_direct"
+                native_layout = "PA_KR_BSND"
+            elif fuse_pairs and not kv.is_contiguous() and not key_rope.is_contiguous():
                 # Legacy PA_BSND + LSE expects two dense planes. Preserve the
                 # original physical page IDs and share the packed latent as K/V.
                 kv, key_rope = prepare_sfa_kv_pair(kv, key_rope)
@@ -756,8 +799,8 @@ class BaseDeviceAdaptor:
                     ql_nope.shape[1],
                     source_q.stride(),
                     source_pe.stride() if source_pe is not None else None,
-                    tuple(kv.shape),
-                    tuple(key_rope.shape) if key_rope is not None else None,
+                    tuple(source_kv.shape),
+                    tuple(source_kr.shape) if source_kr is not None else None,
                     source_kv.stride(),
                     source_kr.stride() if source_kr is not None else None,
                     tuple(
@@ -793,7 +836,7 @@ class BaseDeviceAdaptor:
                 query_rope=None if nope else q_pe,
                 key_rope=key_rope,
                 layout_query="TND",
-                layout_kv="PA_BSND",
+                layout_kv=native_layout,
                 sparse_mode=sparse_mode,
                 attention_mode=2,
                 return_softmax_lse=return_lse,

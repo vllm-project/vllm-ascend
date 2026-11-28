@@ -2171,6 +2171,16 @@ The following accuracy results were reported for Kimi K3.1 Pro with PD separatio
 
 ## 8 Performance Evaluation {#8-performance-evaluation}
 
+On the TP8/DCP8 BF16 Decode worker, `FULL_DECODE_ONLY` supports the local GQA DSpark draft with
+`speculative_config.enforce_eager=false`. With three speculative tokens and `sample_from_anchor=true`,
+the draft queries three tokens per request. A target capture size of 128 gives a draft capture size
+of 96 at `--max-num-seqs 32` and 120 at `--max-num-seqs 40`. To also capture target verification
+at 40 concurrent requests, include 160 in the target capture sizes (40 requests × 4 target tokens).
+Filter the worker log with `rg 'Kimi K3.1 DSpark draft graph stage=' decode.log`. The `stage=init`
+record lists the planned sizes, `stage=capture` lists the sizes the worker captured, and
+`stage=replay mode=FULL` records the first replay submitted for a serving batch.
+The draft graph covers the query forward and Markov sampling. Context KV preparation runs before replay.
+
 On Ascend 950, rebuild the vllm-ascend native extension from this checkout with
 a CANN installation that provides `LightningIndexerV2` and
 `LightningIndexerV2Metadata`. The BF16 K3.1 indexer detects these operators
@@ -2182,7 +2192,7 @@ For a 133-page table with 128 tokens per page, three 45-page windows cover the
 table. The final window masks its two padding pages. A shared metadata call
 describes all windows. Each rank selects 2048 candidates and merges them across ranks.
 
-Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>`.
+Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA|DCP SFA)' <worker.log>`.
 
 | Log field | Meaning |
 |---|---|
@@ -2194,6 +2204,15 @@ Search the worker log with `rg 'Kimi K3.1 (LightningIndexerV2|DSA)' <worker.log>
 | `route=skip_topk` or `custom_selector` | This layer skipped retrieval or delegated selection to the attention implementation. |
 | `DSA selected preprocess` and `DSA first entering` | The first record names the preprocessing implementation selected after loading weights. The forward records name the preprocessing and sparse attention operators reached by the worker. |
 | `DSA stage=dispatched preprocess=...` and `DSA stage=dispatched attention=_C_ascend.npu_sparse_flash_attention` | The fused preprocessing or BF16 sparse attention host call returned. Each worker logs the first occurrence. |
+| `DCP SFA stage=probe layout=PA_KR_BSND` | On Ascend 950, `enabled=True` confirms the installed kernel produced the expected attention output and softmax max/sum during startup. A failed compatibility check reports its reason. |
+| `DCP SFA stage=input_layout` | `kv_route=paired_page_direct` reads the latent and RoPE planes from their original pages inside SFA. `kv_route=fused_kv_pair` copies them into separate dense tensors before SFA. |
+| `LightningIndexerV2 score_scratch_init=query_weight_pack` | The window input pack also initializes the score buffer. A single window with both inputs ready uses `score_scratch_init=fill`. |
+
+The direct KV path requires rebuilding and installing both the vllm-ascend extension
+and its bundled custom OPP. For a device comparison, run
+`pytest -qs tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k paired_pages_decode_replay_and_latency`.
+It checks output and softmax statistics after cache updates and prints median graph
+replay times for copy plus SFA (`copy_sfa_us`) and direct SFA (`paired_sfa_us`).
 
 Indexer forward records show the first occurrence per layer, route, reason and capture
 metadata mode. FULL graph replay runs the recorded device operations without

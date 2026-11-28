@@ -40,7 +40,11 @@ _NATIVE_TORCH_SUM = torch.sum
     ],
 )
 def test_adaptive_verification_cudagraph_support(builder_cls, speculative_config, expected):
-    config = SimpleNamespace(speculative_config=speculative_config)
+    config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
     assert builder_cls.get_cudagraph_support(config, Mock()) is expected
 
 
@@ -54,6 +58,15 @@ def test_aclgraph_model_forwards_confidence_computation():
 
     assert wrapped.compute_confidence(hidden, markov) is expected
     model.compute_confidence.assert_called_once_with(hidden, markov)
+
+
+def test_aclgraph_model_forwards_topk_markov_sampling():
+    model = Mock()
+    wrapped = ModelWithContext(model, is_draft_model=True)
+    markov, logits, values, index = (object() for _ in range(4))
+    result = wrapped.apply_markov_bias_gathered(markov, logits, values, index)
+    assert result is model.apply_markov_bias_gathered.return_value
+    model.apply_markov_bias_gathered.assert_called_once_with(markov, logits, values, index)
 
 
 @pytest.mark.parametrize(
@@ -181,6 +194,7 @@ def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptiv
     )
 
     assert result == "draft"
+    assert spec._serving_draft_batch == (not dummy_run and not is_profile)
     assert parent.call_args.args[0] is batch
     assert batch.num_reqs == 1
     assert parent.call_args.args[11] is (None if adaptive and not is_profile else target_sync)

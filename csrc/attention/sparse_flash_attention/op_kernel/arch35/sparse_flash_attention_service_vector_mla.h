@@ -116,7 +116,12 @@ private:
     __aicore__ inline void ProcessSparseKv(Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &outputL1,
         Buffer<BufferType::GM, SyncType::CROSS_CORE_SYNC_BACKWARD> &v0ResGm,
         const RunInfo &runInfo, ConstInfo &constInfo, int32_t startPos);
-    __aicore__ inline int64_t GetkeyOffset(int64_t s2Idx, const RunInfo &runInfo, ConstInfo &constInfo);
+    struct KvOffsets {
+        int64_t token; // Physical row in the equivalent separate K and RoPE tensors.
+        int64_t key;   // Element offsets within each input descriptor.
+        int64_t rope;
+    };
+    __aicore__ inline KvOffsets GetKvOffsets(int64_t s2Idx, const RunInfo &runInfo, ConstInfo &constInfo);
     __aicore__ inline void GetRealCmpS2Idx(int64_t &token0Idx, int64_t &token1Idx, int64_t s2IdxInBase,
         const RunInfo &runInfo, ConstInfo &constInfo);
     __aicore__ inline void CopyInKvNotSparse(LocalTensor<KV_T> kvMergUb, int64_t v0Loop, int64_t dealRow,
@@ -128,7 +133,7 @@ private:
         LocalTensor<Q_T> kvOutUb, int64_t dealRow, int64_t s2StartIdx, const RunInfo &runInfo,
         ConstInfo &constInfo);
     __aicore__ inline void CopyInSingleKv(LocalTensor<KV_T> kvInUb,
-        int64_t startRow, int64_t keyOffset, ConstInfo &constInfo);
+        int64_t startRow, const KvOffsets &offset, ConstInfo &constInfo);
     /* VEC2_RES_T 表示bmm2ResUb当前的类型，VEC2_RES_T = Q_T那么不需要做Cast。另外，无效行场景当前默认需要做Cast */
     using VEC2_RES_T = T;
     template <typename VEC2_RES_T>
@@ -215,35 +220,40 @@ SFAVectorService<TEMPLATE_ARGS>::GetRealCmpS2Idx(int64_t &token0Idx, int64_t &to
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline
-int64_t SFAVectorService<TEMPLATE_ARGS>::GetkeyOffset(
+typename SFAVectorService<TEMPLATE_ARGS>::KvOffsets SFAVectorService<TEMPLATE_ARGS>::GetKvOffsets(
     int64_t s2Idx, const RunInfo &runInfo, ConstInfo &constInfo)
 {
     if (s2Idx < 0) {
-        return -1;
+        return {-1, -1, -1};
     }
-    int64_t realkeyOffset = 0;
+    int64_t token = 0;
     if constexpr (isPa) {
         int64_t blkTableIdx = s2Idx / blockSize;
         int64_t blkTableOffset = s2Idx % blockSize;
-        realkeyOffset = blockTableGm.GetValue(runInfo.boIdx * maxBlockNumPerBatch + blkTableIdx) *
-            static_cast<int64_t>(blockSize) +
-            blkTableOffset; // BlockNum, BlockSize, N(1), D
+        int64_t page = blockTableGm.GetValue(runInfo.boIdx * maxBlockNumPerBatch + blkTableIdx);
+        token = page * blockSize + blkTableOffset;
+        if constexpr (KV_LAYOUT_T == SFA_LAYOUT::PA_KR_BSND) {
+            // Each physical page contains all latent keys (also the values), then all RoPE keys.
+            int64_t pageBase = page * blockSize * (constInfo.dSizeNope + constInfo.dSizeRope);
+            return {token, pageBase + blkTableOffset * constInfo.dSizeNope,
+                    pageBase + static_cast<int64_t>(blockSize) * constInfo.dSizeNope + blkTableOffset * constInfo.dSizeRope};
+        }
     } else {
         if constexpr (LAYOUT_T == SFA_LAYOUT::BSND) {
-            realkeyOffset = (runInfo.boIdx * constInfo.s2Size + s2Idx); // BSN(1)D
+            token = (runInfo.boIdx * constInfo.s2Size + s2Idx); // BSN(1)D
         } else if constexpr (LAYOUT_T == SFA_LAYOUT::TND) {
             int64_t batchKvStart = (runInfo.boIdx == 0) ? 0 : actualSeqLengthsKVGm.GetValue(runInfo.boIdx - 1);
-            realkeyOffset = (batchKvStart + s2Idx);
+            token = (batchKvStart + s2Idx);
         }
     }
-    return realkeyOffset;
+    return {token, token * constInfo.dSizeNope, token * constInfo.dSizeRope};
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
 SFAVectorService<TEMPLATE_ARGS>::CopyInSingleKv(LocalTensor<KV_T> kvInUb, int64_t startRow,
-    int64_t keyOffset, ConstInfo &constInfo)
+    const KvOffsets &offset, ConstInfo &constInfo)
 {
-    if (keyOffset < 0) {
+    if (offset.token < 0) {
         return;
     }
     DataCopyExtParams intriParams;
@@ -261,11 +271,11 @@ SFAVectorService<TEMPLATE_ARGS>::CopyInSingleKv(LocalTensor<KV_T> kvInUb, int64_
     padParams.leftPadding = 0;
     padParams.rightPadding = combineDimAlign - combineDim;
     padParams.paddingValue = 0;
-    DataCopyPad(kvInUb[startRow * 576], keyGm[keyOffset * 512], intriParams, padParams);
+    DataCopyPad(kvInUb[startRow * 576], keyGm[offset.key], intriParams, padParams);
 
     intriParams.blockLen = constInfo.sparseBlockSize * constInfo.dSizeRope *sizeof(KV_T);
     intriParams.dstStride = 512 / BUFFER_SIZE_BYTE_32B;
-    DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[keyOffset * 64], intriParams, padParams); // combineDimAlign
+    DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[offset.rope], intriParams, padParams); // combineDimAlign
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline
@@ -273,8 +283,10 @@ uint32_t SFAVectorService<TEMPLATE_ARGS>::CopyInKvSparse(
     LocalTensor<KV_T> kvInUb, int64_t startRow, int64_t token0Idx,
     int64_t token1Idx, const RunInfo &runInfo, ConstInfo &constInfo)
 {
-    int64_t keyOffset0 = GetkeyOffset(token0Idx, runInfo, constInfo);
-    int64_t keyOffset1 = GetkeyOffset(token1Idx, runInfo, constInfo);
+    const KvOffsets offset0 = GetKvOffsets(token0Idx, runInfo, constInfo);
+    const KvOffsets offset1 = GetKvOffsets(token1Idx, runInfo, constInfo);
+    int64_t keyOffset0 = offset0.token;
+    int64_t keyOffset1 = offset1.token;
     if (unlikely(keyOffset0 < 0 && keyOffset1 < 0)) {
         return 0;
     }
@@ -284,30 +296,40 @@ uint32_t SFAVectorService<TEMPLATE_ARGS>::CopyInKvSparse(
     int64_t keySrcStride = blkTableSrcStride * constInfo.dSizeNope * sizeof(KV_T);
     int64_t keyRopeSrcStride = blkTableSrcStride * constInfo.dSizeRope * sizeof(KV_T);
     if (unlikely(keyOffset1 < 0)) {
-        CopyInSingleKv(kvInUb, startRow, keyOffset0, constInfo);
+        CopyInSingleKv(kvInUb, startRow, offset0, constInfo);
     } else if (keySrcStride >= INT32_MAX || keySrcStride < 0 || constInfo.sparseBlockSize > 1) {
         // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
-        CopyInSingleKv(kvInUb, startRow, keyOffset0, constInfo);
-        CopyInSingleKv(kvInUb, startRow + 1, keyOffset1, constInfo);
+        CopyInSingleKv(kvInUb, startRow, offset0, constInfo);
+        CopyInSingleKv(kvInUb, startRow + 1, offset1, constInfo);
     } else {
         DataCopyExtParams intriParams;
         intriParams.blockCount = (keyOffset0 >= 0) + (keyOffset1 >= 0);
         intriParams.blockLen = constInfo.sparseBlockSize * constInfo.dSizeNope *sizeof(KV_T);
         intriParams.dstStride = constInfo.dSizeRope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
-        intriParams.srcStride = keySrcStride;
         DataCopyPadExtParams<KV_T> padParams;
 
-        int64_t keyOffset = keyOffset0 > -1 ? keyOffset0 : keyOffset1;
-        if (keyOffset1 > -1 && keyOffset1 < keyOffset0) {
-            keyOffset = keyOffset1;
+        bool firstIsLower = keyOffset0 >= 0 && keyOffset0 <= keyOffset1;
+        const KvOffsets &lower = firstIsLower ? offset0 : offset1;
+        if constexpr (KV_LAYOUT_T == SFA_LAYOUT::PA_KR_BSND) {
+            const KvOffsets &upper = firstIsLower ? offset1 : offset0;
+            // Strides across page boundaries differ for the two planes.
+            keySrcStride = upper.token < 0 ? 0 : (upper.key - lower.key - constInfo.dSizeNope) * sizeof(KV_T);
+            keyRopeSrcStride = upper.token < 0 ? 0 : (upper.rope - lower.rope - constInfo.dSizeRope) * sizeof(KV_T);
+            if (keySrcStride >= INT32_MAX || keyRopeSrcStride >= INT32_MAX) {
+                // The equivalent planar pair DMA visits the lower address first. Preserve that reduction order.
+                CopyInSingleKv(kvInUb, startRow, lower, constInfo);
+                CopyInSingleKv(kvInUb, startRow + 1, upper, constInfo);
+                return 2;
+            }
         }
-        DataCopyPad(kvInUb[startRow * 576], keyGm[keyOffset * constInfo.dSizeNope],
+        intriParams.srcStride = keySrcStride;
+        DataCopyPad(kvInUb[startRow * 576], keyGm[lower.key],
                     intriParams, padParams); // combineDimAlign
 
         intriParams.blockLen = constInfo.sparseBlockSize * constInfo.dSizeRope *sizeof(KV_T);
         intriParams.dstStride = constInfo.dSizeNope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
         intriParams.srcStride = keyRopeSrcStride;
-        DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[keyOffset * constInfo.dSizeRope],
+        DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[lower.rope],
                     intriParams, padParams); // combineDimAlign
     }
     return (keyOffset0 > -1) + (keyOffset1 > -1);
