@@ -1061,7 +1061,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
-        return bool(self.enable_sparse_sfa_c8 or self.enable_sparse_sfa_turboquant or self.enable_sparse_sfa_fp4)
+        return bool(
+            self.enable_sparse_sfa_c8
+            or self.enable_sparse_sfa_turboquant
+            or getattr(self, "enable_sparse_sfa_fp4", False)
+        )
 
     @property
     def skip_topk(self) -> bool:
@@ -1183,7 +1187,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         return getattr(getattr(layer, "quant_method", None), "quant_method", None)
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
-        if self.enable_sparse_sfa_fp4:
+        if getattr(self, "enable_sparse_sfa_fp4", False):
             # exec_kv owns the FP4 cache store (RMSNorm + kv_compress_epilog);
             # the fused prologs write their own cache formats.
             return PreprocessType.NATIVE
@@ -1548,7 +1552,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
     ):
         """Process and write KV whose PCP exchange has already completed."""
-        if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_fp4:
+        if self.qk_rope_head_dim == 0 and getattr(self, "enable_sparse_sfa_fp4", False):
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             write_fp4_kv_cache(kv_cache[0], values, slots[: values.shape[0]])
@@ -1961,7 +1965,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
-        if self.enable_sparse_sfa_fp4:
+        if getattr(self, "enable_sparse_sfa_fp4", False):
             return fp4_sparse_mla(
                 ql_nope.contiguous(),
                 kv_cache[0],
@@ -2429,7 +2433,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._on_query_ready(ql_nope, q_pe, attn_metadata)
 
-            if self.uses_packed_sfa_main_cache and not self.enable_sparse_sfa_fp4:
+            if self.uses_packed_sfa_main_cache and not getattr(self, "enable_sparse_sfa_fp4", False):
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
