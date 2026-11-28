@@ -45,6 +45,7 @@ from vllm_ascend.models.qwen_gdn_recoverssm import (
     gdn_mamba_state_shape_from_config,
 )
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.patch.worker.mrope_utils import can_use_fused_mrope, get_fused_mrope_inputs
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -133,16 +134,10 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
-        if _uses_multimodal_rope(self):
-            # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
-            if positions.ndim == 1:
-                positions = positions.unsqueeze(0).expand(3, -1)
-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
-            if cos_sin.device != qkv.device:
-                cos_sin = cos_sin.to(qkv.device)
-            if cos_sin.dtype != qkv.dtype:
-                cos_sin = cos_sin.to(qkv.dtype)
-
+        if "qwen3_5" in self.config.model_type and can_use_fused_mrope(
+            self.rotary_emb, self.num_kv_heads, self.num_heads
+        ):
+            cos_sin, inline_positions, inv_freq = get_fused_mrope_inputs(self.rotary_emb, positions, qkv)
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
                 q_weight=1.0 + self.q_norm.weight,
@@ -156,6 +151,8 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 is_interleaved=self.rotary_emb.mrope_interleaved,
                 rope_dim=self.rotary_emb.rotary_dim,
                 has_gate=self.attn_output_gate,
+                positions=inline_positions,
+                inv_freq=inv_freq,
             )
         else:
             if self.attn_output_gate:
