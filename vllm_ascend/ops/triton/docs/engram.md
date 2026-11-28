@@ -31,6 +31,56 @@ offset arithmetic across the whole allocation. The model must keep registrations
 alive until the consuming stream finishes. Kernel execution does not register or
 release host memory.
 
+For host lookup, `vocab_start` and `vocab_end` define the global ID range
+owned by the caller. `ROW_OFFSET` is the row offset from the first registered
+chunk in the pointer tables to the beginning of that range. For an owned ID,
+the kernel indexes row `ID - vocab_start + ROW_OFFSET`, then divides by
+`CHUNK` to select the pointer and row within the chunk. Codes and scales must
+use matching chunk boundaries and row offsets. An out-of-range ID reads the
+row at `ROW_OFFSET` and writes zeros. The caller must ensure that row is valid.
+The host lookup wrapper passes `codes.row_offset`, defaulting to zero when it
+is absent. `ROW_OFFSET` is a `tl.constexpr`, so different offsets produce
+different JIT specializations. The offset is fixed when the shared-pool view
+is created, so these specializations are bounded by the number of distinct
+view offsets rather than by token or batch shapes; the other launch arguments
+were already compile-time constants before this change. No warmup registration
+is added.
+
+### Host lookup parameters and validation
+
+`gather_dequantize_host_uva` in `models/deepseek_v41/engram/npu.py` is the
+model-specific entry point. Its host buffers contain chunk pointer tables and
+two-dimensional tensors describing row count, width and dtype; IDs have shape
+`[tokens, hash_columns]`. The caller supplies the output or the wrapper
+allocates BF16 output. The relevant kernel attributes are:
+
+| Parameter | Meaning |
+| --- | --- |
+| `CHUNK` | Rows represented by each pointer-table entry. |
+| `ROW_OFFSET` | First owned row's offset relative to the first pointer-table entry, in rows. |
+| `WIDTH`, `GROUP` | Elements per row and elements per quantization scale group. |
+| `HEAD_START`, `LOCAL_HEADS`, `PAD_HEADS` | Input head-column start, number of heads read, and output rows reserved per token. |
+| `QUANTIZED`, `MXFP8` | Select whether and how scales and codes are decoded. |
+
+**Supported modes:** Atlas A2 and Atlas A3. The shared-pool host lookup path
+has not been hardware-validated on 950PR/950DT (A5); its device test skips on
+A5.
+
+The pointer tables must cover all rows in the owned range and use the same
+chunk alignment for codes and scales. The kernel assumes a non-empty owned
+range, valid registered pointers, a supported power-of-two `WIDTH`, and a
+compatible `GROUP` when quantized. It is derived from the existing Engram
+host lookup in vLLM-Ascend; this change adds the chunk-relative row offset for
+unaligned shared-pool slices.
+
+The row-offset boundary test uses NPU-resident chunk pointers and checks BF16
+and INT8 results exactly against a PyTorch reference. It does not validate
+host registration or MemFabric. Run it on a supported Ascend device with:
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_host_lookup.py
+```
+
 Output has shape `[tokens * pad_heads, width]`. Only `local_heads` rows per token
 are written, starting at output head zero; `head_start` selects the corresponding
 input ID columns. These two offsets must not be confused.

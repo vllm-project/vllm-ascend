@@ -116,6 +116,7 @@ def _engram_host_uva_gather_dequant_kernel(
     vocab_end,
     ids_stride_t,
     CHUNK: tl.constexpr,
+    ROW_OFFSET: tl.constexpr,
     WIDTH: tl.constexpr,
     GROUP: tl.constexpr,
     HEAD_START: tl.constexpr,
@@ -130,7 +131,7 @@ def _engram_host_uva_gather_dequant_kernel(
         head_local = row % LOCAL_HEADS
         index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
         owned = (index >= vocab_start) & (index < vocab_end)
-        local_row = tl.where(owned, index - vocab_start, 0)
+        local_row = tl.where(owned, index - vocab_start, 0) + ROW_OFFSET
         chunk = local_row // CHUNK
         local = local_row % CHUNK
         if MXFP8:

@@ -281,6 +281,7 @@ def gather_dequantize_host_uva(
         vocab_end,
         ids.stride(0),
         CHUNK=CHUNK_ROWS,
+        ROW_OFFSET=getattr(codes, "row_offset", 0),
         WIDTH=width,
         GROUP=SCALE_GROUP,
         HEAD_START=head_start,

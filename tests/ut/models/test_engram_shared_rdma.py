@@ -28,9 +28,13 @@ def rdma():
     assert package_spec is not None and package_spec.origin is not None
     package = Path(package_spec.origin).parent
     source = Path(os.getenv("ENGRAM_TEST_SOURCE", package / "models/deepseek_v41/engram/shared_rdma.py"))
-    spec = importlib.util.spec_from_file_location("engram_shared_rdma_test", source)
+    holder = ModuleType("_engram_rdma_ut")
+    holder.__path__ = [str(source.parent)]
+    sys.modules[holder.__name__] = holder
+    spec = importlib.util.spec_from_file_location(f"{holder.__name__}.shared_rdma", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -188,6 +192,7 @@ def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
     """A control EOF does not establish completion of a remote HIXL read."""
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.generation = "test-generation"
     owner.sessions, owner.retained, owner.lock, owner.pending_handlers = {}, [], threading.Lock(), 0
     stage, handle, deregistered = SimpleNamespace(data_ptr=lambda: 123), object(), []
@@ -230,6 +235,7 @@ def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
 def test_owner_rejects_missing_or_invalid_physical_device(rdma, monkeypatch, physical_device):
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.sessions, owner.retained, owner.lock = {}, [], threading.Lock()
     monkeypatch.setattr(rdma, "_configure_socket", lambda wire: None)
     client, server = socket.socketpair()
@@ -250,6 +256,7 @@ def test_owner_rejects_missing_or_invalid_physical_device(rdma, monkeypatch, phy
 def test_shutdown_tracks_attach_until_abrupt_disconnect(rdma, monkeypatch):
     owner = object.__new__(rdma.SharedOwner)
     owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.shard = {"index": 0, "count": 1}
     owner.generation = "test-generation"
     owner.sessions, owner.retained, owner.lock, owner.pending_handlers = {}, [], threading.Lock(), 0
     started, release = threading.Event(), threading.Event()
@@ -438,6 +445,7 @@ def test_owner_ready_file_failure_stops_service(rdma, monkeypatch, tmp_path):
     class Owner:
         generation = "test"
         metadata = {}
+        shard = {"index": 0, "count": 1}
         tables = {}
         sessions = {}
         retained = []
@@ -579,6 +587,158 @@ def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
     assert copied.dtype == np.int64
     np.testing.assert_array_equal(copied[:, 0], [[10, -1], [31, 32]])
     np.testing.assert_array_equal(copied[:, 1], [[21, 22], [-1, 42]])
+
+
+def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypatch):
+    fake_kernel = ModuleType("vllm_ascend.ops.triton.engram_lookup")
+    monkeypatch.setattr(
+        fake_kernel,
+        "dequantize_packed_engram",
+        lambda packed, out, count, *_: out.copy_(packed[:count].view(-1, 1).expand_as(out)),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, fake_kernel.__name__, fake_kernel)
+    syncs = []
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            Event=lambda: SimpleNamespace(record=lambda stream: None, synchronize=lambda: syncs.append("sync")),
+            current_stream=lambda: None,
+        ),
+        raising=False,
+    )
+    readers, transfers = [], []
+    for owner_id in range(3):
+        reader = object.__new__(rdma.RemoteReader)
+        reader.shard = {"index": owner_id, "count": 3}
+        reader.metadata = {
+            "tables": {
+                "1": {"rows": 10, "row_bytes": 1, "scale_dtype": "F32"},
+                "14": {"rows": 10, "row_bytes": 1, "scale_dtype": "F32"},
+            }
+        }
+        reader.capacity = 32
+        reader.closed = reader.failed = False
+        reader._operation_lock = threading.Lock()
+        reader.buffer = torch.empty(32, dtype=torch.uint8)
+        first, _ = rdma.shard_range(10, owner_id, 3)
+
+        def transfer(request, ids, size, *, r=reader, start=first):
+            transfers.append(r)
+            values, offset = [], 0
+            for entry in request["lookups"]:
+                count = entry["count"]
+                chunk = ids[offset : offset + count]
+                offset += count
+                base = 100 if entry["layer"] == "14" else 0
+                values.append(torch.as_tensor(chunk + start + 1 + base, dtype=torch.uint8))
+            r.buffer[:size].copy_(torch.cat(values))
+
+        reader._transfer_rows = transfer
+        readers.append(reader)
+    sharded = object.__new__(rdma.ShardedRemoteReader)
+    sharded.readers, sharded.capacity = readers, 32
+    sharded._last_use = None
+    sharded._operation_lock = threading.Lock()
+    sharded._closing = False
+    tables = [
+        SimpleNamespace(
+            _checkpoint_key=f"layers.{layer}.engram.embed.weight",
+            num_embeddings=10,
+            head_start=0,
+            part_n_hash_cols=2,
+            vocab_start_idx=1,
+            vocab_end_idx=10,
+            dim=2,
+        )
+        for layer in (1, 14)
+    ]
+    hashes = torch.tensor([[[0, 3], [9, 4]], [[6, 3], [-1, 7]]], dtype=torch.int64)
+    outputs = sharded.lookup_layers(tables, hashes, hashes.numpy())
+    torch.testing.assert_close(outputs[0][:, :, 0], torch.tensor([[0, 4], [7, 4]], dtype=torch.bfloat16))
+    layer14 = torch.tensor([[10, 5], [0, 8]], dtype=torch.bfloat16)
+    layer14 += torch.where(layer14 != 0, torch.tensor(100, dtype=torch.bfloat16), torch.tensor(0, dtype=torch.bfloat16))
+    torch.testing.assert_close(outputs[1][:, :, 0], layer14)
+    assert all(torch.equal(output[:, :, 0], output[:, :, 1]) for output in outputs)
+    # Owners share one receive buffer: wait once before each overwrite, never per owner path.
+    assert 1 < len(transfers) < len(readers)
+    assert len(syncs) == len(transfers) - 1
+    assert all(getattr(reader, "_last_use", None) is None for reader in readers)
+
+
+def test_shard_ranges_cover_uneven_table(rdma):
+    assert [rdma.shard_range(10, i, 3) for i in range(3)] == [(0, 3), (3, 6), (6, 10)]
+    with pytest.raises(ValueError):
+        rdma.shard_range(2, 0, 3)
+
+
+def _fake_remote_reader_factory(events, engine, metadata, *, shard_count=3, fail_ack_at=None):
+    class FakeReader:
+        def __init__(self, index, transport):
+            events.append(("attach", index, transport is not None))
+            self.index = index
+            self.shard = {"index": index, "count": shard_count}
+            self.metadata = metadata
+            self.supports_batch = True
+            self.engine = engine
+            self.generation = str(index)
+            self.wire = SimpleNamespace(close=lambda: events.append(("wire-close", index)))
+            self.failed = False
+            self.closed = False
+            self.buffer = object()
+
+        def _retire_lease(self):
+            if self.index == fail_ack_at:
+                raise ConnectionError("ack failed")
+            events.append(("retire", self.index))
+            self.closed = True
+
+    def reader(model, endpoint, *, capacity, library_path, listen_port, local_comm_res, transport):
+        return FakeReader(int(endpoint), transport)
+
+    return reader
+
+
+def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
+    events: list[Any] = []
+    engine = SimpleNamespace(close=lambda: events.append("engine-close"))
+    metadata = {"identity": "checkpoint", "tables": {}}
+    monkeypatch.setattr(rdma, "RemoteReader", _fake_remote_reader_factory(events, engine, metadata))
+    multi = rdma.ShardedRemoteReader("model", ["0", "1", "2"], capacity=16)
+    multi.close()
+    multi.close()
+    assert events[:3] == [("attach", 0, False), ("attach", 1, True), ("attach", 2, True)]
+    assert events.count("engine-close") == 1
+    assert [event for event in events if isinstance(event, tuple) and event[0] == "retire"] == [
+        ("retire", 0),
+        ("retire", 1),
+        ("retire", 2),
+    ]
+    assert events.index("engine-close") < events.index(("retire", 0))
+
+
+@pytest.mark.parametrize("code_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
+def test_owner_loads_only_its_checkpoint_rows(rdma, tmp_path, monkeypatch, code_dtype, scale_dtype):
+    config = {"text_config": {"engram_head_dim": 256, "engram_layer_ids": [1], "engram_num_embeddings": [10]}}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    weight_key, scale_key = "layers.1.engram.embed.weight", "layers.1.engram.embed.scale"
+    index = {"weight_map": {weight_key: "weights.safetensors", scale_key: "weights.safetensors"}}
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(json.dumps(index))
+    weights = (torch.arange(10 * 256).reshape(10, 256).float() % 100).to(code_dtype)
+    scales = torch.ones((10, 8), dtype=torch.float32).to(scale_dtype)
+    save_file({weight_key: weights, scale_key: scales}, tmp_path / "weights.safetensors")
+    monkeypatch.setattr(rdma, "_physical_device_id", lambda device: device)
+    monkeypatch.setattr(rdma, "HixlEngine", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
+    owner = rdma.SharedOwner(tmp_path, "127.0.0.1:0", "127.0.0.1:1", shard_index=1, shard_count=3)
+    try:
+        assert owner.shard == {"index": 1, "count": 3}
+        assert owner.tables["1"].shape == (3, 256 + scales.element_size() * 8)
+        torch.testing.assert_close(owner.tables["1"][:, :256], weights[3:6].view(torch.uint8))
+        torch.testing.assert_close(owner.tables["1"][:, 256:], scales[3:6].contiguous().view(torch.uint8))
+    finally:
+        owner.server_close()
 
 
 def test_batch_reader_falls_back_without_touching_transport(rdma):
@@ -822,3 +982,41 @@ def test_fp8_checkpoint_preserves_code_dtype_and_index(rdma, tmp_path, index_nam
     # Equal raw bytes reinterpreted as INT8 must not attach as the same table.
     save_file({weight_key: codes.view(torch.int8), scale_key: torch.ones(4, 8)}, tmp_path / "weights.safetensors")
     assert metadata != rdma.checkpoint_metadata(tmp_path)
+
+
+def test_sharded_reader_rejects_closed_or_failed_before_empty_lookup(rdma):
+    for closed, failed in ((True, False), (False, True)):
+        reader = object.__new__(rdma.ShardedRemoteReader)
+        reader.readers = [SimpleNamespace(closed=closed, failed=failed)]
+        reader._closing = False
+        reader._operation_lock = threading.Lock()
+        reader.capacity = 1
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader._lookup([], [], [], [])
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader.lookup_layers([], SimpleNamespace(shape=(2,)), None)
+
+
+@pytest.mark.parametrize("endpoints", [[], ["owner:1"]])
+def test_sharded_reader_rejects_fewer_than_two_endpoints(rdma, endpoints):
+    with pytest.raises(ValueError, match="at least two owners"):
+        rdma.ShardedRemoteReader("model", endpoints, capacity=1)
+
+
+def test_sharded_reader_retires_later_owners_after_partial_close(rdma, monkeypatch):
+    events: list[Any] = []
+    engine = SimpleNamespace(close=lambda: events.append("engine-close"))
+    metadata = {"identity": "checkpoint", "tables": {}}
+    monkeypatch.setattr(rdma, "RemoteReader", _fake_remote_reader_factory(events, engine, metadata, fail_ack_at=1))
+    reader = rdma.ShardedRemoteReader("model", ["0", "1", "2"], capacity=16)
+    try:
+        with pytest.raises(ConnectionError, match="ack failed"):
+            reader.close()
+        assert events[3:] == ["engine-close", ("retire", 0), ("retire", 2)]
+        assert events.count("engine-close") == 1
+        assert reader.readers[0].closed and reader.readers[2].closed
+        assert not reader.readers[1].closed and reader.readers[1] in rdma._held_readers
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader._lookup([], [], [], [])
+    finally:
+        rdma._held_readers.clear()

@@ -14,7 +14,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import vllm.envs as envs
@@ -132,6 +132,9 @@ from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
+
+if TYPE_CHECKING:
+    from .engram.shared_rdma import RemoteReader, ShardedRemoteReader
 
 
 def _retain_local_engram_tables(model):
@@ -1267,7 +1270,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         shared_config = get_ascend_config().shared_engram
         remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
-        remote_reader = None
+        remote_reader: RemoteReader | ShardedRemoteReader | None = None
         if remote_engram is not None and self.has_engram:
             if self.engram_layout is None or not cpu_offload or not self.engram_dp_shared_memory:
                 raise ValueError("shared_engram requires Engram cpu_offload and local DP sharing enabled")
@@ -1276,7 +1279,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 "safetensors",
             ) or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy"):
                 raise ValueError("shared_engram requires lazy safetensors loading")
-            from .engram.shared_rdma import RemoteReader, capacity_for_batch
+            from .engram.shared_rdma import RemoteReader, ShardedRemoteReader, capacity_for_batch
 
             max_tokens = max(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1287,17 +1290,22 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 remote_engram.capacity, max_tokens, layer_head_counts, get_tensor_model_parallel_world_size()
             )
 
-            remote_reader = RemoteReader(
-                self.engram_weight_root,
-                remote_engram.endpoint,
+            reader_kwargs = dict(
                 capacity=capacity,
                 library_path=remote_engram.library_path,
                 listen_port=remote_engram.listen_port,
                 local_comm_res=remote_engram.local_comm_res,
             )
+            if len(remote_engram.endpoints) > 1:
+                remote_reader = ShardedRemoteReader(self.engram_weight_root, remote_engram.endpoints, **reader_kwargs)
+            else:
+                remote_reader = RemoteReader(self.engram_weight_root, remote_engram.endpoints[0], **reader_kwargs)
+                if remote_reader.shard != {"index": 0, "count": 1}:
+                    remote_reader.close()
+                    raise ValueError("single-owner Engram endpoint points to a sharded owner")
         self._engram_remote_reader = remote_reader
         shared_pool_endpoint = (
-            shared_config.endpoint if shared_config is not None and shared_config.backend == "a3" else None
+            shared_config.endpoints if shared_config is not None and shared_config.backend == "a3" else None
         )
         shared_pool_identity = None
         if shared_pool_endpoint:

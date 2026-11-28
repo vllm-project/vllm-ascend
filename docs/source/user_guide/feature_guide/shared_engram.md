@@ -61,7 +61,7 @@ Add these options to each server's otherwise unchanged launch:
 
 ```bash
 --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
---additional-config '{"shared_engram":{"backend":"a3","endpoint":"OWNER_ADDRESS:29500"}}'
+--additional-config '{"shared_engram":{"backend":"a3","endpoints":["OWNER_ADDRESS:29500"]}}'
 ```
 
 Merge this key into any existing additional configuration; do not replace
@@ -187,3 +187,37 @@ a stable speedup. The20–40K TTFT target of7s was missed by both baseline7.640s
 and shared8.238s. Full SLO acceptance and owner-failure validation remain open.
 The private request corpus is not distributed with this change; reproduce
 performance using a representative corpus and report workload differences.
+
+## Static multi-owner placement
+
+For tables too large for one owner, partition each table into fixed, nonempty
+ranges across an ordered list of A3 owners. All owners must use the same model,
+`--store-url`, `--generation`, `--shard-count`, and `--max-consumers`. Choose
+a new unique generation for each deployment. Start shard 0 first: it hosts the
+BM store. Wait for its `POOL_READY` before starting the other shards. For example:
+
+```bash
+python -m vllm_ascend.shared_engram --backend a3 --model /models/immutable-checkpoint \
+  --endpoint OWNER0:29500 --store-url tcp://OWNER0:29600 --device 0 \
+  --generation UNIQUE_DEPLOYMENT_ID --shard-count 2 --shard-index 0
+python -m vllm_ascend.shared_engram --backend a3 --model /models/immutable-checkpoint \
+  --endpoint OWNER1:29500 --store-url tcp://OWNER0:29600 --device 0 \
+  --generation UNIQUE_DEPLOYMENT_ID --shard-count 2 --shard-index 1
+```
+
+After both report `POOL_READY`, configure consumers with
+`{"shared_engram":{"backend":"a3","endpoints":["OWNER0:29500","OWNER1:29500"]}}`
+in `--additional-config` alongside the Engram options above. Endpoint order
+must match shard indices. The consumer validates all owners before importing
+mappings. Every table needs at least one 4,194,304-row chunk per owner. Each
+owner packs its table ranges into one BM object, and model layers share the
+consumer mapping. Each tensor begins on a GiB boundary so lookup chunks stay
+within one mapped slab. This padding and BM allocation rounding increase the
+physical memory required.
+
+Stop all consumers first, then nonzero owners, and finally shard 0. A missing or
+failed owner makes the group unavailable; restart the complete group with a new
+generation. These static shards do not provide failover.
+
+For a single owner, pass a one-element `endpoints` list. The legacy
+`endpoint` string form is still accepted.

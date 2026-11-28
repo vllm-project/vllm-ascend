@@ -63,14 +63,19 @@ def test_shared_engram_config_schema():
     import pytest
     from pydantic import TypeAdapter
 
-    config = SharedEngramConfig(backend="a3", endpoint="owner:29500")
-    assert config.backend == "a3" and config.endpoint == "owner:29500"
+    config = SharedEngramConfig(backend="a3", endpoints=["owner:29500"])
+    assert config.backend == "a3" and config.endpoints == ["owner:29500"]
+    # `endpoint` remains accepted as the legacy single-owner spelling.
+    assert SharedEngramConfig(backend="a3", endpoint="owner:29500").endpoints == ["owner:29500"]
     for values in (
         {"endpoint": "owner:29500"},
         {"backend": "a3"},
-        {"backend": "unknown", "endpoint": "owner:29500"},
-        {"backend": "a3", "endpoint": "owner:0"},
-        {"backend": "a3", "endpoint": "owner:29500", "unexpected": True},
+        {"backend": "unknown", "endpoints": ["owner:29500"]},
+        {"backend": "a3", "endpoints": ["owner:0"]},
+        {"backend": "a3", "endpoints": []},
+        {"backend": "a3", "endpoints": ["owner:29500"], "endpoint": "other:29500"},
+        {"backend": "a3", "endpoint": ["owner:29500", "other:29500"]},
+        {"backend": "a3", "endpoints": ["owner:29500"], "unexpected": True},
     ):
         with pytest.raises(ValueError):
             TypeAdapter(SharedEngramConfig).validate_python(values)
