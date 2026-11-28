@@ -77,10 +77,9 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
-      # Paths outside vllm_ascend/ and csrc/ that the coverage recommender
-      # cannot map, but that still change what CPU UT executes. A hit appends
-      # the cpu-ut alias to the recommendation, and selection runs that suite
-      # the same way it runs any recommended UT target.
+      # Paths the coverage recommender does not map onto CPU UT, plus csrc/.
+      # A hit appends the cpu-ut alias to the recommendation, and selection
+      # runs that suite the same way it runs any recommended UT target.
       ut_relevant: ${{ steps.filter.outputs.ut_relevant }}
     steps:
       - name: Validate PR title prefix
@@ -252,20 +251,29 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'pyproject.toml'
-            # Outside vllm_ascend/ and csrc/, which the recommender already
-            # maps. These paths are imported by tests/ut or change the package
-            # UT installs, and a changed test_*.py is excluded so a precise
-            # recommendation still runs only that file.
+            # Paths the recommender does not map onto CPU UT, plus csrc/.
+            # tests/** covers helpers the suite imports, including
+            # tests/deepseek_v41_utils.py and tests/e2e/common/**. Selectable
+            # test_*.py files under tests/ut and tests/e2e/pull_request stay
+            # out so a precise recommendation still runs only that file.
+            # Dockerfile* and top-level workflow YAML are read by
+            # test_gdn_window_guard.
             ut_relevant:
               - 'setup.py'
               - 'packages.txt'
               - 'CMakeLists.txt'
               - 'cmake/**'
-              - 'tests/ut/**'
+              - 'csrc/**'
+              - 'tests/**'
               - '!tests/ut/test_*.py'
               - '!tests/ut/**/test_*.py'
+              - '!tests/e2e/pull_request/test_*.py'
+              - '!tests/e2e/pull_request/**/test_*.py'
               - 'examples/**'
               - 'tools/**'
+              - 'Dockerfile*'
+              - '.github/workflows/*.yml'
+              - '.github/workflows/*.yaml'
               - '.github/vllm-main-verified.commit'
               - '.github/vllm-release-tag.commit'
               - '!**/*.md'
