@@ -138,6 +138,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
+from vllm_ascend.worker.v2.dp_sync import align_skip_drafts_across_dp
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -804,8 +805,16 @@ class NPUModelRunner(GPUModelRunner):
         with dp_coordination_context:
             d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
-                output = super().execute_model(
+                # The skipped DP all-reduce also carried the skip_drafts
+                # agreement, so every rank must fall back to drafting; see
+                # align_skip_drafts_across_dp.
+                dp_agreed_scheduler_output = align_skip_drafts_across_dp(
                     scheduler_output,
+                    self.vllm_config,
+                    skip_dp_metadata_sync,
+                )
+                output = super().execute_model(
+                    dp_agreed_scheduler_output,
                     intermediate_tensors=intermediate_tensors,
                     dummy_run=dummy_run,
                     skip_attn_for_dummy_run=skip_attn_for_dummy_run,

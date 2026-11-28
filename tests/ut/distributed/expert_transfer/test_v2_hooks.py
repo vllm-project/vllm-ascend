@@ -21,6 +21,7 @@ from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.worker.v2.dp_sync import align_skip_drafts_across_dp
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +95,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
             "d2h_retire": lambda runner, ids=None: 0,
             "d2h_record_source_ready": lambda runner: False,
             "should_skip_allreduce_across_dp_group": lambda _vc: False,
+            "align_skip_drafts_across_dp": align_skip_drafts_across_dp,
             "nullcontext": nullcontext,
             "lmhead_tp_enable": lambda: False,
             "is_pd_decode_recompute_scheduler_enabled": lambda _vc: False,
