@@ -751,8 +751,9 @@ vLLM Ascend revision.
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
     the proxy inside the 950DT container in a separate terminal on a node that
-    can reach both servers. The image contains the non-layerwise proxy used
-    by MooncakeConnectorV2. Register all eight endpoints from each role:
+    can reach both servers. This proxy serves `MooncakeConnectorV2` in
+    non-layerwise pull mode. The command starts four proxy workers on port
+    `1999` and registers all eight API endpoints for each role.
 
     ```shell
     P_IP="<PREFILL_IP>"
@@ -761,6 +762,7 @@ vLLM Ascend revision.
     python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 \
         --port 1999 \
+        --workers 4 \
         --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
         --prefiller-ports 7100 7101 7102 7103 7104 7105 7106 7107 \
         --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
@@ -1675,15 +1677,16 @@ Select the tab for the target hardware.
     #### 5.3.1 Memcache KV Cache Pool
 
     This example adds a DRAM KV Cache Pool to the two-server DP8 Prefill / DP8
-    Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
+    Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout and ports are
     the same as ordinary PD deployment.
 
     `MultiConnector` combines `MooncakeConnectorV2` for P-to-D transfer with
     `AscendStoreConnector` for Memcache access. Prefill looks up, loads, and
     stores reusable prefixes; Decode receives KV from Prefill. Set
     `use_layerwise: true` in the Prefill `AscendStoreConnector` child and
-    `use_layerwise: false` in the Decode child. The MooncakeConnectorV2 children
-    continue to use their default non-layerwise pull mode.
+    `use_layerwise: false` in the Decode child. Set `use_layerwise: true` in
+    both `MooncakeConnectorV2` children to use layerwise push transfer with the
+    proxy shown in [Section 5.3.1.4](#5314-start-the-proxy-and-verify-pooling).
 
     Both roles retain the MegaMoE, fastokens, and renderer settings from ordinary
     PD deployment. Prefill uses the same EPLB settings. Keep
@@ -1764,6 +1767,12 @@ Select the tab for the target hardware.
     [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
     for supported limits; `max.dram.size: 25GB` is an upper bound, not a pool
     allocation.
+
+    On each host, run `lsblk -o NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS` to find an
+    unassigned NVMe disk with no partitions or mount points. Run
+    `sudo wipefs --no-act '<DEDICATED_NVME_DEVICE>'` with the candidate disk's
+    path to check for existing signatures. If the check succeeds and lists no
+    signatures, set `ubsio.disk.path` to the disk's absolute device path.
 
     Start one MetaService before starting vLLM:
 
@@ -1858,7 +1867,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_consumer",
-                        "kv_port": 27010
+                        "kv_port": 27010,
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
@@ -1966,7 +1978,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_producer",
-                        "kv_port": 26010
+                        "kv_port": 26010,
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
@@ -1991,8 +2006,24 @@ Select the tab for the target hardware.
 
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
-    the proxy from [Deploy the 950DT PD Proxy](#deploy-the-950dt-pd-proxy) with the same
-    endpoints. Verify the service using [Section 5.6](#56-service-verification).
+    the layerwise proxy in a separate terminal inside the Prefill node's 950DT
+    container. Set `P_IP` and `D_IP` to the corresponding server IPs. Decode must
+    be able to reach the proxy at `$P_IP:1999`.
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports 7100 7101 7102 7103 7104 7105 7106 7107 \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports 7100 7101 7102 7103 7104 7105 7106 7107
+    ```
+
+    Verify the service using [Section 5.6](#56-service-verification).
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Local prefix caching is enabled in this recipe, so an
     HBM cache hit alone does not demonstrate Memcache reuse. For an external-pool
@@ -2808,7 +2839,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
     Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, then start Node 1. Only Node 0 exposes the API endpoint. Each server contributes one TP8 rank to the global DP2 topology.
 
-### 5.6 Service Verification
+### 5.6 Service Verification {: #56-service-verification }
 
 Set `SERVICE_URL` to the host and port configured when starting the service.
 For colocated deployment, use the vLLM API endpoint with `HEALTH_PATH=health`;
