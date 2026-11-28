@@ -1,0 +1,6 @@
+pr: 23443
+entries:
+  - category: hardware
+    text: 'Added a Qwen3.6-27B recipe lane for Ascend 950DT nodes: the Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8 checkpoint (W8A8 MXFP8 weights with an MXFP8 KV cache) serves at TP1 with --quantization ascend and --kv-cache-dtype mxfp8, using the qwen3_5_mtp draft head. The C8 KV cache applies to 950PR and 950DT products only, and --block-size must remain a multiple of 512.'
+    model: Qwen3.6-27B
+    hardware: [950DT]

@@ -44,6 +44,71 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+  # C8 checkpoint from the tutorial's 950DT tab: same ModelSlim W8A8 MXFP8
+  # weights plus an MXFP8 KV cache (--kv-cache-dtype mxfp8), which is why it
+  # is a separate variant from ascend_w8a8_mxfp8 rather than a hardware override.
+  ascend_w8a8c8_mxfp8:
+    model_id: Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8
+    precision: mxfp8
+    label: W8A8C8 MXFP8 (Ascend)
+    vram_minimum_gb: 34
+    supported_hardware:
+      - ascend_950dt
+    # spec_decoding is deliberately absent: the MTP line lives in extra_args
+    # (the base's qwen3_5_mtp mode is variant-filtered and an overlay cannot
+    # add this variant to that list), so the toggle is disabled rather than
+    # left pointing at a mode it cannot use — the DeepSeek-V4-Pro W4A8 lane
+    # shapes this the same way.
+    supported_features:
+      - tool_calling
+      - reasoning
+      - encoder_parallel
+    tp: 1
+    min_vllm_version: 0.23.0
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--kv-cache-dtype'
+      - mxfp8
+      - '--served-model-name'
+      - qwen3.6
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '153600'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - shm
+      - '--gpu-memory-utilization'
+      - '0.90'
+      # The base recipe's qwen3_5_mtp spec-decoding mode is variant-filtered
+      # to [ascend_w8a8_mxfp8, ascend_w8a8] and an overlay cannot extend that
+      # list or add a new mode, so the tutorial's MTP line is baked into
+      # extra_args instead (the same approach as the Qwen3.8-27B C8 lane and
+      # the DeepSeek-V4-Pro A3 variant). The 950DT draft head replays the
+      # aclgraph, so no enforce_eager.
+      - '--speculative-config'
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+        # No pip path for this lane: the ModelScope checkpoint needs the
+        # model-specific a5 image (same as the 910B override below).
+        install:
+          pip: false
+    description: 'ModelSlim W8A8 MXFP8 build with a C8 MXFP8 KV cache for Ascend 950DT — the 27B W8A8 weight footprint fits one NPU (96 GB). Requires --quantization ascend and --kv-cache-dtype mxfp8.'
   ascend_w8a8:
     model_id: Eco-Tech/Qwen3.6-27B-w8a8
     precision: int8
@@ -149,6 +214,7 @@ variants:
     tp:
       ascend_910c: 2
 meta:
+  date_updated: 2026-11-26
   hardware:
     ascend_950dt: verified
     ascend_910c: verified
@@ -239,3 +305,58 @@ guide_sections:
     The draft-free A2 launch trades the MTP speedup for the guide's verified
     stability; if you enable speculative decoding anyway, spell the method
     `qwen3_5_mtp` and re-check memory headroom at the 262K window.
+
+    ### Huawei Ascend 950DT-w8a8c8 (vLLM Ascend)
+
+    Verified on 950DT products (8x 96 GB HBM per node), TP1, vLLM Ascend 0.23.0 from the
+    `quay.io/ascend/vllm-ascend:v0.23.0-a5` image.
+
+    The C8 checkpoint `Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8` pairs the ModelSlim W8A8 MXFP8
+    weights with an MXFP8 KV cache: it needs both `--quantization ascend` and
+    `--kv-cache-dtype mxfp8`, which stores the full-attention KV cache as FP8 (E4M3) with
+    E8M0 scales on the QFA kernel and brings the long-sequence gains. With C8,
+    `--block-size` must stay a multiple of 512 (it defaults to 512). For short sequences
+    (e.g. 16K input) serve `Eco-Tech/Qwen3.6-27B-w8a8-mxfp8` instead and drop
+    `--kv-cache-dtype mxfp8`. The C8 KV cache is documented for 950PR & 950DT
+    products, and the tutorial validates this checkpoint on 950DT products only —
+    hence the lane's single hardware entry. The non-C8 `ascend_w8a8_mxfp8` lane above
+    already covers the TP1+DP8 layout with the full 262144-token window and prefix
+    caching disabled; this lane is the tutorial's single-instance example at 153600
+    with prefix caching left at its default (on).
+
+    Both the weight and the image come from ModelScope, not HuggingFace: set
+    `VLLM_USE_MODELSCOPE=True` or pass a local path.
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+
+    vllm serve Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8 \
+      --tensor-parallel-size 1 \
+      --quantization ascend \
+      --kv-cache-dtype mxfp8 \
+      --served-model-name qwen3.6 \
+      --max-num-seqs 32 \
+      --max-model-len 153600 \
+      --max-num-batched-tokens 16384 \
+      --trust-remote-code \
+      --mm-processor-cache-gb 0 \
+      --mm-encoder-tp-mode data \
+      --mm-processor-cache-type shm \
+      --gpu-memory-utilization 0.90 \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+      --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+    ```
+
+    The draft head replays the aclgraph, so the `qwen3_5_mtp` speculative config
+    carries no `enforce_eager`. Read MTP acceptance from
+    `vllm:spec_decode_num_{accepted,draft}_tokens_total` before tuning
+    `num_speculative_tokens` — throughput alone cannot tell a working drafter from
+    one that loaded and was ignored.
+
+    The checkpoint fits a single 950DT NPU (96 GB): follow the DP-first principle —
+    TP1 is the recommended default and the remaining NPUs should be allocated to DP for
+    parallel request batches; the tutorial supports `--max-model-len` up to 262144 in
+    the same TP1 + DP8 layout.
