@@ -1,0 +1,7 @@
+pr: 23677
+entries:
+  - category: performance
+    text: >-
+      Added the opt-in `dsv41_pcp_prefill_max_inflight_layers` setting to limit
+      temporary attention memory in eager DeepSeek V4.1 PCP prefill.
+    model: deepseek-v4.1
