@@ -969,14 +969,24 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     group = attn_groups[2]
     group.backend = layer.get_attn_backend()
+    pcp_layer = qsa.AscendPCPQSACompressedKeyCache(
+        head_size=spec.head_size,
+        dtype=spec.dtype,
+        prefix=f"{name}.pcp",
+        cache_config=runtime_config.cache_config,
+        compress_ratio=4,
+        vllm_config=runtime_config,
+    )
     block_sizes = [128] * len(groups)
     if kernel_block_size == 512:
         assert group.backend is qsa.AscendQSACompressedKeyBackend
+        assert pcp_layer.get_attn_backend() is qsa.AscendPCPQSACompressedKeyBackend
         attn_groups[0].backend = qsa.AscendQSABackend
         block_sizes = prepare_ascend_kernel_block_sizes(config, [[g] for g in attn_groups])
         assert block_sizes[2] == manager_block_size
     else:
         assert group.backend is qsa.QSAIndexerBackend
+        assert pcp_layer.get_attn_backend() is qsa.AscendPCPQSAIndexerBackend
     # The MRV2 metadata factory refines the manager size using this backend.
     group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=block_sizes[2])
     builder = group.get_metadata_builder(0)
@@ -1017,29 +1027,25 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     _assert_qsa_compressed_page_boundary(layer.kv_cache, metadata, manager, manager_block_size)
 
 
-def test_qsa_compressed_cache_uses_default_backend_without_runner_flag():
-    from vllm_ascend.models.qwen4_exp import qsa
-
-    _, runtime_config = _qsa_page_test_config(512)
-    del runtime_config.use_v2_model_runner
-    layer = qsa.AscendQSACompressedKeyCache(
-        head_size=32,
-        dtype=torch.bfloat16,
-        prefix="indexer.compressed_key_cache",
-        cache_config=runtime_config.cache_config,
-        compress_ratio=4,
-        vllm_config=runtime_config,
-    )
-    assert layer.get_attn_backend() is qsa.QSAIndexerBackend
-
-
-def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypatch):
+@pytest.mark.parametrize(
+    ("manager_block_size", "expected_group_block_size", "expected_main_factor", "expected_compressed_factor"),
+    [
+        (1024, 1024, 8, 2),
+        (768, 128, 6, 6),
+    ],
+)
+def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(
+    monkeypatch,
+    manager_block_size,
+    expected_group_block_size,
+    expected_main_factor,
+    expected_compressed_factor,
+):
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
     from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 
-    manager_block_size = 1024
     groups, runtime_config = _qsa_page_test_config(manager_block_size)
     specs = {name: group.kv_cache_spec for group in groups for name in group.layer_names}
     owners = _prepare_qsa_composite_groups(specs)
@@ -1051,13 +1057,19 @@ def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypat
     assert set(config.kv_cache_groups[0].layer_names) == main_names | compressed_names
 
     layers = {}
-    for name in specs:
-        backend = qsa.QSAIndexerBackend
-        if name in main_names:
-            backend = qsa.AscendQSABackend
-        elif name in compressed_names:
-            backend = qsa.AscendQSACompressedKeyBackend
-        layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+    for name, spec in specs.items():
+        if name in compressed_names:
+            layers[name] = qsa.AscendQSACompressedKeyCache(
+                head_size=spec.head_size,
+                dtype=spec.dtype,
+                prefix=name,
+                cache_config=runtime_config.cache_config,
+                compress_ratio=4,
+                vllm_config=runtime_config,
+            )
+        else:
+            backend = qsa.AscendQSABackend if name in main_names else qsa.QSAIndexerBackend
+            layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
@@ -1069,8 +1081,12 @@ def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypat
     for group in attn_groups:
         grouped[group.kv_cache_group_id].append(group)
     main_group, compressed_group = grouped[0]
+    expected_compressed_backend = (
+        qsa.AscendQSACompressedKeyBackend if manager_block_size % 512 == 0 else qsa.QSAIndexerBackend
+    )
+    assert compressed_group.backend is expected_compressed_backend
     block_sizes = prepare_ascend_kernel_block_sizes(config, grouped)
-    assert block_sizes[0] == manager_block_size
+    assert block_sizes[0] == expected_group_block_size
     caches = attn_utils_v2.allocate_kv_cache_main(config, device, None, block_sizes)
 
     for group in (main_group, compressed_group):
@@ -1079,13 +1095,20 @@ def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypat
     common = _qsa_page_boundary_metadata(manager_block_size, manager_table)
     main_metadata = main_group.build_metadata(common)
     compressed_metadata = compressed_group.build_metadata(common)
-    torch.testing.assert_close(main_metadata.block_table, torch.arange(8, 24, dtype=torch.int32).unsqueeze(0))
-    torch.testing.assert_close(compressed_metadata.block_table, torch.arange(2, 6, dtype=torch.int32).unsqueeze(0))
+    torch.testing.assert_close(
+        main_metadata.block_table,
+        torch.arange(expected_main_factor, 3 * expected_main_factor, dtype=torch.int32).unsqueeze(0),
+    )
+    torch.testing.assert_close(
+        compressed_metadata.block_table,
+        torch.arange(expected_compressed_factor, 3 * expected_compressed_factor, dtype=torch.int32).unsqueeze(0),
+    )
 
     key, value = caches[main_group.layer_names[0]]
-    assert key.shape == value.shape == (config.num_blocks * 8, 128, 1, 64)
+    assert key.shape == value.shape == (config.num_blocks * expected_main_factor, 128, 1, 64)
     compressed_cache = caches[compressed_group.layer_names[0]]
-    assert compressed_cache.shape == (config.num_blocks * 2, 128, 1, 32)
+    expected_keys_per_page = (manager_block_size // expected_compressed_factor) // 4
+    assert compressed_cache.shape == (config.num_blocks * expected_compressed_factor, expected_keys_per_page, 1, 32)
     _assert_qsa_compressed_page_boundary(compressed_cache, compressed_metadata, manager_table, manager_block_size)
 
 

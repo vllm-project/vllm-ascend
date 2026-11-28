@@ -759,13 +759,9 @@ class AscendQSACompressedKeyBackend(QSAIndexerBackend):
 
 
 class AscendQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
-    def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
-        super().__init__(vllm_config=vllm_config, **kwargs)
-        self.use_v2_model_runner = getattr(vllm_config, "use_v2_model_runner", False)
-
     def get_attn_backend(self) -> type[AttentionBackend]:
         block_size = self.cache_config.block_size
-        if self.use_v2_model_runner and block_size and block_size % QSA_INDEXER_KERNEL_BLOCK_SIZE == 0:
+        if block_size and block_size % QSA_INDEXER_KERNEL_BLOCK_SIZE == 0:
             return AscendQSACompressedKeyBackend
         return super().get_attn_backend()
 
@@ -855,8 +851,24 @@ class AscendPCPQSARawKeyCache(QSARawKeyCache):
         return AscendPCPQSAIndexerBackend
 
 
+class AscendPCPQSACompressedKeyBackend(AscendPCPQSAIndexerBackend):
+    selects_kernel_blocks_per_attention_group = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN4_EXP_QSA_PCP_COMPRESSED_KEY_ASCEND"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        # A 512-token kernel block contains 128 keys at 4:1 compression.
+        return [QSA_INDEXER_KERNEL_BLOCK_SIZE]
+
+
 class AscendPCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
     def get_attn_backend(self) -> type[AscendPCPQSAIndexerBackend]:
+        block_size = self.cache_config.block_size
+        if block_size and block_size % QSA_INDEXER_KERNEL_BLOCK_SIZE == 0:
+            return AscendPCPQSACompressedKeyBackend
         return AscendPCPQSAIndexerBackend
 
 

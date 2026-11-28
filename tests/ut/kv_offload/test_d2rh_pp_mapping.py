@@ -189,6 +189,63 @@ class PlannerTests(unittest.TestCase):
         d2rh.D2RHThread._transfer_kv_cache_all_groups(w, req)
         self.assertEqual(self.calls, [("host:1010", [1048], [3032], [16]), ("host:1011", [2048], [4064], [8])])
 
+    def test_full_hop1_shared_layer_uses_per_slot_block_size_scale(self):
+        req = self.prepare_transfer()
+        w = self.worker
+        page_bytes = 32 * 1024
+        main_base_local, compressed_base_local = 1_000_000, 4_000_000
+        main_base_remote, compressed_base_remote = 8_000_000, 12_000_000
+        w.remote_local_block_map = {"r": {(0, 1, 0): 1}}
+        self.spec["layer_names"] = ["layer.0", "indexer.0"]
+        self.spec["layer_cache_indices"] = {"layer.0": [0], "indexer.0": [1]}
+        w.kv_group2layeridx[0] = (self.spec, [0, 0])
+        w.cpu_kv_caches_base_addr = [[main_base_local, compressed_base_local]]
+        w.cpu_block_len_per_addr = [[page_bytes, page_bytes]]
+        w.cpu_block_stride_per_addr = [[page_bytes, page_bytes]]
+        w.cpu_block_size_scale = [[8, 2]]
+        w.kv_caches_base_addr = {"e": {10: [[main_base_remote, compressed_base_remote]]}}
+        w.remote_block_stride_per_addr = {"e": {10: [[page_bytes, page_bytes]]}}
+        w.remote_block_size_scale = {"e": {10: [[8, 2]]}}
+        w.remote_kv_group2layeridx = {
+            "e": {
+                10: {
+                    0: (
+                        {
+                            "layer_names": ["layer.0", "indexer.0"],
+                            "layer_cache_indices": {"layer.0": [0], "indexer.0": [1]},
+                        },
+                        [0, 0],
+                    )
+                }
+            }
+        }
+        req["remote_handshake_ports"] = [10]
+        req["group_pulls_by_port"] = [
+            [{"group_id": 0, "remote_tp_offset": 0, "num_group_pulls": 1, "prefill_pp_rank": 0}]
+        ]
+        # Group contiguous kernel pages so each slot emits one descriptor with
+        # its true byte offset and length (256 KiB for scale=8, 64 KiB for scale=2).
+        with patch.object(
+            d2rh,
+            "base_group_concurrent_contiguous",
+            side_effect=lambda remote, local: ([remote], [local]),
+        ):
+            d2rh.D2RHThread._transfer_kv_cache_all_groups(w, req)
+
+        main_offset = 8 * page_bytes
+        compressed_offset = 2 * page_bytes
+        self.assertEqual(
+            self.calls,
+            [
+                (
+                    "host:1010",
+                    [main_base_local + main_offset, compressed_base_local + compressed_offset],
+                    [main_base_remote + main_offset, compressed_base_remote + compressed_offset],
+                    [8 * page_bytes, 2 * page_bytes],
+                )
+            ],
+        )
+
     def test_host_hit_skips_both_stage_reads(self):
         d2rh.D2RHThread._transfer_kv_cache_all_groups(self.worker, self.prepare_transfer(host_hit=True))
         self.assertEqual(self.calls, [])
