@@ -211,3 +211,33 @@ def test_worker_customizes_spec_once_without_reading_impl(monkeypatch, backend, 
     assert actual.head_size == source.head_size + 1
     expected_alignment = alignment if alignment is not None else MultipleOf(128)
     assert actual.block_stride_alignment == expected_alignment
+
+
+@pytest.mark.parametrize("use_c8", [False, True])
+@pytest.mark.parametrize("is_leader", [False, True])
+def test_mla_owner_populates_hisparse_source_spec(monkeypatch, use_c8, is_leader):
+    from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+    source = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = use_c8
+    impl.c8_cache_dtype = torch.int8
+    layer = _make_owner(impl, AscendSFABackend)
+    layer.hisparse_cache = SimpleNamespace(runtime=SimpleNamespace(is_group_leader=is_leader))
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace()),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="deepseek_v3")),
+    )
+
+    actual = layer.get_kv_cache_spec(config)
+    assert type(actual) is MLAAttentionSpec
+    assert actual.is_index_group_leader is is_leader
+    assert actual.block_stride_alignment == 1
+    assert actual.head_size == (C8_ROW_BYTES if use_c8 else 576)
+    assert actual.dtype == (torch.int8 if use_c8 else torch.bfloat16)
