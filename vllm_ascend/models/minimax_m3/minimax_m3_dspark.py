@@ -349,7 +349,7 @@ class MiniMaxFlashDSparkForCausalLM(AscendQwen3DSparkForCausalLM):
 
     def __init__(self, *, vllm_config, prefix=""):
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        if not config.use_gemma_norm or config.hidden_act != "swigluoai":
+        if not config.use_gemma_norm:
             raise ValueError("Unexpected MiniMax draft decoder semantics")
         if getattr(config, "dspark_hybrid_context_fusion", False):
             raise ValueError("Hybrid context fusion is not implemented by this adapter")
