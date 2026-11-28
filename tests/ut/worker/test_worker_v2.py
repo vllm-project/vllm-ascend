@@ -34,6 +34,9 @@ def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager):
         model_runner=SimpleNamespace(
             _dummy_run=lambda size: events.append(("dummy", size)),
             capture_model=lambda: events.append(("capture",)),
+            # Pooling models skip the post-capture sampler warm-up, which
+            # test_worker_v1 covers.
+            is_pooling_model=True,
         ),
     )
     with (

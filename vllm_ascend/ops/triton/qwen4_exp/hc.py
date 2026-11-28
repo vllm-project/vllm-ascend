@@ -33,7 +33,7 @@ def _grouped_gemma_rmsnorm_kernel(
     EPS: tl.constexpr,
 ) -> None:
     program = tl.program_id(0)
-    row = program // NUM_GROUPS
+    row = (program // NUM_GROUPS).to(tl.int64)
     group = program % NUM_GROUPS
     group_offsets = tl.arange(0, BLOCK_SIZE)
     mask = group_offsets < GROUP_DIM
@@ -107,7 +107,7 @@ def _hc_silu_kernel(
     BLOCK_SIZE: tl.constexpr,
     HC_COUNT: tl.constexpr,
 ) -> None:
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < DIM
     values = tl.load(
@@ -159,7 +159,7 @@ def _hc_gate_mix_kernel(
     HC_COUNT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1)
     inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = inner_offsets < GROUP_DIM
@@ -327,7 +327,7 @@ def _hc_combine_kernel(
     HAS_INJECTION: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     stream = tl.program_id(1)
     tile = tl.program_id(2)
     inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -450,7 +450,7 @@ def _hc_combine_final_kernel(
     HAS_INJECTION: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     stream = tl.program_id(1)
     tile = tl.program_id(2)
     inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -571,7 +571,7 @@ def _hc_combine_norm_kernel(
     EPS: tl.constexpr,
 ) -> None:
     program = tl.program_id(0)
-    row = program // HC_COUNT
+    row = (program // HC_COUNT).to(tl.int64)
     stream = program % HC_COUNT
     inner_offsets = tl.arange(0, BLOCK_SIZE)
     mask = inner_offsets < GROUP_DIM

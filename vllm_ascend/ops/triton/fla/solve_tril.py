@@ -46,8 +46,8 @@ def solve_tril_16x16_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    A = A + (bos * H + i_h) * BT
-    Ad = Ad + (bos * H + i_h) * 16
+    A = A + (bos * H + i_h).to(tl.int64) * BT
+    Ad = Ad + (bos * H + i_h).to(tl.int64) * 16
 
     base_t = i_t * LARGE_BLOCK_T
 
@@ -70,7 +70,7 @@ def solve_tril_16x16_kernel(
             # 2 Calculate the pointer of each element
             ptr_A_subrec16 = (
                 A
-                + row_start_o * H * BT
+                + row_start_o.to(tl.int64) * H * BT
                 + col_start_o
                 + offs_rows_in_block[:, None] * H * BT
                 + offs_cols_in_block[None, :]
@@ -126,7 +126,9 @@ def solve_tril_16x16_kernel(
         offs_cols_to_store = tl.arange(0, 16)
 
         # 2 Calculate the pointer of each element
-        p_Ai = Ad + base_t * H * 16 + 0 + offs_rows_to_store[:, None] * H * 16 + offs_cols_to_store[None, :]
+        p_Ai = (
+            Ad + base_t.to(tl.int64) * H * 16 + 0 + offs_rows_to_store[:, None] * H * 16 + offs_cols_to_store[None, :]
+        )
         # 3 Create a mask to prevent out-of-bounds access, only check rows
         global_store_rows = base_t + offs_rows_to_store[:, None]
         store_mask = global_store_rows < T
@@ -162,9 +164,9 @@ def merge_16x16_to_32x32_inverse_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    A += (bos * H + i_h) * 32
-    Ad += (bos * H + i_h) * 16
-    Ai += (bos * H + i_h) * 32
+    A += (bos * H + i_h).to(tl.int64) * 32
+    Ad += (bos * H + i_h).to(tl.int64) * 16
+    Ai += (bos * H + i_h).to(tl.int64) * 32
 
     p_A_21 = tl.make_block_ptr(A, (T, 32), (H * 32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
     p_Ad_11 = tl.make_block_ptr(Ad, (T, 16), (H * 16, 1), (i_t * 32, 0), (16, 16), (1, 0))
@@ -228,12 +230,15 @@ def merge_16x16_to_64x64_inverse_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     # Base pointers (already offset by batch and head)
-    A += (bos * H + i_h) * 64
-    Ad += (bos * H + i_h) * 16
-    Ai += (bos * H + i_h) * 64
+    A += (bos * H + i_h).to(tl.int64) * 64
+    Ad += (bos * H + i_h).to(tl.int64) * 16
+    Ai += (bos * H + i_h).to(tl.int64) * 64
+
+    # int64 rows: offs_m * (H * 64) overflows int32 for one long sequence.
+    row_start = (i_t * 64).to(tl.int64)
 
     # load Ai_22 (Ad block at row i_t * 64 + 16, col 0, 16 * 16)
-    offs_m = i_t * 64 + 16 + tl.arange(0, 16)
+    offs_m = row_start + 16 + tl.arange(0, 16)
     offs_n = tl.arange(0, 16)
     mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
     ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
@@ -246,7 +251,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     tmp = tl.dot(Ai_22, A_21, input_precision="ieee")
 
     # load Ai_11 (Ad block at row i_t * 64, col 0, 16 * 16)
-    offs_m = i_t * 64 + tl.arange(0, 16)
+    offs_m = row_start + tl.arange(0, 16)
     offs_n = tl.arange(0, 16)
     mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
     ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
@@ -255,7 +260,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     Ai_21 = -tl.dot(tmp, Ai_11, input_precision="ieee")
 
     # load Ai_44 (Ad block at row i_t * 64 + 48, col 0, 16 * 16)
-    offs_m = i_t * 64 + 48 + tl.arange(0, 16)
+    offs_m = row_start + 48 + tl.arange(0, 16)
     offs_n = tl.arange(0, 16)
     mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
     ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
@@ -269,7 +274,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     tmp = tl.dot(Ai_44, A_43, input_precision="ieee")
 
     # load Ai_33 (Ad block at row i_t * 64 + 32, col 0, 16 * 16)
-    offs_m = i_t * 64 + 32 + tl.arange(0, 16)
+    offs_m = row_start + 32 + tl.arange(0, 16)
     offs_n = tl.arange(0, 16)
     mask_Ad = (offs_m[:, None] < T) & (offs_n[None, :] < 16)
     ptr_Ad = Ad + offs_m[:, None] * (H * 16) + offs_n[None, :]
@@ -284,7 +289,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     Ai_22_32 = insert_slice(Ai_22_32, Ai_43, (16, 0), (16, 16), (1, 1))
 
     # load A_21_32 (A block at row i_t * 64 + 32, col 0, 32 * 32)
-    offs_m = i_t * 64 + 32 + tl.arange(0, 32)
+    offs_m = row_start + 32 + tl.arange(0, 32)
     offs_n = tl.arange(0, 32)
     mask_A = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
     ptr_A = A + offs_m[:, None] * (H * 64) + offs_n[None, :]
@@ -300,14 +305,14 @@ def merge_16x16_to_64x64_inverse_kernel(
     Ai_21_32 = -tl.dot(tmp, Ai_11_32, input_precision="ieee")
 
     # store Ai_11_32 to (i_t * 64, 0)
-    offs_m = i_t * 64 + tl.arange(0, 32)
+    offs_m = row_start + tl.arange(0, 32)
     offs_n = tl.arange(0, 32)
     mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
     ptr_Ai = Ai + offs_m[:, None] * (H * 64) + offs_n[None, :]
     tl.store(ptr_Ai, Ai_11_32.to(ptr_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=mask_store)
 
     # store Ai_22_32 to (i_t * 64 + 32, 32)
-    offs_m = i_t * 64 + 32 + tl.arange(0, 32)
+    offs_m = row_start + 32 + tl.arange(0, 32)
     offs_n = 32 + tl.arange(0, 32)
     mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < 64)
     ptr_Ai = Ai + offs_m[:, None] * (H * 64) + offs_n[None, :]
@@ -320,7 +325,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     tl.store(ptr_Ai, Ai_21_32.to(ptr_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=mask_store)
 
     # zero out the upper-right 32 * 32 block (rows 0 ~ 31, cols 32 ~ 63)
-    offs_m = i_t * 64 + tl.arange(0, 32)
+    offs_m = row_start + tl.arange(0, 32)
     offs_n = 32 + tl.arange(0, 32)
     mask_store = (offs_m[:, None] < T) & (offs_n[None, :] < BT)
     ptr_Ai = Ai + offs_m[:, None] * (H * BT) + offs_n[None, :]

@@ -51,10 +51,12 @@ def layer_norm_fwd_kernel(
         n_iters = n_iters + 1
 
     for i in tl.range(n_iters):
-        X_base = X + (i * BLOCK_ROWS * stride_x_row) + row * stride_x_row + group * N
-        Y_base = Y + (i * BLOCK_ROWS * stride_y_row) + row * stride_y_row + group * N
+        # int64 so that row * stride does not overflow int32 for large batches.
+        row_idx = (i * BLOCK_ROWS + row).to(tl.int64)
+        X_base = X + row_idx * stride_x_row + group * N
+        Y_base = Y + row_idx * stride_y_row + group * N
         if HAS_Z:
-            Z_base = Z + (i * BLOCK_ROWS * stride_z_row) + row * stride_z_row + group * N
+            Z_base = Z + row_idx * stride_z_row + group * N
         if not IS_RMS_NORM:
             Mean_base = Mean + (i * BLOCK_ROWS) + group * M
         Rstd_base = Rstd + (i * BLOCK_ROWS) + group * M

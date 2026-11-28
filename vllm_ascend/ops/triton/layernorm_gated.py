@@ -57,8 +57,17 @@ def _layer_norm_fwd_1pass_kernel_npu(
         B += group * N
 
     # Compute row indices for this program
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_start = pid_m * BLOCK_M
+    block_rows = tl.arange(0, BLOCK_M)
+    rows = row_start + block_rows
     cols = tl.arange(0, BLOCK_N)
+
+    # Move to the block's first row in int64, so that row * stride does not
+    # overflow int32 for large batches. Offsets inside the block stay small.
+    X += row_start.to(tl.int64) * stride_x_row
+    Y += row_start.to(tl.int64) * stride_y_row
+    if HAS_Z:
+        Z += row_start.to(tl.int64) * stride_z_row
 
     # Mask for valid rows and cols
     row_mask = rows < M
@@ -70,12 +79,12 @@ def _layer_norm_fwd_1pass_kernel_npu(
         b = tl.load(B + cols, mask=col_mask).to(tl.float32)
 
     # Load X: shape [BLOCK_M, BLOCK_N]
-    x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :] + group * N
+    x_ptrs = X + block_rows[:, None] * stride_x_row + cols[None, :] + group * N
     x = tl.load(x_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
 
     # Load Z if needed
     if HAS_Z:
-        z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
+        z_ptrs = Z + block_rows[:, None] * stride_z_row + cols[None, :] + group * N
         z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
         if not NORM_BEFORE_GATE:
             if ACTIVATION == 0:
@@ -114,7 +123,7 @@ def _layer_norm_fwd_1pass_kernel_npu(
             y *= tl.sigmoid(z)
 
     # Store output
-    y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :] + group * N
+    y_ptrs = Y + block_rows[:, None] * stride_y_row + cols[None, :] + group * N
     tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
 

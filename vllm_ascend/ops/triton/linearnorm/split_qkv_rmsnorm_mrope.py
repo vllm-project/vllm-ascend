@@ -77,9 +77,11 @@ def split_qkv_rmsnorm_mrope_kernel(
         k_bias = tl.load(k_bias_ptr + tl.arange(0, head_size))
 
     for index in range(loop_num):
+        # int64 so that token * stride does not overflow int32 for large batches.
+        token = (block_offset + index).to(tl.int64)
         ## load ##
         # q
-        in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + gate_size + 2 * kv_size)
+        in_q_offset = in_qkv_ptr + token * (q_size + gate_size + 2 * kv_size)
         if gate_size > 0:
             in_q_gate_tensor = (
                 tl.load(in_q_offset + tl.arange(0, q_size + gate_size))
@@ -121,11 +123,11 @@ def split_qkv_rmsnorm_mrope_kernel(
                 cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
             )
 
-        t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
+        t_cos_offset = cos_sin_ptr + token * rope_dim
         h_cos_offset = t_cos_offset + num_tokens * rope_dim
         w_cos_offset = h_cos_offset + num_tokens * rope_dim
 
-        t_sin_offset = cos_sin_ptr + (block_offset + index) * rope_dim + half_rope_dim
+        t_sin_offset = cos_sin_ptr + token * rope_dim + half_rope_dim
         h_sin_offset = t_sin_offset + num_tokens * rope_dim
         w_sin_offset = h_sin_offset + num_tokens * rope_dim
 
@@ -260,22 +262,22 @@ def split_qkv_rmsnorm_mrope_kernel(
 
         ## store ##
         # out_q
-        out_q_offset = out_q_ptr + (block_offset + index) * q_size
+        out_q_offset = out_q_ptr + token * q_size
         out_q_indices = tl.arange(0, q_size)
         tl.store(out_q_offset + out_q_indices, q_normalized.reshape(q_size))
 
         # out_k
-        out_k_offset = out_k_ptr + (block_offset + index) * kv_size
+        out_k_offset = out_k_ptr + token * kv_size
         out_k_indices = tl.arange(0, kv_size)
         tl.store(out_k_offset + out_k_indices, k_normalized.reshape(kv_size))
 
         # out_v
-        out_v_offset = out_v_ptr + (block_offset + index) * kv_size
+        out_v_offset = out_v_ptr + token * kv_size
         tl.store(out_v_offset + tl.arange(0, kv_size), in_v_tensor)
 
         # out_gate
         if gate_size > 0:
-            out_gate_offset = out_gate_ptr + (block_offset + index) * gate_size
+            out_gate_offset = out_gate_ptr + token * gate_size
             tl.store(out_gate_offset + tl.arange(0, gate_size), in_gate_tensor)
 
 
