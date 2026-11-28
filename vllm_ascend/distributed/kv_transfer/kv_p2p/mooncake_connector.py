@@ -1112,7 +1112,25 @@ class KVCacheRecvingThread(threading.Thread):
                 request_id,
                 shard_idx,
             )
-            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+            # A shard's bucket can mix pull counts: 1-pull indexer/MLA groups
+            # complete before the multi-pull GQA group, and hybrid models mix
+            # mamba and attention groups. The non-hybrid path below applies one
+            # num_group_pulls to the whole batch, so dispatch per pull count.
+            groups_by_pulls: dict[int, list[tuple[int, list[list[int]], int, list[int]]]] = {}
+            # Stash one reformat per (group, pull count, layer partition): with
+            # prefill PP > 1 the same group index arrives once per prefill PP rank,
+            # each time for its own disjoint layer subset, so the group index alone
+            # is not a unique key while an exact repeat is the same work and must
+            # not reformat those layers twice.
+            stashed_keys: set[tuple[int, int, tuple[int, ...]]] = set()
+            for entry in shard_reformats[shard_idx]:
+                key = (entry[0], entry[2], tuple(entry[3]))
+                if key in stashed_keys:
+                    continue
+                stashed_keys.add(key)
+                groups_by_pulls.setdefault(entry[2], []).append(entry)
+            for num_group_pulls in sorted(groups_by_pulls):
+                self._apply_kv_cache_reformat(groups_by_pulls[num_group_pulls])
 
     def _apply_kv_cache_reformat(
         self,
