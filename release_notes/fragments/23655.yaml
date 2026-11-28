@@ -1,0 +1,6 @@
+pr: 23655
+entries:
+  - category: documentation
+    text: >-
+      Added the Qwen3.5-397B-A17B 950DT W4A4 MXFP4 tutorial preset to Recipes and aligned
+      the A2 prefill/decode preset with the tutorial's worker ports.
