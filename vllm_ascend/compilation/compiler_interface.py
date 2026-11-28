@@ -18,8 +18,7 @@
 import copy
 import functools
 import os
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
@@ -40,27 +39,12 @@ from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runti
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
-@contextmanager
-def _without_aot_autograd_cache() -> Iterator[None]:
-    # The Ascend backends return graph objects rather than Inductor OutputCode.
-    with (
-        torch._functorch.config.patch(
-            enable_autograd_cache=False,
-            enable_remote_autograd_cache=False,
-            bundled_autograd_cache=False,
-        ),
-        torch._dynamo.config.patch(caching_precompile=False),
-    ):
-        yield
-
-
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
     if not graph_returns_tuple(graph):
         return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
-    with _without_aot_autograd_cache():
-        return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
+    return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
 
 
 def fusion_pass_compile(
@@ -165,7 +149,6 @@ def _configure_backend(
             )
 
 
-@_without_aot_autograd_cache()
 def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
@@ -220,15 +203,13 @@ def npugraph_ex_compile(
             return compiled_gm
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
-        try:
-            backend = nge.get_npu_backend(compiler_config=config)
-            # torch.compile requires the output of the fx graph to be a tuple
-            if not graph_returns_tuple(graph):
-                compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-            else:
-                compiled_fn = backend(graph, example_inputs)
-        finally:
-            nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
+        backend = nge.get_npu_backend(compiler_config=config)
+        # torch.compile requires the output of the fx graph to be a tuple
+        if not graph_returns_tuple(graph):
+            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+        else:
+            compiled_fn = backend(graph, example_inputs)
+        nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
         import torchair
