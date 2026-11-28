@@ -1,0 +1,11 @@
+pr: 23607
+entries:
+  - category: feature
+    text: >-
+      Added `--kv-cache-dtype mxfp4` for GLM-5.3-Flash on Ascend 950DT.
+      The 512-wide MLA latent is stored as packed MXFP4 with inline group
+      scales, halving the main KV cache footprint, and the full-attention
+      layers run as CMP-only sparse MLA over the indexer's selected top-k
+      token positions.
+    model: glm-5.3-flash
+    hardware: [A5]
