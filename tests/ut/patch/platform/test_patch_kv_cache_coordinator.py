@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     MambaSpec,
 )
@@ -96,10 +97,14 @@ def _fake_manager_factory(**kwargs):
 
 
 def _hybrid_config(
-    *, mamba_eagle: bool = False, retention_interval: int | None = None, extra_mamba: bool = False
+    *,
+    mamba_eagle: bool = False,
+    retention_interval: int | None = None,
+    extra_mamba: bool = False,
+    fa_role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT,
 ) -> KVCacheConfig:
     groups = [
-        KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
+        KVCacheGroupSpec(["fa-layer"], FA_SPEC, False, role=fa_role),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
     if extra_mamba:
@@ -120,12 +125,17 @@ def _make_coordinator(
     mamba_eagle: bool = False,
     retention_interval: int | None = None,
     extra_mamba: bool = False,
+    fa_role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT,
+    manager_factory=_fake_manager_factory,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
-    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", manager_factory)
     kv_cache_config = _hybrid_config(
-        mamba_eagle=mamba_eagle, retention_interval=retention_interval, extra_mamba=extra_mamba
+        mamba_eagle=mamba_eagle,
+        retention_interval=retention_interval,
+        extra_mamba=extra_mamba,
+        fa_role=fa_role,
     )
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
@@ -462,6 +472,28 @@ def test_per_group_lookup_preserves_replicated_draft_positions():
     coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
     assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
+
+
+def test_manager_factory_receives_group_role(monkeypatch):
+    """vLLM selects the manager from the group role.
+
+    A HISPARSE_SOURCE group must reach the factory as such; dropping the role
+    builds a plain FullAttentionManager and HiSparse finds no host manager.
+    """
+    seen_roles = []
+
+    def recording_factory(**kwargs):
+        seen_roles.append(kwargs.get("role"))
+        return _fake_manager_factory(**kwargs)
+
+    _make_coordinator(
+        monkeypatch,
+        use_eagle=False,
+        fa_role=KVCacheGroupRole.HISPARSE_SOURCE,
+        manager_factory=recording_factory,
+    )
+
+    assert seen_roles == [KVCacheGroupRole.HISPARSE_SOURCE, KVCacheGroupRole.DEFAULT]
 
 
 if __name__ == "__main__":

@@ -182,6 +182,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
+                role=kv_cache_group.role,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
