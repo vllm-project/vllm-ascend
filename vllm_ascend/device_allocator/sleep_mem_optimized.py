@@ -92,7 +92,7 @@ class AclGraphSleepWakeupManager:
             manager._graphs_captured = False
 
     def sleep(self) -> None:
-        self.resetgraph()
+        self.reset_graph()
         self.reset_model_runner_graph_manager(self._model_runner_getter())
 
     def wakeup(self, tags: list[str] | None = None) -> None:
