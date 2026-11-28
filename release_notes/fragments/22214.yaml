@@ -1,0 +1,10 @@
+pr: 22214
+entries:
+  - category: feature
+    text: >-
+      Routed the sparse-attention indexer's `per_row` decode top-k backend to the
+      AscendC TopKPerRow operator. vLLM's DSA indexer resolves to `per_row` on
+      NPU and called the CUDA-only `torch.ops._C.top_k_per_row_decode`, which
+      raised; `vllm._custom_ops.top_k_per_row_prefill/_decode` now dispatch to
+      `torch.ops._C_ascend` when the operator is registered.
+    model: deepseek-v3.2
