@@ -102,15 +102,6 @@ SAS_METADATA_BUFFER_SIZE = 1024
 QLI_METADATA_BUFFER_SIZE = 1024
 
 
-def _copy_sas_metadata(buffer: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
-    size = plan.numel()
-    if not 0 < size <= buffer.numel():
-        raise ValueError(f"SAS metadata size {size} is outside buffer capacity {buffer.numel()}")
-    # Keep the backing address stable and pass the exact plan shape to CANN.
-    output = buffer if size == buffer.numel() else buffer[:size]
-    return output.copy_(plan)
-
-
 class OProjBufferPool:
     """Model-owned, address-stable OTP scratch storage shared by sequential layers."""
 
@@ -1608,10 +1599,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                return _copy_sas_metadata(
-                    self.spec_sas_metadata[draft_index - 1],
-                    result,
-                )
+                output = self.spec_sas_metadata[draft_index - 1]
+                size = result.numel()
+                if size == 0:
+                    raise ValueError("SAS metadata plan is empty")
+                if size != output.numel():
+                    output = output.narrow(0, 0, size)
+                return output.copy_(result)
             return result
 
         self._device_metadata_tasks = ()
@@ -1782,7 +1776,12 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        output = _copy_sas_metadata(output, sas_metadata)
+        size = sas_metadata.numel()
+        if size == 0:
+            raise ValueError("SAS metadata plan is empty")
+        if size != output.numel():
+            output = output.narrow(0, 0, size)
+        output.copy_(sas_metadata)
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
