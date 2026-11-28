@@ -367,6 +367,28 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Run sparse KV lifecycle first with CANN logs
+        id: sparse-kv-lifecycle
+        if: ${{ github.event.pull_request.number == 23118 && matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
+        continue-on-error: ${{ inputs.continue_on_error }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" "${{ matrix.group.num_npus }}" with-device \
+            tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py
+
+      - name: Upload sparse KV lifecycle diagnostic log
+        if: ${{ !cancelled() && (steps.sparse-kv-lifecycle.outcome == 'success' || steps.sparse-kv-lifecycle.outcome == 'failure') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sparse-kv-lifecycle-native-vllm-${{ inputs.vllm }}-${{ matrix.group.partition }}
+          path: ${{ runner.temp }}/selected-tests-*/1-e2e_pull_request_one_card_test_sparse_kv_offload_lifecycle.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run selected tests with device
         id: tests-with-device
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -374,6 +396,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          SELECTED_TEST_TARGETS: ${{ matrix.group.tests }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
@@ -383,12 +406,25 @@ jobs:
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
             TIMING_FLAG="--timing"
           fi
+          read -r -a test_targets <<< "$SELECTED_TEST_TARGETS"
+          if [[ "${{ steps.sparse-kv-lifecycle.outcome }}" =~ ^(success|failure)$ ]]; then
+            remaining_targets=()
+            for target in "${test_targets[@]}"; do
+              if [[ "${target%%::*}" != "tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py" ]]; then
+                remaining_targets+=("$target")
+              fi
+            done
+            test_targets=("${remaining_targets[@]}")
+          fi
+          if [ "${#test_targets[@]}" -eq 0 ]; then
+            exit 0
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
             ${TIMING_FLAG} \
-            ${{ matrix.group.tests }}
+            "${test_targets[@]}"
 
       - name: Run selected tests without device
         id: tests-without-device
