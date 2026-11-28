@@ -337,8 +337,15 @@ class Qwen4ExpPreparedInputAdapter:
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
+        if full_graph:
+            # Replay uses the row layout recorded during capture.
+            main.qsa_request_cu_q = None
+        cu_q = getattr(main, "qsa_request_cu_q", None)
+        max_query_len = main.max_query_len if cu_q is not None else 1
         signature = (
             "gbsa",
+            max_query_len,
+            _tensor_storage_signature(cu_q) if cu_q is not None else None,
             int(layer.num_heads),
             num_kv_heads,
             int(layer.head_dim),
@@ -362,10 +369,13 @@ class Qwen4ExpPreparedInputAdapter:
             dtype=torch.int32,
             device=positions.device,
         )
-        cu_q = torch.arange(rows + 1, dtype=torch.int64, device=positions.device)
+        kv_lengths = raw.seq_lens
+        if cu_q is None:
+            cu_q = torch.arange(rows + 1, dtype=torch.int64, device=positions.device)
+            kv_lengths = visible
         common = dict(
             cu_seqlens_q=cu_q,
-            seqused_kv=visible,
+            seqused_kv=kv_lengths,
             layout_q="TND",
             layout_kv="PA_BBND",
             layout_sparse_pattern=4,
@@ -382,13 +392,13 @@ class Qwen4ExpPreparedInputAdapter:
             num_kv_heads,
             int(layer.head_dim),
             [1, GBSA_COMPRESS_RATIO],
-            max_seqlen_q=1,
+            max_seqlen_q=max_query_len,
             max_seqlen_kv=int(main.block_table.shape[1] * GBSA_PAGE_SIZE),
             **common,
         )
-        main.qsa_gbsa_metadata = self._persistent_metadata(
-            signature,
-            generated,
+        main.qsa_gbsa_metadata = (
+            generated if getattr(main, "qsa_request_cu_q", None) is not None
+            else self._persistent_metadata(signature, generated)
         )
         prepared_this_step[signature] = main.qsa_gbsa_metadata
 
