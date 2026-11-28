@@ -29,7 +29,6 @@ from vllm_ascend.platform import (
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_deepseek_v41_adaptive_config,
-    _validate_direct_reload_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
@@ -41,41 +40,6 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     dsv4_skips_indexer_topk,
 )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({}, None),
-        ({"quantization": "ascend"}, "unquantized BF16"),
-        ({"dtype": torch.float16}, "unquantized BF16"),
-        ({"enable_eplb": True}, "static expert placement"),
-        ({"speculative_config": object()}, "no speculative decoding"),
-        ({"megamoe_shared_expert_fusion": True}, "separate shared expert"),
-        ({"enable_fused_mc2": 0, "dtype": torch.float16}, None),
-        ({"reload_mode": "layerwise", "quantization": "ascend"}, None),
-    ],
-)
-def test_validate_direct_fused_reload_config(monkeypatch, overrides, message):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", overrides.get("reload_mode", "direct"))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            is_moe=True,
-            quantization=overrides.get("quantization"),
-            dtype=overrides.get("dtype", torch.bfloat16),
-        ),
-        parallel_config=SimpleNamespace(enable_eplb=overrides.get("enable_eplb", False)),
-        speculative_config=overrides.get("speculative_config"),
-    )
-    ascend_config = SimpleNamespace(
-        enable_fused_mc2=overrides.get("enable_fused_mc2", 1),
-        megamoe_shared_expert_fusion=overrides.get("megamoe_shared_expert_fusion", False),
-    )
-    if message is None:
-        _validate_direct_reload_config(config, ascend_config)
-    else:
-        with pytest.raises(ValueError, match=message):
-            _validate_direct_reload_config(config, ascend_config)
 
 
 @pytest.mark.parametrize("block_size,interleave", [(768, 128), (768, 384), (768, 768), (1536, 768), (1536, 1536)])

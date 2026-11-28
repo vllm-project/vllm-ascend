@@ -176,12 +176,10 @@ unquantized BF16 Qwen weights in place. The default is `layerwise`. Direct
 reload preserves the weight addresses used by captured decode graphs, so
 the server can replay those graphs after a successful update.
 
-For full checkpoint updates over HCCL or NPU IPC, unquantized BF16 MoE
-supports direct reload with fused MC2
-(`enable_fused_mc2=1`) and BF16-capable MegaMoE with a separate shared expert
-(`enable_fused_mc2=2`, where the CANN operator and expert-parallel configuration
-support it). Use static expert placement with EPLB disabled, disable speculative
-decoding, and keep `weight_nz_mode=0` for ordinary weights.
+For online full checkpoint updates, select fused MC2 (`enable_fused_mc2=1`)
+or BF16-capable MegaMoE (`enable_fused_mc2=2`). The BF16 validation used
+unquantized MoE, static expert placement, a separate shared expert, and
+`weight_nz_mode=0`, with speculative decoding disabled.
 
 ```bash
 VLLM_RELOAD_MODE=direct \
