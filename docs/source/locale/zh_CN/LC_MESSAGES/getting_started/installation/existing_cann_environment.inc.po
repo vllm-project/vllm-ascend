@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "===+ \"CANN environment\""
-msgstr "===+ \"CANN环境\""
-
 msgid "<span id=\"installation-existing-cann\"></span>"
 msgstr "<span id=\"installation-existing-cann\"></span>"
 
@@ -173,3 +170,6 @@ msgstr ""
 "            | Ascend 950DT系列产品 | `quay.io/ascend/cann:{{ "
 "release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ "
 "release_cann_version }}-950-openeuler24.03-py3.12` |"
+
+msgid "=== \"CANN environment\""
+msgstr "=== \"CANN 环境\""
