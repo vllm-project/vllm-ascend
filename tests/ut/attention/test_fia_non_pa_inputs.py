@@ -15,6 +15,11 @@ from vllm_ascend.attention.attention_v1 import (
     AttentionType,
     FIAParamProvider,
 )
+from vllm_ascend.compilation.updatable_graph import (
+    ContextSource,
+    GraphUpdateTask,
+    UpdatableGraph,
+)
 
 
 def _make_impl(impl_cls=AscendAttentionBackendImpl):
@@ -39,6 +44,7 @@ def _make_metadata(state=AscendAttentionState.PrefillNoCache):
     return SimpleNamespace(
         attn_state=state,
         actual_seq_lengths_q=[3],
+        max_query_len=3,
         seq_lens=torch.tensor([3], dtype=torch.int32),
         seq_lens_list=[3],
         block_tables=torch.tensor([[0]], dtype=torch.int32),
@@ -289,3 +295,129 @@ def test_graph_provider_preserves_captured_pa_mode(sliding_window, is_draft_mode
         assert runtime_kwargs["block_table"] is captured_block_table
     else:
         assert runtime_kwargs["block_table"] is (None if is_non_pa else metadata.block_tables)
+
+
+def test_graph_provider_selects_maskless_single_token_decode():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert params["atten_mask"] is None
+    assert params["sparse_mode"] == 0
+
+
+def test_graph_provider_keeps_captured_mask_for_multi_token_replay():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 4
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_keeps_captured_mask_for_non_decode_state():
+    metadata = _make_metadata(AscendAttentionState.ChunkedPrefill)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_keeps_captured_mask_for_sliding_window():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", 16)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_tolerates_missing_max_query_len():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    del metadata.max_query_len
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+@pytest.mark.parametrize(
+    "num_decode_tokens,expected_mask,expected_sparse_mode",
+    [(2, None, 0), (3, "captured", 3)],
+)
+def test_chunked_prefill_split_decode_mask_selection(num_decode_tokens, expected_mask, expected_sparse_mode):
+    impl = _make_impl()
+    metadata = _make_metadata(AscendAttentionState.ChunkedPrefill)
+    metadata.num_decodes = 2
+    metadata.num_decode_tokens = num_decode_tokens
+    metadata.num_prefills = 0
+    metadata.actual_seq_lengths_q = [1, 2] if num_decode_tokens == 2 else [2, 3]
+    metadata.seq_lens_list = [10, 20]
+    metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+    query = torch.zeros(num_decode_tokens, 2, 4)
+    key, value = _strided_kv(num_decode_tokens), _strided_kv(num_decode_tokens, offset=100)
+    output = torch.empty_like(query)
+
+    def fake_fia(**kwargs):
+        return torch.ones_like(kwargs["query"]), None
+
+    with patch.object(attn_module.DeviceOperator, "npu_fused_infer_attention_score", side_effect=fake_fia) as fia:
+        result = impl._forward_fia_chunked_prefill_split(
+            query,
+            key,
+            value,
+            key,
+            value,
+            2,
+            metadata.block_tables.expand(2, -1),
+            metadata,
+            output,
+        )
+
+    fia.assert_called_once()
+    kwargs = fia.call_args.kwargs
+    assert kwargs["atten_mask"] is (metadata.attn_mask if expected_mask == "captured" else None)
+    assert kwargs["sparse_mode"] == expected_sparse_mode
+    assert result is output
+
+
+def test_graph_replay_rebinds_mask_only_for_single_token_decode():
+    captured_mask = torch.zeros(4, 4, dtype=torch.int8)
+    provider = FIAParamProvider("layer", None)
+    captured_task = GraphUpdateTask(
+        Mock(),
+        {"atten_mask": captured_mask, "sparse_mode": 3},
+        provider,
+        0,
+        None,
+        None,
+    )
+    graph = SimpleNamespace(tasks=[captured_task], provider_sizes={provider: 1})
+
+    single_token = _make_metadata(AscendAttentionState.DecodeOnly)
+    single_token.max_query_len = 1
+    single_replay = UpdatableGraph.resolve_tasks(graph, ContextSource({"layer": single_token}))[0]
+    assert single_replay.kwargs["atten_mask"] is None
+    assert single_replay.kwargs["sparse_mode"] == 0
+
+    for state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding):
+        multi_or_spec = _make_metadata(state)
+        multi_or_spec.max_query_len = 4 if state == AscendAttentionState.DecodeOnly else 1
+        replay = UpdatableGraph.resolve_tasks(graph, ContextSource({"layer": multi_or_spec}))[0]
+        assert replay.kwargs["atten_mask"] is captured_mask
+        assert replay.kwargs["sparse_mode"] == 3
+
+    # Resolving replay parameters must not mutate the captured task.
+    assert captured_task.kwargs["atten_mask"] is captured_mask
+    assert captured_task.kwargs["sparse_mode"] == 3

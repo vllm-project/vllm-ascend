@@ -1,0 +1,6 @@
+pr: 22900
+entries:
+  - category: performance
+    text: Optimized FIA decode paths by skipping redundant attention mask construction for genuine single-token DecodeOnly batches. On Ascend 910 with CANN 9.2.1 and Qwen3-8B BF16, same-engine ABBA testing at batch size 64 with approximately 4K KV length measured an 8.2% decode-throughput improvement with identical output token IDs.
+  - category: bugfix
+    text: Kept the causal mask and sparse_mode=3 in FULL-graph FIA capture and for multi-token batches labeled DecodeOnly (speculative-decode verification and draft expansion), fixing spec-decode acceptance-rate regressions on A2/A3. Capture keeps the mask for every replay shape; single-token DecodeOnly replay selects maskless parameters through FIAParamProvider. SpecDecoding batches conservatively retain the mask even when max_query_len=1.
