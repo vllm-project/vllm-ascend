@@ -391,6 +391,18 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         method._lora_routing = None
         return method
 
+    def test_get_mlp_weights_returns_moe_weights(self):
+        method = self._make_method()
+        w1 = torch.randn(2, 8, 16)
+        w2 = torch.randn(2, 16, 8)
+        layer = SimpleNamespace(w13_weight=w1, w2_weight=w2)
+
+        weights = method.get_mlp_weights(layer)
+
+        self.assertIsInstance(weights, MoEWeights)
+        self.assertIs(weights.w1, w1)
+        self.assertIs(weights.w2, w2)
+
     def test_apply_gmm1_transposes_and_runs_grouped_matmul(self):
         method = self._make_method()
         layer = SimpleNamespace(
@@ -574,7 +586,7 @@ class TestApplyMoeMlp(unittest.TestCase):
 class TestUnifiedApplyActivation(unittest.TestCase):
     def _quant_method(self):
         quant_method = MagicMock()
-        quant_method.get_mlp_weights.return_value = (torch.randn(2, 8, 16), torch.randn(2, 16, 8))
+        quant_method.get_mlp_weights.return_value = MoEWeights(w1=torch.randn(2, 8, 16), w2=torch.randn(2, 16, 8))
         return quant_method
 
     def test_gelu_matches_torch_reference(self):
@@ -658,6 +670,35 @@ class TestUnifiedApplyActivation(unittest.TestCase):
             )
         self.assertEqual(out, "out")
         mock_act.assert_called_once()
+
+    def test_swigluoai_accepts_split_eplb_expert_weights(self):
+        # W8A8 loading transposes stacked weights to [experts, hidden, 2 * intermediate]
+        # before splitting them into the 2-D per-expert matrices used by EPLB.
+        w13_weight = torch.zeros((2, 16, 8), dtype=torch.int8)
+        w2_weight = torch.zeros((2, 4, 16), dtype=torch.int8)
+        layer = SimpleNamespace(
+            w13_weight_list=list(w13_weight.unbind(dim=0)),
+            w13_weight_scale_fp32_list=[torch.ones(8) for _ in range(2)],
+            w2_weight_list=list(w2_weight.unbind(dim=0)),
+            w2_weight_scale_list=[torch.ones(16) for _ in range(2)],
+        )
+        quant_method = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
+        quant_method.use_expert_weight_list = True
+
+        weights = quant_method.get_mlp_weights(layer)
+        self.assertEqual([weight.ndim for weight in weights.w1], [2, 2])
+        self.assertEqual([tuple(weight.shape) for weight in weights.w1], [(16, 8), (16, 8)])
+
+        with patch(f"{MOE_MLP}.AscendSwigluOAIAndMul.swiglu_oai_forward", return_value="out") as mock_act:
+            out = _unified_apply_activation(
+                _mlp_compute_input(layer=layer, activation=MoEActivation.SWIGLUOAI),
+                torch.randn(2, 8),
+                quant_method,
+            )
+
+        self.assertEqual(out, "out")
+        mock_act.assert_called_once()
+        self.assertEqual(mock_act.call_args.args[0].shape, torch.Size([2, 8]))
 
 
 if __name__ == "__main__":

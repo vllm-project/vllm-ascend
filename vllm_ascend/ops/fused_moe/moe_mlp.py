@@ -91,8 +91,11 @@ def _unified_apply_activation(
             linear_beta=mlp_compute_input.activation_situ_linear_beta,
         )
     elif activation == MoEActivation.SWIGLUOAI:
-        w1, _ = quant_method.get_mlp_weights(mlp_compute_input.layer)
-        _, _, hidden_size = w1.shape
+        weights = quant_method.get_mlp_weights(mlp_compute_input.layer)
+        w1 = weights.w1
+        if isinstance(w1, list):
+            w1 = w1[0]
+        hidden_size = w1.shape[-1]
         hidden_states = AscendSwigluOAIAndMul.swiglu_oai_forward(hidden_states.view(-1, hidden_size))
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
         hidden_states = DeviceOperator.clipped_swiglu(
