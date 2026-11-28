@@ -2,10 +2,12 @@ import json
 import math
 import os
 from collections import OrderedDict, defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+import numpy.typing as npt
 import torch
 import torch.distributed as dist
 from vllm.logger import logger
@@ -481,3 +483,55 @@ def validate_register_region_count(regions: RegisterRegions) -> None:
         "Please reduce KV cache allocation fragmentation or merge "
         "k/v/dsa/scale allocations further."
     )
+
+
+def as_uint64_transfer_array(values: Any) -> npt.NDArray[np.uint64]:
+    """Coerce an integer sequence or 1D array into contiguous native uint64."""
+    if isinstance(values, np.ndarray):
+        if values.ndim != 1:
+            raise ValueError("Transfer column must be 1D.")
+        if values.dtype == np.dtype(np.uint64) and values.flags.c_contiguous:
+            return values
+        if not np.issubdtype(values.dtype, np.integer):
+            raise ValueError("Transfer column must contain integer values.")
+        if np.issubdtype(values.dtype, np.signedinteger) and values.size and int(values.min()) < 0:
+            raise ValueError("Transfer column must not contain negative values.")
+        return np.ascontiguousarray(values, dtype=np.uint64)
+
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Iterable):
+        raise ValueError("Transfer column must contain integer values.")
+    items = list(values)
+    for v in items:
+        if isinstance(v, bool) or not isinstance(v, (int, np.integer)) or int(v) < 0 or int(v) >= (1 << 64):
+            raise ValueError("Transfer column values must be integers in [0, 2**64).")
+    return np.array(items, dtype=np.uint64)
+
+
+def concat_uint64_chunks(chunks: Sequence[Any]) -> npt.NDArray[np.uint64]:
+    """Concatenate 1D uint64 descriptor chunks while avoiding extra copies when possible."""
+    if not chunks:
+        return np.empty(0, dtype=np.uint64)
+    if len(chunks) == 1:
+        return as_uint64_transfer_array(chunks[0])
+    normalized = [as_uint64_transfer_array(chunk) for chunk in chunks]
+    return np.ascontiguousarray(np.concatenate(normalized), dtype=np.uint64)
+
+
+def validate_uint64_transfer_columns(
+    src_addrs: npt.NDArray[np.uint64],
+    dst_addrs: npt.NDArray[np.uint64],
+    lengths: npt.NDArray[np.uint64],
+) -> int:
+    """Verify transfer columns are contiguous 1D native uint64 arrays of equal length."""
+    for col in (src_addrs, dst_addrs, lengths):
+        if (
+            not isinstance(col, np.ndarray)
+            or col.ndim != 1
+            or col.dtype != np.dtype(np.uint64)
+            or not col.flags.c_contiguous
+        ):
+            raise ValueError("Transfer columns must be contiguous 1D native uint64.")
+    num_ranges = len(src_addrs)
+    if len(dst_addrs) != num_ranges or len(lengths) != num_ranges:
+        raise ValueError("Transfer columns must have equal lengths.")
+    return num_ranges

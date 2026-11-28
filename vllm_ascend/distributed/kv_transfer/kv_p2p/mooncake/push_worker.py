@@ -12,6 +12,7 @@ from typing import Any
 
 import msgspec
 import numpy as np
+import numpy.typing as npt
 import torch
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -45,6 +46,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_layout,
+)
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
+    batch_transfer_sync_write,
+)
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    as_uint64_transfer_array,
+    concat_uint64_chunks,
 )
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
@@ -632,13 +640,60 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         # Keep its event/future so completion follows the same WRITE ordering.
         return LayerTransferRequest(request_id, tuple(local_ids), tuple(remote_ids), start, end), event
 
+    def _build_attention_transfer_arrays(
+        self,
+        batch: LayerTransferBatch,
+        local_index: int,
+        remote_index: int,
+        pp: Any,
+        worker: Any,
+        spec: Any,
+    ) -> tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint64], npt.NDArray[np.uint64]]:
+        partition = self._get_transfer_partition(batch.layer_name, batch.remote_metadata, batch.remote_rank)
+        assert partition is not None
+        local_offset, remote_offset, heads = partition
+        whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+        local = self.transfer_metadata
+
+        for req in batch.requests:
+            if len(req.local_block_ids) != len(req.remote_block_ids):
+                raise ValueError("P/D block counts differ")
+        # Reuse the request-ordered uint64 block arrays across cache components.
+        local_blocks = np.fromiter((block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64)
+        remote_blocks = np.fromiter(
+            (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
+        )
+
+        src_chunks: list[npt.NDArray[np.uint64]] = []
+        dst_chunks: list[npt.NDArray[np.uint64]] = []
+        length_chunks: list[npt.NDArray[np.uint64]] = []
+        for cache_index, (local_addr, remote_addr) in enumerate(
+            zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
+        ):
+            local_len = local.block_lens[local_index][cache_index]
+            remote_len = pp.block_lens[remote_index][cache_index]
+            if not whole:
+                local_len //= local.block_shapes[local_index][cache_index][0]
+                remote_len //= pp.block_shapes[remote_index][cache_index][0]
+            if local_len != remote_len:
+                raise ValueError("P/D cache slice lengths differ")
+            if not local_blocks.size:
+                continue
+            src_chunks.append(
+                local_blocks * np.uint64(local.block_strides[local_index][cache_index])
+                + np.uint64(local_addr + local_offset * local_len)
+            )
+            dst_chunks.append(
+                remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
+                + np.uint64(remote_addr + remote_offset * remote_len)
+            )
+            length_chunks.append(np.full(local_blocks.size, local_len * heads, dtype=np.uint64))
+        return concat_uint64_chunks(src_chunks), concat_uint64_chunks(dst_chunks), concat_uint64_chunks(length_chunks)
+
     def _execute_layer_transfer(self, batch: LayerTransferBatch) -> str | None:
         # Backend contract: synchronous WRITE returns only after host/device
         # accesses finish, including on failure. The connector waits for this
         # return before notifying D or allowing source blocks to be reused.
-        src_list: list[int] = []
-        dst_list: list[int] = []
-        length_list: list[int] = []
         try:
             local_index = self._layer_indices[batch.layer_name]
             remote = batch.remote_metadata
@@ -647,6 +702,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             worker = pp.metadata_by_pcp_rank[batch.remote_rank[1]].metadata_by_tp_rank[batch.remote_rank[2]]
             spec = self.kv_cache_specs[self.layer_name_to_spec_index[batch.layer_name]]
             if isinstance(spec, MambaSpec):
+                src_list: list[int] = []
+                dst_list: list[int] = []
+                length_list: list[int] = []
                 self._append_mamba_transfer_addresses(
                     spec,
                     batch.remote_rank[1],
@@ -663,49 +721,17 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     dst_list,
                     length_list,
                 )
+                src_addrs = as_uint64_transfer_array(src_list)
+                dst_addrs = as_uint64_transfer_array(dst_list)
+                lengths = as_uint64_transfer_array(length_list)
             else:
-                partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
-                assert partition is not None
-                local_offset, remote_offset, heads = partition
-                whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
-                local = self.transfer_metadata
-                for req in batch.requests:
-                    if len(req.local_block_ids) != len(req.remote_block_ids):
-                        raise ValueError("P/D block counts differ")
-                # Reuse the request-ordered block arrays across cache components.
-                local_blocks = np.fromiter(
-                    (block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64
+                src_addrs, dst_addrs, lengths = self._build_attention_transfer_arrays(
+                    batch, local_index, remote_index, pp, worker, spec
                 )
-                remote_blocks = np.fromiter(
-                    (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
-                )
-                for cache_index, (local_addr, remote_addr) in enumerate(
-                    zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
-                ):
-                    local_len = local.block_lens[local_index][cache_index]
-                    remote_len = pp.block_lens[remote_index][cache_index]
-                    if not whole:
-                        local_len //= local.block_shapes[local_index][cache_index][0]
-                        remote_len //= pp.block_shapes[remote_index][cache_index][0]
-                    if local_len != remote_len:
-                        raise ValueError("P/D cache slice lengths differ")
-                    src_list.extend(
-                        (
-                            local_blocks * np.uint64(local.block_strides[local_index][cache_index])
-                            + np.uint64(local_addr + local_offset * local_len)
-                        ).tolist()
-                    )
-                    dst_list.extend(
-                        (
-                            remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
-                            + np.uint64(remote_addr + remote_offset * remote_len)
-                        ).tolist()
-                    )
-                    length_list.extend([local_len * heads] * len(local_blocks))
             batch.event.synchronize()
-            if src_list:
+            if src_addrs.size:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"
-                ret = self.engine.batch_transfer_sync_write(session, src_list, dst_list, length_list)
+                ret = batch_transfer_sync_write(self.engine, session, src_addrs, dst_addrs, lengths)
                 if ret < 0:
                     return f"Mooncake WRITE failed: session={session}, ret={ret}"
         except Exception as exc:

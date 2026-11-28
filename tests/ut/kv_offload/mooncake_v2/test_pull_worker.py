@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import queue
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import msgspec
+import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -29,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     group_concurrent_contiguous,
 )
+from vllm_ascend.distributed.kv_transfer.utils.utils import concat_uint64_chunks
 
 from .helpers import (
     make_circular_spec,
@@ -42,6 +46,18 @@ from .helpers import (
     make_transfer_metadata,
     vllm_dcp_ranks_by_worker,
 )
+
+
+def _flatten_chunks(
+    src: list[npt.NDArray[np.uint64]],
+    dst: list[npt.NDArray[np.uint64]],
+    lengths: list[npt.NDArray[np.uint64]],
+) -> tuple[list[int], list[int], list[int]]:
+    return (
+        concat_uint64_chunks(src).tolist(),
+        concat_uint64_chunks(dst).tolist(),
+        concat_uint64_chunks(lengths).tolist(),
+    )
 
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
@@ -643,9 +659,9 @@ def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:
     entries = buckets[(0, 1)][0]
     assert entries[(0, 0)] == [("request", [10, 11], [20, 21])]
 
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
     thread._append_spec_transfer_addresses(
         0,
         remote_pcp_rank=0,
@@ -659,7 +675,7 @@ def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:
         dst_list=dst,
         length_list=lengths,
     )
-    assert (src, dst, lengths) == ([2280], [8560], [256])
+    assert _flatten_chunks(src, dst, lengths) == ([2280], [8560], [256])
 
 
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
@@ -1089,9 +1105,9 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
         block_strides=[[512]],
         tp_base_addrs={0: [[5000]], 1: [[6000]]},
     )
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
 
     thread._append_spec_transfer_addresses(
         0,
@@ -1107,9 +1123,7 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
         length_list=lengths,
     )
 
-    assert src == [1000 + 1024 + 512]
-    assert dst == [6000 + 2 * 512]
-    assert lengths == [512]
+    assert _flatten_chunks(src, dst, lengths) == ([1000 + 1024 + 512], [6000 + 2 * 512], [512])
 
 
 @pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
@@ -1259,9 +1273,9 @@ def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     post_read = MagicMock()
 
     def append_addresses(**kwargs):
-        kwargs["src_list"].append(1000)
-        kwargs["dst_list"].append(2000)
-        kwargs["length_list"].append(128)
+        kwargs["src_list"].append(np.array([1000], dtype=np.uint64))
+        kwargs["dst_list"].append(np.array([2000], dtype=np.uint64))
+        kwargs["length_list"].append(np.array([128], dtype=np.uint64))
         return post_read
 
     thread._append_spec_transfer_addresses = MagicMock(side_effect=append_addresses)  # type: ignore[method-assign]
@@ -1566,9 +1580,9 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
         block_lens=[[128]],
         tp_base_addrs={0: [[5000]]},
     )
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
 
     thread._append_spec_transfer_addresses(
         0,
@@ -1584,9 +1598,7 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
         lengths,
     )
 
-    assert src == [1256, 1512]
-    assert dst == [6536, 7048]
-    assert lengths == [128, 128]
+    assert _flatten_chunks(src, dst, lengths) == ([1256, 1512], [6536, 7048], [128, 128])
 
 
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
@@ -1602,9 +1614,9 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
         block_lens=[[128]],
         tp_base_addrs={0: [[5000]]},
     )
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
 
     thread._append_spec_transfer_addresses(
         0,
@@ -1620,9 +1632,7 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
         lengths,
     )
 
-    assert src == [1256]
-    assert dst == [6536]
-    assert lengths == [128]
+    assert _flatten_chunks(src, dst, lengths) == ([1256], [6536], [128])
 
 
 @pytest.mark.parametrize("local_shape,remote_shape", [((9, 256), (2, 9, 128)), ((2, 9, 128), (9, 256))])
@@ -1640,7 +1650,9 @@ def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remo
         block_lens=[[9216]],
         tp_base_addrs={0: [[5000]]},
     )
-    src, dst, lengths = list[int](), list[int](), list[int]()
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
     with pytest.raises(ValueError, match="circular cache layout mismatch"):
         thread._append_spec_transfer_addresses(
             0, 0, 0, 1, 1, 4, {(0, 0): [("request", [1], [3])]}, remote, src, dst, lengths
@@ -1680,9 +1692,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
             ("request-a", [1 + shift, 2 + shift], [3 + 2 * shift, 4 + 2 * shift]),
             ("request-b", [3 + shift, 5 + shift], [5 + 2 * shift, 8 + 2 * shift]),
         ]
-        src: list[int] = []
-        dst: list[int] = []
-        lengths: list[int] = []
+        src: list[npt.NDArray[np.uint64]] = []
+        dst: list[npt.NDArray[np.uint64]] = []
+        lengths: list[npt.NDArray[np.uint64]] = []
         with patch.object(
             thread, "_prepare_block_transfer_ranges", wraps=thread._prepare_block_transfer_ranges
         ) as group:
@@ -1707,7 +1719,7 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
             expected_src.extend(1000 * (layer + 1) + (block + shift) * local_stride for block in local_ids)
             expected_dst.extend(5000 + 1000 * layer + (block + 2 * shift) * remote_stride for block in remote_ids)
             expected_lengths.extend(count * length for count in counts)
-        assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
+        assert _flatten_chunks(src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
 
 
 @pytest.mark.parametrize("remote_pcp", [False, True])
@@ -2810,9 +2822,9 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
         [remote_base + group[0] * remote_stride + 32 for group in groups[1]],
         [len(group) * size for group in groups[0]],
     )
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
+    src: list[npt.NDArray[np.uint64]] = []
+    dst: list[npt.NDArray[np.uint64]] = []
+    lengths: list[npt.NDArray[np.uint64]] = []
     thread._append_block_transfer_addresses(
         thread._prepare_block_transfer_ranges(local_ids, remote_ids, coalesce),
         local_base,
@@ -2826,5 +2838,119 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
         16,
         32,
     )
-    assert (src, dst, lengths) == expected
-    assert all(type(value) is int for column in (src, dst, lengths) for value in column)
+    for column in (src, dst, lengths):
+        assert all(
+            isinstance(chunk, np.ndarray) and chunk.dtype == np.uint64 and chunk.ndim == 1 and chunk.flags.c_contiguous
+            for chunk in column
+        )
+    assert _flatten_chunks(src, dst, lengths) == expected
+
+
+@pytest.mark.parametrize("api_mode", ["available", "missing", "not_callable", "bare_mock"])
+def test_pull_read_arrays_api_and_legacy_fallback(api_mode: str) -> None:
+    remote_attn_l0 = torch.arange(6 * 16, dtype=torch.int32).reshape(6, 1, 4, 4)
+    remote_attn_l1 = torch.arange(100, 100 + 6 * 16, dtype=torch.int32).reshape(6, 1, 4, 4)
+    local_attn_l0 = torch.zeros_like(remote_attn_l0)
+    local_attn_l1 = torch.zeros_like(remote_attn_l1)
+    remote_mamba = torch.arange(200, 200 + 4 * 8, dtype=torch.int32).reshape(4, 2, 4)
+    local_mamba = torch.zeros_like(remote_mamba)
+
+    attn_bytes = remote_attn_l0[0].nbytes
+    mamba_bytes = remote_mamba[0].nbytes
+    mamba_spec = replace(make_mamba_spec(), shapes=((2, 4),), dtypes=(torch.int32,))
+    thread = make_thread(
+        layer_names=["attn.0", "attn.1", "mamba.0"],
+        kv_cache_specs=[make_full_spec(), mamba_spec],
+        kv_caches_base_addr=[[local_attn_l0.data_ptr()], [local_attn_l1.data_ptr()], [local_mamba.data_ptr()]],
+        block_strides=[[attn_bytes], [attn_bytes], [mamba_bytes]],
+        block_lens=[[attn_bytes], [attn_bytes], [mamba_bytes]],
+        block_shapes=[[(1, 4, 4)], [(1, 4, 4)], [(2, 4)]],
+    )
+    remote = make_pp_metadata(
+        layer_names=["attn.0", "attn.1", "mamba.0"],
+        block_strides=[[attn_bytes], [attn_bytes], [mamba_bytes]],
+        block_lens=[[attn_bytes], [attn_bytes], [mamba_bytes]],
+        block_shapes=[[(1, 4, 4)], [(1, 4, 4)], [(2, 4)]],
+        tp_base_addrs={0: [[remote_attn_l0.data_ptr()], [remote_attn_l1.data_ptr()], [remote_mamba.data_ptr()]]},
+    )
+
+    calls: list[tuple[str, str, Any, Any, Any]] = []
+
+    def record(
+        kind: str, session: str, local_addrs: Any, remote_addrs: Any, lengths: Any, *, do_copy: bool = True
+    ) -> int:
+        calls.append((kind, session, local_addrs, remote_addrs, lengths))
+        for col in (local_addrs, remote_addrs, lengths):
+            if kind == "arrays":
+                assert (
+                    isinstance(col, np.ndarray) and col.dtype == np.uint64 and col.ndim == 1 and col.flags.c_contiguous
+                )
+            else:
+                assert isinstance(col, list) and all(type(v) is int for v in col)
+        if do_copy:
+            for dst_addr, src_addr, nbytes in zip(local_addrs, remote_addrs, lengths, strict=True):
+                ctypes.memmove(int(dst_addr), int(src_addr), int(nbytes))
+        return 0
+
+    def make_engine(*, do_copy: bool = True) -> Any:
+        engine: Any
+        if api_mode == "bare_mock":
+            engine = Mock()
+            engine.batch_transfer_sync_read.side_effect = lambda *args: record("list", *args, do_copy=do_copy)
+            return engine
+        engine = SimpleNamespace(batch_transfer_sync_read=lambda *args: record("list", *args, do_copy=do_copy))
+        if api_mode == "available":
+            engine.batch_transfer_sync_read_arrays = lambda *args: record("arrays", *args, do_copy=do_copy)
+        elif api_mode == "not_callable":
+            engine.batch_transfer_sync_read_arrays = "not-callable"
+        return engine
+
+    thread.engine = make_engine(do_copy=True)
+
+    # Mixed bucket: multi-block coalesced attn.0 (2 ranges), single-block attn.1 (size == 1), and Mamba (1 range).
+    entries = {
+        0: {(0, 0): [("req", [1, 2, 4], [0, 1, 5])], (1, 1): [("req-single", [3], [2])]},
+        1: {(2, 2): [("req", [2], [3])]},
+    }
+    thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+
+    peer = remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[0]
+    expected_kind = "arrays" if api_mode == "available" else "list"
+    assert len(calls) == 1
+    assert calls[0][:2] == (expected_kind, f"{peer.local_ip}:{peer.te_rpc_port}")
+    assert len(calls[0][2]) == 4
+    assert torch.equal(local_attn_l0[[1, 2, 4]], remote_attn_l0[[0, 1, 5]])
+    assert torch.equal(local_attn_l1[3], remote_attn_l1[2])
+    assert torch.equal(local_mamba[2], remote_mamba[3])
+    assert torch.all(local_attn_l0[[0, 3, 5]] == 0)
+
+    # Empty bucket returns early without calling the engine.
+    thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, {0: {(0, 0): [("empty", [], [])]}})
+    assert len(calls) == 1
+
+    # High-bit uint64 addresses (>= 2**63) across single-block and multi-block chunks preserve exact values.
+    high_local, high_remote = 0xFF00000000100000, 0xFF00000000200000
+    high_thread = make_thread(
+        engine=make_engine(do_copy=False),
+        kv_caches_base_addr=[[high_local]],
+        block_strides=[[128]],
+        block_lens=[[128]],
+    )
+    high_remote_meta = make_pp_metadata(
+        block_strides=[[128]],
+        block_lens=[[128]],
+        tp_base_addrs={0: [[high_remote]]},
+    )
+    high_thread._execute_tp_transfer_bucket(
+        0, 0, 0, 1, 1, 1, high_remote_meta, {0: {(0, 0): [("s", [1], [2]), ("m", [3, 5], [4, 7])]}}
+    )
+    assert len(calls) == 2
+    assert calls[1][0] == expected_kind
+    np.testing.assert_array_equal(calls[1][2], [high_local + 128, high_local + 3 * 128, high_local + 5 * 128])
+    np.testing.assert_array_equal(calls[1][3], [high_remote + 2 * 128, high_remote + 4 * 128, high_remote + 7 * 128])
+    np.testing.assert_array_equal(calls[1][4], [128, 128, 128])
+
+    if api_mode == "available":
+        thread.engine.batch_transfer_sync_read_arrays = MagicMock(return_value=-5)
+        with pytest.raises(RuntimeError, match="ret=-5"):
+            thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)

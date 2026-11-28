@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
 )
+from vllm_ascend.distributed.kv_transfer.utils.utils import as_uint64_transfer_array
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -66,6 +67,9 @@ class _HiSparsePullThread(MooncakePullRecvingThread):
             return None
 
         pages_to_reorder: dict[int, tuple[int, int, int]] = {}
+        host_src: list[int] = []
+        host_dst: list[int] = []
+        host_lengths: list[int] = []
         spec = self.kv_cache_specs[spec_index]
         peer = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         for (local_index, remote_index), entries in host_layers.items():
@@ -76,11 +80,15 @@ class _HiSparsePullThread(MooncakePullRecvingThread):
                 peer.kv_caches_base_addr[remote_index],
                 remote_metadata,
                 entries,
-                local_dsts=src_list,
-                remote_srcs=dst_list,
-                lengths=length_list,
+                local_dsts=host_src,
+                remote_srcs=host_dst,
+                lengths=host_lengths,
                 pages_to_reorder=pages_to_reorder,
             )
+        if host_src:
+            src_list.append(as_uint64_transfer_array(host_src))
+            dst_list.append(as_uint64_transfer_array(host_dst))
+            length_list.append(as_uint64_transfer_array(host_lengths))
         return partial(self._reorder_host_pages, pages_to_reorder) if pages_to_reorder else None
 
     def _append_host_layer_reads(
