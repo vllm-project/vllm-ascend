@@ -489,6 +489,170 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
+    def _check_repair_kv_layout_capability(self) -> None:
+        """Refuse kv_load_failure_policy='repair' on unsupported layouts.
+
+        Three fail-closed checks:
+        (1) EXPLICIT LAYOUT CHECK: the Ascend repair path is validated for
+        head-major (LBHNC/HND) layouts only. The old code refused LBNHC as a
+        side effect of the shape-based block-size derivation reading the head
+        count instead of the block size; the layout-contract patch fixed that
+        derivation (LBNHC is now correctly indexed with token_axis=1), so this
+        is now an explicit policy-level refusal.
+        (2) BINDING-CONTRACT VERIFICATION: this runner's own repair view
+        binding (_repair_view_binding: per-K/V views, the token axis by the
+        resolved layout) validated against the fence layer's ACTUAL bound
+        views with the same executor API the repair-time fence uses -- one
+        contract shared by the init check and the runtime fence.
+        (3) LEGACY FALLBACK: on vLLM bases without the binding contract
+        (pre-#68377), the old shape-based derivation keeps the check active;
+        a repair stack exposing NEITHER API logs a loud warning -- a missing
+        helper must never look like a passed check.
+
+        The repair executor only exists in vLLM builds carrying the repair
+        stack; on builds without it the policy never reaches repair execution
+        either, so the import guard skips the check there (with a warning).
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        policy = (
+            getattr(kv_transfer_config, "kv_load_failure_policy", "fail") if kv_transfer_config is not None else "fail"
+        )
+        if policy != "repair":
+            return
+        # Explicit layout check BEFORE the geometry check: the Ascend
+        # repair path is validated for head-major (LBHNC/HND) layouts
+        # only. The default LBNHC layout binds per-K/V views whose token
+        # axis (dim 1) is indexed differently from the core's shared
+        # [B, H, N, C] convention; the geometry derivation now HANDLES
+        # LBNHC correctly (token_axis=1), so the old refusal (which was a
+        # side effect of the shape-based block-size misreading) is
+        # replaced by this explicit, policy-level refusal.
+        resolved_layout = self.vllm_config.cache_config.kv_cache_layout
+        if resolved_layout is None:
+            # Not yet resolved at this init stage: read the env (the
+            # engine core resolves and records it on CacheConfig before
+            # worker init; this is a defensive fallback for direct
+            # worker construction in tests).
+            from vllm import envs as _envs
+
+            resolved_layout = _envs.VLLM_KV_CACHE_LAYOUT
+        if resolved_layout not in ("LBHNC", "HND"):
+            raise RuntimeError(
+                "kv_load_failure_policy='repair': the Ascend hole-repair "
+                "path is validated for head-major KV cache layouts "
+                "(VLLM_KV_CACHE_LAYOUT=HND or LBHNC) only; the resolved "
+                f"layout is '{resolved_layout}'. Set the layout to HND or "
+                "switch the policy to 'fail' or 'recompute'."
+            )
+        try:
+            # The module exists only in vLLM builds carrying the repair
+            # stack (PR #68377); the ignore keeps mypy quiet on bases
+            # without it, and the guard keeps the check dormant there.
+            from vllm.v1.worker.gpu.repair_executor import (  # type: ignore[import-not-found]
+                find_repair_fence_layer,
+            )
+        except ImportError:
+            # LOUD, never silent: a repair policy without a repair stack
+            # must stay visible (F1). The explicit layout check above
+            # still applied; the geometry check cannot run.
+            logger.warning(
+                "kv_load_failure_policy='repair': this vLLM build carries "
+                "no repair executor module; the repair geometry init "
+                "check is dormant (the explicit layout check still "
+                "applies)."
+            )
+            return
+        block_size = self.vllm_config.cache_config.block_size
+        layer, layer_path = find_repair_fence_layer(self.model)
+        if layer is None:
+            raise RuntimeError(
+                "kv_load_failure_policy='repair': no decoder layer with the "
+                "repair fence's KV cache seam (self_attn.attn) was found on "
+                "this model; the hole-repair policy is unsupported for it. "
+                "Switch the policy to 'fail' or 'recompute'."
+            )
+        # The binding-contract verification: this runner's binding (the
+        # same one the repair-time fence receives through
+        # _repair_view_binding) validated against the fence layer's
+        # actual bound views -- one contract with the runtime fence.
+        try:
+            from vllm.v1.worker.gpu.repair_executor import (
+                _repair_cache_views,
+                _repair_geometry_from_binding,
+                _verify_repair_layer_geometry,
+            )
+
+            binding = self._repair_view_binding()
+            geometry = _repair_geometry_from_binding(binding, _repair_cache_views(layer))
+            _verify_repair_layer_geometry(layer, geometry, binding)
+        except ImportError:
+            # The repair stack carries the pre-binding API (pre-#68377):
+            # keep the check active through the legacy shape-based
+            # derivation -- exactly the check the published gate ran.
+            try:
+                from vllm.v1.worker.gpu.repair_executor import (
+                    _repair_block_size as _legacy_block_size,
+                )
+
+                if _legacy_block_size(layer) != block_size:
+                    raise RuntimeError(
+                        "kv_load_failure_policy='repair': the KV cache "
+                        "geometry is not repair-fence compatible. Set the "
+                        "KV cache layout to a [B, H, N, C] layout (e.g. "
+                        "VLLM_KV_CACHE_LAYOUT=HND) or switch the policy."
+                    )
+            except ImportError:
+                logger.warning(
+                    "kv_load_failure_policy='repair': the vLLM build "
+                    "carries a repair executor with neither the binding "
+                    "contract nor the legacy block-size derivation; the "
+                    "repair geometry init check cannot run."
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"kv_load_failure_policy='repair': the KV cache geometry of "
+                f"the first decoder layer ({layer_path}) is not "
+                f"repair-fence compatible ({exc}). Set the KV cache layout "
+                "to a [B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) "
+                "or switch the policy to 'fail' or 'recompute'."
+            ) from exc
+
+    def _repair_view_binding(self):
+        """The Ascend V2 binding contract for the repair executor.
+
+        This runner binds SEPARATE per-K/V views (K and V sliced from the
+        [2, num_blocks, ...] allocation of get_kv_cache_shape); the
+        within-block token axis follows the backend's own convention by
+        the resolved layout: head-major LBHNC/HND views carry it at dim
+        2, token-major LBNHC views and flat views at dim 1. The base
+        runner's core-logical binding describes Core's shared
+        [B, H, N, C] views, not these -- overriding it keeps the
+        executor's geometry truthful for the views this stack binds.
+        """
+        from vllm.v1.worker.gpu.repair_executor import (  # type: ignore[import-not-found]
+            per_kv_repair_binding,
+        )
+
+        group = (
+            self.kv_cache_config.kv_cache_groups[0]
+            if self.kv_cache_config is not None and self.kv_cache_config.kv_cache_groups
+            else None
+        )
+        # An older vLLM keeps the block size on the group itself; the verified
+        # pin keeps it in the group's KV cache spec.
+        spec_block_size = getattr(group, "block_size", None)
+        if spec_block_size is None and group is not None:
+            spec_block_size = getattr(group.kv_cache_spec, "block_size", None)
+        if spec_block_size is None:
+            spec_block_size = self.vllm_config.cache_config.block_size
+        resolved_layout = self.vllm_config.cache_config.kv_cache_layout
+        if resolved_layout is None:
+            from vllm import envs as _envs
+
+            resolved_layout = _envs.VLLM_KV_CACHE_LAYOUT
+        token_axis = 2 if resolved_layout in ("LBHNC", "HND") else 1
+        return per_kv_repair_binding(spec_block_size, token_axis, resolved_layout)
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -550,6 +714,7 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(self.speculator, DraftModelSpeculator):
                     self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
+        self._check_repair_kv_layout_capability()
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
