@@ -402,6 +402,9 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
 
     def test_merged_fp8_shape_allowance_is_set_before_weight_creation(self):
         quant_config = MagicMock(weight_block_size=[128, 128])
+        # `resolve_quant_method` composes a checkpoint method with the online
+        # quantization overlay; a real config always has this field.
+        quant_config.online_quantization_config = None
         quant_method = quant_config.get_quant_method.return_value
 
         def check_allowance(*, layer, output_partition_sizes, **kwargs):
@@ -613,7 +616,8 @@ class TestAscendDCPGroupColumnParallelLinear(unittest.TestCase):
     @contextmanager
     def _quantization():
         config = SimpleNamespace(
-            get_quant_method=lambda *args, **kwargs: AscendLinearMethod(AscendW8A8DynamicLinearMethod())
+            get_quant_method=lambda *args, **kwargs: AscendLinearMethod(AscendW8A8DynamicLinearMethod()),
+            online_quantization_config=None,
         )
         with (
             patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda w: w),

@@ -50,6 +50,7 @@ from vllm_ascend.device.hardware_profile import (
 
 # isort: off
 from vllm_ascend.utils import (
+    ASCEND_ONLINE_QUANT_METHODS,
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
@@ -249,6 +250,15 @@ class NPUPlatform(Platform):
         "deepseek_v4_fp8",
         "modelopt_mxfp8",
         "mxfp8",
+        # Online (load-time) quantization: a plain bf16 checkpoint quantized
+        # while the weights are loaded. `online` is vLLM's generic name and
+        # `int8_per_channel` is Ascend's own recipe (per-channel INT8 weights
+        # with dynamically per-token INT8 activations, dense and routed-expert
+        # layers). Both are listed here because verify_quantization() checks
+        # this list; patch_online_quant adds `int8_per_channel` to vLLM's
+        # method list and makes vLLM construct `AscendOnlineQuantizationConfig`,
+        # which rejects the online weight keys Ascend has no method for.
+        *ASCEND_ONLINE_QUANT_METHODS,
     ]
 
     @classmethod

@@ -1532,3 +1532,68 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+#
+# ** 37. File: platform/patch_online_quant.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.quantization.online.base._ONLINE_LINEAR_METHODS`
+#      `vllm.model_executor.layers.quantization.online.base._ONLINE_MOE_METHODS`
+#    Why:
+#       vLLM dispatches an online quantization layer from a
+#       `(layer kind, QuantKey) -> method class` table. Its MOE entry for
+#       `int8_per_channel_static` is the CUDA-only `Int8OnlineMoEMethod`, and
+#       there is no INT8 linear entry at all, so Ascend's INT8 recipe cannot be
+#       reached. The same table also drives the "checkpoint format + online
+#       overlay" path, which builds the config in
+#       `weight_utils.maybe_compose_online_quantization`.
+#    How:
+#       Write Ascend's `ONLINE_LINEAR_METHODS` / `ONLINE_MOE_METHODS` entries
+#       (`vllm_ascend/quantization/methods/online/__init__.py`) into the two
+#       upstream tables, so vLLM's own `_get_method_cls` resolves Ascend's
+#       classes.
+#    Future Plan:
+#       Delete this entry once vLLM lets a platform contribute its own
+#       `(QuantKey -> method class)` entries.
+#
+#   2. `vllm.model_executor.layers.quantization.online.base.OnlineQuantizationConfig`
+#    Why:
+#       vLLM constructs the online config at four sites of
+#       `weight_utils.get_quant_config`: the plain online path, the shorthand
+#       paths, the "checkpoint format + online overlay" path and the deprecated
+#       `--quantization fp8` alias. All of them hardcode
+#       `OnlineQuantizationConfig`, and the v0.34.0 lane also compares it by
+#       identity, so a subclass registered through
+#       `register_quantization_config` is never instantiated. Ascend needs its
+#       own class for the request validation and for the unquantized fallback
+#       (NPU post-load weight processing).
+#    How:
+#       Rebind the module attribute to `AscendOnlineQuantizationConfig`
+#       (`vllm_ascend/quantization/configs/online_config.py`). Every
+#       construction site and `get_quantization_config` import the class inside
+#       the function, so they pick the rebound symbol up, and the v0.34.0
+#       `quant_cls is OnlineQuantizationConfig` test still holds because both
+#       sides resolve to the subclass. `isinstance` checks that captured the old
+#       class at import time keep working (the new one is a subclass).
+#    Related PR (if no, explain why):
+#       vllm-project/vllm#64056 made the plain-online return sites use the class
+#       resolved by `get_quantization_config`; the composition site, the
+#       deprecated `fp8` alias and the v0.34.0 lane still hardcode the class.
+#    Future Plan:
+#       Delete this entry once vLLM resolves the online config class through the
+#       platform (or the registry) at every online construction site.
+#
+#   3. `vllm.config.quantization._ONLINE_SHORTHANDS`
+#      `vllm.config.quantization.ONLINE_QUANT_SHORTHAND_NAMES`
+#      `vllm.model_executor.layers.quantization.QUANTIZATION_METHODS`
+#    Why:
+#       `int8_per_channel` is Ascend's own recipe name, so it is not in vLLM's
+#       `QuantizationMethods` Literal and has to be added before
+#       `--quantization` accepts it.
+#    How:
+#       Apply Ascend's recipes on top of vLLM's table in place (a rebind would
+#       bypass `online/base.py`, which imported the dict by value), rebuild the
+#       derived name tuple, and append the new names to `QUANTIZATION_METHODS`.
+#       `NPUPlatform.supported_quantization` lists them through
+#       `ASCEND_ONLINE_QUANT_METHODS`, and vLLM's other recipes and checkpoint
+#       formats are left untouched.
+#    Future Plan:
+#       Delete this entry once vLLM accepts platform-provided online CLI names.

@@ -112,3 +112,12 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 # Upstream plan: contribute physical-block accounting to vLLM and remove this
 # patch once both supported vLLM versions cover first-time and shared-block
 # admission accounting.
+
+# Online quantization dispatches through vLLM's global tables, so this has to run
+# in every process that builds layers. Apply it last: importing it pulls in the
+# Ascend ops package, which must happen after the MoE factory patch above.
+from vllm_ascend.patch.platform.patch_online_quant import (  # noqa: E402
+    apply_online_quantization_patch,
+)
+
+apply_online_quantization_patch()

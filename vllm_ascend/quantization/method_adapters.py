@@ -21,7 +21,10 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -69,6 +72,18 @@ def _make_mx_scale_weight_loader(
         return weight_loader(param, loaded_weight)
 
     return mx_scale_weight_loader
+
+
+def _linear_tp_rank(layer: torch.nn.Module) -> int:
+    """TP rank the runtime kernel must use for `layer`'s activations."""
+    if not isinstance(layer, RowParallelLinear):
+        return 0
+    prefix = getattr(layer, "prefix", "") or ""
+    if "o_proj" in prefix and oproj_tp_enable():
+        return get_otp_group().rank_in_group
+    if "down_proj" in prefix and mlp_tp_enable():
+        return get_mlp_tp_group().rank_in_group
+    return get_tensor_model_parallel_rank()
 
 
 class AscendLinearMethod(LinearMethodBase):
@@ -216,16 +231,7 @@ class AscendLinearMethod(LinearMethodBase):
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if isinstance(layer, RowParallelLinear):
-            if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
-                tp_rank = get_otp_group().rank_in_group
-            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
-                tp_rank = get_mlp_tp_group().rank_in_group
-            else:
-                tp_rank = get_tensor_model_parallel_rank()
-        else:
-            tp_rank = 0
-        return self.quant_method.apply(layer, x, bias, tp_rank)
+        return self.quant_method.apply(layer, x, bias, _linear_tp_rank(layer))
 
 
 class AscendKVCacheMethod(BaseKVCacheMethod):
@@ -264,7 +270,55 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         return self.quant_method.apply(layer, query, key, value, kv_cache, attn_metadata, attn_type, scale, output)
 
 
-class AscendFusedMoEMethod(FusedMoEMethodBase):
+class _AscendMoEMethodMixin:
+    """Ascend's FusedMoE execution contract, shared by every Ascend MoE method.
+
+    Ascend runs MoE through `moe_comm_method`, so vLLM's modular-kernel
+    machinery must stay disabled, and the actual execution is delegated to the
+    quantization scheme held in `self.quant_method`.
+    """
+
+    quant_method: AscendMoEScheme
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    def maybe_make_prepare_finalize(self, routing_tables=None):
+        # Ascend uses its own MoE communication and forward_impl path.
+        # Do not let upstream modular-kernel initialization replace it.
+        return None
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts=None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.quant_method.apply(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        return self.quant_method.get_eplb_weight_views(layer)
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        return None
+
+    @property
+    def supports_eplb(self):
+        return getattr(self.quant_method, "supports_eplb", False)
+
+
+class AscendFusedMoEMethod(_AscendMoEMethodMixin, FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
     This wrapper class delegates to the actual MoE quantization scheme.
@@ -277,15 +331,6 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
         super().__init__(moe_config)
         self.quant_method = scheme
-
-    @property
-    def is_monolithic(self) -> bool:
-        return False
-
-    def maybe_make_prepare_finalize(self, routing_tables=None):
-        # Ascend uses its own MoE communication and forward_impl path.
-        # Do not let upstream modular-kernel initialization replace it.
-        return None
 
     def create_weights(
         self,
@@ -322,38 +367,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             if any(fields in param_key for fields in per_group_param):
                 param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts=None,
-        shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.quant_method.apply(
-            layer=layer,
-            x=x,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
-        )
-
-    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
-        return self.quant_method.get_eplb_weight_views(layer)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
-
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
-        pass
-
-    @property
-    def supports_eplb(self):
-        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
-        return supports_eplb
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):
@@ -368,3 +384,78 @@ class AscendEmbeddingMethod(AscendLinearMethod):
 
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
+
+
+class AscendOnlineLinearMethod(OnlineLinearBase):
+    """Linear method for Ascend online (load-time) quantization.
+
+    vLLM owns the lifecycle: :meth:`OnlineLinearBase.create_weights` stages the
+    checkpoint-dtype weight on the meta device and wraps the weight loaders, and
+    vLLM calls :meth:`process_weights_after_loading` once the layer is fully
+    loaded. Quantization and the post-load layout transform stay in the Ascend
+    scheme, so an online-quantized layer is indistinguishable from one loaded
+    from a pre-quantized checkpoint.
+
+    Subclasses select the scheme through ``scheme_cls``; vLLM instantiates them
+    without arguments.
+    """
+
+    activation_quant_key = None
+    scheme_cls: type[AscendLinearScheme]
+    quant_method: AscendLinearScheme
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Ascend's linear wrappers all expose their scheme as `quant_method`;
+        # vllm_ascend duck-types it as `layer.quant_method.quant_method`.
+        self.quant_method = self.scheme_cls()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_method.process_weights_after_loading(layer)
+
+    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
+        raise NotImplementedError(
+            "Online re-quantization of a checkpoint-quantized layer is not supported on Ascend yet "
+            f"(checkpoint method: {type(source_method).__name__}). Serve the quantized checkpoint with "
+            "its own quantization method, or use a bf16/fp16 checkpoint with --quantization online."
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.quant_method.apply(layer, x, bias, _linear_tp_rank(layer))
+
+
+class AscendOnlineFusedMoEMethod(_AscendMoEMethodMixin, OnlineMoEMethodBase):
+    """FusedMoE method for Ascend online (load-time) quantization.
+
+    vLLM creates the checkpoint-dtype expert weights on the meta device and
+    materializes them one layer at a time; the scheme then quantizes them and
+    applies Ascend's runtime layout, exactly as it does for a pre-quantized
+    checkpoint.
+
+    Subclasses select the scheme through ``scheme_cls``; vLLM instantiates them
+    with ``moe=<FusedMoEConfig>``.
+    """
+
+    # Ascend quantizes activations dynamically inside the scheme, so there is no
+    # single activation QuantKey for vLLM to reason about.
+    activation_quant_key = None
+    scheme_cls: type[AscendMoEScheme]
+
+    def __init__(self, moe: FusedMoEConfig) -> None:
+        OnlineMoEMethodBase.__init__(self, moe)
+        self.quant_method = self.scheme_cls()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_method.process_weights_after_loading(layer)
+
+    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
+        raise NotImplementedError(
+            "Online re-quantization of a checkpoint-quantized layer is not supported on Ascend yet "
+            f"(checkpoint method: {type(source_method).__name__}). Serve the quantized checkpoint with "
+            "its own quantization method, or use a bf16/fp16 checkpoint with --quantization online."
+        )
