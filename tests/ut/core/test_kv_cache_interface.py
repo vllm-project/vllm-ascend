@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main.
+from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     HiddenStateCacheSpec,
     UniformTypeKVCacheSpecs,
+    compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -22,20 +28,11 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     declared_kwarg,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
     supports_component_major_mla_pd,
 )
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
-# the v0.32.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
-else:
-    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 
 def _mla_spec():
@@ -57,21 +54,86 @@ def test_mixed_mla_indexer_specs_are_not_uniform(indexer_first):
     assert not is_kv_cache_spec_uniform(dict(specs))
 
 
+@pytest.mark.parametrize("replicas", [1, 2, 8])
+@pytest.mark.parametrize("block_size", [128, 768])
+@pytest.mark.parametrize(
+    "dtype,head_size,scale_dim,scale_dtype",
+    [
+        (torch.bfloat16, 128, 0, torch.int8),
+        (torch.int8, 128, 1, torch.float16),
+        (torch.uint8, 64, 4, torch.float8_e8m0fnu),
+    ],
+)
+def test_indexer_layout_strides_cover_replicated_keys_and_scales(
+    replicas, block_size, dtype, head_size, scale_dim, scale_dtype
+):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+        sfa_dcp_replicated_indexer_size=replicas,
+    )
+    num_blocks = 3
+    layer_stride, block_stride, *_ = compute_layout_strides(spec, num_blocks, 2, KVCacheLayout.LBNHC)
+    assert block_stride == spec.page_size_bytes
+    assert layer_stride == num_blocks * spec.page_size_bytes
+    assert spec.unpadded_page_size_bytes == spec.page_size_bytes
+
+
 def test_matching_ascend_mla_specs_merge():
     spec = _mla_spec()
     assert AscendMLAAttentionSpec.merge([spec, spec]) == spec
     assert is_kv_cache_spec_uniform({"layer0": spec, "layer1": spec})
 
 
-def test_get_storage_block_size_and_dcp_memory():
+@pytest.mark.parametrize("draft_flags", [(False, False), (True, True), (False, True), (True, False)])
+def test_mla_merge_preserves_draft_only_ownership_without_changing_grouping(draft_flags):
+    specs = [replace(_mla_spec(), is_draft=is_draft) for is_draft in draft_flags]
+
+    merged = AscendMLAAttentionSpec.merge(specs)
+
+    assert merged.is_draft is all(draft_flags)
+    assert specs[0] == specs[1]
+    assert is_kv_cache_spec_uniform(dict(zip(("layer0", "layer1"), specs)))
+
+
+@pytest.mark.parametrize("dcp_sharded", [True, False])
+@pytest.mark.parametrize("spec_type", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec])
+def test_ascend_spec_merge_preserves_dcp_layout(spec_type, dcp_sharded):
+    kwargs = {"sliding_window": 128} if spec_type is AscendSlidingWindowMLASpec else {}
+    spec = spec_type(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        dcp_sharded=dcp_sharded,
+        **kwargs,
+    )
+    assert spec_type.merge([spec, spec]).dcp_sharded is dcp_sharded
+    with pytest.raises(AssertionError):
+        spec_type.merge([spec, replace(spec, dcp_sharded=not dcp_sharded)])
+
+
+@pytest.mark.parametrize("dcp_sharded,expected_blocks", [(True, 3), (False, 9)])
+def test_ascend_mla_memory_uses_spec_dcp_layout(dcp_sharded, expected_blocks):
+    spec = replace(_mla_spec(), dcp_sharded=dcp_sharded)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=129),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=4),
+    )
+    assert spec.max_memory_usage_bytes(config) == expected_blocks * spec.page_size_bytes
+
+
+def test_num_states_and_dcp_memory():
     spec = _mla_spec()
-    # On main, storage_block_size is an optional dataclass field and may be
-    # None. Ascend derives physical rows from block_size / compression ratio.
     expected = spec.block_size // get_kv_cache_compression_ratio(spec)
-    assert get_storage_block_size(spec) == expected
+    assert spec.num_states == expected
 
     uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
-    assert get_storage_block_size(uniform) == expected
+    assert uniform.first_spec.num_states == expected
 
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=128),
@@ -80,13 +142,9 @@ def test_get_storage_block_size_and_dcp_memory():
     assert spec.max_memory_usage_bytes(vllm_config) > 0
 
 
-def test_get_storage_block_size_for_plain_mla_subclass():
-    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` in both
-    # supported lanes. A plain MLA subclass (HiddenStateCacheSpec) must
-    # resolve to block_size.
+def test_num_states_for_plain_mla_subclass():
     spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    expected = spec.block_size
-    assert get_storage_block_size(spec) == expected
+    assert spec.num_states == spec.block_size
 
 
 def test_sliding_window_mla_storage_and_page_size():
@@ -97,7 +155,7 @@ def test_sliding_window_mla_storage_and_page_size():
         dtype=torch.bfloat16,
         sliding_window=64,
     )
-    assert spec.storage_block_size == 16
+    assert spec.num_states == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
 
 
@@ -246,11 +304,8 @@ def test_the_swa_spec_accepts_whatever_the_probe_returns():
 # --- which layers may declare a replay window --------------------------------
 
 
-def _vllm_config(
-    *, v2_runner: bool = False, pcp_size: int = 1, dp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)
-):
+def _vllm_config(*, pcp_size: int = 1, dp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)):
     return SimpleNamespace(
-        use_v2_model_runner=v2_runner,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, data_parallel_size=dp_size),
         model_config=SimpleNamespace(architectures=list(architectures)),
     )
@@ -317,32 +372,30 @@ def test_the_upstream_switch_is_all_that_is_left():
 
 def test_the_v2_runner_keeps_supported_replay_enabled():
     """Ascend V2 pads replayed writes in its model-state attention setup."""
-    assert resolve_bounded_replay(_vllm_config(v2_runner=True), _cache_config())
+    assert resolve_bounded_replay(_vllm_config(), _cache_config())
 
 
 def test_the_v2_runner_does_not_warn():
     """V2 has its own slot-padding implementation for supported replay."""
     with patch("vllm.logger.logger.warning_once") as warning:
-        resolve_bounded_replay(_vllm_config(v2_runner=True), _cache_config())
+        resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
 
 
 def test_prefill_context_parallelism_with_prefix_caching_keeps_replay_on():
-    assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=2), _cache_config())
+    assert resolve_bounded_replay(_vllm_config(pcp_size=2), _cache_config())
 
 
 def test_pcp_without_prefix_caching_keeps_replay_on():
     with patch("vllm.logger.logger.warning_once") as warning:
-        assert resolve_bounded_replay(
-            _vllm_config(v2_runner=True, pcp_size=4), _cache_config(enable_prefix_caching=False)
-        )
+        assert resolve_bounded_replay(_vllm_config(pcp_size=4), _cache_config(enable_prefix_caching=False))
     warning.assert_not_called()
 
 
 def test_pcp_with_dp_keeps_replay_on():
     with patch("vllm.logger.logger.warning_once") as warning:
-        assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=4, dp_size=2), _cache_config())
+        assert resolve_bounded_replay(_vllm_config(pcp_size=4, dp_size=2), _cache_config())
 
     warning.assert_not_called()
 
@@ -355,3 +408,32 @@ def test_a_layer_that_may_replay_warns_about_nothing():
         resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
+
+
+# --- HIF8 C8 spec behavior -------------------------------------------------
+#
+# The hif8 flag changes the main cache's payload dtype (bf16 latents become
+# raw uint8 HIF8 bytes) without repacking the pages, so it must participate in
+# every group-geometry decision: a merged group must not alias HIF8 pages with
+# plain bf16 latent pages.
+
+
+def test_hif8_flag_disqualifies_single_raw_backing():
+    plain = _mla_spec()
+    assert plain.supports_single_raw_backing
+
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    assert not hif8.supports_single_raw_backing
+
+
+def test_hif8_and_plain_mla_specs_cannot_share_a_group():
+    plain = _mla_spec()
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([plain, hif8])
+
+
+def test_uniform_hif8_group_merges_with_flag_preserved():
+    specs = [replace(_mla_spec(), cache_sparse_sfa_hif8=True) for _ in range(2)]
+    merged = AscendMLAAttentionSpec.merge(specs)
+    assert merged.cache_sparse_sfa_hif8

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.wna16.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
 
 
@@ -14,10 +14,11 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
     def test_get_weight_static_method(self):
@@ -40,9 +41,11 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
+    @patch("vllm_ascend.quantization.nz.torch_npu")
     @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
-    def test_process_weights_transposes_weights(self, mock_torch_npu):
-        mock_torch_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+    def test_process_weights_transposes_weights(self, mock_torch_npu, mock_nz_npu):
+        # The BF16 recipe performs the cast in the shared nz module.
+        mock_nz_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
         mock_torch_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
 
         layer = nn.Module()
@@ -80,7 +83,6 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = None
         layer.swiglu_alpha = 1.0
         layer.swiglu_beta = 0.0

@@ -1,0 +1,433 @@
+# Migrated from https://github.com/vllm-project/recipes/pull/1170
+# Source head: 57f458067d08c8d86a04131f1c6fe3e47f5db109
+meta:
+  date_updated: 2026-11-26
+  hardware:
+    ascend_950dt: supported
+    ascend_910c: supported
+hardware_notes:
+  ascend_910c:
+    title: W4A8 checkpoint required
+    body: >-
+      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
+      by this Ascend recipe. Other inherited variants may remain visible in the
+      current renderer and are not validated for Ascend.
+  ascend_950dt:
+    title: W4A8 checkpoint required
+    body: >-
+      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
+      by this Ascend recipe. Other inherited variants may remain visible in the
+      current renderer and are not validated for Ascend.
+hardware_opt_in_features:
+  ascend_950dt:
+    - spec_decoding
+  ascend_910c:
+    - spec_decoding
+variants:
+  w4a8_ascend:
+    model_id: Eco-Tech/Kimi-K2.6-w4a8
+    precision: int4
+    label: W4A8 (Ascend)
+    min_vllm_version: 0.30.0
+    vram_minimum_gb: 714
+    description: Ascend W4A8 checkpoint on ModelScope, documented and validated on Atlas 800 A3 (16 x 64 GB NPUs) in the vLLM-Ascend Kimi-K2.6 tutorial. The 714 GB VRAM requirement remains an estimate.
+    supported_hardware:
+      - ascend_950dt
+      - ascend_910c
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    extra_args:
+      - '--quantization'
+      - ascend
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_shm_size: 1g
+        docker_serve_command: vllm serve
+        install:
+          pip:
+            note: >-
+              Source installation for 910C (A3). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: |
+              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+              npu-smi info
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
+
+              sudo apt-get update
+              sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+              python3 -m venv vllm-ascend-env
+              source vllm-ascend-env/bin/activate
+              python -m pip install --upgrade pip
+
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+              cd vllm
+              VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
+              cd ..
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+              cd vllm-ascend
+              git submodule update --init --recursive
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+              cd ..
+
+              pip uninstall -y triton triton-ascend
+              pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+              pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a3==26.9.1"
+              pip check
+              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: vllm serve
+        install:
+          pip:
+            note: >-
+              Source installation for 950DT (A5). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: |
+              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+              npu-smi info
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
+
+              sudo apt-get update
+              sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+              python3 -m venv vllm-ascend-env
+              source vllm-ascend-env/bin/activate
+              python -m pip install --upgrade pip
+
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+              cd vllm
+              VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
+              cd ..
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+              cd vllm-ascend
+              git submodule update --init --recursive
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+              cd ..
+
+              pip uninstall -y triton triton-ascend
+              pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+              pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a5==26.9.1"
+              pip check
+              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+strategy_hardware:
+  pd_cluster:
+    ascend_950dt: unsupported
+  multi_node_tp:
+    ascend_950dt: unsupported
+  multi_node_tp_pp:
+    ascend_950dt: unsupported
+  multi_node_dep:
+    ascend_950dt: unsupported
+  multi_node_tep:
+    ascend_950dt: unsupported
+guide_sections:
+  ascend: |
+    ### Huawei Ascend 910C
+
+    The [official 910C example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
+    uses one Atlas 800 A3 node (16 x 64 GB NPUs) with TP=4, DP=4 and EP.
+    Select **W4A8 (Ascend)** in the builder. Other inherited variants are not
+    validated for Ascend. Download the W4A8 checkpoint and use its local path if needed.
+
+    - **Ports:** the standalone command below serves on 8000; the DEP builder uses
+      service port 8100 behind a router on 8000.
+    - **Spec Decoding:** off by default. On 910C, enabling it selects DFlash;
+      confirm draft compatibility first. On 950DT, the contributor tested Eagle3
+      with one speculative token. Replace the draft placeholder
+      `/path/to/kimi-k2.6-w4a8` with the actual Eagle3 draft directory.
+      The 950DT result does not validate 910C draft compatibility.
+    - **Tuning:** CPU/sysctl tuning and profiling are Guide-only; host tuning
+      requires appropriate permissions. Generated commands were not rerun on NPUs
+      for this update.
+
+    When using the shared Client Usage example, set `model` to
+    `Eco-Tech/Kimi-K2.6-w4a8` to match this recipe's served model name.
+
+    #### Launch command
+
+    ```bash
+    #!/bin/sh
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
+
+    export HCCL_BUFFSIZE=600
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
+        --quantization ascend \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --allowed-local-media-path /data/media \
+        --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+        --trust-remote-code \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 4 \
+        --no-enable-prefix-caching \
+        --enable-expert-parallel \
+        --port 8000 \
+        --max-num-seqs 4 \
+        --max-model-len 15000 \
+        --max-num-batched-tokens 16384 \
+        --gpu-memory-utilization 0.87 \
+        --seed 42 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+    ```
+    #### Ascend PD presets
+
+    On A3 W4A8, the `ascend_pd` preset explicitly enables Ascend Router and
+    Mooncake (Ascend). It offers 1P1D TP8/DP2, one-node internal-DP, and
+    two-node-per-role TP4/DP8 adaptations. See the preset runbook for startup
+    order and validation limits. These are reference designs; the current
+    renderer cannot represent the tutorial's two independent Prefill pools.
+    The proxy listens on 1999, and native multi-port DP uses health port 8290.
+    The container-local shared-memory setting follows the tutorial's 1g;
+    host IPC is not required by that example and is not enabled here.
+
+  huawei_prerequisites: |
+    - **Huawei support:** 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C). Official reference environment: vLLM 0.30.0 and vLLM-Ascend 0.30.0; host Ascend HDK 26.1.1.
+  ascend_references: |
+    - [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
+    - [Eco-Tech Kimi-K2.6-W4A8 on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8)
+    - [vLLM-Ascend Kimi-K2.6 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html)
+
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      ascend_910c:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '4'
+          - '--data-parallel-size'
+          - '4'
+          - '--allowed-local-media-path'
+          - /data/media
+          - '--served-model-name'
+          - Eco-Tech/Kimi-K2.6-w4a8
+          - '--no-enable-prefix-caching'
+          - '--max-num-seqs'
+          - '4'
+          - '--max-model-len'
+          - '15000'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.87'
+          - '--seed'
+          - '42'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--mm-processor-cache-gb'
+          - '0'
+          - '--additional-config'
+          - '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+        extra_env:
+          HCCL_OP_EXPANSION_MODE: AIV
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '600'
+features:
+  spec_decoding:
+    hardware_overrides:
+      ascend_950dt:
+        args:
+          - '--speculative-config'
+          - '{"method":"eagle3","model":"/path/to/kimi-k2.6-w4a8","num_speculative_tokens":1}'
+      ascend_910c:
+        args:
+          - '--speculative-config'
+          - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
+
+# Native external DP replaces the tutorial's launch_online_dp.py process launcher.
+# This preset is restricted to the documented A3 W4A8 checkpoint.
+presets:
+  ascend_pd:
+    label: A3 W4A8 PD (native DP)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [w4a8_ascend]
+    default: true
+    description: >-
+      Tutorial-derived 1P1D TP8/DP2 baseline plus internal-DP and distributed-pool
+      adaptations. Command generation is checked; native DP on Kimi-K2.6 has
+      not been rerun on NPUs. Reference deployment only, not production guidance.
+    source:
+      label: Official Kimi-K2.6 tutorial (Sections 5.2 and 9.1)
+      href: https://github.com/vllm-project/vllm-ascend/blob/8744aa967ceaefcba563b5d27e39c1f6fe882587/docs/source/tutorials/models/Kimi-K2.6.md
+      revision: 8744aa967ceaefcba563b5d27e39c1f6fe882587
+    image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+    router_port: 1999
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        spec_decoding: false
+      kv_offload: off
+    args:
+      - --served-model-name
+      - Eco-Tech/Kimi-K2.6-w4a8
+      - --seed
+      - '1024'
+      - --max-model-len
+      - '17000'
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - '0'
+      - --mm-encoder-tp-mode
+      - data
+      # Distinct from Router 1999 and per-rank HTTP / KV / DP RPC ports.
+      - --data-parallel-supervisor-port
+      - '8290'
+    env:
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+      VLLM_RPC_TIMEOUT: '3600000'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+      HCCL_EXEC_TIMEOUT: '3600'
+      HCCL_CONNECT_TIMEOUT: '120'
+      LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    remove_args: [--data-parallel-hybrid-lb, --all2all-backend, --block-size]
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 8
+        pp: 1
+        data_parallel_lb: external
+        args:
+          - --max-num-seqs
+          - '1'
+          - --max-num-batched-tokens
+          - '16384'
+          - --gpu-memory-utilization
+          - '0.92'
+          - --enforce-eager
+          - --additional-config
+          - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '1536'
+        remove_args: [--speculative-config, --compilation-config]
+        json_args:
+          --kv-transfer-config:
+            MooncakeConnectorV2:
+              kv_connector: MooncakeConnectorV1
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                prefill: {pp_size: null}
+                decode: {pp_size: null}
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 8
+        pp: 1
+        data_parallel_lb: external
+        args:
+          - --max-num-seqs
+          - '8'
+          - --max-num-batched-tokens
+          - '32'
+          - --gpu-memory-utilization
+          - '0.91'
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - --additional-config
+          - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '800'
+        json_args:
+          --kv-transfer-config:
+            MooncakeConnectorV2:
+              kv_connector: MooncakeConnectorV1
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                prefill: {pp_size: null}
+                decode: {pp_size: null}
+          # Only edits an enabled speculative feature; off stays off.
+          --speculative-config:
+            method: eagle3
+            model: lightseekorg/kimi-k2.6-eagle3
+            num_speculative_tokens: 3
+    points:
+      one_p_one_d:
+        label: 1P1D - TP8 / local DP2 per node
+        default: true
+      internal_dp:
+        label: 1P1D - internal DP, one HTTP endpoint per node
+        description: >-
+          One dedicated node per role; native internal load balancing replaces
+          the per-rank HTTP endpoints. This is an unvalidated adaptation.
+        roles:
+          prefill: {data_parallel_lb: internal}
+          decode: {data_parallel_lb: internal}
+      distributed_dp:
+        label: Two-node pools - TP4 / global DP8 per role
+        description: >-
+          Four A3 nodes total: one two-node Prefill pool and one two-node Decode
+          pool, each TP4/local DP4/global DP8. Unlike the tutorial's independent
+          Prefill replicas, all Prefill ranks here join one DP group. This
+          topology adaptation requires separate end-to-end validation.
+        roles:
+          prefill: {nodes: 2, tp: 4, data_parallel_lb: external}
+          decode: {nodes: 2, tp: 4, data_parallel_lb: external}
+    runbook: |
+      ## Scope and prerequisites
+
+      Reference design only. The official tutorial recommends MindIE Motor
+      plus vLLM-Ascend for production. Its 1P1D tuning example uses TP8/DP2 on
+      each 16-NPU A3 node. Native external/internal DP and the distributed-pool
+      point are adaptations, not Kimi-K2.6 runtime-validation claims.
+
+      Use dedicated Prefill and Decode hosts, the W4A8 checkpoint, matching
+      vLLM/vLLM-Ascend 0.30.0 environments, Mooncake and the proxy script from
+      that same runtime. Check `vllm serve --help` for the multi-port and
+      supervisor flags. Configure each node's NIC variables (GLOO_SOCKET_IFNAME,
+      TP_SOCKET_IFNAME and HCCL_SOCKET_IFNAME) for its own interconnect.
+
+      ## Start workers, then the proxy
+
+      1. Fill the generated node addresses and DP RPC / worker ports; use each
+         node's distinct exported command, including start ranks 0 and 4 for
+         the two-node pools. Do not repeat the first node's command everywhere.
+      2. Run the native `vllm serve` commands on every node. No
+         `launch_online_dp.py` or `run_dp_template.sh` is needed. External local
+         DP>1 uses `--data-parallel-multi-port-external-lb`; each local rank
+         listens on base_port + local_rank. Internal DP uses one HTTP endpoint
+         per role and is offered only for the one-node pools.
+      3. Keep supervisor health port 8290 free on each host. Multi-port mode
+         starts it automatically; it is not a model-serving port. Keep it
+         distinct from worker HTTP, DP RPC and KV ports. Dedicated hosts allow
+         the same supervisor port on different nodes.
+      4. Once every worker/rank is healthy, start the generated Ascend Router
+         command. Its preset port is 1999; send client, verification and
+         benchmark requests through that port, not through the supervisor.
+      5. Verify /v1/models and an actual completion through the Router, then
+         confirm Mooncake KV transfer in logs. Repeat for each topology before
+         declaring it verified. No accuracy or performance result is implied.
+
+      Speculative decoding is off by default. If enabled, Prefill remains
+      non-speculative and Decode uses the tutorial's Eagle3 draft with three
+      tokens; download that separate draft checkpoint first. That path also
+      needs a compatible runtime and Kimi-K2.6 validation.

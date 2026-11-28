@@ -2,18 +2,163 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import torch
 from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
+    resolve_sparse_kv_offload_store_url,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+# Captured before any patching: the patched torch.zeros/empty must call the
+# originals, otherwise the wrapper re-enters itself infinitely.
+_original_torch_zeros = torch.zeros
+_original_torch_empty = torch.empty
+
+
+class TestSparseKVOffloadRequestMetadata(unittest.TestCase):
+    def setUp(self):
+        self.identity = RequestIdentityRegistry()
+        self.req_ids = SimpleNamespace(np=np.full(4, 99, dtype=np.int64), copy_to_gpu=MagicMock())
+        self.token_to_req = SimpleNamespace(np=np.full(8, 99, dtype=np.int32), copy_to_gpu=MagicMock())
+
+    def update(self, ids, *, num_reqs=None, is_dummy=False, query_start=None):
+        if num_reqs is None:
+            num_reqs = len(ids)
+        if query_start is None:
+            query_start = np.arange(num_reqs + 1, dtype=np.int32)
+        manager_module.update_sparse_kv_offload_metadata(
+            int(query_start[-1]),
+            num_reqs,
+            8,
+            4,
+            ids,
+            query_start,
+            self.req_ids,
+            self.token_to_req,
+            request_identity=self.identity,
+            is_dummy=is_dummy,
+        )
+
+    def test_colliding_ids_have_distinct_stable_owners_after_batch_reorder(self):
+        ids = ["234054828099429543", "471754017250656876", "304399536143223879"]
+        self.update(ids)
+        owners = dict(zip(ids, self.req_ids.np[:3].tolist()))
+        self.assertEqual(len(set(owners.values())), 3)
+        self.assertTrue(all(owner > 0 for owner in owners.values()))
+        self.update(ids[::-1])
+        self.assertEqual(self.req_ids.np.tolist(), [owners[req_id] for req_id in ids[::-1]] + [0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+        self.assertEqual(self.token_to_req.np.tolist(), [0, 1, 2, 0, 0, 0, 0, 0])
+        self.req_ids.copy_to_gpu.assert_called_with(4)
+        self.token_to_req.copy_to_gpu.assert_called_with(8)
+
+    def test_owner_change_after_finished_request_reuses_the_same_string(self):
+        self.update(["same-id"])
+        old_owner = int(self.req_ids.np[0])
+        self.identity.remove("same-id")
+        self.update(["same-id"])
+        self.assertGreater(int(self.req_ids.np[0]), old_owner)
+
+    def test_dummy_does_not_alias_live_owners_or_consume_real_ids(self):
+        self.update(["live"])
+        owner = int(self.req_ids.np[0])
+        self.update([], num_reqs=2, is_dummy=True)
+        self.assertEqual(self.req_ids.np.tolist(), [-2, -3, 0, 0])
+        self.update(["live", "next"])
+        self.assertEqual(self.req_ids.np.tolist(), [owner, owner + 1, 0, 0])
+
+    def test_invalid_or_incomplete_active_ids_are_rejected_before_copy(self):
+        for ids in ([], ["only-one"], ["valid", None], ["valid", 123]):
+            with self.subTest(ids=ids):
+                with self.assertRaises((ValueError, TypeError, RuntimeError)):
+                    self.update(ids, num_reqs=2)
+                self.req_ids.copy_to_gpu.assert_not_called()
+                self.token_to_req.copy_to_gpu.assert_not_called()
+
+    def test_zero_request_batch_publishes_only_padding(self):
+        self.update([])
+        self.assertEqual(self.req_ids.np.tolist(), [0] * 4)
+        self.assertEqual(self.token_to_req.np.tolist(), [0] * 8)
+
+    def test_int64_owner_is_published_without_uint32_truncation(self):
+        self.identity._next_owner_id = 1 << 32
+        self.update(["large-owner"])
+        self.assertEqual(self.req_ids.np.tolist(), [1 << 32, 0, 0, 0])
+
+    def test_int64_wrap_publishes_valid_owners_and_keeps_target_draft_identity(self):
+        self.update(["retained"])
+        retained_owner = int(self.req_ids.np[0])
+        invalidate = MagicMock()
+        self.identity._on_wrap = invalidate
+        self.identity._next_owner_id = (1 << 63) - 1
+        self.update(["last", "overflow", "retained"])
+        self.assertEqual(self.req_ids.np.tolist(), [(1 << 63) - 1, 2, retained_owner, 0])
+        invalidate.assert_called_once_with()
+        self.update(["retained", "overflow", "last"])
+        self.assertEqual(self.req_ids.np.tolist(), [retained_owner, 2, (1 << 63) - 1, 0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+
+
+class TestSparseKVOffloadOwnerReset(unittest.TestCase):
+    def test_reset_drains_plans_and_invalidates_target_draft_and_fallback_in_place(self):
+        target_owners = manager_module.torch.tensor([1, 2], dtype=manager_module.torch.int64)
+        draft_owners = manager_module.torch.tensor([3, 4], dtype=manager_module.torch.int64)
+        fallback_owners = manager_module.torch.tensor([5, 6], dtype=manager_module.torch.int64)
+        buffers = (target_owners, draft_owners, fallback_owners)
+        pointers = [buffer.data_ptr() for buffer in buffers]
+        manager = SimpleNamespace(
+            lru_last_req_ids_cpu_list=[target_owners, draft_owners],
+            fused_overlap_plan_owner_layer_id=1,
+            fused_overlap_plan_topk=2,
+            fused_overlap_plan_num_tokens=2,
+            fused_overlap_plan_membership_map=object(),
+        )
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context={
+                    "target": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=fallback_owners)),
+                    "draft-unallocated": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=None)),
+                    "other": object(),
+                }
+            )
+        )
+        snapshots = []
+        with (
+            patch.object(manager_module, "get_sparse_kv_offload_manager", return_value=manager),
+            patch.object(
+                manager_module.torch_npu.npu,
+                "synchronize",
+                side_effect=lambda: snapshots.append([buffer.tolist() for buffer in buffers]),
+            ),
+        ):
+            manager_module.reset_sparse_kv_offload_request_owners(config)
+
+        self.assertEqual(snapshots, [[[1, 2], [3, 4], [5, 6]], [[-1, -1], [-1, -1], [-1, -1]]])
+        self.assertEqual([buffer.data_ptr() for buffer in buffers], pointers)
+        self.assertIsNone(manager.fused_overlap_plan_owner_layer_id)
+        self.assertIsNone(manager.fused_overlap_plan_topk)
+        self.assertEqual(manager.fused_overlap_plan_num_tokens, 0)
+        self.assertIsNone(manager.fused_overlap_plan_membership_map)
+
+
+def _unpinned_zeros(*args, **kwargs):
+    kwargs["pin_memory"] = False
+    return _original_torch_zeros(*args, **kwargs)
+
+
+def _unpinned_empty(*args, **kwargs):
+    kwargs["pin_memory"] = False
+    return _original_torch_empty(*args, **kwargs)
 
 
 class _FakeKVCacheSpec:
@@ -248,7 +393,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host-resident"):
             get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
 
-    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1):
+    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1, store_port_base=8500):
         spec = _FakeKVCacheSpec(
             page_size_bytes=1024,
             max_blocks_per_request=100,
@@ -276,20 +421,24 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             use_fused_overlap=False,
             use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
+            store_port_base=store_port_base,
         )
         return vllm_config, kv_cache_config, offload_config
 
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size, dp_index in (
-            (0, planned_pool_size, 0),
-            (1, 0, 0),
-            (0, planned_pool_size, 1),
-            (1, 0, 1),
+        for rank, expected_alloc_size, dp_index, store_port_base in (
+            (0, planned_pool_size, 0, 8500),
+            (1, 0, 0, 8500),
+            (0, planned_pool_size, 1, 8500),
+            (1, 0, 1, 8500),
+            (0, planned_pool_size, 0, 9500),
+            (1, 0, 0, 9500),
         ):
-            with self.subTest(rank=rank, dp_index=dp_index):
+            with self.subTest(rank=rank, dp_index=dp_index, store_port_base=store_port_base):
                 vllm_config.parallel_config.data_parallel_index = dp_index
+                offload_config.store_port_base = store_port_base
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
@@ -355,7 +504,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 self.assertEqual(initialized_config.rank_id, rank)
                 self.assertEqual(
                     initialized_config.store_url,
-                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
+                    f"tcp://127.0.0.1:{offload_config.store_port_base + dp_index}",
                 )
                 tp_group.barrier.assert_called_once_with()
 
@@ -479,3 +628,1079 @@ class TestHostKVRegistration(unittest.TestCase):
                 self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
                 manager._bind_copy_sfa_bases.assert_called_once()
                 manager._init_fused_overlap_planner.assert_not_called()
+
+
+class TestSparseKVOffloadStorePort(unittest.TestCase):
+    def test_default_base_keeps_the_historical_endpoint(self):
+        config = SimpleNamespace(store_port_base=8500)
+
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 3),
+            "tcp://127.0.0.1:8503",
+        )
+
+    def test_independent_services_can_use_distinct_bases(self):
+        service_a = SimpleNamespace(store_port_base=8500)
+        service_b = SimpleNamespace(store_port_base=9500)
+
+        # Two services in the same network namespace may reuse the same DP
+        # index, so the configured base has to keep their endpoints apart.
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_a, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_b, 0),
+            "tcp://127.0.0.1:9500",
+        )
+
+    def test_tp_ranks_of_one_group_share_the_endpoint(self):
+        config = SimpleNamespace(store_port_base=9000)
+
+        # The endpoint only depends on the DP index, so every TP rank of the
+        # same offload group agrees on it.
+        endpoints = {resolve_sparse_kv_offload_store_url(config, 1) for _ in range(4)}
+
+        self.assertEqual(endpoints, {"tcp://127.0.0.1:9001"})
+
+    def test_port_out_of_range_is_rejected(self):
+        config = SimpleNamespace(store_port_base=65535)
+
+        with self.assertRaisesRegex(ValueError, "valid TCP port"):
+            resolve_sparse_kv_offload_store_url(config, 1)
+
+
+class TestDelayedD2HPlanner(unittest.TestCase):
+    @staticmethod
+    def _manager(max_num_reqs: int = 4, ready_margin: int = 0) -> SparseKVOffloadManager:
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.max_num_reqs = max_num_reqs
+        manager.block_size = 128
+        # 0 emulates the no-speculation deployment; tests that exercise the
+        # optimistic-head guard pass an explicit MTP margin instead.
+        manager.d2h_ready_margin = ready_margin
+        manager.topk_buffer_size = 8192
+        manager.tp_size = 1
+        # CPU-only runners cannot pin host memory (torch_npu hooks are not
+        # registered); mirror the runner-owned buffers' UT strategy and force
+        # the staging allocations to plain pageable memory.
+        with (
+            patch.object(torch, "zeros", side_effect=_unpinned_zeros),
+            patch.object(torch, "empty", side_effect=_unpinned_empty),
+        ):
+            manager._allocate_d2h_planner_state()
+        manager.d2h_host_kv_cache_group_id = 0
+        manager.d2h_host_num_blocks = 4096
+        manager.d2h_source_token_capacity = (
+            2 * manager.d2h_capacity * (manager.topk_buffer_size + 2 * manager.block_size)
+        )
+        return manager
+
+    def _manager_with_execution_state(self, tp_size: int = 1, tp_rank: int = 0):
+        calls: list[tuple[str, ...]] = []
+
+        class FakeEvent:
+            def __init__(self, name):
+                self.name = name
+                self.fail_synchronize = False
+
+            def record(self, stream):
+                calls.append(("record", self.name, stream))
+
+            def synchronize(self):
+                calls.append(("synchronize", self.name))
+                if self.fail_synchronize:
+                    raise RuntimeError("event synchronize failed")
+
+        class FakeStream:
+            def __init__(self, name):
+                self.name = name
+
+            def wait_event(self, event):
+                calls.append(("wait", self.name, event.name))
+
+        class FakeStreamContext:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                calls.append(("enter", self.stream.name))
+                return self.stream
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                calls.append(("exit", self.stream.name))
+
+        class FakeRuntime:
+            def __init__(self):
+                self.compute_stream = FakeStream("compute")
+                self.d2h_stream = FakeStream("d2h")
+                self.event_count = 0
+                self.capturing = False
+
+            def Stream(self):
+                return self.d2h_stream
+
+            def Event(self):
+                event = FakeEvent(f"event-{self.event_count}")
+                self.event_count += 1
+                return event
+
+            def current_stream(self):
+                return self.compute_stream
+
+            def is_current_stream_capturing(self):
+                return self.capturing
+
+            def stream(self, stream):
+                return FakeStreamContext(stream)
+
+        manager = self._manager(max_num_reqs=2)
+        manager.tp_rank = tp_rank
+        manager.tp_size = tp_size
+        manager.num_layers = 1
+        manager.token_size_bytes_k = 4
+        manager.token_size_bytes_v = 6
+        manager.addr_k_bases = [1_000]
+        manager.addr_v_bases = [2_000]
+        manager.gvas_k_bases = [100_000]
+        manager.gvas_v_bases = [200_000]
+        manager._allocate_d2h_descriptor_state(torch.device("cpu"))
+        runtime = FakeRuntime()
+        manager._npu_runtime = runtime
+        # The manager resolves torch_npu.npu at call time; tests intercept it
+        # at the module while keeping the instance attribute as a handle for
+        # stream/event assertions.
+        patcher = patch.object(manager_module, "torch_npu", SimpleNamespace(npu=runtime))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        manager._allocate_d2h_execution_state()
+        return manager, calls
+
+    def test_full_block_boundary_freezes_one_plan_without_advancing_prefix(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([10]),
+            np.array([0]),
+        )
+        block_table = np.array([[7, 8]], dtype=np.int32)
+
+        count = manager.plan_d2h_requests(
+            np.array([127]),
+            np.array([0]),
+            np.array([10]),
+            block_table,
+            np.array([True]),
+        )
+        self.assertEqual(count, 0)
+        self.assertFalse(manager.d2h_inflight_batch_active)
+
+        count = manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([10]),
+            block_table,
+            np.array([True]),
+        )
+
+        self.assertEqual(count, 1)
+        self.assertTrue(manager.d2h_inflight_batch_active)
+        self.assertEqual(np.flatnonzero(manager.d2h_inflight_active_cpu).tolist(), [0])
+        self.assertEqual(manager.d2h_inflight_generations_cpu[0], 10)
+        self.assertEqual(manager.d2h_inflight_source_slots_cpu[0], 8192)
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[0], 7)
+        self.assertEqual(manager.d2h_inflight_target_prefixes_cpu[0], 128)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 0)
+
+    def test_cpu_plan_fields_share_one_pinned_host_staging_buffer(self):
+        manager = self._manager()
+
+        manager.d2h_inflight_generations_cpu[1] = 42
+        manager.d2h_inflight_target_prefixes_cpu[1] = 128
+
+        self.assertEqual(manager.d2h_inflight_generations_host[1].item(), 42)
+        self.assertEqual(manager.d2h_inflight_target_prefixes_host[1].item(), 128)
+        plan_storage = manager.d2h_plan_host.untyped_storage().data_ptr()
+        for field in (
+            manager.d2h_inflight_active_host,
+            manager.d2h_inflight_generations_host,
+            manager.d2h_inflight_source_slots_host,
+            manager.d2h_inflight_destination_slots_host,
+            manager.d2h_inflight_target_prefixes_host,
+        ):
+            self.assertEqual(field.untyped_storage().data_ptr(), plan_storage)
+
+    def test_next_full_block_uses_other_tail_page_and_next_host_block(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([2]),
+            np.array([21]),
+            np.array([128]),
+        )
+
+        count = manager.plan_d2h_requests(
+            np.array([256]),
+            np.array([2]),
+            np.array([21]),
+            np.array([[30, 31, 32]], dtype=np.int32),
+            np.array([True]),
+        )
+
+        request_stride = manager.topk_buffer_size + 2 * manager.block_size
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            manager.d2h_inflight_source_slots_cpu[2],
+            2 * request_stride + manager.topk_buffer_size + manager.block_size,
+        )
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[2], 31)
+        self.assertEqual(manager.d2h_inflight_target_prefixes_cpu[2], 256)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[2], 128)
+
+    def test_multiple_ready_requests_share_one_fixed_capacity_batch(self):
+        manager = self._manager(max_num_reqs=3)
+        manager.initialize_d2h_slots(
+            np.array([0, 4]),
+            np.array([5, 9]),
+            np.array([0, 128]),
+        )
+
+        count = manager.plan_d2h_requests(
+            np.array([128, 999, 256]),
+            np.array([0, manager.d2h_capacity + 8, 4]),
+            np.array([5, -1, 9]),
+            np.array([[10, 11], [-1, -1], [20, 21]], dtype=np.int32),
+            np.array([True, False, True]),
+        )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(np.flatnonzero(manager.d2h_inflight_active_cpu).tolist(), [0, 4])
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[[0, 4]].tolist(), [10, 21])
+
+    def test_rejection_corrected_length_is_the_only_boundary_input(self):
+        for corrected_length, expected_count in ((127, 0), (128, 1)):
+            with self.subTest(corrected_length=corrected_length):
+                manager = self._manager()
+                manager.initialize_d2h_slots(
+                    np.array([1]),
+                    np.array([12]),
+                    np.array([0]),
+                )
+                count = manager.plan_d2h_requests(
+                    np.array([corrected_length]),
+                    np.array([1]),
+                    np.array([12]),
+                    np.array([[40]], dtype=np.int32),
+                    np.array([True]),
+                )
+                self.assertEqual(count, expected_count)
+
+    def test_optimistic_head_within_margin_does_not_freeze_plan(self):
+        """An optimistic CPU count crossing the block edge must not copy.
+
+        With MTP the CPU mirror counts draft tokens before rejection, so the
+        planner requires lag >= block_size + margin: the block only becomes
+        eligible once the margin of steady tokens is also committed.
+        """
+        manager = self._manager(ready_margin=3)
+        manager.initialize_d2h_slots(
+            np.array([1]),
+            np.array([12]),
+            np.array([0]),
+        )
+        # Optimistic 130 (127 committed + 3 drafts) still below the widened
+        # 131 bound; a steady 131 freezes the plan.
+        for optimistic_length, expected_count in ((130, 0), (131, 1)):
+            with self.subTest(optimistic_length=optimistic_length):
+                count = manager.plan_d2h_requests(
+                    np.array([optimistic_length]),
+                    np.array([1]),
+                    np.array([12]),
+                    np.array([[40]], dtype=np.int32),
+                    np.array([True]),
+                )
+                self.assertEqual(count, expected_count)
+        self.assertTrue(manager.d2h_inflight_batch_active)
+
+    def test_host_destination_must_be_inside_allocated_block_pool(self):
+        valid_manager = self._manager()
+        valid_manager.d2h_host_num_blocks = 8
+        valid_manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([12]),
+            np.array([0]),
+        )
+        self.assertEqual(
+            valid_manager.plan_d2h_requests(
+                np.array([128]),
+                np.array([0]),
+                np.array([12]),
+                np.array([[7]], dtype=np.int32),
+                np.array([True]),
+            ),
+            1,
+        )
+
+        manager = self._manager()
+        manager.d2h_host_num_blocks = 8
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([12]),
+            np.array([0]),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"host_group=0, host_num_blocks=8.*destination_slot': 8",
+        ):
+            manager.plan_d2h_requests(
+                np.array([128]),
+                np.array([0]),
+                np.array([12]),
+                np.array([[8]], dtype=np.int32),
+                np.array([True]),
+            )
+
+        self.assertFalse(manager.d2h_inflight_batch_active)
+        self.assertFalse(manager.d2h_inflight_active_cpu.any())
+
+    def test_resident_source_must_be_inside_allocated_buffer(self):
+        manager = self._manager()
+        manager.d2h_source_token_capacity = manager.topk_buffer_size + manager.block_size - 1
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([12]),
+            np.array([0]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "resident source block is outside"):
+            manager.plan_d2h_requests(
+                np.array([128]),
+                np.array([0]),
+                np.array([12]),
+                np.array([[7]], dtype=np.int32),
+                np.array([True]),
+            )
+
+        self.assertFalse(manager.d2h_inflight_batch_active)
+        self.assertFalse(manager.d2h_inflight_active_cpu.any())
+
+    def test_generation_mismatch_cannot_plan_for_reused_slot(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            manager.plan_d2h_requests(
+                np.array([128]),
+                np.array([0]),
+                np.array([4]),
+                np.array([[2]], dtype=np.int32),
+                np.array([True]),
+            )
+        self.assertFalse(manager.d2h_inflight_batch_active)
+        self.assertFalse(manager.d2h_inflight_active_cpu.any())
+
+    def test_two_unretired_blocks_are_rejected(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([1]),
+            np.array([0]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "two unretired full blocks"):
+            manager.plan_d2h_requests(
+                np.array([256]),
+                np.array([0]),
+                np.array([1]),
+                np.array([[2, 3]], dtype=np.int32),
+                np.array([True]),
+            )
+
+    def test_inflight_slot_cannot_be_rebound_or_replanned(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([1]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([1]),
+            np.array([[2]], dtype=np.int32),
+            np.array([True]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "cannot be rebound"):
+            manager.initialize_d2h_slots(
+                np.array([0]),
+                np.array([2]),
+                np.array([0]),
+            )
+        with self.assertRaisesRegex(RuntimeError, "retire the current inflight batch"):
+            manager.plan_d2h_requests(
+                np.array([129]),
+                np.array([0]),
+                np.array([1]),
+                np.array([[2]], dtype=np.int32),
+                np.array([True]),
+            )
+
+    def test_request_plan_expands_all_layer_kv_descriptors(self):
+        manager = self._manager(max_num_reqs=2)
+        manager.tp_rank = 0
+        manager.num_layers = 2
+        manager.token_size_bytes_k = 4
+        manager.token_size_bytes_v = 6
+        manager.addr_k_bases = [1_000, 3_000]
+        manager.addr_v_bases = [2_000, 4_000]
+        manager.gvas_k_bases = [100_000, 300_000]
+        manager.gvas_v_bases = [200_000, 400_000]
+        manager._allocate_d2h_descriptor_state(torch.device("cpu"))
+        manager.initialize_d2h_slots(
+            np.array([1]),
+            np.array([9]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([0, 128]),
+            np.array([manager.d2h_capacity + 1, 1]),
+            np.array([-1, 9]),
+            np.array([[-1], [7]], dtype=np.int32),
+            np.array([False, True]),
+        )
+
+        count = manager.prepare_d2h_descriptors()
+
+        request_stride = manager.topk_buffer_size + 2 * manager.block_size
+        source_slot = request_stride + manager.topk_buffer_size
+        self.assertEqual(count, manager.num_layers * 2)
+        self.assertTrue(torch.equal(manager.d2h_plan_npu, manager.d2h_plan_host))
+        self.assertEqual(manager.d2h_plan_generations_npu[1].item(), 9)
+        self.assertEqual(manager.d2h_plan_target_prefixes_npu[1].item(), 128)
+        plan_storage = manager.d2h_plan_npu.untyped_storage().data_ptr()
+        for field in (
+            manager.d2h_plan_active_npu,
+            manager.d2h_plan_generations_npu,
+            manager.d2h_plan_source_slots_npu,
+            manager.d2h_plan_destination_slots_npu,
+            manager.d2h_plan_target_prefixes_npu,
+        ):
+            self.assertEqual(field.untyped_storage().data_ptr(), plan_storage)
+        source_ptrs = manager.d2h_source_ptrs_npu[:count].view(manager.num_layers, 2, 1)
+        destination_ptrs = manager.d2h_destination_ptrs_npu[:count].view(manager.num_layers, 2, 1)
+        lengths = manager.d2h_block_lengths_npu[:count].view(manager.num_layers, 2, 1)
+        self.assertEqual(
+            source_ptrs[:, :, 0].tolist(),
+            [
+                [1_000 + source_slot * 4, 2_000 + source_slot * 6],
+                [3_000 + source_slot * 4, 4_000 + source_slot * 6],
+            ],
+        )
+        self.assertEqual(
+            destination_ptrs[:, :, 0].tolist(),
+            [
+                [100_000 + 7 * 128 * 4, 200_000 + 7 * 128 * 6],
+                [300_000 + 7 * 128 * 4, 400_000 + 7 * 128 * 6],
+            ],
+        )
+        self.assertEqual(
+            lengths[:, :, 0].tolist(),
+            [[128 * 4, 128 * 6], [128 * 4, 128 * 6]],
+        )
+        self.assertTrue(torch.all(lengths > 0))
+
+    def test_descriptor_expansion_requires_tp0_and_an_inflight_batch(self):
+        manager = self._manager()
+        manager.tp_rank = 1
+        with self.assertRaisesRegex(RuntimeError, "Only TP0"):
+            manager.prepare_d2h_descriptors()
+
+        manager.tp_rank = 0
+        with self.assertRaisesRegex(RuntimeError, "no inflight"):
+            manager.prepare_d2h_descriptors()
+
+    def test_source_ready_events_rotate_only_when_recorded(self):
+        manager, calls = self._manager_with_execution_state()
+
+        self.assertTrue(manager.record_d2h_source_ready())
+        self.assertTrue(manager.record_d2h_source_ready())
+
+        self.assertEqual(
+            calls,
+            [
+                ("record", "event-0", manager._npu_runtime.compute_stream),
+                ("record", "event-1", manager._npu_runtime.compute_stream),
+            ],
+        )
+        self.assertEqual(manager.d2h_source_epoch, 2)
+        self.assertEqual(manager.d2h_latest_source_event_slot, 1)
+
+    def test_launch_orders_descriptor_work_before_source_wait_and_copy_after(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+        calls.clear()
+        prepare = manager.prepare_d2h_descriptors
+        manager.prepare_d2h_descriptors = MagicMock(side_effect=lambda: (calls.append(("prepare",)), prepare())[1])
+
+        def sparse_copy(sources, destinations, lengths, count, device):
+            calls.append(
+                (
+                    "sparse_copy",
+                    sources.numel(),
+                    destinations.numel(),
+                    lengths.numel(),
+                    count.item(),
+                    device,
+                )
+            )
+            return 0
+
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=sparse_copy),
+            create=True,
+        ):
+            self.assertTrue(manager.launch_d2h())
+
+        descriptor_count = manager.d2h_descriptor_count
+        self.assertEqual(
+            calls,
+            [
+                ("enter", "d2h"),
+                ("prepare",),
+                ("wait", "d2h", "event-0"),
+                (
+                    "sparse_copy",
+                    descriptor_count,
+                    descriptor_count,
+                    descriptor_count,
+                    descriptor_count,
+                    torch.device("cpu"),
+                ),
+                ("record", "event-2", manager._npu_runtime.d2h_stream),
+                ("exit", "d2h"),
+            ],
+        )
+        self.assertTrue(manager.d2h_inflight_launched)
+        with self.assertRaisesRegex(RuntimeError, "already been launched"):
+            manager.launch_d2h()
+
+    def test_launch_chunks_compact_descriptors(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+
+        copies = []
+
+        def sparse_copy(sources, destinations, lengths, count, device):
+            copies.append((sources.numel(), destinations.numel(), lengths.numel(), count.item(), device))
+            return 0
+
+        with (
+            patch.object(manager_module, "D2H_COPY_CHUNK_SIZE", 1),
+            patch.object(
+                manager_module,
+                "offload",
+                SimpleNamespace(sparse_copy=sparse_copy),
+                create=True,
+            ),
+        ):
+            self.assertTrue(manager.launch_d2h())
+
+        self.assertEqual(
+            copies,
+            [
+                (1, 1, 1, 1, torch.device("cpu")),
+                (1, 1, 1, 1, torch.device("cpu")),
+            ],
+        )
+        self.assertIn(("record", "event-2", manager._npu_runtime.d2h_stream), calls)
+
+    def test_launch_requires_plan_and_source_frontier_and_is_tp0_only(self):
+        manager, calls = self._manager_with_execution_state()
+        self.assertFalse(manager.launch_d2h())
+        self.assertEqual(calls, [])
+
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        with self.assertRaisesRegex(RuntimeError, "no source-ready"):
+            manager.launch_d2h()
+
+        manager.tp_rank = 1
+        self.assertFalse(manager.record_d2h_source_ready())
+        self.assertFalse(manager.launch_d2h())
+        self.assertEqual(calls, [])
+
+    def test_source_record_and_launch_are_forbidden_during_capture(self):
+        manager, _calls = self._manager_with_execution_state()
+        manager._npu_runtime.capturing = True
+        with self.assertRaisesRegex(RuntimeError, "during graph capture"):
+            manager.record_d2h_source_ready()
+
+    def test_local_retire_advances_only_matching_generations_and_reuses_plan(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0, 1]),
+            np.array([3, 4]),
+            np.array([0, 0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128, 128]),
+            np.array([0, 1]),
+            np.array([3, 4]),
+            np.array([[7, 9], [8, 10]], dtype=np.int32),
+            np.array([True, True]),
+        )
+        manager.record_d2h_source_ready()
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=MagicMock(return_value=0)),
+            create=True,
+        ):
+            manager.launch_d2h()
+
+        manager.d2h_owner_generations_cpu[1] = 40
+        manager.d2h_stable_prefixes_cpu[1] = 256
+        calls.clear()
+        self.assertEqual(manager.retire_d2h_local(), 1)
+
+        self.assertEqual(calls, [("synchronize", "event-2")])
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[:2].tolist(), [128, 256])
+        self.assertFalse(manager.d2h_inflight_batch_active)
+        self.assertFalse(manager.d2h_inflight_launched)
+        self.assertFalse(manager.d2h_inflight_active_cpu.any())
+        self.assertTrue(np.all(manager.d2h_inflight_generations_cpu == -1))
+        self.assertEqual(manager.retire_d2h_local(), 0)
+        self.assertEqual(calls, [("synchronize", "event-2")])
+
+        count = manager.plan_d2h_requests(
+            np.array([256]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7, 9]], dtype=np.int32),
+            np.array([True]),
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[0], 9)
+
+    def test_idle_step_replan_on_unchanged_snapshot_skips_retired_block(self):
+        # The step-boundary hook plans even on zero-scheduled-token steps,
+        # where upstream skips prepare_attn and the settled snapshot does
+        # not change. Re-planning from the same unchanged snapshot must not
+        # re-freeze the block the retire just consumed.
+        manager, _calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        block_table = np.array([[7, 9]], dtype=np.int32)
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            block_table,
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=MagicMock(return_value=0)),
+            create=True,
+        ):
+            manager.launch_d2h()
+
+        # Idle step: retire the launched batch, then plan again on the
+        # exact same unchanged snapshot inputs.
+        self.assertEqual(manager.retire_d2h_local(), 1)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 128)
+        count = manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            block_table,
+            np.array([True]),
+        )
+        self.assertEqual(count, 0)
+        self.assertFalse(manager.d2h_inflight_batch_active)
+
+        # The next real frontier plans the next block exactly once.
+        count = manager.plan_d2h_requests(
+            np.array([256]),
+            np.array([0]),
+            np.array([3]),
+            block_table,
+            np.array([True]),
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[0], 9)
+
+    def test_preempted_row_readopts_ledger_at_recomputed_frontier(self):
+        # Preemption resets num_computed_tokens below the row's stable
+        # prefix, which the planner guard rejects. The safe fallback
+        # releases the row and the prepare-side adoption re-initializes it
+        # at the recomputed frontier, after which the planner accepts the
+        # request again.
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([10]),
+            np.array([256]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "stable prefix is ahead"):
+            manager.plan_d2h_requests(
+                np.array([128]),
+                np.array([0]),
+                np.array([10]),
+                np.array([[7, 9]], dtype=np.int32),
+                np.array([True]),
+            )
+
+        manager.release_d2h_slots([0])
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([10]),
+            np.array([128]),
+        )
+        count = manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([10]),
+            np.array([[7, 9]], dtype=np.int32),
+            np.array([True]),
+        )
+        self.assertEqual(count, 0)
+
+        count = manager.plan_d2h_requests(
+            np.array([256]),
+            np.array([0]),
+            np.array([10]),
+            np.array([[7, 9]], dtype=np.int32),
+            np.array([True]),
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(manager.d2h_inflight_destination_slots_cpu[0], 9)
+
+    def test_local_retire_rejects_unlaunched_batch_without_waiting(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unlaunched"):
+            manager.retire_d2h_local()
+        self.assertEqual(calls, [])
+        self.assertTrue(manager.d2h_inflight_batch_active)
+
+    def test_terminal_release_rejects_inflight_then_invalidates_owner(self):
+        manager = self._manager()
+        manager.initialize_d2h_slots(
+            np.array([1]),
+            np.array([7]),
+            np.array([128]),
+        )
+        manager.plan_d2h_requests(
+            np.array([256]),
+            np.array([1]),
+            np.array([7]),
+            np.array([[4, 5]], dtype=np.int32),
+            np.array([True]),
+        )
+
+        self.assertFalse(manager.d2h_slot_releasable(1))
+        with self.assertRaisesRegex(RuntimeError, "cannot be released while inflight"):
+            manager.release_d2h_slots([1])
+
+        manager.d2h_inflight_active_cpu[1] = False
+        manager.d2h_inflight_batch_active = False
+        self.assertTrue(manager.d2h_slot_releasable(1))
+        manager.release_d2h_slots([1])
+        self.assertEqual(manager.d2h_owner_generations_cpu[1], -1)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[1], 0)
+        self.assertEqual(manager.d2h_inflight_generations_cpu[1], -1)
+
+    def test_terminal_release_does_not_mutate_another_active_plan_staging_buffer(self):
+        manager = self._manager(max_num_reqs=2)
+        manager.initialize_d2h_slots(
+            np.array([0, 1]),
+            np.array([5, 7]),
+            np.array([0, 0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128, 0]),
+            np.array([0, 1]),
+            np.array([5, 7]),
+            np.array([[4], [6]], dtype=np.int32),
+            np.array([True, True]),
+        )
+        plan_before_release = manager.d2h_plan_host.clone()
+
+        manager.release_d2h_slots([1])
+
+        torch.testing.assert_close(manager.d2h_plan_host, plan_before_release)
+        self.assertEqual(manager.d2h_owner_generations_cpu[1], -1)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[1], 0)
+
+    def test_completion_wait_failure_keeps_inflight_state_protected(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=MagicMock(return_value=0)),
+            create=True,
+        ):
+            manager.launch_d2h()
+        manager.d2h_complete_event.fail_synchronize = True
+        calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "synchronize failed"):
+            manager.retire_d2h_local()
+
+        self.assertEqual(calls, [("synchronize", "event-2")])
+        self.assertTrue(manager.d2h_inflight_batch_active)
+        self.assertTrue(manager.d2h_inflight_launched)
+        self.assertTrue(manager.d2h_inflight_active_cpu[0])
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 0)
+
+    def test_local_retire_rejects_multi_tp_until_collective_is_added(self):
+        manager, calls = self._manager_with_execution_state()
+        manager.tp_size = 2
+
+        with self.assertRaisesRegex(RuntimeError, "completion collective"):
+            manager.retire_d2h_local()
+        self.assertEqual(calls, [])
+
+    def test_distributed_retire_skips_collective_without_inflight_batch(self):
+        manager, calls = self._manager_with_execution_state(tp_size=2)
+        manager.tp_group = SimpleNamespace(broadcast_object=MagicMock())
+
+        self.assertEqual(manager.retire_d2h(), 0)
+        manager.tp_group.broadcast_object.assert_not_called()
+        self.assertEqual(calls, [])
+
+    def test_distributed_retire_broadcasts_tp0_completion_epoch(self):
+        manager, calls = self._manager_with_execution_state(tp_size=2)
+
+        def broadcast_object(epoch, src):
+            calls.append(("broadcast_object", epoch, src))
+            return epoch
+
+        manager.tp_group = SimpleNamespace(broadcast_object=broadcast_object)
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=MagicMock(return_value=0)),
+            create=True,
+        ):
+            manager.launch_d2h()
+        calls.clear()
+
+        self.assertEqual(manager.retire_d2h(), 1)
+
+        self.assertEqual(
+            calls,
+            [
+                ("synchronize", "event-2"),
+                ("broadcast_object", 0, 0),
+            ],
+        )
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 128)
+        self.assertEqual(manager.d2h_inflight_batch_epoch, -1)
+
+    def test_non_tp0_retires_only_after_receiving_matching_epoch(self):
+        manager, calls = self._manager_with_execution_state(tp_size=2, tp_rank=1)
+
+        def broadcast_object(epoch, src):
+            calls.append(("broadcast_object", epoch, src))
+            return 0
+
+        manager.tp_group = SimpleNamespace(broadcast_object=broadcast_object)
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        self.assertFalse(manager.launch_d2h())
+        calls.clear()
+
+        self.assertEqual(manager.retire_d2h(), 1)
+
+        self.assertEqual(
+            calls,
+            [
+                ("broadcast_object", None, 0),
+            ],
+        )
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 128)
+
+    def test_completion_epoch_mismatch_keeps_inflight_state(self):
+        manager, _calls = self._manager_with_execution_state(tp_size=2, tp_rank=1)
+
+        def broadcast_object(epoch, src):
+            return 9
+
+        manager.tp_group = SimpleNamespace(broadcast_object=broadcast_object)
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.launch_d2h()
+
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            manager.retire_d2h()
+
+        self.assertTrue(manager.d2h_inflight_batch_active)
+        self.assertTrue(manager.d2h_inflight_launched)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 0)
+
+    def test_tp0_completion_failure_is_broadcast_without_consuming_plan(self):
+        manager, calls = self._manager_with_execution_state(tp_size=2)
+
+        def broadcast_object(epoch, src):
+            calls.append(("broadcast_object", epoch, src))
+            return epoch
+
+        manager.tp_group = SimpleNamespace(broadcast_object=broadcast_object)
+        manager.initialize_d2h_slots(
+            np.array([0]),
+            np.array([3]),
+            np.array([0]),
+        )
+        manager.plan_d2h_requests(
+            np.array([128]),
+            np.array([0]),
+            np.array([3]),
+            np.array([[7]], dtype=np.int32),
+            np.array([True]),
+        )
+        manager.record_d2h_source_ready()
+        with patch.object(
+            manager_module,
+            "offload",
+            SimpleNamespace(sparse_copy=MagicMock(return_value=0)),
+            create=True,
+        ):
+            manager.launch_d2h()
+        manager.d2h_complete_event.fail_synchronize = True
+        calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "TP0 failed"):
+            manager.retire_d2h()
+
+        self.assertIn(("broadcast_object", -2, 0), calls)
+        self.assertTrue(manager.d2h_inflight_batch_active)
+        self.assertTrue(manager.d2h_inflight_launched)
+        self.assertEqual(manager.d2h_stable_prefixes_cpu[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+    def test_layer_role_api_separates_host_and_resident_layers(self):
+        manager = self._manager()
+        manager.layer_name_to_offload_id = {"model.layers.0.self_attn.attn": 0}
+        manager.resident_layer_names = {"model.layers.78.self_attn.attn"}
+
+        self.assertTrue(manager.is_host_offloaded("model.layers.0.self_attn.attn"))
+        self.assertFalse(manager.is_resident_draft("model.layers.0.self_attn.attn"))
+        self.assertTrue(manager.is_resident_draft("model.layers.78.self_attn.attn"))
+        self.assertFalse(manager.is_host_offloaded("model.layers.78.self_attn.attn"))
+        # Unknown layers are neither role.
+        self.assertFalse(manager.is_host_offloaded("model.layers.99.self_attn.attn"))
+        self.assertFalse(manager.is_resident_draft("model.layers.99.self_attn.attn"))

@@ -1,0 +1,10 @@
+pr: 22919
+entries:
+  - category: feature
+    text: >
+      Maintainers with write permission or above can now waive files from the
+      CODEOWNERS approval gate with a `/ignore-owner [path ...]` PR comment (a
+      bare `/ignore-owner` waives the whole PR; `/ignore-owner-clear` revokes).
+      The waiver is validated by CI on every run, applies for the lifetime of
+      the PR, and each waived file stays visible in the gate log and comment.
+      The CODEOWNERS coverage health check is not affected.

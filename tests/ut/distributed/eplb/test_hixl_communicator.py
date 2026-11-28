@@ -73,7 +73,7 @@ class _Engine:
         self.pending.remove(request)
         return 0, 1
 
-    def disconnect(self, _remote_engine):
+    def disconnect(self, _remote_engine, _timeout_in_millis=1000):
         return 0
 
     def deregister_mem(self, handle):
@@ -718,7 +718,7 @@ def test_model_manifest_and_metadata_mismatch_rolls_back_before_registration(mon
     assert session._engine is None
 
 
-@pytest.mark.parametrize("mismatch", ["group", "device"])
+@pytest.mark.parametrize("mismatch", [pytest.param("group", id="cpu_group"), "device"])
 def test_models_cannot_share_a_session_across_groups_or_devices(monkeypatch, mismatch):
     session, models, engine = _shared_models(monkeypatch)
     if mismatch == "group":

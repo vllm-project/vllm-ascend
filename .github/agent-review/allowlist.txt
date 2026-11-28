@@ -1,0 +1,19 @@
+# AI review POC operator allowlist (RFC #21451)
+#
+# List one GitHub username per line. Listed operators can start a review
+# with the `ai-review` label and use /ai-review, /ai-review-waive and
+# /ai-review-stop on enabled pull requests.
+#
+# To join the POC as an operator: ask in RFC #21451 or ping a maintainer.
+# To shrink/roll back the POC: remove lines here — no code change needed.
+#
+# Maintainers: keep this list small (3–5) during the POC.
+wxsIcey
+ShyRa1n
+kunpengW-code
+drslark
+lcfenglinwan
+wangxiyuan
+zhangxinyuehfad
+MrZ20
+liqian79

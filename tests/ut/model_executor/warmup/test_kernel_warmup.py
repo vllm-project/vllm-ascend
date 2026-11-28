@@ -1,16 +1,25 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for ``kernel_warmup`` orchestration."""
 
+import ast
 import importlib
+import inspect
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
 from tests.ut.model_executor.warmup.helpers import (
-    make_mock_spec_config,
     make_mock_vllm_config,
     make_registry,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.triton import rms_norm
+from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_warmup
+from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 
 # The package __init__ re-exports the function of the same name, so resolve
 # the module explicitly.
@@ -49,6 +58,33 @@ def test_skips_when_jit_warmup_disabled():
     registry.warmup = MagicMock()
     kw.kernel_warmup(worker)
     registry.warmup.assert_not_called()
+
+
+@patch.object(kw, "HAS_TRITON", True)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_indexer_cache_registration_precedes_compilation(enabled):
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.ops.triton import indexer_quant_cache_int8 as int8_ops
+
+    worker, registry = _make_worker(enable_jit_warmup=enabled)
+    indexer = MagicMock(spec=AscendSFAIndexerBackend)
+    indexer.register_k_cache_warmup.side_effect = lambda: int8_ops._INDEXER_QUANT_CACHE_INT8_KERNEL.register_warmup(
+        num_slots=1024,
+        page_size=128,
+        key_page_stride=16384,
+        scale_page_stride=128,
+    )
+    worker.vllm_config.compilation_config.static_forward_context = {
+        "attention": SimpleNamespace(impl=SimpleNamespace(indexer=indexer)),
+        "unrelated": SimpleNamespace(),
+    }
+    registry.warmup = MagicMock(
+        side_effect=lambda: int8_ops._INDEXER_QUANT_CACHE_INT8_KERNEL in registry._registrations or pytest.fail()
+    )
+    with patch.object(kw, "_register_dspark_swa_indices_warmup", return_value=0):
+        kw.kernel_warmup(worker)
+    assert indexer.register_k_cache_warmup.call_count == int(enabled)
+    assert registry.warmup.call_count == int(enabled)
 
 
 @patch.object(kw, "HAS_TRITON", True)
@@ -149,29 +185,240 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     super_init.assert_called_once()
 
 
-@patch.object(kw, "HAS_TRITON", True)
-def test_register_v1_sampling_warmup_registers_four_kernel_families():
-    from tests.ut.model_executor.warmup.helpers import make_mock_ascend_config
-    from vllm_ascend.ops.triton.v1 import bincount, penalty, reject_sample
+@pytest.fixture(autouse=True)
+def dcp_kernel_signatures(monkeypatch):
+    # The no-Triton shim returns plain functions; emulate only JIT signature metadata.
+    for owner in dcp_warmup._DCP_KERNELS:
+        if not hasattr(owner.kernel, "arg_names"):
+            monkeypatch.setattr(
+                owner.kernel, "arg_names", list(inspect.signature(owner.kernel).parameters), raising=False
+            )
 
-    spec = make_mock_spec_config(num_speculative_tokens=3)
-    config = make_mock_vllm_config(speculative_config=spec)
-    registry = make_registry(config)
 
+def _register_dcp_warmup(**kwargs):
+    registry = make_registry()
     with (
-        patch.object(penalty, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bincount, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(reject_sample, "get_vectorcore_num", return_value=4),
-        patch(
-            "vllm_ascend.ascend_config.get_ascend_config",
-            return_value=make_mock_ascend_config(),
-        ),
-        patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=1),
+        registry.activate(),
+        patch.object(dcp_warmup, "init_device_properties_triton"),
+        patch.object(dcp_warmup, "get_vectorcore_num", return_value=24),
     ):
-        kw.register_v1_sampling_warmup(config)
-        assert len(registry) == 0  # outside a window: no-op
+        dcp_warmup.register_dcp_warmup(**kwargs)
+    return registry
 
+
+def _dcp_warmup_keys(registry):
+    return {
+        owner: {key for args, kwargs in registrations for key in owner.get_warmup_keys(*args, **kwargs)}
+        for owner, registrations in registry._registrations.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "device_type,dtype,route,expected_mode",
+    [
+        (AscendDeviceType.A3, torch.bfloat16, "head_scatter", 0),
+        (AscendDeviceType.A5, torch.bfloat16, "head_scatter", 1),
+        (AscendDeviceType.A5, torch.float16, "", None),
+        (AscendDeviceType.A3, torch.bfloat16, "rank_tiled_static", None),
+        (AscendDeviceType.A5, torch.bfloat16, "rank_tiled", None),
+    ],
+)
+@pytest.mark.parametrize("tokens", [1, 33])
+def test_runtime_combine_matches_registered_warmup(device_type, dtype, route, expected_mode, tokens, monkeypatch):
+    monkeypatch.setattr(dcp_a2a, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    heads, dim, scatter_size, pcp_size = 12, 512, 4, 2
+    ranks = scatter_size * pcp_size
+    registry = _register_dcp_warmup(
+        dtype=dtype,
+        local_heads=heads,
+        head_dim=dim,
+        scatter_size=scatter_size,
+        pcp_size=pcp_size,
+        max_tokens=33,
+        from_stats=False,
+        mla=True,
+        decode_buckets=[tokens],
+    )
+    recv = dcp_warmup._Tensor(dtype, shape=(ranks, heads, tokens, dim + 4))
+    output = dcp_warmup._Tensor(dtype, shape=(tokens, heads, dim))
+    local, lse = (
+        dcp_warmup._output_and_lse(dtype, tokens, heads, dim, "token_major")
+        if route.startswith("rank_tiled")
+        else (None, None)
+    )
+    launch = MagicMock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, local, lse, 24, launch)
+    launch.assert_called_once()
+    kernel, grid, *args = launch.call_args.args
+    suffix = f"_{route}" if route else ""
+    assert kernel is getattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel")
+    assert launch.call_args.kwargs.get("MODE") == expected_mode
+    registered = _dcp_warmup_keys(registry)
+    owner = next(owner for owner in registered if owner.kernel is kernel)
+    assert owner.key_from_launch(*args, **launch.call_args.kwargs) in registered[owner]
+
+
+@pytest.mark.parametrize(
+    "dtype,local_heads,head_dim,scatter_size,pcp_size,from_stats,mla,max_tokens",
+    [
+        (torch.bfloat16, 8, 512, 8, 1, True, False, 4097),
+        (torch.bfloat16, 12, 512, 8, 1, True, False, 257),
+        (torch.bfloat16, 8, 256, 4, 2, True, False, 257),
+        (torch.float16, 8, 256, 4, 1, True, False, 257),
+        (torch.float32, 8, 256, 4, 1, False, True, 257),
+        (torch.bfloat16, 8, 512, 8, 1, False, True, 4097),
+        (torch.bfloat16, 128, 512, 2, 1, True, False, 33),
+        (torch.bfloat16, 1, 2, 2, 1, False, False, 33),
+    ],
+)
+def test_finite_warmup_covers_every_token_count(
+    dtype, local_heads, head_dim, scatter_size, pcp_size, from_stats, mla, max_tokens
+):
+    # Exhaustive token enumeration belongs in the test, never startup. This
+    # exercises non-capture sizes, threshold neighbours, scalar residues,
+    # native T1, full/tiled pack, all stats tiles and MLA's local contribution.
+    registry = _register_dcp_warmup(
+        dtype=dtype,
+        local_heads=local_heads,
+        head_dim=head_dim,
+        scatter_size=scatter_size,
+        pcp_size=pcp_size,
+        max_tokens=max_tokens,
+        from_stats=from_stats,
+        mla=mla,
+    )
+    registered = _dcp_warmup_keys(registry)
+    owners = {owner.kernel: owner for owner in dcp_warmup._DCP_KERNELS}
+    exhaustive = defaultdict(set)
+
+    def record(kernel, grid, *args, **kwargs):
+        owner = owners[kernel]
+        key = owner.key_from_launch(*args, **kwargs)
+        assert key in registered[owner]
+        exhaustive[owner].add(key)
+
+    layouts = ("token_major", "head_major_lse", "head_major") if mla else ("token_major",)
+    for tokens in range(1, max_tokens + 1):
+        for layout in layouts:
+            dcp_warmup._record_dcp_layout(
+                dtype, tokens, local_heads, head_dim, scatter_size, pcp_size, from_stats, mla, layout, 24, record
+            )
+    assert dict(exhaustive) == registered
+
+
+def test_registration_is_scoped_deduplicated_and_allocates_nothing():
+    kwargs = dict(
+        dtype=torch.bfloat16,
+        local_heads=8,
+        head_dim=512,
+        scatter_size=8,
+        pcp_size=1,
+        max_tokens=4097,
+        from_stats=False,
+        mla=True,
+    )
+    registry = make_registry()
+    with (
+        patch.object(dcp_warmup, "init_device_properties_triton"),
+        patch.object(dcp_warmup, "get_vectorcore_num", return_value=24),
+        patch.object(torch, "empty", side_effect=AssertionError("warmup must not allocate payloads")),
+        patch.object(torch.distributed, "all_to_all_single", side_effect=AssertionError("warmup must not communicate")),
+    ):
+        dcp_warmup.register_dcp_warmup(**kwargs)
+        assert len(registry) == 0
         with registry.activate():
-            kw.register_v1_sampling_warmup(config)
-    # penalties + bincount + prepare_inputs + six rejection wrappers.
-    assert len(registry) == 9
+            dcp_warmup.register_dcp_warmup(**kwargs)
+            dcp_warmup.register_dcp_warmup(**kwargs)
+    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS} - {
+        dcp_a2a._fused_dcp_lse_combine_kernel,
+        dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel,
+        dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel,
+    }
+    assert {owner.kernel for owner in registry._registrations} == expected
+    assert all(len(registrations) == 1 for registrations in registry._registrations.values())
+    for original, keys in _dcp_warmup_keys(registry).items():
+        kernel = MagicMock()
+        kernel.arg_names = original.kernel.arg_names
+        owner = DcpJitKernel(kernel, original.dynamic_scalars)
+        with patch.object(torch, "empty", side_effect=AssertionError("compile must remain metadata-only")):
+            for key in keys:
+                owner.compile(key)
+        assert kernel.warmup.call_count == len(keys)
+        kernel.__getitem__.assert_not_called()
+        assert all(call.kwargs["grid"] == (1,) for call in kernel.warmup.call_args_list)
+
+
+def test_merge_rank_stride_is_runtime_and_offset_alignment_is_covered():
+    registry = _register_dcp_warmup(
+        dtype=torch.bfloat16,
+        local_heads=1,
+        head_dim=2,
+        scatter_size=2,
+        pcp_size=1,
+        max_tokens=33,
+        from_stats=True,
+    )
+    owner = next(owner for owner in registry._registrations if owner.kernel is dcp_warmup._fused_merge_kernel)
+    inputs = [dict(key.inputs) for key in _dcp_warmup_keys(registry)[owner]]
+    assert {case["lse_ptr"].aligned for case in inputs} == {False, True}
+    assert {case["lse_stride_rank"] for case in inputs} == {2}
+    assert {case["NATIVE_LAYOUT"] for case in inputs} == {False, True}
+    # The no-Triton shim drops JIT metadata; inspect the actual declaration.
+    kernel = dcp_warmup._fused_merge_kernel
+    source = ast.parse(inspect.getsource(getattr(kernel, "fn", kernel)))
+    function = source.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    jit = function.decorator_list[0]
+    assert isinstance(jit, ast.Call)
+    do_not_specialize = next(ast.literal_eval(kw.value) for kw in jit.keywords if kw.arg == "do_not_specialize")
+    assert "lse_stride_rank" in do_not_specialize
+
+
+@pytest.mark.parametrize("a3", [False, True])
+def test_dcp_target_and_draft_owners_register_before_compilation(a3):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+    from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+
+    worker, registry = _make_worker()
+    target = object.__new__(AscendSFADCPImpl)
+    draft = object.__new__(AscendMlaDCPImpl)
+    for impl, dtype in ((target, torch.bfloat16), (draft, torch.float16)):
+        impl.vllm_config = make_mock_vllm_config(dtype=dtype)
+        impl.dcp_size = 8
+        impl.pcp_group = SimpleNamespace(world_size=2)
+        impl.tp_group = SimpleNamespace(world_size=4)
+        impl.local_num_heads = impl.num_heads = 12
+        impl.kv_lora_rank = 512
+    target.enable_sparse_sfa_turboquant = False
+    draft.use_a3_mla_sink = a3
+    worker.vllm_config.compilation_config.static_forward_context = {
+        "target": SimpleNamespace(impl=target),
+        "same_target_layout": SimpleNamespace(impl=target),
+        "draft": SimpleNamespace(impl=draft),
+        "other": SimpleNamespace(impl=object()),
+    }
+    registered = []
+
+    def register(**kwargs):
+        registered.append(kwargs)
+        dcp_warmup._DCP_KERNELS[0].register_warmup(())
+
+    registry.warmup = MagicMock(side_effect=lambda: len(registered) == 2 or pytest.fail())
+    with (
+        patch.object(kw, "HAS_TRITON", True),
+        patch.object(kw, "_register_dspark_swa_indices_warmup", return_value=0),
+        patch.object(dcp_warmup, "register_dcp_warmup", side_effect=register),
+    ):
+        kw.kernel_warmup(worker)
+    assert len(registered) == 2
+    registry.warmup.assert_called_once()
+    assert [(case["dtype"], case["mla"], case["from_stats"]) for case in registered] == [
+        (torch.bfloat16, False, True),
+        (torch.float16, True, False),
+    ]
+    assert all(case["scatter_size"] == 4 and case["pcp_size"] == 2 for case in registered)
+    assert [case["masked_output"] for case in registered] == [False, a3]

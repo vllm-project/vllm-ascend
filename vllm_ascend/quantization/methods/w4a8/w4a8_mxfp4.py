@@ -23,14 +23,18 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,  # noqa: F401
+    EplbExpertTensorList,
+)
+from vllm_ascend.quantization.nz import NzCastSpec, fp4_packed_nz, fp4_semantic_nz
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
@@ -38,6 +42,7 @@ from ..base import (
     PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
+    require_mx_weight_format,
 )
 from ..registry import register_scheme
 
@@ -48,6 +53,11 @@ SITU_MX_DST_TYPE_E4M3FN = 36
 @register_scheme("W4A8_MXFP", "linear")
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
+
+    # Declares the full scheme so consumers (e.g. the MegaMoe shared-expert
+    # weight collection) can tell this linear method apart from the W4A4MXFP
+    # one, whose packed weight bytes are indistinguishable.
+    quant_type: QuantType = QuantType.W4A8MXFP
 
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
@@ -60,6 +70,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     supports_weight_switch = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -132,12 +143,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
-        layer.weight.data = torch_npu.npu_format_cast(
-            layer.weight.data,
-            ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
+        layer.weight.data = fp4_packed_nz().cast(layer.weight.data)
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         n, k = layer.weight_scale.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
@@ -168,13 +174,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     fused_activations = frozenset({"silu", "situ"})
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
-        )
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
 
     @staticmethod
     def get_weight(
@@ -219,7 +222,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -238,7 +240,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if self.use_expert_weight_list:
             if _EXTRA_CTX.use_mega_moe:
-                w1 = layer.w13_weight_list
+                # SiTU keeps semantic FP4 on w13; MegaMoe needs packed bytes.
+                # The views preserve EPLB updates. w2 is already packed uint8.
+                w1 = [weight.view(torch.uint8) for weight in layer.w13_weight_list]
                 w2 = layer.w2_weight_list
                 # Reinterpret checkpoint bytes without copying: EPLB updates
                 # the same scale storage that MegaMoe consumes.
@@ -246,6 +250,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None) if _EXTRA_CTX.use_mega_moe else None
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=w1,
                 w2=w2,
@@ -253,6 +259,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=layer.w13_weight,
@@ -264,11 +274,22 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     @staticmethod
-    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+    def _is_situ(layer: torch.nn.Module) -> bool:
+        return getattr(layer, "activation", None) in (MoEActivation.SITU, "situ")
+
+    @classmethod
+    def _w13_cast_spec(cls, layer: torch.nn.Module) -> NzCastSpec:
+        # SiTU needs the semantic FP4 dtype; ordinary GMM takes torch_npu's.
+        return fp4_semantic_nz() if cls._is_situ(layer) else fp4_packed_nz()
+
+    @classmethod
+    def get_eplb_weight_views(cls, layer: torch.nn.Module) -> list:
         if hasattr(layer, "w13_weight_list"):
+            # The expert weights are cast with parameters, so EPLB cannot
+            # rebuild them without the same cast. The scales stay ND.
             return [
-                layer.w13_weight_list,
-                layer.w2_weight_list,
+                EplbExpertTensorList(layer.w13_weight_list, cls._w13_cast_spec(layer)),
+                EplbExpertTensorList(layer.w2_weight_list, fp4_packed_nz()),
                 layer.w13_weight_scale_list,
                 layer.w2_weight_scale_list,
             ]
@@ -301,14 +322,22 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2)
         g, n, k = layer.w2_weight_scale.shape
+        if k % 2 != 0:
+            # A TP shard can leave intermediate_size_per_partition // group_size odd
+            # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+            # The runtime consumes scale groups in pairs, so append one zero group;
+            # the weight columns it would correspond to are already out of range.
+            layer.w2_weight_scale.data = torch.nn.functional.pad(
+                layer.w2_weight_scale.data, (0, 1), mode="constant", value=0
+            )
+            k += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
-            is_situ = getattr(layer, "activation", None) in (
-                MoEActivation.SITU,
-                "situ",
-            )
-            w13_input_dtype = torch.float4_e2m1fn_x2 if is_situ else torch_npu.float4_e2m1fn_x2
+            is_situ = self._is_situ(layer)
+            # One definition behind both the cast and what get_eplb_weight_views
+            # reports, so the two cannot drift apart.
+            w13_cast_spec = self._w13_cast_spec(layer)
 
             layer.w13_weight_list = []
             for weight in layer.w13_weight.data.unbind(dim=0):
@@ -319,22 +348,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 if is_situ:
                     expert_weight = expert_weight.view(torch.float4_e2m1fn_x2)
 
-                layer.w13_weight_list.append(
-                    torch_npu.npu_format_cast(
-                        expert_weight,
-                        ACL_FORMAT_FRACTAL_NZ,
-                        customize_dtype=torch.float8_e4m3fn,
-                        input_dtype=w13_input_dtype,
-                    )
-                )
+                layer.w13_weight_list.append(w13_cast_spec.cast(expert_weight))
             layer.w2_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                for weight in layer.w2_weight.data.unbind(dim=0)
+                fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data.unbind(dim=0)
             ]
             # GMM-SiTU consumes contiguous N-major expert lists. Ordinary GMM
             # gets zero-copy transposed views from _get_mlp_weights.
@@ -350,23 +366,11 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # Non-mega path (npu_grouped_matmul): format-cast to FRACTAL_NZ and
             # transpose to (in, out) so the packed FP4 K is interpreted correctly.
             w13 = layer.w13_weight.data
-            w13_input_dtype = torch_npu.float4_e2m1fn_x2
-            if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
+            if self._is_situ(layer):
                 # The native GMSQ schema requires FP4 semantic dtype metadata.
                 w13 = w13.view(torch.float4_e2m1fn_x2)
-                w13_input_dtype = torch.float4_e2m1fn_x2
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                w13,
-                ACL_FORMAT_FRACTAL_NZ,
-                customize_dtype=torch.float8_e4m3fn,
-                input_dtype=w13_input_dtype,
-            )
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data,
-                ACL_FORMAT_FRACTAL_NZ,
-                customize_dtype=torch.float8_e4m3fn,
-                input_dtype=torch_npu.float4_e2m1fn_x2,
-            )
+            layer.w13_weight.data = self._w13_cast_spec(layer).cast(w13)
+            layer.w2_weight.data = fp4_packed_nz().cast(layer.w2_weight.data)
             layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
             layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
             layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2)
@@ -393,9 +397,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
             orig_shapes["w13_weight_scale"]
         )
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(-3, -2).reshape(
-            orig_shapes["w2_weight_scale"]
-        )
+        orig_w2_scale_shape = orig_shapes["w2_weight_scale"]
+        w2_scale = layer.w2_weight_scale.data.transpose(-3, -2).reshape(*orig_w2_scale_shape[:-1], -1)
+        # process_weights_after_loading may have appended one zero scale group to
+        # reach an even count (see the k % 2 != 0 branch above); drop it here so
+        # the reloaded weight matches the checkpoint's real, possibly-odd shape.
+        layer.w2_weight_scale.data = w2_scale[..., : orig_w2_scale_shape[-1]].contiguous()
         layer._mxfp4_transformed = False
 
     def _get_mlp_weights(self, layer):

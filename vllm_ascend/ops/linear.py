@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
+[Role] Ascend linear weight preparation and parallel-layer integration.
+[Invariants] Finalize logical weight layout before applying private NZ storage.
+[Timeouts & Locks] No independent waits or locks; caller owns model loading.
+[Side-Effect Policy] Update layer weights during loading, never in forward.
+
 To customize linear communication groups or forward of classes in this file,
 extend new linear operations in linear_op.py.
 The classes in this file should not be modified, including AscendQKVParallelLinear,
@@ -42,7 +47,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
+from vllm_ascend.utils import is_internal_npu_format, maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -106,6 +111,15 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        # TransposeBatchMatMulWeightNz consumes the same logical 3D layout as
+        # its ND variant. Finish the reshape before creating private storage;
+        # a subsequent contiguous() would otherwise materialize ND again.
+        # This also covers dummy loading, where weight_loader never runs.
+        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            )
+
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
@@ -115,24 +129,13 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # keep the captured graph's weight reference to the updated weight
             # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
             # and keeps the parameter object by default.
-            if vllm_version_is("0.32.0"):
-                replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
-            else:
-                replace_parameter(layer, "weight_fp32", new_fp32)
+            replace_parameter(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
-
-        # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
-        # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
-        # applies to load-format=dummy too, where weight_loader never runs.
-        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
 
     def apply(
         self,
@@ -241,6 +244,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,
@@ -276,16 +281,22 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        padding_size: int = 0,
     ):
+        if vllm_version_is("0.34.0") and padding_size:
+            raise ValueError("Merged-linear output padding requires the verified vLLM main revision")
+        # #66784's inherited weight loaders read this even without padding.
+        self.padding_size = padding_size
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
-        self.output_sizes = output_sizes
-        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        self.output_sizes = output_sizes + [padding_size * self.tp_size] if padding_size else output_sizes
+        self.shard_ids = tuple(range(len(output_sizes)))
+        assert all(output_size % self.tp_size == 0 for output_size in self.output_sizes)
         AscendColumnParallelLinear.__init__(
             self,
             input_size=input_size,
-            output_size=sum(output_sizes),
+            output_size=sum(self.output_sizes),
             bias=bias,
             gather_output=gather_output,
             skip_bias_add=skip_bias_add,
@@ -295,6 +306,14 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
+        # #66784's pad-fill helpers only exist on the verified main revision.
+        if not vllm_version_is("0.34.0"):
+            for name in self.padding_fill_params():
+                param = getattr(self, name)
+                self._zero_output_padding(param)
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
     def forward(
         self,
@@ -393,6 +412,58 @@ class AscendRowParallelLinear(RowParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
+
+    def try_forward_into(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        """Try to write a plain BF16 projection into a separate output buffer.
+
+        Return False without writing if the caller needs the regular forward path.
+        The caller selects a supported hardware path and supplies an output
+        buffer that does not alias x or weight.
+        """
+        if (
+            type(self) is not AscendRowParallelLinear
+            or type(self.quant_method) is not AscendUnquantizedLinearMethod
+            or self.custom_op is not None
+            or not self.input_is_parallel
+            or (self.reduce_results and self.tp_size > 1)
+            or self.bias is not None
+            or not self.return_bias
+            or self.out_dtype is not None
+        ):
+            return False
+
+        # Direct dispatch bypasses the ordinary module call.
+        module = nn.modules.module
+        if (
+            self._forward_hooks
+            or self._forward_pre_hooks
+            or module._global_forward_hooks
+            or module._global_forward_pre_hooks
+            or "forward" in vars(self)
+            or "apply" in vars(self.quant_method)
+            or self._compiled_call_impl is not None
+            or torch.is_grad_enabled()
+            or torch.is_autocast_enabled("npu")
+        ):
+            return False
+
+        weight = self.weight
+        if not (
+            x.device.type == "npu"
+            and x.device == weight.device == out.device
+            and x.dtype == weight.dtype == out.dtype == torch.bfloat16
+            and x.ndim == weight.ndim == out.ndim == 2
+            and x.shape[1] == weight.shape[1]
+            and out.shape == (x.shape[0], weight.shape[0])
+            and x.is_contiguous()
+            and weight.is_contiguous()
+            and out.is_contiguous()
+            and not is_internal_npu_format(out)
+        ):
+            return False
+
+        torch.matmul(x, weight.t(), out=out)
+        return True
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):

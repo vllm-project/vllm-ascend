@@ -22,7 +22,6 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -42,6 +41,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.dcp_size = 1
     # Dump contract from the production initializer; helpers no-op on None.
     runner.debugger = None
     runner._debugger_started = False
@@ -58,7 +58,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
         dummy_sampler_run=lambda *args, **kwargs: False,
     )
     runner.kvpp = MagicMock()
-    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace())
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
     runner.sampler = create_autospec(Sampler, instance=True)
@@ -224,11 +224,6 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.32.0"):
-        # 0.32.0 exposes the permissive-row mask as the fourth sampler argument;
-        # main feeds it through the scheduler/draft-token handler instead.
-        invalid_drafts = runner.rejection_sampler.call_args.args[3]
-        assert invalid_drafts.tolist() == [False, False, True]
 
 
 @pytest.mark.parametrize(
@@ -290,12 +285,10 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     execute_model_state (as the real forward does) for the hook to read."""
 
     def super_execute(scheduler_output, **kwargs):
-        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states, dp_sync=None, dp_sync_state=None)
         return "upstream-output"
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
-        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
@@ -383,18 +376,18 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
 @pytest.mark.parametrize(
     "draft_method, bypass, argmax, adaptive, match",
     [
-        ("probabilistic", False, False, False, "probabilistic"),
+        ("probabilistic", False, False, False, None),
         ("greedy", False, False, False, None),  # default stays supported
-        ("greedy", True, False, False, "sample_draft"),  # DSpark/DFlash2 style
+        ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
-        ("greedy", False, False, True, "enable_adaptive_verification"),
+        ("greedy", False, False, True, None),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine (probabilistic gumbel buffers, paths
-    that bypass sample_draft, local argmax under pure DP, adaptive
-    verification's row-count-indexed estimator buffers)."""
+    sampling step in a running engine. Probabilistic sampling and adaptive
+    verification are supported; bypassing paths and local argmax retain their
+    independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass
@@ -409,13 +402,15 @@ def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match
 
 
 def test_production_speculators_carry_lmhead_sampling_mixin():
-    """Every family must keep the mixin (a re-parent silently drops the row
-    alignment and hangs the collectives); bypassing families must keep their
-    opt-out flag (upstream keeps adding them: DSpark, DFlash2)."""
+    """Keep row-alignment support on each family and LiLiCorr opted out.
+
+    DFlash2 aligns candidates itself; LiLiCorr still bypasses that path.
+    """
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
     from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
     from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+    from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import AscendLiLiCorrSpeculator
     from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
     for cls in (
@@ -424,7 +419,49 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
         AscendDFlash2Speculator,
+        AscendLiLiCorrSpeculator,
     ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
-    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is True
+    assert AscendLiLiCorrSpeculator._lmhead_tp_sample_draft_supported is False
+
+
+def test_active_finegrained_tp_check_precedes_input_preparation():
+    runner = _make_runner()
+    runner._finegrained_tp_requires_graph = True
+    descriptor = SimpleNamespace(cg_mode=CUDAGraphMode.NONE)
+    with pytest.raises(RuntimeError, match="captured graph"):
+        runner._prepare_inputs_impl(None, None, descriptor)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("runtime_idle", [False, True])
+@pytest.mark.parametrize("requires_graph", [False, True])
+@pytest.mark.parametrize("embedding_tp_size", [1, 2])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_idle_graph_contract_at_real_model_state_entry(
+    monkeypatch, hybrid, runtime_idle, requires_graph, embedding_tp_size, mode
+):
+    from vllm_ascend.ascend_config import FinegrainedTPConfig
+    from vllm_ascend.worker.v2.attn_utils import skip_ring_state_update
+    from vllm_ascend.worker.v2.model_states import default, mamba_hybrid
+
+    state_cls = mamba_hybrid.AscendMambaHybridModelState if hybrid else default.AscendModelState
+    state = object.__new__(state_cls)
+    state.vllm_config = SimpleNamespace(model_config=None)
+    config = SimpleNamespace(
+        finegrained_tp_config=FinegrainedTPConfig(
+            embedding_tensor_parallel_size=embedding_tp_size,
+            shared_expert_tensor_parallel_size=2 if requires_graph else 1,
+        )
+    )
+    monkeypatch.setattr(default, "get_ascend_config", lambda: config)
+    rejects = runtime_idle and requires_graph and mode == CUDAGraphMode.NONE
+    # DBO rejection is the first existing operation after the graph check.
+    # Reaching it proves warmup/profile and graph steps passed the new check.
+    expected = (
+        pytest.raises(RuntimeError, match="captured graph") if rejects else pytest.raises(AssertionError, match="DBO")
+    )
+    with skip_ring_state_update(runtime_idle), expected:
+        state.prepare_attn(None, mode, (), None, [], None, ubatch_idx=1)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -21,6 +22,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKV
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
 
 
+def test_transfer_max_workers() -> None:
+    options: dict[str, int] = {}
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
+    assert MooncakeBaseConnectorWorker._get_transfer_max_workers(config) == 32
+    options["transfer_max_workers"] = 64
+    assert MooncakeBaseConnectorWorker._get_transfer_max_workers(config) == 64
+    for value in (0, True):
+        options["transfer_max_workers"] = value
+        with pytest.raises(ValueError, match="transfer_max_workers must be a positive integer"):
+            MooncakeBaseConnectorWorker._get_transfer_max_workers(config)
+
+
 @pytest.mark.parametrize(
     ("pcp_rank", "tp_rank", "target_index"),
     [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)],
@@ -33,6 +46,7 @@ def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, pcp_rank, tp_rank, tar
     caches = {name: torch.zeros((2, 16, 1, 8), dtype=torch.float16) for name in names}
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
+    worker.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=4))
     worker.pcp_rank, worker.pcp_size = pcp_rank, 2
     worker.tp_rank, worker.tp_size = tp_rank, 2
@@ -103,6 +117,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -152,6 +167,35 @@ def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, erro
         MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=heads), cache)
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (4, 2, 8, 512, 32),  # C8-MXFP K/V PA_NZ cache
+        (4, 2, 32, 8, 16, 1),  # C8-MXFP K-scale cache
+        (4, 2, 8, 16, 32, 1),  # C8-MXFP V-scale cache
+    ],
+)
+def test_transfer_block_shape_preserves_packed_head_major_gqa(shape) -> None:
+    cache = torch.empty(shape, dtype=torch.uint8)
+
+    assert MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache) == tuple(
+        shape[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    ("shape", "step", "error"),
+    [
+        ((4, 1, 8, 512, 32), 1, "does not match"),
+        ((4, 2, 8, 512, 32), 2, "contiguous bytes"),
+    ],
+)
+def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(shape, step, error) -> None:
+    cache = torch.empty(shape, dtype=torch.uint8)[..., ::step]
+    with pytest.raises(ValueError, match=error):
+        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache)
+
+
 @pytest.mark.parametrize("spare", [0, 64, 256])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
@@ -190,6 +234,7 @@ def test_register_kv_caches_merges_only_full_pages(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -250,19 +295,22 @@ def test_shared_page_handles_mixed_dtype_views() -> None:
     assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
 
 
-def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
-    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
-    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
-    slot_elems = 128 * 576
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block_scale", [1, 12])
+@pytest.mark.parametrize("padding", [0, 32])
+def test_register_kv_caches_publishes_component_major_mla_views(monkeypatch, dtype, block_scale, padding) -> None:
+    spec = MLAAttentionSpec(block_size=128 * block_scale, num_kv_heads=1, head_size=576, dtype=dtype)
+    slot_elems = 128 * 576 + padding
+    raw_cache = torch.empty(4 * block_scale * slot_elems, dtype=dtype)
     nope_cache = torch.as_strided(
         raw_cache,
-        size=(4, 128, 1, 512),
+        size=(4 * block_scale, 128, 1, 512),
         stride=(slot_elems, 512, 512, 1),
         storage_offset=0,
     )
     rope_cache = torch.as_strided(
         raw_cache,
-        size=(4, 128, 1, 64),
+        size=(4 * block_scale, 128, 1, 64),
         stride=(slot_elems, 64, 64, 1),
         storage_offset=128 * 512,
     )
@@ -279,12 +327,13 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
-    worker.block_size = 128
+    worker.block_size = 128 * block_scale
     worker.side_channel_host = "10.0.0.1"
     worker.handshake_port = 5000
     transfer_engine = MagicMock()
@@ -295,11 +344,23 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
-    assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
-    assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
-    assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
-    assert metadata.block_shapes == [[(slot_elems,)]]
-    assert metadata.block_size_scales == [[1]]
+    element_size = raw_cache.element_size()
+    if padding:
+        # Hybrid page padding is not part of either tensor. Publish separate
+        # component ranges with the physical stride, never a truncated page.
+        assert metadata.kv_caches_base_addr == [[nope_cache.data_ptr(), rope_cache.data_ptr()]]
+        assert metadata.block_strides == [[slot_elems * element_size] * 2]
+        assert metadata.block_lens == [[128 * 512 * element_size, 128 * 64 * element_size]]
+        assert metadata.block_shapes == [[(128, 1, 512), (128, 1, 64)]]
+        assert metadata.block_size_scales == [[block_scale, block_scale]]
+    else:
+        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+        assert metadata.block_strides == [[slot_elems * element_size]]
+        assert metadata.block_lens == [[slot_elems * element_size]]
+        assert metadata.block_shapes == [[(slot_elems,)]]
+        assert metadata.block_size_scales == [[block_scale]]
+    assert metadata.indexer_replication_sizes == [0]
+    assert metadata.cp_kv_cache_interleave_size == 16
 
 
 def test_component_major_mla_binding_rejects_token_interleaved_parent() -> None:
@@ -341,6 +402,7 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -365,9 +427,156 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
+    assert metadata.indexer_replication_sizes == [replication_size]
     assert metadata.layer_block_sizes == [16 * replication_size]
     assert metadata.block_size_scales == [[replication_size]]
     assert metadata.layer_block_sizes[0] // metadata.block_size_scales[0][0] == spec.block_size
+
+
+@pytest.fixture(params=[False, True], ids=["single-tensor", "kv-pair"])
+def sharing_registration(monkeypatch, request):
+    spec = make_full_spec()
+    caches = {}
+    for name in ("layer.1", "layer.3"):
+        k_cache = torch.zeros((4, 1, 16, 8), dtype=torch.float16)
+        caches[name] = [k_cache, torch.zeros_like(k_cache)] if request.param else k_cache
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layer.4": SimpleNamespace(kv_sharing_target_layer_name="layer.1"),
+                "layer.5": SimpleNamespace(kv_sharing_target_layer_name="layer.3"),
+                # A declaration on another PP stage does not require a local binding.
+                "layer.9": SimpleNamespace(kv_sharing_target_layer_name="layer.8"),
+            }
+        ),
+    )
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=sum(cache.nbytes for cache in base_worker.as_kv_cache_tensors(binding)),
+                layers=[name],
+                layer_stride=sum(cache.nbytes for cache in base_worker.as_kv_cache_tensors(binding)),
+                block_stride=spec.page_size_bytes,
+            )
+            for name, binding in caches.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=list(caches), kv_cache_spec=spec)],
+    )
+    worker.engine_id, worker.te_rpc_port = "engine", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 16, "127.0.0.1", 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+    return worker, caches, transfer_engine
+
+
+@pytest.mark.parametrize("new_views", [False, True])
+def test_register_kv_sharing_keeps_owner_metadata_and_registration(sharing_registration, new_views):
+    worker, caches, transfer_engine = sharing_registration
+    worker.register_kv_caches(caches)
+    owner_metadata = worker.transfer_metadata
+    owner_registration = transfer_engine.register_buffer.call_args
+    transfer_engine.reset_mock()
+
+    def borrow(binding):
+        if not new_views:
+            return binding
+        if isinstance(binding, torch.Tensor):
+            return binding.view_as(binding)
+        return tuple(cache.view_as(cache) for cache in binding)
+
+    # Borrowers can precede owners in the runner's dictionary.
+    shared_caches = {"layer.5": borrow(caches["layer.3"]), "layer.4": borrow(caches["layer.1"]), **caches}
+    worker.register_kv_caches(shared_caches)
+
+    assert worker.kv_caches is shared_caches
+    assert worker.transfer_metadata.layer_names == ["layer.1", "layer.3"]
+    assert worker.transfer_metadata == owner_metadata
+    transfer_engine.register_buffer.assert_called_once()
+    assert transfer_engine.register_buffer.call_args == owner_registration
+
+
+def test_owner_descriptor_copy_is_visible_through_borrower(sharing_registration):
+    worker, caches, _ = sharing_registration
+    caches["layer.4"] = caches["layer.1"]
+    worker.register_kv_caches(caches)
+    source_block = torch.full((1, 16, 8), 7, dtype=torch.float16)
+    metadata = worker.transfer_metadata
+
+    # Emulate a transfer engine writing the published owner's first block.
+    # No independent descriptor or second copy is needed for the borrower.
+    assert "layer.4" not in metadata.layer_names
+    for address, length in zip(metadata.kv_caches_base_addr[0], metadata.block_lens[0]):
+        ctypes.memmove(address, source_block.data_ptr(), length)
+    for cache in base_worker.as_kv_cache_tensors(caches["layer.4"]):
+        torch.testing.assert_close(cache[0], source_block)
+        assert torch.count_nonzero(cache[1:]) == 0
+
+
+@pytest.mark.parametrize("target", [None, "missing", "layer.4", "layer.5"])
+def test_register_kv_sharing_rejects_invalid_declarations(sharing_registration, target):
+    worker, caches, transfer_engine = sharing_registration
+    context = worker.vllm_config.compilation_config.static_forward_context
+    context["layer.4"].kv_sharing_target_layer_name = target
+    caches["layer.4"] = caches["layer.1"]
+
+    with pytest.raises(ValueError, match="absent from kv_cache_tensors|must target a configured owner"):
+        worker.register_kv_caches(caches)
+    transfer_engine.register_buffer.assert_not_called()
+    assert not hasattr(worker, "transfer_metadata")
+
+
+@pytest.mark.parametrize("binding", ["copy", "other-owner", "shape", "stride", "dtype", "offset", "count", "empty"])
+def test_register_kv_sharing_rejects_different_bindings(sharing_registration, binding):
+    worker, caches, transfer_engine = sharing_registration
+    owner_tensors = base_worker.as_kv_cache_tensors(caches["layer.1"])
+    if binding == "copy":
+        borrower = [cache.clone() for cache in owner_tensors]
+    elif binding == "other-owner":
+        borrower = caches["layer.3"]
+    elif binding == "shape":
+        borrower = [cache.view(4, 1, 8, 16) for cache in owner_tensors]
+    elif binding == "stride":
+        borrower = [cache.as_strided(cache.shape, (1, 512, 32, 4)) for cache in owner_tensors]
+    elif binding == "dtype":
+        borrower = [cache.view(torch.int16) for cache in owner_tensors]
+    elif binding == "offset":
+        borrower = [cache[1:] for cache in owner_tensors]
+    elif binding == "count":
+        borrower = list(owner_tensors) + [owner_tensors[0]]
+    else:
+        borrower = []
+    caches["layer.4"] = borrower
+
+    with pytest.raises(ValueError, match="must bind to the same cache"):
+        worker.register_kv_caches(caches)
+    transfer_engine.register_buffer.assert_not_called()
+
+
+def test_register_kv_sharing_rejects_missing_owner(sharing_registration):
+    worker, caches, transfer_engine = sharing_registration
+    caches["layer.4"] = caches.pop("layer.1")
+
+    with pytest.raises(ValueError, match="No KV cache was registered for configured layer 'layer.1'"):
+        worker.register_kv_caches(caches)
+    transfer_engine.register_buffer.assert_not_called()
+
+
+def test_register_kv_sharing_rejects_kvpp_before_mapping(sharing_registration, monkeypatch):
+    worker, caches, transfer_engine = sharing_registration
+    worker.ascend_config.kvpp_config.size = 2
+    caches["layer.4"] = caches["layer.1"]
+    map_owners = MagicMock()
+    monkeypatch.setattr(base_worker, "map_kvpp_layers_to_owners", map_owners)
+
+    with pytest.raises(ValueError, match="does not support KV sharing with KV parallelism"):
+        worker.register_kv_caches(caches)
+    map_owners.assert_not_called()
+    transfer_engine.register_buffer.assert_not_called()
 
 
 def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
@@ -385,6 +594,10 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config

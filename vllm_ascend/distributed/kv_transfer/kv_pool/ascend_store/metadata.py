@@ -4,15 +4,21 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import compress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import torch
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -20,8 +26,8 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
 
 
-def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
-    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
+    return kv_role in ("kv_producer", "kv_both") or save_decode_cache
 
 
 @dataclass(frozen=True)
@@ -277,6 +283,24 @@ def infer_group_block_sizes(
     return block_sizes
 
 
+def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[int]:
+    """Return IDs of Mamba cache groups whose states are not TP-replicated."""
+    if kv_cache_config is None:
+        return set()
+    group_ids: set[int] = set()
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            if not isinstance(spec, MambaSpec):
+                continue
+            tp_replicated = getattr(spec, "tp_replicated", False)
+            if not tp_replicated:
+                group_ids.add(group_id)
+    return group_ids
+
+
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
     if not kv_cache_groups:
         return [0]
@@ -302,6 +326,16 @@ def infer_cache_transfer_granularity(
     for group_id in kv_cache_group_ids:
         granularities.append(get_group_block_size(group_block_sizes, group_id))
     return math.lcm(*granularities)
+
+
+def get_engine_transfer_config(vllm_config, kv_cache_config):
+    # MultiConnector replaces the child's transfer config, not the engine's.
+    # The planner retains it; worker RPCs use Core's current-config context.
+    resolved = getattr(kv_cache_config, "kv_transfer_config", None)
+    if resolved is not None:
+        return resolved
+    current = get_current_vllm_config_or_none()
+    return (current if current is not None else vllm_config).kv_transfer_config
 
 
 class ChunkedTokenDatabase:
@@ -445,6 +479,10 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
+    def project_group_ids(self, group_ids: list[int]) -> list[int]:
+        """Project global cache-group IDs onto locally registered regions."""
+        return [group_id for group_id in group_ids if self.group_block_len.get(group_id)]
+
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int] | None]:
@@ -550,6 +588,7 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -558,10 +597,13 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
-        grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
-        if not grouped_hashes:
-            return
-        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
+        partial = bool(self.cache_coordinator is not None and self.cache_coordinator.enable_partial_hash_hits)
+        num_logical_blocks = cdiv(token_len, logical_block_size) if token_len > 0 else 0
+        if not partial:
+            grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
+            if not grouped_hashes:
+                return
+            num_logical_blocks = min(len(grouped_hashes), num_logical_blocks)
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
         chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
@@ -595,7 +637,19 @@ class ChunkedTokenDatabase:
             candidate_index += 1
             if not shard_allows:
                 continue
-            yield start_idx, end_idx, grouped_hashes[chunk_id], block_id
+            if partial:
+                boundary = tail_key_boundary if end_idx == token_len and tail_key_boundary is not None else end_idx
+                hash_index = boundary // self.hash_block_size - 1
+                if hash_index < 0 or hash_index >= len(block_hashes):
+                    raise ValueError("Missing committed hash for a Store chunk")
+                chunk_hash = block_hashes[hash_index]
+            else:
+                chunk_hash = grouped_hashes[chunk_id]
+            # Partial-hit keys name a recoverable hash boundary, but their
+            # values contain the whole physical page (or Mamba checkpoint).
+            if partial:
+                end_idx = start_idx + logical_block_size
+            yield start_idx, end_idx, chunk_hash, block_id
 
     def process_tokens(
         self,
@@ -659,6 +713,7 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -673,6 +728,7 @@ class ChunkedTokenDatabase:
             shard_rank=shard_rank,
             shard_size=shard_size,
             chunk_mask=chunk_mask,
+            tail_key_boundary=tail_key_boundary,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
@@ -764,6 +820,31 @@ def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     return bytes(block_hash)
 
 
+class TailKeyBoundary(NamedTuple):
+    """Hash key of a group's final restored page, independent of hit length.
+
+    Group arbitration can shorten a hit inside a page whose stored key names
+    a later hash boundary. This selects that value; it does not extend the hit.
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class StoreLookupResult:
+    hit_length: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
+class BoundaryPut(NamedTuple):
+    """Core-owned state snapshot or attention proof for an exact prefix key."""
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 # Parameters related to the connector metadata
 @dataclass
 class LoadSpec:
@@ -778,21 +859,37 @@ class LoadSpec:
 
     token_len: int = 0
 
-    # Exact request-scoped snapshot identity, separate from the logical length
-    # which can roll back after speculative-token rejection.
-    layerwise_snapshot_end_token: int | None = None
-    layerwise_snapshot_block_index: int | None = None
     # Distinguish the preceding step of this request from external prefix hits.
     layerwise_previous_step: bool = False
-    # First block stored under request-scoped keys, including unhashed full blocks.
-    layerwise_snapshot_start_block: int | None = None
+    # Append protocol extensions to preserve legacy positional construction.
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+    @property
+    def pool_hit_tokens(self) -> int:
+        """External pool coverage in tokens.
+
+        Prefers the raw store-skip hit when the store reported one, else the
+        cached hit length. Load-range planning and save-range clamping share
+        this resolution; policies that must ignore the raw hit (eagle drafts,
+        hybrid groups that are not all cacheable) keep guards at call sites.
+        """
+        return self.kvpool_store_skip_tokens if self.kvpool_store_skip_tokens is not None else self.kvpool_cached_tokens
+
+    def clamp_save_start(self, start_block: int, block_size: int) -> int:
+        """Clamp ``start_block`` up past blocks the pool hit already covers.
+
+        No-op unless the hit is loadable (``can_load``): an unloadable hit
+        never trims the save range.
+        """
+        if not self.can_load:
+            return start_block
+        return max(start_block, self.pool_hit_tokens // block_size)
 
 
 @dataclass(init=False)
 class RequestTracker:
     # Request id
     req_id: str
-
     token_len: int
 
     # The block ids that has been allocated so far, grouped by KV cache group.
@@ -818,15 +915,11 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    # Identity of the latest request-scoped layerwise partial snapshot.
-    last_layerwise_snapshot_end_token: int | None = None
-    last_layerwise_snapshot_block_index: int | None = None
-    last_layerwise_snapshot_start_block: int | None = None
-
     # Number of speculative scratch blocks for each Mamba cache group.
-    num_speculative_blocks_by_group: dict[int, int] | None = None
+    num_mamba_speculative_blocks_by_group: dict[int, int] | None = None
 
     block_sizes: list[int] | None = None
+    partial_tail_sent: bool = False
 
     def __init__(
         self,
@@ -842,15 +935,13 @@ class RequestTracker:
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        num_speculative_blocks_by_group: dict[int, int] | None = None,
+        num_mamba_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
-        last_layerwise_snapshot_end_token: int | None = None,
-        last_layerwise_snapshot_block_index: int | None = None,
-        last_layerwise_snapshot_start_block: int | None = None,
+        partial_tail_sent: bool = False,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
-        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
+        self.num_mamba_speculative_blocks_by_group = num_mamba_speculative_blocks_by_group
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -864,9 +955,7 @@ class RequestTracker:
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
-        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
-        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
-        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
+        self.partial_tail_sent = partial_tail_sent
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -901,8 +990,9 @@ class RequestTracker:
         we also need to update the previous allocated_block_ids to 0.
         """
         if (
-            self.num_speculative_blocks_by_group is not None
-            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
+            self.num_mamba_speculative_blocks_by_group is not None
+            and (num_speculative_blocks := self.num_mamba_speculative_blocks_by_group.get(kv_cache_group_id))
+            is not None
         ):
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
@@ -938,6 +1028,9 @@ class ReqMeta:
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
+    # Tokens computed before this step of an uninterrupted running request.
+    computed_prefix_tokens: int = 0
+
     can_save: bool | None = None
     # load_spec
     load_spec: LoadSpec | None = None
@@ -960,6 +1053,9 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    boundary_puts: list[BoundaryPut] | None = None
+    completed_token_len: int | None = None
+    publish_partial_tail: bool = False
 
     def __init__(
         self,
@@ -1001,6 +1097,10 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        boundary_puts: list[BoundaryPut] | None = None,
+        completed_token_len: int | None = None,
+        publish_partial_tail: bool = False,
+        computed_prefix_tokens: int = 0,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1009,6 +1109,7 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
+        self.computed_prefix_tokens = computed_prefix_tokens
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group
@@ -1024,6 +1125,9 @@ class ReqMeta:
         self.original_block_size = original_block_size
         self.event_id = event_id
         self.store_job_id = store_job_id
+        self.boundary_puts = boundary_puts
+        self.completed_token_len = completed_token_len
+        self.publish_partial_tail = publish_partial_tail
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1104,6 +1208,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        enable_partial_hash_hits: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1116,12 +1221,12 @@ class ReqMeta:
         # 2. number of unsaved tokens is not reached the chunk boundary
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
-            if discard_partial_chunks
+            if discard_partial_chunks or enable_partial_hash_hits
             else 0
         )
         num_tokens_to_save = (
             (target_token_len // cache_transfer_granularity * cache_transfer_granularity)
-            if discard_partial_chunks
+            if discard_partial_chunks or enable_partial_hash_hits
             else target_token_len
         )
         hash_block_size = hash_block_size or cache_transfer_granularity
@@ -1152,8 +1257,18 @@ class ReqMeta:
         should_save_partial_block = save_partial_block and (
             target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
+        prefill_end = tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len
+        publish_partial_tail = (
+            enable_partial_hash_hits
+            and not skip_save
+            and not tracker.partial_tail_sent
+            and target_token_len >= prefill_end
+        )
         skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
+            num_tokens_to_save < chunk_boundary
+            and partial_block_index is None
+            and not should_save_partial_block
+            and not publish_partial_tail
         )
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up
@@ -1165,20 +1280,12 @@ class ReqMeta:
             return None
 
         if not skip_save:
+            if publish_partial_tail:
+                tracker.partial_tail_sent = True
             tracker.num_saved_tokens = max(
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
-            if should_save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = target_token_len
-                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
-                tracker.last_layerwise_snapshot_block_index = (
-                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-                )
-            elif save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = None
-                tracker.last_layerwise_snapshot_block_index = None
-                tracker.last_layerwise_snapshot_start_block = None
 
         token_ids = None
         if tracker.token_ids and not skip_save:
@@ -1226,6 +1333,8 @@ class ReqMeta:
             else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
+            publish_partial_tail=publish_partial_tail and not skip_save,
+            completed_token_len=target_token_len,
         )
 
 
@@ -1234,10 +1343,13 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self,
         preempted_req_ids,
         loading_req_ids: set[str] | None = None,
+        *,
+        cancelled_load_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        self.cancelled_load_req_ids = cancelled_load_req_ids if cancelled_load_req_ids is not None else set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""

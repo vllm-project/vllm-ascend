@@ -9,6 +9,10 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
+!!! warning "GQA DCP Support Removed"
+
+    Decode Context Parallelism (DCP) for GQA models has been removed. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }
@@ -22,6 +26,8 @@ PCP support is experimental. The following table shows the basic backend support
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA/KPool (GLM-5.3-Flash) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (MTP) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA (Kimi-K3.1-Pro) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
@@ -34,10 +40,10 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | Speculative Decoding + DCP | PCP + DCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Ascend A2/A3 | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| Ascend A2/A3 | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
+| Ascend A2/A3 | GQA | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported |
 | Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 | 950PR&950DT Products | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| 950PR&950DT Products | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
+| 950PR&950DT Products | GQA | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported |
 | 950PR&950DT Products | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
@@ -58,6 +64,17 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+With `--data-parallel-multi-port-external-lb`, each local data-parallel rank gets
+`TP × PP × PCP` devices. If you pass `--device-ids`, list the devices for all
+local ranks in the order you want them assigned.
+
+For supported models, decode requests are sharded when
+`--prefill-context-parallel-size` is greater than 1 and
+`--decode-context-parallel-size` is 1. Each decode request in a batch is
+assigned to one PCP rank in round-robin order, including during speculative
+target verification. When `--decode-context-parallel-size` is greater than 1,
+decode requests remain replicated across PCP ranks.
+
 When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
 
 With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
@@ -68,7 +85,10 @@ PCP supports MTP with MLA, SFA, and DeepSeek-V4 DSA models, Eagle3 with
 GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models. The target
 model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
-model.
+model. DFlash and DFlash2 also use a replicated draft with logical PCP size `1`.
+DFlash2 candidate selection merges the target LM head's vocabulary shards across
+both PCP and TP before computing the global candidate TopK.
+For replicated DFlash/DFlash2 with `TP=1` and `DP=1`, keep EPLB disabled.
 
 For general speculative decoding configuration and model requirements, see [Speculative Decoding](speculative_decoding.md).
 
@@ -107,10 +127,11 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
-  Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
+  Eagle3 with GQA models, DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models,
+  and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
-- PCP and DCP can be stacked for MLA, SFA, and GQA. See
+- PCP and DCP can be stacked for MLA and SFA. GQA does not support DCP. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
@@ -137,16 +158,15 @@ Standalone DCP reuses only the TP ranks and does not increase the world size.
     - `tensor_parallel_size % decode_context_parallel_size == 0`
 - For a sparse SFA model with DCP enabled (`decode_context_parallel_size>1`):
     - `decode_context_parallel_size == tensor_parallel_size`
-- For a GQA model such as Qwen3-235B:
-    - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
-    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
+- For GQA/MQA models:
+    - Decode Context Parallelism (DCP) is not supported. GQA/MQA models must keep `decode_context_parallel_size=1`.
 
 #### Combining PCP and DCP { #combining-pcp-and-dcp }
 
 When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode_context_parallel_size>1`), their supported sizes depend on the attention backend. The standalone DCP constraints above do not apply to this topology. Here, `PCP_SIZE` is `prefill_context_parallel_size`, `DCP_SIZE` is `decode_context_parallel_size`, and `TP_SIZE` is `tensor_parallel_size`:
 
 - **MLA and SFA**: Support `DCP_SIZE = PCP_SIZE` and `DCP_SIZE = PCP_SIZE * TP_SIZE`.
-- **GQA**: Supports only `DCP_SIZE = PCP_SIZE`. When `TP_SIZE > 1`, `DCP_SIZE = PCP_SIZE * TP_SIZE` is not supported.
+- **GQA**: Decode Context Parallelism (DCP) is not supported for GQA models.
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
 
@@ -163,5 +183,7 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
+
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. GQA/MQA models do not support DCP. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

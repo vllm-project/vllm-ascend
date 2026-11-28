@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -36,6 +37,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalPageMapping,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -268,6 +270,13 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             mappings.get(layer_name),
                         )
                     elif isinstance(layer_cache, (tuple, list)):
+                        if group.role is KVCacheGroupRole.HISPARSE_INDEXER and isinstance(
+                            layer_spec, AscendSFAIndexerCacheSpec
+                        ):
+                            from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
+
+                            layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                            layer_cache = hisparse_indexer_transfer_views(layer_cache, layer)
                         views = _canonicalize_split_cache(
                             layer_cache,
                             num_blocks,

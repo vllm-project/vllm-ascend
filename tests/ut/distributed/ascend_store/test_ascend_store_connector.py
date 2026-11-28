@@ -17,12 +17,16 @@
 
 import types
 import unittest
+from itertools import product
 from unittest.mock import MagicMock, patch
 
 # isort: off
 from zmq.error import ZMQError
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm.distributed.kv_events import KVCacheEvent
+import torch
+from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
@@ -49,6 +53,7 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
 
         config, cache = MagicMock(), MagicMock()
         with (
+            patch.object(LayerwiseKVPoolWorker, "enable_kv_events", False, create=True),
             patch.object(BaseKVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
             patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
         ):
@@ -57,41 +62,143 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
             configure.assert_called_once_with()
 
 
-def _mock_events(num_workers=1):
-    events = AscendStoreKVEvents(num_workers=num_workers)
-    events._aggregator = MagicMock()
-    return events
+def _cpu_event(block_hash: bytes, group_idx: int | None = 0) -> BlockStored:
+    return BlockStored(
+        block_hashes=[block_hash],
+        parent_block_hash=None,
+        token_ids=[1, 2],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+        group_idx=group_idx,
+    )
+
+
+def _merged_worker_events(
+    batches: list[list[BlockStored]],
+    factors: tuple[int, ...] = (1,),
+) -> AscendStoreKVEvents:
+    """Combine worker batches the way KVOutputAggregator does."""
+    combined: AscendStoreKVEvents | None = None
+    for batch in batches:
+        events = AscendStoreKVEvents(num_workers=1, group_tp_replication_factors=factors)
+        events.add_events(batch)
+        if combined is None:
+            combined = events
+        else:
+            combined.add_events(events.get_all_events())
+            combined.increment_workers(1)
+    assert combined is not None
+    return combined
 
 
 class TestAscendStoreKVEvents(unittest.TestCase):
     def test_event_lifecycle(self):
-        ev = _mock_events()
-        mock_events = [MagicMock(spec=KVCacheEvent), MagicMock(spec=KVCacheEvent)]
-        ev.add_events(mock_events)
-        ev._aggregator.get_all_events.return_value = mock_events
-        self.assertEqual(ev.get_all_events(), mock_events)
+        event = _cpu_event(b"h")
+        ev = AscendStoreKVEvents(num_workers=1, group_tp_replication_factors=(2,))
+        ev.add_events([event, event])
+        self.assertEqual(ev.get_all_events(), [event, event])
+        self.assertEqual(ev.get_number_of_workers(), 1)
         self.assertIn("AscendStoreKVEvents", repr(ev))
+        self.assertIs(ev.aggregate(), ev)
+        self.assertEqual(ev.get_all_events(), [event, event])
 
         ev.clear_events()
-        ev._aggregator.clear_events.assert_called_once()
-        ev._aggregator.reset_workers.assert_called_once()
+        self.assertEqual(ev.get_all_events(), [])
+        self.assertEqual(ev.get_number_of_workers(), 1)
 
-    def test_worker_aggregation(self):
-        ev = _mock_events()
+    def test_worker_count_and_quorum(self):
+        ev = AscendStoreKVEvents(num_workers=1, group_tp_replication_factors=(2, 1))
         ev.increment_workers(3)
-        ev._aggregator.increment_workers.assert_called_once_with(3)
-        ev._aggregator.get_number_of_workers.return_value = 5
-        self.assertEqual(ev.get_number_of_workers(), 5)
+        self.assertEqual(ev.get_number_of_workers(), 4)
+        with self.assertRaises(ValueError):
+            ev.increment_workers(0)
 
-        common = [MagicMock()]
-        ev._aggregator.get_common_events.return_value = common
-        self.assertIs(ev.aggregate(), ev)
-        ev._aggregator.clear_events.assert_called_once()
-        ev._aggregator.add_events.assert_called_once_with(common)
-        ev._aggregator.reset_workers.assert_called_once()
+        # TP=4, put_step=2: two head writers complete one block. The other block
+        # still needs its second writer. A fully replicated group waits for all four.
+        owned = _cpu_event(b"owned", group_idx=0)
+        partial = _cpu_event(b"partial", group_idx=0)
+        replicated = _cpu_event(b"replicated", group_idx=1)
+        ev.add_events([owned, owned, partial, replicated])
+        self.assertEqual(ev.pop_common_events(), [owned])
+        self.assertEqual(ev.get_all_events(), [partial, replicated])
+
+        ev.add_events([partial])
+        self.assertEqual(ev.pop_common_events(), [partial])
+        self.assertEqual(set(ev.get_all_events()), {replicated})
+
+    def test_group_replication_factors(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+
+        worker = types.SimpleNamespace(
+            dcp_size=1,
+            use_kvpp=False,
+            sharded_mamba_group_ids={2},
+            group_uses_align_state=[False, True],
+            put_step=2,
+            pcp_size=2,
+            num_kv_cache_groups=3,
+        )
+        factor = BaseKVPoolWorker._group_tp_replication_factor
+        self.assertEqual(tuple(factor(worker, group_id) for group_id in range(3)), (4, 2, 1))
+
+        worker.dcp_size = 2
+        worker.sharded_mamba_group_ids = set()
+        worker.group_uses_align_state = [False]
+        self.assertEqual(factor(worker, 0), 2)
+
+        worker.use_kvpp = True
+        self.assertEqual(factor(worker, 0), 1)
 
 
 class TestLookupKeyServer(unittest.TestCase):
+    def test_structured_response_and_reset(self):
+        from msgspec import ValidationError
+        from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+        for result in (StoreLookupResult(0), StoreLookupResult(32, (TailKeyBoundary(0, 36), TailKeyBoundary(1, 32)))):
+            with (
+                self.subTest(result=result),
+                patch(module + ".threading.Thread") as thread,
+                patch(module + ".zmq.Poller") as poller,
+                patch(module + ".make_zmq_socket") as make_socket,
+                patch(module + ".zmq.Context"),
+            ):
+                config = MagicMock()
+                config.kv_transfer_config.kv_connector_extra_config = {}
+                worker = MagicMock()
+                worker.lookup_scheduler.return_value = result
+                socket = make_socket.return_value
+                encoder = MsgpackEncoder()
+                socket.recv_multipart.side_effect = [
+                    [b"lookup", (48).to_bytes(4, "big"), *encoder.encode([0, 1]), bytes(4), *encoder.encode(["hash"])],
+                    [b"reset"],
+                    ZMQError("receive failed"),
+                ]
+                poller.return_value.poll.return_value = [(socket, 1)]
+                LookupKeyServer(worker, config)
+                thread.call_args.kwargs["target"]()
+                response = socket.send_multipart.call_args_list[0].args[0]
+                self.assertEqual(
+                    MsgpackDecoder().decode(response),
+                    [result.hit_length, [list(b) for b in result.tail_key_boundaries]],
+                )
+                socket.send_multipart.assert_called_with([b"\x01"])
+                worker.reset_store.assert_called_once_with()
+                client = LookupKeyClient(config)
+                socket.recv_multipart.side_effect = None
+                socket.recv_multipart.return_value = response
+                self.assertEqual(client.lookup(48, [b"hash"], [0, 1]), result)
+                socket.recv_multipart.return_value = [b"\x00"]
+                with self.assertRaises(ValidationError):
+                    client.lookup(48, [b"hash"])
+                client.close()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.threading.Thread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Poller")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
@@ -136,7 +243,7 @@ class TestLookupKeyServer(unittest.TestCase):
 
         target()
 
-        mock_socket.send.assert_called_once_with(b"\x00")
+        mock_socket.send_multipart.assert_called_once_with([b"\x00"])
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -175,7 +282,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                     connector.get_transfer_results(set())
                 results.assert_called_once_with(
                     finished_sending=set(),
-                    finished_recving=set() if layerwise else {"r1"},
+                    finished_recving=set(),
                     failed_recving={"r1"},
                 )
 
@@ -185,8 +292,6 @@ class TestAscendStoreConnector(unittest.TestCase):
                 connector = AscendStoreConnector.__new__(AscendStoreConnector)
                 connector.use_layerwise = use_layerwise
                 connector.connector_worker = MagicMock()
-                old_bufs = object()
-                connector._mamba_copy_bufs = old_bufs
                 metadata = types.SimpleNamespace(requests=[])
 
                 connector.bind_connector_metadata(metadata)
@@ -194,19 +299,12 @@ class TestAscendStoreConnector(unittest.TestCase):
                 self.assertIs(connector._get_connector_metadata(), metadata)
                 if use_layerwise:
                     connector.connector_worker.prepare_layerwise_step.assert_called_once_with(metadata)
-                    self.assertIsNone(connector._mamba_copy_bufs)
                 else:
                     connector.connector_worker.prepare_layerwise_step.assert_not_called()
-                    self.assertIs(connector._mamba_copy_bufs, old_bufs)
 
-                # The runner may prepare Mamba copies between binding and the
-                # deferred load start. Only the non-layerwise path resets here.
-                current_bufs = object()
-                connector._mamba_copy_bufs = current_bufs
                 connector.start_load_kv(types.SimpleNamespace())
                 self.assertTrue(connector._current_step_has_real_forward)
                 connector.connector_worker.start_load_kv.assert_called_once_with(metadata)
-                self.assertIs(connector._mamba_copy_bufs, current_bufs if use_layerwise else None)
 
                 connector.bind_connector_metadata(metadata)
                 connector.start_load_kv(None)
@@ -218,7 +316,47 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.kv_transfer_config.kv_connector = "AscendStoreConnector"
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.parallel_config.rank = 0
+        config.parallel_config.tensor_parallel_size = 1
         return config
+
+    def test_mooncake_composite_callbacks_require_shared_source_layerwise(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        for use_layerwise, sources, expected in (
+            (True, [2, 8, 14, 20], True),
+            (False, [2, 8, 14, 20], False),
+            (True, list(range(40)), False),
+        ):
+            with self.subTest(use_layerwise=use_layerwise, sources=sources):
+                config = self._make_vllm_config(extra_config={"backend": "mooncake", "use_layerwise": use_layerwise})
+                config.model_config.hf_text_config = types.SimpleNamespace(
+                    num_hidden_layers=40, kv_source_layer_ids=sources
+                )
+                with patch(f"{module}.create_kv_pool_worker"), patch(f"{module}.LookupKeyServer"):
+                    connector = AscendStoreConnector(config, KVConnectorRole.WORKER, None)
+                self.assertEqual(connector.supports_composite_kv_loads, expected)
+                self.assertEqual(connector.supports_composite_kv_saves, expected)
+
+    def test_parallel_validation_allows_replicas_and_state_shards(self):
+        attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        sharded = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
+        replicated = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), tp_replicated=True)
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        for spec, tp_size, pcp_size in (
+            (attention, 2, 2),
+            (replicated, 2, 2),
+            (sharded, 2, 1),
+            (sharded, 1, 2),
+            (sharded, 2, 2),
+        ):
+            with self.subTest(spec=spec, tp_size=tp_size, pcp_size=pcp_size):
+                config = self._make_vllm_config()
+                config.parallel_config.tensor_parallel_size = tp_size
+                config.parallel_config.prefill_context_parallel_size = pcp_size
+                cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)])
+                with patch(f"{module}.create_kv_pool_scheduler") as scheduler:
+                    connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+                    scheduler.assert_called_once_with(config, False, cache)
+                    self.assertIs(connector.connector_scheduler, scheduler.return_value)
 
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
@@ -309,13 +447,12 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector.update_connector_output(output)
         self.assertIsNone(connector._kv_cache_events)
 
-        for _ in range(2):
-            events = _mock_events()
-            events._aggregator.get_all_events.return_value = [MagicMock()]
-            events._aggregator.get_number_of_workers.return_value = 1
-            output.kv_cache_events = events
-            connector.update_connector_output(output)
-        self.assertIsNotNone(connector._kv_cache_events)
+        event = _cpu_event(b"h")
+        events = AscendStoreKVEvents(num_workers=1)
+        events.add_events([event])
+        output.kv_cache_events = events
+        connector.update_connector_output(output)
+        self.assertEqual(connector._kv_cache_events.get_all_events(), [event])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_take_events(self, mock_scheduler_cls):
@@ -331,15 +468,57 @@ class TestAscendStoreConnector(unittest.TestCase):
         result = list(connector.take_events())
         self.assertEqual(result, [])
 
-        # With events
-        events = _mock_events(num_workers=1)
-        mock_event = MagicMock()
-        events._aggregator.get_common_events.return_value = [mock_event]
-        events._aggregator.get_all_events.return_value = [mock_event]
-        connector._kv_cache_events = events
+        # One writer is enough when that rank is the only worker.
+        event = _cpu_event(b"h")
+        events = AscendStoreKVEvents(num_workers=1)
+        events.add_events([event])
+        output = MagicMock()
+        output.kv_cache_events = events
+        connector.update_connector_output(output)
         result = list(connector.take_events())
-        self.assertEqual(len(result), 1)
+        self.assertEqual(result, [event])
         self.assertIsNone(connector._kv_cache_events)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_take_events_waits_for_the_ranks_that_write_each_block(self, mock_scheduler_cls):
+        config = self._make_vllm_config()
+        config.parallel_config.tensor_parallel_size = 4
+        connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, MagicMock())
+        # put_step=2, PCP=1: two of four workers write each block.
+        owned = _cpu_event(b"owned", group_idx=0)
+        pending = _cpu_event(b"pending", group_idx=0)
+        connector.update_connector_output(
+            types.SimpleNamespace(
+                kv_cache_events=_merged_worker_events([[owned], [owned], [pending], []], factors=(2,))
+            )
+        )
+        self.assertEqual(list(connector.take_events()), [owned])
+        self.assertEqual(connector._kv_cache_events.get_number_of_workers(), 4)
+
+        # The remaining writer arrives on a later step without raising the quorum.
+        connector.update_connector_output(
+            types.SimpleNamespace(kv_cache_events=_merged_worker_events([[], [], [], [pending]], factors=(2,)))
+        )
+        self.assertEqual(connector._kv_cache_events.get_number_of_workers(), 4)
+        self.assertEqual(list(connector.take_events()), [pending])
+        self.assertEqual(list(connector.take_events()), [])
+        self.assertIsNone(connector._kv_cache_events)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_take_events_holds_a_block_until_every_key_writer_reports(self, mock_scheduler_cls):
+        config = self._make_vllm_config()
+        connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, MagicMock())
+        block = _cpu_event(b"all-heads", group_idx=None)
+        connector.update_connector_output(
+            types.SimpleNamespace(kv_cache_events=_merged_worker_events([[block], []], factors=(1,)))
+        )
+        self.assertEqual(list(connector.take_events()), [])
+
+        connector.update_connector_output(
+            types.SimpleNamespace(kv_cache_events=_merged_worker_events([[], [block]], factors=(1,)))
+        )
+        self.assertEqual(list(connector.take_events()), [block])
+        self.assertEqual(list(connector.take_events()), [])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -484,12 +663,12 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
-    def test_save_kv_layer_consumer_with_put_enabled(self, mock_worker_cls, mock_lookup_cls):
+    def test_save_kv_layer_consumer_with_decode_save_enabled(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
             extra_config={
                 "use_layerwise": True,
-                "consumer_is_to_put": True,
+                "save_decode_cache": True,
             },
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -531,8 +710,8 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker_cls.return_value.wait_for_save.assert_called_once_with(metadata)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
-    def test_consumer_save_decode_cache_rejects_layerwise(self, mock_worker_cls, mock_lookup_cls):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
+    def test_consumer_save_decode_cache_enables_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
             extra_config={
@@ -542,12 +721,30 @@ class TestAscendStoreConnector(unittest.TestCase):
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        with self.assertRaisesRegex(ValueError, "does not support use_layerwise"):
-            AscendStoreConnector(
-                vllm_config=config,
-                role=KVConnectorRole.WORKER,
-                kv_cache_config=None,
-            )
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        self.assertTrue(connector.can_put)
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once()
+
+    def test_replaced_consumer_options_report_new_names(self):
+        for old_option, new_option in (
+            ("consumer_is_to_put", "save_decode_cache"),
+            ("consumer_is_to_load", "enable_lookup"),
+        ):
+            with self.subTest(option=old_option):
+                config = self._make_vllm_config(kv_role="kv_consumer", extra_config={old_option: True})
+                with self.assertRaisesRegex(ValueError, new_option):
+                    AscendStoreConnector(
+                        vllm_config=config,
+                        role=KVConnectorRole.WORKER,
+                        kv_cache_config=None,
+                    )
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -574,9 +771,46 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.WORKER,
             kv_cache_config=None,
         )
-        for events, expected_type in (([], type(None)), ([MagicMock()], AscendStoreKVEvents)):
-            mock_worker_cls.return_value.get_kv_events.return_value = events
-            self.assertIsInstance(connector.get_kv_connector_kv_cache_events(), expected_type)
+        worker = mock_worker_cls.return_value
+        worker.enable_kv_events = False
+        worker.kv_send_thread = object()
+        self.assertIsNone(connector.get_kv_connector_kv_cache_events())
+
+        worker.enable_kv_events = True
+        worker.kv_send_thread = None
+        self.assertIsNone(connector.get_kv_connector_kv_cache_events())
+
+        worker.kv_send_thread = object()
+        worker.group_tp_replication_factors = (2,)
+        worker.get_kv_events.return_value = []
+        empty = connector.get_kv_connector_kv_cache_events()
+        self.assertIsInstance(empty, AscendStoreKVEvents)
+        self.assertEqual(empty.get_all_events(), [])
+        self.assertEqual(empty.get_number_of_workers(), 1)
+        self.assertEqual(empty._group_tp_replication_factors, (2,))
+
+        stored = _cpu_event(b"h")
+        worker.get_kv_events.return_value = [stored]
+        result = connector.get_kv_connector_kv_cache_events()
+        self.assertEqual(result.get_all_events(), [stored])
+
+    def test_shutdown_closes_scheduler_backend_even_when_lookup_close_fails(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+        for layerwise, fail in product((False, True), (False, True)):
+            with self.subTest(layerwise=layerwise, fail=fail), patch.object(KVConnectorBase_V1, "shutdown"):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = layerwise
+                connector.connector_scheduler = MagicMock()
+                connector.connector_worker = None
+                scheduler = connector.connector_scheduler
+                if fail:
+                    scheduler.client.close.side_effect = RuntimeError("lookup close failed")
+                    with self.assertRaisesRegex(RuntimeError, "lookup close failed"):
+                        connector.shutdown()
+                else:
+                    connector.shutdown()
+                scheduler.store_scheduler.close.assert_called_once_with()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -651,53 +885,6 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             connector.wait_for_layer_load("layer_0")
             mock_worker_cls.return_value.wait_for_layer_load.assert_called_once()
 
-    def test_mamba_state_copy_runs_after_layer_load(self):
-        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-
-        call_order = []
-        with (
-            patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
-            patch.object(self.connector_mod, "LookupKeyServer"),
-            patch.object(
-                self.connector_mod.mamba_utils,
-                "do_mamba_copy_block_for_layer",
-                side_effect=lambda *_: call_order.append("copy"),
-                create=True,
-            ),
-            patch.object(
-                self.connector_mod.mamba_utils,
-                "prepare_mamba_copy_by_layer",
-                create=True,
-            ) as prepare_copy,
-            patch.object(
-                self.connector_mod.mamba_utils,
-                "finish_mamba_copy_by_layer",
-                create=True,
-            ) as finish_copy,
-        ):
-            config = MagicMock()
-            config.kv_transfer_config.kv_role = "kv_consumer"
-            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
-            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
-            config.parallel_config.rank = 0
-            mock_worker_cls.return_value.wait_for_layer_load.side_effect = lambda: call_order.append("load")
-
-            connector = self.connector_mod.AscendStoreConnector(
-                vllm_config=config,
-                role=KVConnectorRole.WORKER,
-                kv_cache_config=None,
-            )
-            copy_bufs = MagicMock(spec=self.connector_mod.mamba_utils.MambaCopyBuffers)
-            self.assertTrue(connector.prepare_mamba_state_copy(copy_bufs))
-
-            connector.wait_for_layer_load("layers.0.linear_attn")
-            connector.finish_mamba_state_copy()
-
-            self.assertEqual(call_order, ["load", "copy"])
-            prepare_copy.assert_called_once_with(copy_bufs)
-            finish_copy.assert_called_once_with(copy_bufs)
-            self.assertIsNone(connector._mamba_copy_bufs)
-
     def test_v2_mamba_state_copy_runs_after_layer_load(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
@@ -728,6 +915,13 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             self.assertEqual(call_order, ["load", "copy:layers.0.linear_attn"])
             self.assertIsNone(connector._mamba_state)
 
+    def test_mamba_state_copy_rejects_non_model_state(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.requires_mamba_state_copy_after_layer_load = True
+
+        with self.assertRaisesRegex(TypeError, "expects a mamba hybrid model state"):
+            connector.prepare_mamba_state_copy(object())
+
     def _make_shared_layer_connector(self, mamba_state=True):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
             get_physical_layer_index,
@@ -735,7 +929,6 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
 
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.use_layerwise = True
-        connector._mamba_copy_bufs = None
         connector._mamba_state = MagicMock()
         connector._loaded_layer = None
         connector.connector_worker = MagicMock()

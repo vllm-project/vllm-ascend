@@ -20,7 +20,7 @@ by combining a GitHub label with a comment command.
 
 ### 1. Post a comment
 
-Post one of the following comments in the PR to specify which tests to run.
+Post one of the following comments in the PR to specify which tests to run:
 The comment itself triggers the workflow — no label is required.
 
 | Comment | Effect |
@@ -29,6 +29,8 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
 | `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
+| `/presmoke <tests>` | Build only the nightly images (no tests) for the chips the test names select, publishing them to the isolated `*-presmoke` repositories |
+| `/nightly <tests> --presmoke` | Run the tests on the images previously published by `/presmoke` instead of the standard nightly images |
 
 !!! note
 
@@ -104,6 +106,16 @@ When a PR run is detected (`is_pr_test: true`), the workflow additionally:
 3. Installs all dependencies from source.
 4. Installs the `aisbench` benchmark suite.
 
+## Scheduled Runs
+
+Scheduled nightly runs are dispatched by the external scheduler through
+`workflow_dispatch` with `request_id` empty and `-f drain_pr_runs=true`. Before
+the tests start, the `setup-vars` job force-cancels in-flight PR runs of the
+same workflow so they do not stay ahead of the scheduled run in the
+`npu-scheduler` FIFO queue. The drain is opt-in: a manual dispatch from the
+Actions UI (where `request_id` is also empty) does not cancel PR runs. Without
+`drain_pr_runs=true`, scheduled runs skip the cleanup.
+
 ## Test Matrix Data Source
 
 The set of nightly test cases (their names, runners, test paths, model configs) is
@@ -132,7 +144,7 @@ To add a new test case (no need to touch the workflow YAMLs):
 1. Append an entry under the appropriate section in
    `.github/workflows/configs/nightly_config.yaml`. Each entry needs at least:
    - `name`: unique identifier used in `/nightly <name>` filters
-   - `os` (for single-node / multi-card pytest+yaml tests) or `runner` is inferred
+   - `os` (for single-node / multi-card pytest+YAML tests) or `runner` is inferred
    - one of `tests:` (pytest directory) or `config_file_path:` (YAML-driven model config)
    - `size` (multi-node / double-node only)
 2. Add the actual test files (pytest modules under `tests/e2e/nightly/...` or
@@ -187,7 +199,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | Test name | Description |
 |-----------|-------------|
 
-**Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
+**Double-node tests** (`a3.double_node.test_config`, 2-node):
 
 | Test name | Description |
 |-----------|-------------|
@@ -197,10 +209,15 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 !!! warning
 
-    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-    A3 will queue a large number of jobs — prefer targeting specific test names when
-    possible.
+    All multi-node and double-node jobs are submitted at the same time and their LWS
+    pods are queued in FIFO order by the `npu-scheduler`, so the A3 pool may hold more
+    pending jobs than can run concurrently. Running `/nightly all` on A3 will queue a
+    large number of jobs — prefer targeting specific test names when possible.
+
+Multi-node and double-node jobs use the `job_timeout` input of
+`_e2e_nightly_multi_node.yaml`, which defaults to 360 minutes (6h) for nightly
+runs. The test execution itself is bounded by `testcase_timeout`, which
+defaults to 120 minutes (2h).
 
 ### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
 
@@ -345,7 +362,7 @@ can be earlier or later than the 60-second default:
 ```
 
 The test name and `perf` key in this example come from the nightly matrix and its
-[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
+[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
 Choose the corresponding names from your PR when testing another configuration.
 
 Wait for the capture job and its `Plan`, `Parse / node-N`, and `Finalize` jobs.
@@ -693,9 +710,9 @@ The workflow will:
 - The matrix is loaded from your PR branch, so make sure the file is committed
   to the same branch the `/nightly` comment was posted on.
 
-**How to obtain more detailed logs to pinpoint problems for multi-node tests**
+**How to obtain more detailed logs to pinpoint problems for multi-node tests?**
 
-- For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
+- For most issues, the stdout pop-up logs from GitHub Actions are sufficient (this log always represents the logs from the first node).
 - If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of your jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
 
   ```shell

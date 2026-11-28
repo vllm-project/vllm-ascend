@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Called from run.sh on exit and by CI before deleting running pods.
 backup_requested_directory() {
-    [ -n "${DOWNLOAD_SPEC:-}" ] || return 0
+    [ -n "${DOWNLOAD_SPEC:-}" ] || [ "${DEFAULT_DOWNLOAD_PATHS:-[]}" != "[]" ] || return 0
     local node="node${LWS_WORKER_INDEX:-0}"
     local requested archive temporary_archive shared_archive
     local marker="/tmp/${node}_download.archived"
@@ -14,12 +14,16 @@ backup_requested_directory() {
         echo "Requested path already archived on $node"
         return 0
     fi
-    if ! requested=$(python3 /root/.cache/tests/collect_download.py "$DOWNLOAD_SPEC" \
-        --path-for-node --node "$node"); then
+    if ! requested=$(python3 /root/.cache/tests/collect_download.py "${DOWNLOAD_SPEC:-}" \
+        --defaults-json "${DEFAULT_DOWNLOAD_PATHS:-[]}" --path-for-node --node "$node"); then
         echo "WARNING: Invalid download request for $node" >&2
         return 1
     fi
-    [ -n "$requested" ] || return 0
+    if [ -z "$requested" ]; then
+        mkdir -p "$LOG_PREFIX" && touch "$LOG_PREFIX/${node}_download.empty" || true
+        echo "No configured download paths present on $node"
+        return 0
+    fi
     if ! mkdir -p "$LOG_PREFIX"; then
         echo "WARNING: Could not create shared log directory on $node" >&2
         return 1
@@ -28,8 +32,8 @@ backup_requested_directory() {
         echo "WARNING: Could not create temporary archive on $node" >&2
         return 1
     fi
-    if ! python3 /root/.cache/tests/collect_download.py "$DOWNLOAD_SPEC" \
-        "$temporary_archive" --node "$node"; then
+    if ! python3 /root/.cache/tests/collect_download.py "${DOWNLOAD_SPEC:-}" \
+        "$temporary_archive" --defaults-json "${DEFAULT_DOWNLOAD_PATHS:-[]}" --node "$node"; then
         rm -f "$temporary_archive"
         echo "WARNING: Could not archive requested path on $node" >&2
         return 1

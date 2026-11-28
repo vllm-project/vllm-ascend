@@ -69,6 +69,8 @@ on:
         type: string
         description: test case execution timeout period,default:120 minutes
     secrets:
+      PAT_TOKEN:
+        required: false
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
@@ -97,7 +99,7 @@ jobs:
       image: "${{ inputs.image }}"
       env:
         VLLM_USE_MODELSCOPE: True
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
@@ -325,6 +327,15 @@ jobs:
             exit 1
           fi
 
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.report.outcome == 'failure' }}
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: ${{ inputs.model_list }} accuracy test
+
       - name: Generate step summary
         if: ${{ always() }}
         working-directory: /vllm-workspace/vllm-ascend
@@ -365,21 +376,26 @@ jobs:
           overwrite: true
 
       - name: Collect requested path
-        if: ${{ always() && inputs.download_path != '' }}
+        if: always()
         id: collect_download
         continue-on-error: true
         env:
-          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          REQUESTED_PATHS: ${{ inputs.download_path }}
           ARTIFACT_LABEL: ${{ inputs.model_list }}
           IMAGE_LABEL: ${{ inputs.image }}
         run: |
-          python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" /tmp/download-artifact.tar.gz
+          set -e
+          collect_script=/vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py
+          defaults_file=/vllm-workspace/vllm-ascend/.github/workflows/configs/log_download_defaults.json
+          resolved=$(python3 "$collect_script" "$REQUESTED_PATHS" --defaults-file "$defaults_file" --path-for-node)
+          [ -n "$resolved" ] || exit 0
+          python3 "$collect_script" "$REQUESTED_PATHS" /tmp/download-artifact.tar.gz --defaults-file "$defaults_file"
           safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-60)
           label_hash=$(printf '%s\n%s' "$ARTIFACT_LABEL" "$IMAGE_LABEL" | sha256sum | cut -c1-12)
           echo "name=nightly-download-${safe_label}-${label_hash}" >> "$GITHUB_OUTPUT"
 
       - name: Upload requested path
-        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        if: ${{ always() && steps.collect_download.outputs.name != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:

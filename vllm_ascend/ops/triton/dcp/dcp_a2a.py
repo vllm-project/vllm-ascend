@@ -5,28 +5,94 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator, _groups
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type, is_950
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    _fused_dcp_lse_combine_batched_kernel,
+    _decode_lse_significand,
+    _encode_lse_fields,
+    _fused_dcp_lse_combine_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
+    _fused_dcp_lse_combine_rank_tiled_kernel,
+    _fused_dcp_lse_combine_rank_tiled_static_kernel,
+)
+from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+# Fallback decode token buckets from the merged DCP decode budget (#16350).
+# Warmup prefers the engine's actual ACLGraph capture sizes, which are the
+# token counts the combine sees after graph padding; these values are used
+# only when the caller cannot provide them.
+A3_DECODE_TOKEN_BUCKETS = (1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 192)
+
+# Full warmed launch signatures:
+# (heads, tokens, head_dim, dcp, local_t, local_h, local_d, lse_t, lse_h, has_local_mask).
+# The strides participate in the Triton cache key, so a warmed shape with an
+# unseen layout must not take the static path.
+_A3_STATIC_SIGNATURES: frozenset[tuple[int, ...]] = frozenset()
+
+# Warmup-only state. Candidate shapes make the dispatcher select the static
+# kernel while recording; the signatures it actually launches become the
+# runtime set. Kept separate from _A3_STATIC_SIGNATURES so a miss can be logged.
+_A3_WARMING = False
+_A3_WARMING_SHAPES: frozenset[tuple[int, int, int, int]] = frozenset()
+_A3_RECORDED: set[tuple[int, ...]] = set()
+_UNWARMED_LOGGED: set[tuple[int, int, int, int]] = set()
+
+
+def begin_a3_static_warmup(shape_keys) -> None:
+    global _A3_WARMING, _A3_WARMING_SHAPES
+    _A3_WARMING = True
+    _A3_WARMING_SHAPES = frozenset(shape_keys)
+
+
+def end_a3_static_warmup() -> None:
+    """Install the signatures recorded by this warmup pass.
+
+    Keys accumulate across calls because target and draft layouts warm
+    separately; a candidate that produced no launch is never installed.
+    """
+    global _A3_WARMING, _A3_STATIC_SIGNATURES, _A3_WARMING_SHAPES
+    _A3_STATIC_SIGNATURES = _A3_STATIC_SIGNATURES | frozenset(_A3_RECORDED)
+    _A3_RECORDED.clear()
+    _A3_WARMING = False
+    _A3_WARMING_SHAPES = frozenset()
+
+
+def _rank_tiled_mode() -> str:
+    """How this backend lowers the [rank, feature] tile.
+
+    A5 vectorizes a runtime rank-row stride, so it can use the dynamic kernel
+    for any token count. A3 lowers the same stride to scalar-rate transfers
+    (measured 10-15x slower than its scalar kernel), so it only uses the static
+    twin for warmed decode buckets. Other backends use the fallback paths.
+    """
+    if is_950():
+        return "dynamic"
+    if get_ascend_device_type() == AscendDeviceType.A3:
+        return "static"
+    return "off"
 
 
 @triton.jit
 def _pack_dcp_output_lse_kernel(
     output_ptr,
     lse_ptr,
+    sum_ptr,
     send_ptr,
     output_stride_t,
     output_stride_h,
     output_stride_d,
     lse_stride_t,
     lse_stride_h,
+    sum_stride_t,
+    sum_stride_h,
     send_stride_rank,
     send_stride_scatter,
     send_stride_replicated,
@@ -37,7 +103,10 @@ def _pack_dcp_output_lse_kernel(
     total_rows,
     SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    FROM_STATS: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    output_mask_ptr=None,
+    HAS_OUTPUT_MASK: tl.constexpr = False,
 ):
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -62,37 +131,24 @@ def _pack_dcp_output_lse_kernel(
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = d_offsets < head_dim
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
+        if HAS_OUTPUT_MASK:
+            invalid = tl.load(output_mask_ptr + token_idx).to(tl.int1)
+            output = tl.where(invalid, 0.0, output)
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
         lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(tl.float32)
+        if FROM_STATS:
+            total = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h).to(tl.float32)
+            lse = lse + tl.log(total)
+        if HAS_OUTPUT_MASK:
+            lse = tl.where(invalid, -float("inf"), lse)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + head_dim * send_stride_d,
                 lse.to(send_ptr.dtype.element_ty),
             )
         else:
-            # Store a finite FP32 LSE as a signed exponent code plus three
-            # base-256 significand digits. Every stored value is an integer in
-            # [-255, 255], so FP16 and BF16 preserve it exactly.
-            finite_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-            abs_lse = tl.abs(lse)
-            nonzero_lse = abs_lse != 0.0
-            safe_abs_lse = tl.where(finite_lse & nonzero_lse, abs_lse, 1.0)
-            lse_exponent = tl.floor(tl.log2(safe_abs_lse))
-            lse_exponent = tl.maximum(-126.0, tl.minimum(lse_exponent, 127.0))
-            lse_exponent = tl.where(nonzero_lse, lse_exponent, 0.0)
-            significand = tl.where(
-                finite_lse & nonzero_lse,
-                abs_lse * tl.exp2(23.0 - lse_exponent),
-                0.0,
-            )
-            significand_hi = tl.floor(significand / 65536.0)
-            significand_remainder = significand - significand_hi * 65536.0
-            significand_mid = tl.floor(significand_remainder / 256.0)
-            significand_lo = significand_remainder - significand_mid * 256.0
-            exponent_code = lse_exponent + 128.0
-            exponent_code = tl.where(lse < 0.0, -exponent_code, exponent_code)
-            exponent_code = tl.where(finite_lse, exponent_code, 0.0)
+            exponent_code, significand_hi, significand_mid, significand_lo = _encode_lse_fields(lse)
             tl.store(
                 send_ptr + send_base + head_dim * send_stride_d,
                 exponent_code.to(send_ptr.dtype.element_ty),
@@ -138,6 +194,8 @@ def _fused_dcp_lse_combine_kernel(
     BLOCK_D: tl.constexpr,
     RETURN_LSE: tl.constexpr = False,
     HAS_LOCAL: tl.constexpr = False,
+    local_output_mask_ptr=None,
+    HAS_LOCAL_OUTPUT_MASK: tl.constexpr = False,
 ):
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -162,6 +220,9 @@ def _fused_dcp_lse_combine_kernel(
             local_lse = tl.load(local_lse_ptr + token_idx * local_lse_stride_t + head_idx * local_lse_stride_h).to(
                 tl.float32
             )
+            if HAS_LOCAL_OUTPUT_MASK:
+                invalid = tl.load(local_output_mask_ptr + token_idx).to(tl.int1)
+                local_lse = tl.where(invalid, -float("inf"), local_lse)
             local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
             lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.static_range(DCP_SIZE):
@@ -182,7 +243,7 @@ def _fused_dcp_lse_combine_kernel(
                 sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
                 exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
                 safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                significand = _decode_lse_significand(significand_hi, significand_mid, significand_lo)
                 lse = sign * significand * tl.exp2(safe_exponent - 23.0)
                 valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             lse_max = tl.maximum(lse_max, tl.where(valid_lse, lse, -float("inf")))
@@ -210,7 +271,7 @@ def _fused_dcp_lse_combine_kernel(
                 sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
                 exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
                 safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                significand = _decode_lse_significand(significand_hi, significand_mid, significand_lo)
                 lse = sign * significand * tl.exp2(safe_exponent - 23.0)
                 valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             weight = tl.where(valid_lse, tl.exp(lse - safe_lse_max), 0.0)
@@ -296,44 +357,81 @@ def _validate_dcp_inputs(
     return num_tokens, num_heads, head_dim, local_scatter_size, replicated_size
 
 
+def _validate_output_mask(output_mask, output):
+    if output_mask is not None and (
+        output_mask.shape != (output.shape[0],)
+        or output_mask.dtype != torch.bool
+        or output_mask.device != output.device
+        or not output_mask.is_contiguous()
+    ):
+        raise ValueError("DCP output mask must be contiguous same-device bool [tokens]")
+
+
 def pack_dcp_output_lse(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
     scatter_dim: int,
+    softmax_sum: torch.Tensor | None = None,
+    output_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack strided partial output and FP32 LSE into one HCCL payload."""
-    num_tokens, num_heads, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
+    """Pack output and LSE, or compute LSE from max/sum during packing."""
+    _, _, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
         partial_output, softmax_lse, dcp_size, scatter_dim
     )
+    if softmax_sum is not None:
+        if (
+            softmax_sum.shape != softmax_lse.shape
+            or softmax_sum.dtype != torch.float32
+            or softmax_sum.device != partial_output.device
+        ):
+            raise ValueError("softmax_sum must match the FP32 softmax_max shape and device")
+    _validate_output_mask(output_mask, partial_output)
     lse_pack_dim = _lse_pack_dim(partial_output.dtype)
     send = torch.empty(
         (dcp_size, local_scatter_size, replicated_size, head_dim + lse_pack_dim),
         dtype=partial_output.dtype,
         device=partial_output.device,
     )
-    total_rows = num_tokens * num_heads
     init_device_properties_triton()
-    vector_cores = get_vectorcore_num()
+    _launch_pack_dcp_output_lse(
+        partial_output, softmax_lse, softmax_sum, send, scatter_dim, get_vectorcore_num(), _launch_kernel, output_mask
+    )
+    return send
+
+
+def _launch_pack_dcp_output_lse(
+    partial_output, softmax_lse, softmax_sum, send, scatter_dim, vector_cores, launch, output_mask=None
+):
+    """Shared runtime/warmup launch construction; no allocation or collective."""
+    num_tokens, num_heads, head_dim = partial_output.shape
+    local_scatter_size = send.shape[1]
+    sum_input = softmax_lse if softmax_sum is None else softmax_sum
+    lse_pack_dim = _lse_pack_dim(partial_output.dtype)
+    total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Keep enough row tiles to occupy the A5 vector cores. Feature-strided
+    # Keep enough row tiles to occupy the vector cores. Feature-strided
     # loads can regress with batching, especially for wide heads.
     batched = (
-        is_950()
-        and partial_output.dtype == torch.bfloat16
+        partial_output.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 2048
         and total_rows >= 8 * vector_cores
-        and partial_output.stride(-1) == 1
+        and (partial_output.stride(-1) == 1 or (head_dim == 512 and num_tokens >= 128))
     )
     if batched:
-        _pack_dcp_output_lse_batched_kernel[(grid_size,)](
+        launch(
+            _pack_dcp_output_lse_batched_kernel,
+            (grid_size,),
             partial_output,
             softmax_lse,
+            sum_input,
             send,
             *partial_output.stride(),
             softmax_lse.stride(0),
             softmax_lse.stride(1),
+            sum_input.stride(0),
+            sum_input.stride(1),
             *send.stride(),
             local_scatter_size,
             head_dim,
@@ -341,17 +439,26 @@ def pack_dcp_output_lse(
             total_rows,
             SCATTER_TOKENS=scatter_dim == 0,
             LSE_PACK_DIM=lse_pack_dim,
+            output_mask_ptr=output_mask,
+            HAS_OUTPUT_MASK=output_mask is not None,
+            FROM_STATS=softmax_sum is not None,
             BLOCK_D=triton.next_power_of_2(head_dim),
-            BLOCK_ROWS=8,
+            BLOCK_ROWS=32 if head_dim == 512 and num_tokens >= 128 and partial_output.stride(-1) == 1 else 8,
+            OUTPUT_HEAD_MAJOR=head_dim == 512,
         )
-        return send
-    _pack_dcp_output_lse_kernel[(grid_size,)](
+        return
+    launch(
+        _pack_dcp_output_lse_kernel,
+        (grid_size,),
         partial_output,
         softmax_lse,
+        sum_input,
         send,
         *partial_output.stride(),
         softmax_lse.stride(0),
         softmax_lse.stride(1),
+        sum_input.stride(0),
+        sum_input.stride(1),
         *send.stride(),
         local_scatter_size,
         head_dim,
@@ -359,9 +466,12 @@ def pack_dcp_output_lse(
         total_rows,
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
+        output_mask_ptr=output_mask,
+        HAS_OUTPUT_MASK=output_mask is not None,
+        FROM_STATS=softmax_sum is not None,
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
-    return send
+    return
 
 
 def fused_dcp_lse_combine(
@@ -371,6 +481,7 @@ def fused_dcp_lse_combine(
     return_lse: bool = False,
     local_output: torch.Tensor | None = None,
     local_lse: torch.Tensor | None = None,
+    local_output_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Merge rank outputs and an optional local FIA contribution in one pass.
 
@@ -391,7 +502,7 @@ def fused_dcp_lse_combine(
     if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
         raise ValueError(f"DCP fused combine requires a positive integer head_dim, got {head_dim}.")
 
-    dcp_size, local_scatter_size, replicated_size, packed_dim = recv.shape
+    _, local_scatter_size, replicated_size, packed_dim = recv.shape
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     if packed_dim != head_dim + lse_pack_dim:
         raise RuntimeError(
@@ -403,7 +514,10 @@ def fused_dcp_lse_combine(
     )
     if (local_output is None) != (local_lse is None):
         raise ValueError("Local output and LSE must be supplied together.")
+    if local_output_mask is not None and local_output is None:
+        raise ValueError("Local output mask requires local output and LSE.")
     if local_output is not None:
+        _validate_output_mask(local_output_mask, local_output)
         _validate_dcp_inputs(local_output, local_lse, 1, scatter_dim)
         if local_output.shape != (num_tokens, num_heads, head_dim):
             raise RuntimeError("Local output must match the post-scatter token, head and feature dimensions.")
@@ -415,43 +529,164 @@ def fused_dcp_lse_combine(
         dtype=recv.dtype,
         device=recv.device,
     )
-    total_rows = num_tokens * num_heads
     init_device_properties_triton()
-    vector_cores = get_vectorcore_num()
-    grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Wider tiles need a bounded DCP and more rows on small-DCP cases.
-    # Strided local features regress for DCP 1-2 when D > 256.
-    batched = (
-        is_950()
-        and recv.dtype == torch.bfloat16
-        and 1 <= dcp_size <= 8
-        and scatter_dim == 1
-        and head_dim <= 512
-        and total_rows >= (8 if dcp_size <= 2 and head_dim > 256 else 4) * vector_cores
-        and local_output is not None
-        and (dcp_size > 2 or head_dim <= 256 or local_output.stride(-1) == 1)
-        and not return_lse
+    _launch_fused_dcp_lse_combine(
+        recv,
+        output,
+        head_dim,
+        scatter_dim,
+        return_lse,
+        local_output,
+        local_lse,
+        get_vectorcore_num(),
+        _launch_kernel,
+        local_output_mask,
     )
-    if batched:
-        assert local_output is not None and local_lse is not None
-        _fused_dcp_lse_combine_batched_kernel[(grid_size,)](
+    return output
+
+
+def _launch_fused_dcp_lse_combine(
+    recv,
+    output,
+    head_dim,
+    scatter_dim,
+    return_lse,
+    local_output,
+    local_lse,
+    vector_cores,
+    launch,
+    local_output_mask=None,
+):
+    """Shared runtime/warmup launch construction for the packed receive layout."""
+    num_tokens, num_heads = output.shape[:2]
+    dcp_size = recv.shape[0]
+    lse_pack_dim = _lse_pack_dim(recv.dtype)
+    total_rows = num_tokens * num_heads
+    grid_size = total_rows if total_rows < vector_cores else vector_cores
+    # Wide rank tile: one program folds all ranks for a 512-wide feature tile.
+    # A 16x512 BF16 tile holds the FP32 temporaries in 32 KiB; measured 2-4x
+    # faster than narrower tiles at DCP8/16 with head dims 512 and 1024.
+    # Preserve the rank-tiled dispatch before the row-weighted fallback.
+    rank_tile = triton.next_power_of_2(dcp_size)
+    feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
+    tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
+    # At least one row per rank and roughly two rows per core. T4 (16 rows at
+    # DCP8/16) wins on both backends; T2 stays on the scalar path.
+    min_rows = max(triton.cdiv(2 * vector_cores, max(dcp_size, 1)), dcp_size)
+    mode = _rank_tiled_mode()
+    static_shape = (num_heads, num_tokens, head_dim, dcp_size)
+    static_strides = (
+        (*local_output.stride(), *local_lse.stride()[:2])
+        if local_output is not None and local_lse is not None
+        else None
+    )
+    rank_tile_common = (
+        recv.dtype == torch.bfloat16
+        and 8 <= dcp_size <= 16
+        and head_dim >= 512
+        and scatter_dim == 1
+        and not return_lse  # the rank tile does not write the LSE lane
+        and total_rows >= min_rows
+        and local_output is not None
+        and local_lse is not None
+        and local_output.stride(-1) == 1
+    )
+    static_selected = False
+    if mode == "static" and rank_tile_common:
+        assert static_strides is not None
+        signature = static_shape + static_strides + (local_output_mask is not None,)
+        if _A3_WARMING:
+            static_selected = static_shape in _A3_WARMING_SHAPES
+            if static_selected:
+                _A3_RECORDED.add(signature)
+        else:
+            static_selected = signature in _A3_STATIC_SIGNATURES
+            if not static_selected and static_shape not in _UNWARMED_LOGGED:
+                _UNWARMED_LOGGED.add(static_shape)
+                # Decode buckets are bounded by the DCP decode budget; larger
+                # counts are prefill and are expected to take a fallback path.
+                log = logger.warning if num_tokens <= A3_DECODE_TOKEN_BUCKETS[-1] else logger.debug
+                log(
+                    "DCP rank-tiled static kernel has no warmed variant for shape=%s "
+                    "strides=%s; using the row-weighted or scalar path.",
+                    static_shape,
+                    static_strides,
+                )
+    if static_selected:
+        launch(
+            _fused_dcp_lse_combine_rank_tiled_static_kernel,
+            (min(total_rows * tiles_per_head, vector_cores),),
             recv,
             output,
             local_output,
             local_lse,
             *local_output.stride(),
             *local_lse.stride()[:2],
+            local_output_mask_ptr=local_output_mask,
+            HAS_LOCAL_OUTPUT_MASK=local_output_mask is not None,
+            NUM_HEADS=num_heads,
+            NUM_TOKENS=num_tokens,
+            DCP_SIZE=dcp_size,
+            HEAD_DIM=head_dim,
+            BLOCK_R=rank_tile,
+            BLOCK_D=feature_tile,
+        )
+        return
+    rank_tiled = mode == "dynamic" and local_output_mask is None and rank_tile_common and dcp_size >= 2 * tiles_per_head
+    if rank_tiled:
+        tiled_grid = min(total_rows * tiles_per_head, vector_cores)
+        launch(
+            _fused_dcp_lse_combine_rank_tiled_kernel,
+            (tiled_grid,),
+            recv,
+            output,
+            local_output,
+            local_lse,
+            *local_output.stride(),
+            *local_lse.stride()[:2],
+            num_heads=num_heads,
+            num_tokens=num_tokens,
+            DCP_SIZE=dcp_size,
+            HEAD_DIM=head_dim,
+            BLOCK_R=rank_tile,
+            BLOCK_D=feature_tile,
+        )
+        return
+    # TODO: Merge the packed DCP combine kernels into one generic kernel.
+    vector_compatible = (
+        recv.dtype == torch.bfloat16
+        and scatter_dim == 1
+        and head_dim <= 512
+        and (local_output is None or local_output.stride(-1) == 1)
+        and not return_lse
+    )
+    if vector_compatible:
+        launch(
+            _fused_dcp_lse_combine_head_scatter_kernel,
+            (grid_size,),
+            recv,
+            output,
+            local_output if local_output is not None else recv,
+            local_lse if local_lse is not None else recv,
+            *(local_output.stride() if local_output is not None else (0, 0, 0)),
+            *(local_lse.stride()[:2] if local_lse is not None else (0, 0)),
             *recv.stride(),
             *output.stride(),
             head_dim,
             num_heads,
             total_rows,
+            MODE=get_current_hardware_profile().dcp_head_scatter_mode,
             DCP_SIZE=dcp_size,
+            local_output_mask_ptr=local_output_mask,
+            HAS_LOCAL_OUTPUT_MASK=local_output_mask is not None,
+            HAS_LOCAL=local_output is not None,
             BLOCK_D=triton.next_power_of_2(head_dim),
-            BLOCK_ROWS=8,
+            multibuffer=False,
         )
-        return output
-    _fused_dcp_lse_combine_kernel[(grid_size,)](
+        return
+    launch(
+        _fused_dcp_lse_combine_kernel,
+        (grid_size,),
         recv,
         output,
         local_output if local_output is not None else recv,
@@ -468,9 +703,20 @@ def fused_dcp_lse_combine(
         LSE_PACK_DIM=lse_pack_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
         RETURN_LSE=return_lse,
+        local_output_mask_ptr=local_output_mask,
+        HAS_LOCAL_OUTPUT_MASK=local_output_mask is not None,
         HAS_LOCAL=local_output is not None,
     )
-    return output
+
+
+def _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):
+    return (
+        pcp_group is None
+        and not return_lse
+        and not defer_combine
+        and scatter_dim == 1
+        and can_exchange(partial_output, softmax_lse, scatter_size)
+    )
 
 
 def dcp_a2a_fused_combine(
@@ -482,6 +728,8 @@ def dcp_a2a_fused_combine(
     pcp_group: GroupCoordinator | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
+    output_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack, scatter over DCP or TP, optionally gather over PCP, then merge.
 
@@ -489,22 +737,20 @@ def dcp_a2a_fused_combine(
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
     # Keep PCP composition and token-scatter paths on the upstream implementation.
-    if (
-        pcp_group is None
-        and not return_lse
-        and not defer_combine
-        and scatter_dim == 1
-        and can_exchange(partial_output, softmax_lse, scatter_size)
+    if output_mask is None and _use_fast_exchange(
+        partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine
     ):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
-        return exchange(partial_output, softmax_lse, scatter_group).to(partial_output.dtype)
+        return exchange(partial_output, softmax_lse, scatter_group, softmax_sum=softmax_sum).to(partial_output.dtype)
 
     send = pack_dcp_output_lse(
         partial_output,
         softmax_lse,
         scatter_size,
         scatter_dim=scatter_dim,
+        softmax_sum=softmax_sum,
+        output_mask=output_mask,
     )
     if scatter_size > 1:
         if scatter_group is None:
@@ -535,6 +781,8 @@ def dcp_a2a_fused(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
+    output_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fused DCP output merge, optionally gathering contributions across PCP.
 
@@ -578,6 +826,8 @@ def dcp_a2a_fused(
         pcp_group=pcp_group,
         return_lse=return_lse,
         defer_combine=defer_combine,
+        softmax_sum=softmax_sum,
+        output_mask=output_mask,
     )
 
 
@@ -590,6 +840,8 @@ def dcp_a2a_fused_fake(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
+    output_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Propagate output metadata for torch.compile without running HCCL.
 

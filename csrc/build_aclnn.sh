@@ -99,57 +99,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "sparse_flash_attention"
+        "sparse_flash_attention_vllm"
         "kv_quant_sparse_flash_attention_vllm"
-        "moe_gating_top_k_hash"
-        "add_rms_norm_bias"
-        "rms_norm_cast"
-        "transpose_kv_cache_by_block"
-        "copy_and_expand_eagle_inputs"
-        "compressor"
-        "compressor_metadata"
-        "quant_lightning_indexer_v2"
-        "quant_lightning_indexer_v2_metadata"
-        "sparse_flash_mla"
-        "sparse_flash_mla_metadata"
-        "sparse_attn_sharedkv"
-        "sparse_attn_sharedkv_metadata"
-        "hc_pre"
-        "hc_post"
-        "inplace_partial_rotary_mul"
-        "rms_norm_dynamic_quant"
-        "dequant_situ_quant"
-        "dequant_swiglu_quant"
-        "grouped_matmul_swiglu_quant"
-        "grouped_matmul_swiglu_quant_v2"
-        "chunk_fwd_o_vllm"
-        "kda_gate_cumsum_vllm"
-        "kda_layout_swap12"
-        "k2q_csr"
-        "mla_preprocess"
-        "fused_sparse_attention_overlap"
-        "fused_lightning_indexer_manage"
-        "fused_quant_lightning_indexer_manage"
-        "fused_scatter_copy_sparse_flash_attention"
-    )
-
-    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-    SOC_ARG="ascend910b"
-elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
-    log "matched SOC branch: ascend910_93"
-    # ASCEND910C (A3) series
-    # dependency: catlass
-    setup_catlass_dependency
-
-    CUSTOM_OPS_ARRAY=(
-        "chunk_gated_delta_rule_fwd_h_vllm"
-        "scatter_nd_update_sk"
-        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "sparse_flash_attention"
-        "kv_quant_sparse_flash_attention_vllm"
-        "dispatch_ffn_combine"
-        "dispatch_ffn_combine_w4_a8"
-        "dispatch_ffn_combine_bf16"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "rms_norm_cast"
@@ -176,12 +127,67 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
         "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
     )
+
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend910b"
+elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
+    log "matched SOC branch: ascend910_93"
+    # ASCEND910C (A3) series
+    # dependency: catlass
+    setup_catlass_dependency
+
+    CUSTOM_OPS_ARRAY=(
+        "qsa_union_inputs"
+        "chunk_gated_delta_rule_fwd_h_vllm"
+        "scatter_nd_update_sk"
+        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
+        "sparse_flash_attention_vllm"
+        "kv_quant_sparse_flash_attention_vllm"
+        "dispatch_ffn_combine"
+        "dispatch_ffn_combine_w4_a8"
+        "dispatch_ffn_combine_bf16"
+        "moe_gating_top_k_hash"
+        "add_rms_norm_bias"
+        "rms_norm_cast"
+        "transpose_kv_cache_by_block"
+        "copy_and_expand_eagle_inputs"
+        "compressor"
+        "compressor_metadata"
+        "quant_lightning_indexer_v2"
+        "quant_lightning_indexer_v2_metadata"
+        "quant_sparse_lightning_indexer_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre"
+        "hc_post"
+        "inplace_partial_rotary_mul"
+        "rms_norm_dynamic_quant"
+        "dequant_situ_quant"
+        "dequant_swiglu_quant"
+        "grouped_matmul_swiglu_quant"
+        "grouped_matmul_swiglu_quant_v2"
+        "attn_res_fwd"
+        "chunk_fwd_o_vllm"
+        "kda_gate_cumsum_vllm"
+        "kda_layout_swap12"
+        "k2q_csr"
+        "hisparse_resolve_residency"
+        "mla_preprocess"
+        "fused_sparse_attention_overlap"
+        "fused_lightning_indexer_manage"
+        "fused_quant_lightning_indexer_manage"
+        "fused_scatter_copy_sparse_flash_attention"
+    )
+
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
@@ -191,12 +197,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "sparse_flash_attention"
+        "sparse_flash_attention_vllm"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
+        "indexer_region_score"
         "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"
@@ -216,6 +223,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "qsa_union_inputs"
+        "hisparse_resolve_residency"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -283,7 +292,7 @@ log_selected_ops
 
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
-  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}" --install-for-all
   # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
   # editable-build artifacts removable by the non-root user who built them.
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then

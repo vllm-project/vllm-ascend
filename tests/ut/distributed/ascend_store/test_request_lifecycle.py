@@ -29,6 +29,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
@@ -38,7 +39,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -61,7 +61,9 @@ class MemoryBackend(Backend):
     def set_device(self):
         pass
 
-    def register_buffer(self, ptrs, lengths):
+    def register_buffer(self, buffers):
+        ptrs = [buffer.address for buffer in buffers]
+        lengths = [buffer.size_bytes for buffer in buffers]
         self.regions.extend(zip(ptrs, lengths))
 
     def exists(self, keys):
@@ -71,14 +73,14 @@ class MemoryBackend(Backend):
     def check_address(self, addr, size):
         assert any(start <= addr and addr + size <= start + length for start, length in self.regions)
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
         return [True] * len(keys)
 
-    def get(self, keys, addrs, sizes):
+    def get(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size, data in zip(row, lengths, self.payloads[key], strict=True):
                 self.check_address(addr, size)
@@ -240,10 +242,13 @@ def test_raw_sequence_lifecycle(
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
+    # The hit-boundary assertions below exercise dense prefix retention.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    plan = make_resolved_cache_config(config, plan)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, plan)
     caches = allocate()
     worker.register_kv_caches(caches)
@@ -263,6 +268,10 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
+    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
+    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
+    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):
@@ -350,11 +359,10 @@ def test_raw_sequence_lifecycle(
             scheduler.update_from_output(output, result)
             if drafts:
                 expected_computed = computed_before_update - len(drafts) + accepted
-                if not vllm_version_is("0.32.0"):
-                    # vLLM main trims ``num_computed_tokens`` to cover only the
-                    # tokens actually kept when a request stops mid token-list.
-                    appended = request.num_output_tokens - output_tokens_before_update
-                    expected_computed -= (accepted + 1) - appended
+                # vLLM main trims ``num_computed_tokens`` to cover only the
+                # tokens actually kept when a request stops mid token-list.
+                appended = request.num_output_tokens - output_tokens_before_update
+                expected_computed -= (accepted + 1) - appended
                 assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
@@ -434,7 +442,7 @@ def test_raw_sequence_lifecycle(
         # pure full-attention dspark layout sees the doubled local prefix hit.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+        if speculative_method == "dspark" and only_full_attention:
             mixed_local = 256
         run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()

@@ -43,7 +43,7 @@ $$
 
 ## 函数原型
 
-每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnQuantLightningIndexerV2"接口执行计算。
+每个算子分为[两段式接口](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnQuantLightningIndexerV2"接口执行计算。
 
 ```Cpp
 aclnnStatus aclnnQuantLightningIndexerV2GetWorkspaceSize(
@@ -60,6 +60,7 @@ aclnnStatus aclnnQuantLightningIndexerV2GetWorkspaceSize(
     const aclTensor *blockTableOptional,
     const aclTensor *outputIdxOffsetOptional,
     const aclTensor *metadataOptional,
+    const aclTensor *causalSeqlensKvGlobalOptional,
     int64_t          topk,
     int64_t          quantMode,
     int64_t          maxSeqlenQOptional,
@@ -68,6 +69,10 @@ aclnnStatus aclnnQuantLightningIndexerV2GetWorkspaceSize(
     int64_t          maskModeOptional,
     int64_t          cmpRatioOptional,
     int64_t          returnValueOptional,
+    bool             enableDcpOptional,
+    int64_t          cpWorldOptional,
+    int64_t          cpRankOptional,
+    int64_t          cpKvCacheInterleaveSizeOptional,
     const aclTensor *sparseIndicesOut,
     const aclTensor *sparseValuesOut,
     uint64_t        *workspaceSize,
@@ -301,6 +306,22 @@ aclnnStatus aclnnQuantLightningIndexerV2(
       <td>x</td>
     </tr>
     <tr>
+      <td>causalSeqlensKvGlobalOptional</td>
+      <td>输入</td>
+      <td>DCP（Decode Context Parallel，解码上下文并行）场景下每个请求本次 Q 片段的全局 exclusive 上界 C。</td>
+      <td>
+          <ul>
+                <li>shape为(B,)，INT32 Device Tensor；<code>enable_dcp</code> 为 true 时必传，否则必须为空。</li>
+                <li>C 为最后一个 Q 行的全局位置 + 1，不是 batch 前缀和，也不是物理 cache 容量。</li>
+                <li>实际 sequsedK 仍传本地有效长度，不能用 C 替代。</li>
+          </ul>
+      </td>
+      <td>INT32</td>
+      <td>ND</td>
+      <td>(B,)</td>
+      <td>x</td>
+    </tr>
+    <tr>
       <td>topk</td>
       <td>输入</td>
       <td>topK阶段需要保留的Key token索引数量。</td>
@@ -406,6 +427,52 @@ aclnnStatus aclnnQuantLightningIndexerV2(
       <td>-</td>
     </tr>
     <tr>
+      <td>enableDcpOptional</td>
+      <td>输入</td>
+      <td>是否开启 DCP（Decode Context Parallel，解码上下文并行）位置语义。</td>
+      <td>
+          <ul>
+                <li>true 时按 C/P/r/S 计算每行本地可见 KV 长度；false 时保持原有计算行为。</li>
+                <li>arch22（Atlas A2/A3）与 arch35（Ascend950/A5）支持。</li>
+                <li>A5 上 metadata 算子必须同步传入相同的 DCP 参数与 causal_seqlens_kv_global，metadata 与 kernel 使用同一套可见长度公式。</li>
+          </ul>
+      </td>
+      <td>BOOL</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+    <tr>
+      <td>cpWorldOptional</td>
+      <td>输入</td>
+      <td>CP 组大小 P。</td>
+      <td>要求 P ≥ 1；enable_dcp 为 false 时必须为 1。</td>
+      <td>INT64</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+    <tr>
+      <td>cpRankOptional</td>
+      <td>输入</td>
+      <td>当前 rank r。</td>
+      <td>要求 0 ≤ r &lt; P；enable_dcp 为 false 时必须为 0。</td>
+      <td>INT64</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+    <tr>
+      <td>cpKvCacheInterleaveSizeOptional</td>
+      <td>输入</td>
+      <td>每 S 个 token 轮换 rank。</td>
+      <td>要求 S ≥ 1；逐 token 分片为 1，整 block 分片时传物理 block_size；enable_dcp 为 false 时必须为 1。</td>
+      <td>INT64</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+    <tr>
       <td>sparseIndicesOut</td>
       <td>输出</td>
       <td>公式中的Indices输出。</td>
@@ -474,7 +541,8 @@ aclnnStatus aclnnQuantLightningIndexerV2(
     - `quant_mode` 仅支持 2（Per-Token-Head量化）。
     - `cmp_ratio` 仅支持 2 的幂次方且范围为 [1, 128]，即 1/2/4/8/16/32/64/128。
     - 不支持 `outputIdxOffsetOptional`。
-    - 不支持 `return_value`。
+    - 支持 `return_value`（DCP 跨 rank 全局 TopK 需要 score）。
+    - DCP 组合约束：`enable_dcp=true` 时 `layout_q` 必须为 TND、`layout_k` 必须为 PA_BBND、`cmp_ratio` 必须为 1、`candidate_mode` 必须为 3、`return_value` 必须为 1、`causalSeqlensKvGlobalOptional` 必传且不能传 `outputIdxOffsetOptional`。
     - query 和 key：支持 INT8，不支持 FLOAT8_e4m3fn、HIFLOAT8 和 FLOAT4_e2m1。
     - query_dequant_scale 和 key_dequant_scale：支持 FLOAT16，不支持 FLOAT32 和 FLOAT8_e8m0。
     - weights：支持 FLOAT16，不支持 FLOAT32。
@@ -484,7 +552,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 - **返回值：**
 
-  aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+  aclnnStatus：返回状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
   第一段接口会完成入参校验，出现以下场景时报错：
 
@@ -553,7 +621,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 - **返回值：**
 
-  aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+  aclnnStatus：返回状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
 ## 约束说明
 
@@ -566,7 +634,7 @@ aclnnStatus aclnnQuantLightningIndexerV2(
 
 ## 调用示例
 
-示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
+示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/compile_and_run_sample.md)。
 
 ```Cpp
 /**

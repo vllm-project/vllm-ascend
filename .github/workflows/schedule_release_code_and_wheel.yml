@@ -40,7 +40,7 @@ on:
 jobs:
   build_and_release_code:
     name: release code
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -155,14 +155,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: 910b
         run: |
           pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l 910b
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: a2
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -243,14 +255,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: a3
         run: |
           pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l a3
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: a3
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -325,14 +349,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: 310p
         run: |
           pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l 310p
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: 310p
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -408,14 +444,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: "950"
         run: |
           pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l 950
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: "950"
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -430,7 +478,7 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Download all variant wheels
+      - name: Download all wheel artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: '*-wheel'
@@ -443,6 +491,8 @@ jobs:
           find all-wheels/ -path '*/variants/*.whl' -exec cp {} combined-variants/ \;
           echo "Combined variant wheels:"
           ls combined-variants/
+          echo "Per-platform plain wheels:"
+          find all-wheels/platforms -name '*.whl' | sort
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -456,12 +506,15 @@ jobs:
           echo "Generated index files:"
           ls combined-variants/
 
-      - name: Upload wheels and variant index to OBS
+      - name: Install OBS SDK
+        run: |
+          pip install esdk-obs-python --quiet
+
+      - name: Upload variant wheels and index to OBS
         env:
           OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
           OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
         run: |
-          pip install esdk-obs-python --quiet
           python3 - <<'EOF'
           import os, glob
           from obs import ObsClient
@@ -474,10 +527,41 @@ jobs:
           )
           files = glob.glob('combined-variants/*.whl') + glob.glob('combined-variants/*.json')
           for file in files:
-              filename = os.path.basename(file)
-              resp = client.putFile(OBS_BUCKET, f'{OBS_PATH}/{filename}', file)
+              object_key = f'{OBS_PATH}/{os.path.basename(file)}'
+              resp = client.putFile(OBS_BUCKET, object_key, file)
               if resp.status < 300:
-                  print(f'Uploaded: {filename}')
+                  print(f'Uploaded: {object_key}')
               else:
-                  raise Exception(f'Failed to upload {filename}: {resp.errorMessage}')
+                  raise Exception(f'Failed to upload {object_key}: {resp.errorMessage}')
+          EOF
+
+      - name: Upload per-platform wheels to OBS
+        env:
+          OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, glob
+          from obs import ObsClient
+          OBS_BUCKET = 'ascend-artifcat-packages'
+          # Plain (non-variant) wheels consumed by plain pip, e.g.
+          #   --index-url https://repo.huaweicloud.com/ascend/repos/pypi/platforms/a3
+          #   --find-links https://repo.huaweicloud.com/ascend/repos/pypi/platforms/a3/vllm-ascend/
+          OBS_PLATFORM_ROOT = 'pypi/packages/ascend/repos/pypi/platforms'
+          platform_wheels = sorted(glob.glob('all-wheels/platforms/*/*.whl'))
+          if not platform_wheels:
+              raise Exception('No per-platform wheels found; expected all-wheels/platforms/*/*.whl')
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+          for file in platform_wheels:
+              platform = os.path.basename(os.path.dirname(file))
+              object_key = f'{OBS_PLATFORM_ROOT}/{platform}/vllm-ascend/{os.path.basename(file)}'
+              resp = client.putFile(OBS_BUCKET, object_key, file)
+              if resp.status < 300:
+                  print(f'Uploaded: {object_key}')
+              else:
+                  raise Exception(f'Failed to upload {object_key}: {resp.errorMessage}')
           EOF

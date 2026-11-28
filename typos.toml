@@ -52,6 +52,8 @@ dout = "dout"
 Pn = "Pn"
 arange = "arange"
 ptd = "ptd"
+# AscendC operator build tree of the fla_npu OPP (op_impl/ai_core/tbe)
+tbe = "tbe"
 
 [type.py]
 extend-glob = []

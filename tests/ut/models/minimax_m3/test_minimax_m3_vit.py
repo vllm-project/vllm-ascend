@@ -96,9 +96,6 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
             return SimpleNamespace(
                 model_config=model_config,
                 quant_config=None,
-                # vLLM main's ``_mark_tower_model`` reads this to skip tower
-                # construction on non-first pipeline stages under MRv2.
-                use_v2_model_runner=False,
             )
 
         test_cases = [
@@ -111,6 +108,7 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
         with (
             patch.object(m3_vl, "MiniMaxVLVisionModel", _DummyVisionTower),
             patch.object(m3_vl, "MiniMaxM3SparseForCausalLM", _DummyLanguageModel),
+            patch("vllm.distributed.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
         ):
             for limit_mm_per_prompt, expected_tower_type in test_cases:
                 with self.subTest(limit_mm_per_prompt=limit_mm_per_prompt):

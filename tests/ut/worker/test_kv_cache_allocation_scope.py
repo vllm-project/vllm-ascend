@@ -8,8 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
 
@@ -25,74 +23,6 @@ class _AllocationScope(AbstractContextManager):
     def __exit__(self, *args: Any) -> None:
         assert self.active
         self.active = False
-
-
-def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
-    scope = _AllocationScope()
-    raw_tensors = {"layer": object()}
-    reshaped = {"layer": object()}
-    runner = object.__new__(NPUModelRunner)
-    runner.shared_kv_cache_layers = {}
-    runner.kv_caches = []
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="llama"))
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
-
-    def allocate(_kv_cache_config):
-        assert scope.active
-        return raw_tensors
-
-    def reshape(_kv_cache_config, tensors, kernel_block_sizes):
-        assert not scope.active
-        assert tensors is raw_tensors
-        assert kernel_block_sizes is None
-        return reshaped
-
-    def bind(*_args, **_kwargs):
-        assert not scope.active
-
-    runner._allocate_kv_cache_tensors = allocate
-    runner._reshape_kv_cache_tensors = reshape
-
-    with patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=bind):
-        result = NPUModelRunner.initialize_kv_cache_tensors(
-            runner,
-            SimpleNamespace(),
-            kv_cache_allocation_context=scope,
-        )
-
-    assert result is reshaped
-    assert not scope.active
-
-
-def test_310p_kv_pool_only_wraps_backing_allocation() -> None:
-    scope = _AllocationScope()
-    caches = {"layer": object()}
-    runner = object.__new__(NPUModelRunner310)
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
-    runner.use_sparse = False
-    runner.model_config = SimpleNamespace(use_mla=False)
-    runner.shared_kv_cache_layers = {}
-    runner.kv_caches = []
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
-
-    def allocate(_kv_cache_config):
-        assert scope.active
-        return caches
-
-    def bind(*_args, **_kwargs):
-        assert not scope.active
-
-    runner._allocate_kv_cache_tensors = allocate
-
-    with patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=bind):
-        result = NPUModelRunner310.initialize_kv_cache_tensors(
-            runner,
-            SimpleNamespace(),
-            kv_cache_allocation_context=scope,
-        )
-
-    assert result is caches
-    assert not scope.active
 
 
 def test_kv_wake_does_not_run_model_runner_recovery() -> None:
@@ -114,8 +44,9 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
     worker.model_runner = runner
-    worker._sleep_saved_buffers = {}
+    worker._sleep_mode_backend = MagicMock()
     worker.sleep_wakeup_manager = MagicMock()
+    worker._sleep_mode_backend = MagicMock()
 
     with (
         # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
@@ -140,9 +71,17 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
-    worker.model_runner = SimpleNamespace(model=model)
-    worker._sleep_saved_buffers = {}
+    worker.model_config = SimpleNamespace(
+        sleep_preserve_parameter_names=[],
+        sleep_mode_backend="camem",
+    )
+    from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
+
+    worker.model_runner = SimpleNamespace(
+        model=model,
+        get_draft_model=lambda: None,
+    )
+    worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
     return worker
 
@@ -166,7 +105,6 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 
     NPUWorker.sleep(worker, level=1)
 
-    assert worker._sleep_saved_buffers == {}
     assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
     # Both sleep barriers fire on the cleanup-disabled path too.
     assert mock_synchronize_device.call_count == 2
@@ -176,7 +114,7 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
 @patch("vllm_ascend.worker.worker.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
-def test_level2_sleep_still_cpu_backups_named_buffers(
+def test_level2_sleep_does_not_python_backup_named_buffers(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
     mock_get_config.return_value = SimpleNamespace(
@@ -191,7 +129,7 @@ def test_level2_sleep_still_cpu_backups_named_buffers(
 
     NPUWorker.sleep(worker, level=2)
 
-    assert "_dsa_hadamard" in worker._sleep_saved_buffers
-    assert worker._sleep_saved_buffers["_dsa_hadamard"].device.type == "cpu"
-    assert torch.equal(worker._sleep_saved_buffers["_dsa_hadamard"], hadamard)
+    assert not hasattr(worker, "_sleep_saved_buffers")
+    assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
+    worker.sleep_mode_backend.suspend.assert_called_once_with(set())
     assert mock_synchronize_device.call_count == 2

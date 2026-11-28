@@ -31,11 +31,22 @@ class LayerwiseSessionTracker:
         self._load_key_owners: dict[str, set[str]] = {}
 
     @staticmethod
-    def _replace_block_entry(entries: dict[str, tuple[int, int]], key: str, block_index: tuple[int, int]) -> None:
-        for previous_key, previous_index in list(entries.items()):
-            if previous_index == block_index and previous_key != key:
-                del entries[previous_key]
-        entries[key] = block_index
+    def _replace_block_entries(
+        entries: dict[str, tuple[int, int]],
+        replacements: list[tuple[str, tuple[int, int]]],
+    ) -> None:
+        if not replacements:
+            return
+        keys_by_position = {position: key for key, position in entries.items()}
+        for key, position in replacements:
+            old_position = entries.get(key)
+            if old_position is not None:
+                del keys_by_position[old_position]
+            replaced_key = keys_by_position.get(position)
+            if replaced_key is not None:
+                del entries[replaced_key]
+            entries[key] = position
+            keys_by_position[position] = key
 
     def register_put_keys(self, req_id: str, entries: Iterable[tuple[str, int]], group_id: int = 0) -> None:
         """Remember which requests should consume a key after commit succeeds."""
@@ -46,11 +57,14 @@ class LayerwiseSessionTracker:
     def commit_put_keys(self, keys: Iterable[str]) -> None:
         """Promote committed keys into each owner's future load set."""
         with self._lock:
+            updates: dict[str, list[tuple[str, tuple[int, int]]]] = {}
             for key in keys:
                 request_entries = self._pending_put_owners.pop(key, {})
                 for req_id, block_index in request_entries.items():
-                    entries = self._request_load_entries.setdefault(req_id, {})
-                    self._replace_block_entry(entries, key, block_index)
+                    updates.setdefault(req_id, []).append((key, block_index))
+            for req_id, replacements in updates.items():
+                entries = self._request_load_entries.setdefault(req_id, {})
+                self._replace_block_entries(entries, replacements)
 
     def revoke_put_keys(self, keys: Iterable[str]) -> None:
         with self._lock:
@@ -66,8 +80,7 @@ class LayerwiseSessionTracker:
         """Merge current remote hits with keys committed by earlier chunks."""
         with self._lock:
             entries = self._request_load_entries.setdefault(req_id, {})
-            for key, block_index in current_entries:
-                self._replace_block_entry(entries, key, (group_id, block_index))
+            self._replace_block_entries(entries, [(key, (group_id, index)) for key, index in current_entries])
             return [(key, index) for key, (group, index) in entries.items() if group == group_id]
 
     def record_get_result(

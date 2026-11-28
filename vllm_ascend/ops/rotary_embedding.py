@@ -92,13 +92,17 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
+def get_cos_and_sin_mla(positions, use_cache=False, *, use_rope=True):
     global _cos_cache
     global _sin_cache
     global _cos_mla
     global _sin_mla
     global _cos_sin_flat
     num_tokens = positions.size(0)
+    # Kimi's NoPE MLA retains a nonzero shared K projection; its dimensions
+    # describe checkpoint storage, rather than an instruction to rotate it.
+    if not use_rope:
+        return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
     # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
     # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
     if _cos_mla is not None and _cos_mla.shape[-1] == 0:
@@ -713,7 +717,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             query, key = self.forward_triton(positions, query, key)
-        elif self.mrope_section != [16, 24, 24]:
+        elif self.mrope_section is None or tuple(self.mrope_section) not in ((16, 24, 24), (8, 12, 12)):
             query, key = super().forward_oot(positions, query, key)
         else:
             import torch_npu
@@ -730,6 +734,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                     query.dtype
                 )  # type: ignore
 
+            rotary_mode = "half" if self.is_neox_style else "interleave"
+
             query, key = torch_npu.npu_mrope(
                 positions.to(dtype=torch.int64).contiguous(),
                 query.contiguous(),
@@ -737,7 +743,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                 self.cos_sin_cache.contiguous(),
                 self.head_size,
                 mrope_section=mrope_section,
-                rotary_mode="half",
+                rotary_mode=rotary_mode,
             )
 
         # Upstream DFlash/DSpark assumes RoPE is in-place and discards the

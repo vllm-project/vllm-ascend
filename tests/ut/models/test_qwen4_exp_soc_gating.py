@@ -4,12 +4,9 @@
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 import torch
 
-from vllm_ascend.models.qwen4_exp import lightning_indexer
 from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_indexer() -> ascend_qsa.AscendQSAIndexer:
@@ -28,38 +25,26 @@ def _select_metadata() -> SimpleNamespace:
         logical_positions=torch.zeros(1, dtype=torch.int64),
         seq_lens=torch.ones(1, dtype=torch.int32),
         query_start_loc=torch.arange(2, dtype=torch.int32),
+        num_actual_tokens=1,
     )
 
 
 def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
     sentinel = torch.zeros(1, 2051, dtype=torch.int32)
     calls: list[tuple] = []
+    metadata = _select_metadata()
 
-    def lightning(*args):
+    def lightning(*args, **kwargs):
         calls.append(args)
+        assert args[2] is metadata
+        assert not kwargs
         return sentinel
 
-    monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning", lightning)
-    result = _make_indexer()._select(torch.zeros(1, 4, 128), _select_metadata(), None)
+    monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning_v2", lightning)
+    result = _make_indexer()._select(torch.zeros(1, 4, 128), metadata, None)
 
     assert result is sentinel
     assert len(calls) == 1
-
-
-@pytest.mark.parametrize("page_size", [192, 384])
-def test_lightning_indexer_accepts_runtime_page_sizes(page_size: int) -> None:
-    output = lightning_indexer.qsa_select_paged_tokens_lightning(
-        query=torch.empty(0, 8, 128, dtype=torch.bfloat16),
-        compressed_key_cache=torch.empty(1, page_size, 1, 128, dtype=torch.bfloat16),
-        block_table=torch.empty(0, 1, dtype=torch.int32),
-        token_to_req=torch.empty(0, dtype=torch.int64),
-        query_positions=torch.empty(0, dtype=torch.int64),
-        sequence_lengths=torch.empty(0, dtype=torch.int32),
-        query_start_loc=torch.zeros(1, dtype=torch.int32),
-        token_topk=2048,
-        compress_ratio=4,
-    )
-    assert output.shape == (0, 2051)
 
 
 def _make_impl() -> ascend_qsa.AscendQSAImpl:
@@ -90,30 +75,16 @@ def test_impl_always_uses_cann_gbsa(monkeypatch) -> None:
 
     monkeypatch.setattr(ascend_qsa, "qsa_gbsa_attention", gbsa)
     impl: Any = _make_impl()
-    if vllm_version_is("0.32.0"):
-        result = impl.forward_qsa(
-            layer=layer,
-            query=torch.zeros(1, 2, 2),
-            key=torch.zeros(0),
-            value=torch.zeros(0),
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            output=output,
-            token_to_req=torch.zeros(1, dtype=torch.int64),
-            logical_positions=logical_positions,
-            seq_lens=seq_lens,
-        )
-    else:
-        result = impl.forward(
-            layer=layer,
-            query=torch.zeros(1, 2, 2),
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            output=output,
-            token_to_req=torch.zeros(1, dtype=torch.int64),
-            logical_positions=logical_positions,
-            seq_lens=seq_lens,
-        )
+    result = impl.forward(
+        layer=layer,
+        query=torch.zeros(1, 2, 2),
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+        token_to_req=torch.zeros(1, dtype=torch.int64),
+        logical_positions=logical_positions,
+        seq_lens=seq_lens,
+    )
 
     assert result is sentinel
     assert len(calls) == 1

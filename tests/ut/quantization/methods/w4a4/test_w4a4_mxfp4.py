@@ -5,7 +5,7 @@ import torch.nn as nn
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
@@ -18,6 +18,9 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -129,10 +132,11 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -173,7 +177,11 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu.npu_format_cast",
         side_effect=lambda weight, _fmt, **_kwargs: weight.clone(),
     )
-    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, _mock_cast, _mock_use_megamoe, mock_vllm):
+    # The w2 experts go through the shared FP4 recipe, which casts in its own
+    # module and reads torch_npu's FP4 enum there.
+    @patch("vllm_ascend.quantization.nz.torch_npu")
+    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, mock_nz_npu, _mock_cast, _mock_use_megamoe, mock_vllm):
+        mock_nz_npu.npu_format_cast.side_effect = lambda weight, _fmt, **_kwargs: weight.clone()
         mock_vllm.return_value = create_mock_vllm_config()
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(
@@ -274,7 +282,6 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = None
         layer.swiglu_alpha = 1.0
         layer.swiglu_beta = 0.0

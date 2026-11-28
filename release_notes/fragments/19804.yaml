@@ -1,0 +1,4 @@
+pr: 19804
+entries:
+  - category: feature
+    text: Added an Ascend adapter for upstream Decision 3.0 checkpoints, using vLLM's native classification and readout sidecar paths. D3 requests use the upstream System One API and require a compatible vLLM revision with native D3 support.

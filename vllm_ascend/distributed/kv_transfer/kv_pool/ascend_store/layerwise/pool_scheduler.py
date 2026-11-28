@@ -12,17 +12,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_layerwise_kv_cache_specs,
-    get_layerwise_reuse_config,
+    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
+    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
@@ -49,9 +48,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer:
-            self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
+        self.layerwise_offload = (
+            self.use_layerwise_transfer and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
+        )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -79,28 +80,19 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
-    def _async_load_enabled(self) -> bool:
-        return False
-
-    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-        if kv_cache_config is not None and reuse_config is not None:
-            reuse_layout = build_layerwise_reuse_layout(
-                get_layerwise_kv_cache_specs(kv_cache_config),
-                self.num_layers,
-                reuse_config,
-            )
-            if reuse_layout.layer_cache_specs:
-                self.num_layers = max(
-                    self.num_layers,
-                    max(reuse_layout.layer_cache_specs) + 1,
-                )
-            self.layerwise_offload = reuse_layout.has_layer_reuse
-        else:
-            self.layerwise_offload = build_layerwise_cache_layout(
-                self.num_layers,
-                extra_config,
-            ).has_layer_reuse
+    def _build_req_meta(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes: list[BlockHash],
+        load_spec: LoadSpec | None,
+        prompt_token_ids: list[int],
+        skip_save: bool | None,
+    ) -> ReqMeta | None:
+        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            # Verifier rows have no corresponding input KV or state to snapshot.
+            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
+        return super()._build_req_meta(request_tracker, block_hashes, load_spec, prompt_token_ids, skip_save)
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
@@ -114,9 +106,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 vllm_cached_tokens=num_current_tokens,
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
-                layerwise_snapshot_end_token=request_tracker.last_layerwise_snapshot_end_token,
-                layerwise_snapshot_block_index=request_tracker.last_layerwise_snapshot_block_index,
-                layerwise_snapshot_start_block=request_tracker.last_layerwise_snapshot_start_block,
                 layerwise_previous_step=True,
             )
         return None
@@ -126,7 +115,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -134,10 +123,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))
 
         if self.use_layerwise_transfer:
-            return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens))
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
@@ -148,7 +137,19 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_mamba_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Resolve a saved checkpoint at the replayable endpoint before looking up the prefix.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
+            if self.use_eagle:
+                final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+                token_len = min(token_len, final_block_start)
+                if token_len <= 0:
+                    return 0
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
             )
@@ -207,35 +208,39 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             hbm_hit_tokens=num_computed_tokens,
         )
 
-    def _lookup_layerwise_contiguous(
+    def _query_contiguous_group_hits(
         self,
         request: "Request",
         token_len: int,
-        num_computed_tokens: int,
-    ) -> int:
-        # Layer reuse can evict earlier layers from HBM. Otherwise, only
-        # probe blocks beyond the complete local prefix to avoid rewarming it.
+        group_block_sizes: Sequence[int],
+        skip_tokens: int,
+    ) -> list[tuple[int, int, int]]:
+        """Contiguous hit scan shared by both layerwise data planes.
+
+        For each participating group, align the request's block hashes to the
+        group's physical block size, skip the blocks below ``skip_tokens``
+        (the local prefix), probe backend readability and count leading hit
+        blocks. Returns one ``(hit_tokens, hit_blocks, probed_blocks)`` tuple
+        per participating group; groups with nothing to probe are omitted.
+
+        Deliberately no cross-request hit cache: in a tiered (DRAM+SSD) pool a
+        cached hit can outlive an eviction and over-report external hits,
+        while a cached miss can hide a freshly saved block. Every lookup
+        re-probes backend readability instead.
+        """
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
-        hits_per_group: list[int] = []
+        results: list[tuple[int, int, int]] = []
 
-        for group_id in range(len(self.grouped_block_size)):
-            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
+        for group_id, effective_block_size in enumerate(group_block_sizes):
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
-            query_start_block = (
-                0
-                if self.layerwise_offload
-                else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
-            )
+            query_start_block = min(skip_tokens // effective_block_size, len(group_block_hashes))
             group_block_hashes = group_block_hashes[query_start_block:]
             if not group_block_hashes:
-                hits_per_group.append(query_start_block * effective_block_size)
+                # Nothing left to probe: the skipped prefix stands as the hit.
+                results.append((query_start_block * effective_block_size, query_start_block, 0))
                 continue
 
-            # Deliberately no cross-request hit cache: in a tiered (DRAM+SSD)
-            # pool a cached hit can outlive an eviction and over-report
-            # external hits, while a cached miss can hide a freshly saved
-            # block. Every lookup re-probes backend readability instead.
             keys_by_block = [
                 self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
             ]
@@ -249,7 +254,31 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 else:
                     break
 
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
+            results.append(
+                (
+                    (query_start_block + num_hit_blocks) * effective_block_size,
+                    query_start_block + num_hit_blocks,
+                    len(keys_by_block),
+                )
+            )
+
+        return results
+
+    def _lookup_layerwise_contiguous(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        # Layer reuse can evict earlier layers from HBM. Otherwise, only
+        # probe blocks beyond the complete local prefix to avoid rewarming it.
+        skip_tokens = 0 if self.layerwise_offload else num_computed_tokens
+        hits_per_group = [
+            hit_tokens
+            for hit_tokens, _, _ in self._query_contiguous_group_hits(
+                request, token_len, self.grouped_block_size, skip_tokens
+            )
+        ]
 
         if not hits_per_group:
             logger.debug(
@@ -274,48 +303,39 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
+        # The block-key plane stores one hash-addressed object per block and
+        # keeps no per-group local-prefix state: scan the first group only,
+        # with nothing to skip.
         del num_computed_tokens
-        num_hash_blocks = token_len // self.hash_block_size
-        block_hashes = get_block_hashes(
-            request.block_hashes[:num_hash_blocks],
-            self._block_size,
-            self.hash_block_size,
-        )
-        if not block_hashes:
+        results = self._query_contiguous_group_hits(request, token_len, [self._block_size], 0)
+        if not results:
             return 0
-        keys_by_block = [
-            self._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)) for block_hash in block_hashes
-        ]
-        block_hits = self._query_layerwise_block_hits(keys_by_block)
-        num_hit_blocks = 0
-        for hit in block_hits:
-            if not hit:
-                break
-            num_hit_blocks += 1
+        hit_tokens, num_hit_blocks, num_probed_blocks = results[0]
         logger.info(
             "Block-key layerwise hit check request=%s hit_blocks=%d/%d",
             request.request_id,
             num_hit_blocks,
-            len(keys_by_block),
+            num_probed_blocks,
         )
-        return num_hit_blocks * self._block_size
+        return hit_tokens
 
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
         """All-rank keys for scheduler-side hit check, built by the
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage and PCP rank has saved it,
-        so the protocol helper enumerates all stages, PCP ranks and heads.
+        The protocol helper covers every PP stage and head, and every PCP
+        rank for sharded Mamba groups. PCP replicas share one object.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        head_or_tp_ranks = (
-            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
-        )
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_mamba_speculative_blocks_by_group:
+            head_or_tp_ranks = self.tp_size
+        else:
+            head_or_tp_ranks = self.tp_size // self.put_step
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -127,11 +128,10 @@ def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=None),
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
     spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
     physical_size = 256 if backend is AscendFlashAttentionBackend else 192
     assert spec.head_size == spec.head_size_v == physical_size
@@ -159,13 +159,18 @@ def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="generate"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(runner_type="generate", hf_config=SimpleNamespace(architectures=["DFlash2Model"])),
         speculative_config=SimpleNamespace(
             method="dflash",
             target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
             draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             draft_sample_method="greedy",
-            enforce_eager=True,
+            enforce_eager=False,
         ),
     )
 
@@ -184,9 +189,14 @@ def select_flash_attn(monkeypatch):
     from vllm_ascend import platform
     from vllm_ascend.device.hardware_profile import AttentionBackendFamily
 
-    profile = SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD)
+    profile = SimpleNamespace(
+        supports=lambda _: True,
+        attention_backend_family=AttentionBackendFamily.STANDARD,
+        flash_attn_npu_3_models=frozenset(),
+    )
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr(platform, "util", SimpleNamespace(find_spec=lambda _: None))
 
     def select(config, selector, tag="dflash_head"):
         monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
@@ -226,9 +236,11 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])
+def test_flash_attn_is_selected_for_supported_glm53_dflash2_targets(select_flash_attn, dflash2_config, model_type):
     select, profile = select_flash_attn
     config = dflash2_config
+    config.speculative_config.target_model_config.hf_text_config.model_type = model_type
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
     profile.supports = lambda _: False
@@ -252,6 +264,14 @@ def test_flash_attn_requires_live_dflash_loader_tag(monkeypatch, select_flash_at
     assert not platform._validate_flash_attn_backend((False, False, False), selector)
 
 
+@pytest.mark.parametrize("enforce_eager", [False, True, None])
+def test_dflash_selection_is_independent_of_eager(select_flash_attn, dflash2_config, enforce_eager):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.enforce_eager = enforce_eager
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(dflash2_config, selector)
+
+
 @pytest.mark.parametrize("sampling", ["greedy", "probabilistic"])
 def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn, dflash2_config, sampling):
     select, _ = select_flash_attn
@@ -260,18 +280,49 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     assert select(dflash2_config, selector)
 
 
+FA3 = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+FIA = "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+
+
+@pytest.mark.parametrize(
+    "target,draft,tag,expected",
+    [
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "backbone", FA3),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "dflash_head", FA3),
+        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash_head", FIA),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", "backbone", FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "eagle_head", FIA),
+    ],
+)
+def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, tag, expected):
+    from vllm_ascend import platform
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    config = dflash2_config
+    config.model_config.hf_config.architectures = [target]
+    config.model_config.hf_text_config = SimpleNamespace(model_type="qwen3_5_text")
+    config.speculative_config.target_model_config = config.model_config
+    config.speculative_config.draft_model_config.architectures = [draft]
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
+    monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr(platform, "util", SimpleNamespace(find_spec=lambda _: object()))
+    selector = AttentionSelectorConfig(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", block_size=128)
+    assert platform.NPUPlatform._select_attn_backend_cls(selector) == expected
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
@@ -279,7 +330,7 @@ def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, df
     assert not select(dflash2_config, selector)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "glm5_next"])
+@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "other_glm"])
 def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dflash2_config, model_type):
     select, _ = select_flash_attn
     dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
@@ -389,7 +440,9 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
     with monkeypatch.context() as patches:
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
-        result = builder.build_for_drafting(common, draft_index=0)
+        # MRv2 builds each draft step directly; the V1 drafting helper was
+        # removed upstream. Retain the same device-length assertions.
+        result = builder.build(common_prefix_len=0, common_attn_metadata=common, fast_build=True)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
     assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal
@@ -478,7 +531,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
     )
     original = layer.get_kv_cache_spec(config)
@@ -489,7 +542,6 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
     get_spec = Mock(wraps=layer.get_kv_cache_spec)
     monkeypatch.setattr(layer, "get_kv_cache_spec", get_spec)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
 
     spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
 
@@ -501,7 +553,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         expected_padding = None if recover else original.page_size_padded
         assert spec.page_size_bytes == (expected_padding or natural_page)
         assert spec.page_size_padded == expected_padding
-    # v0.32.0 has no draft marker; check propagation when upstream supports it.
+    # Both supported versions propagate the draft marker.
     if hasattr(original, "is_draft"):
         assert spec.is_draft is is_draft
     assert config.cache_config.skip_page_size_padded == padding

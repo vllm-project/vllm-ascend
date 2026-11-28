@@ -1,3 +1,5 @@
+"""DeepSeek sparse attention backends and kernel runtime interfaces."""
+
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,11 +13,13 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImplBase,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -28,8 +32,14 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
+from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+)
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -37,7 +47,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -45,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.models.deepseek_v4.cache_reuse import get_swa_save_layer_name
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -63,11 +74,8 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     wait_for_device_metadata,
 )
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-
     from vllm_ascend.ops.triton.dspark_swa_indices import (
         build_dspark_swa_slot_indices_triton,
         dspark_swa_indices_supported,
@@ -90,8 +98,11 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
-DSA_METADATA_BUFFER_SIZE = 1024
+# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
+# QLI and the legacy metadata op use 1024.
+SAS_METADATA_BUFFER_SIZE = 1024
+SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
+QLI_METADATA_BUFFER_SIZE = 1024
 
 
 class OProjBufferPool:
@@ -124,16 +135,9 @@ CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
 CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
 
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
-
-
-def reset_compressor_metadata_cache() -> None:
-    """Drop the cached compressor metadata before a composite forward enters its next substep."""
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        # No active forward context (e.g. draft-model unit tests): no cache to reset.
-        return
-    forward_context.additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
+# Single-group o_proj dispatches batches up to this many tokens to the plain
+# 2D matmul; past it npu_transpose_batchmatmul wins again (compute-bound).
+_WO_A_SMALL_M_LIMIT = 128
 
 
 def get_or_compute_compressor_metadata(
@@ -321,6 +325,27 @@ class AscendDSABackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+
+        V4 stores NHD components regardless of the generic layout selection.
+        Its compressed-token count comes from the spec, not the manager's
+        raw-token kernel block size. The combined indexer view is an alias,
+        rather than a third sequential component.
+        """
+        prefix = (num_blocks, spec.num_kv_heads, spec.num_states)
+        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        if getattr(spec, "scale_dim", 0):
+            shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
+        return tuple(shapes)
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
@@ -613,8 +638,22 @@ def build_dspark_swa_indices(
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+    repeats = query_lens
+    active_rows = None
+    if (indices_output is not None or buffer is not None) and num_decode_tokens is not None and query_lens.numel() > 0:
+        # Match the fixed graph row count without reading device lengths on CPU.
+        active_rows = query_start_loc[-1]
+        repeats = query_lens.clone()
+        repeats[-1] += num_decode_tokens - active_rows
+
+    per_token_slots = torch.repeat_interleave(slot_ids, repeats, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, repeats, dim=0, output_size=num_decode_tokens)
+    if active_rows is not None:
+        valid_rows = (
+            torch.arange(num_decode_tokens, device=query_start_loc.device, dtype=query_start_loc.dtype) < active_rows
+        )
+        per_token_slots = per_token_slots.masked_fill(~valid_rows[:, None, None], -1)
+        per_token_lens = per_token_lens.masked_fill(~valid_rows, 0)
 
     if indices_output is not None:
         if indices_output.shape != per_token_slots.shape:
@@ -767,7 +806,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # DSpark target and draft builders must not overwrite module-global RoPE.
         self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
+        self.storage_block_size = kv_cache_spec.num_states
+        self.compressor_ratio = kv_cache_spec.tokens_per_state
+        sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
+        # Size the buffer for the metadata operator selected by the cache plan.
+        self.sas_metadata_buffer_size = (
+            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
+            if sas_plan.get_dsa_sparse_attn_metadata_op()
+            in (
+                sparse_flash_mla_metadata,
+                mixed_quant_sparse_flash_mla_metadata_fp8,
+                mixed_quant_sparse_flash_mla_metadata_turboquant,
+            )
+            else SAS_METADATA_BUFFER_SIZE
+        )
         scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -786,7 +838,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
             self.spec_sas_metadata = [
                 torch.zeros(
-                    DSA_METADATA_BUFFER_SIZE,
+                    self.sas_metadata_buffer_size,
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -824,12 +876,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.tq_group_block_sizes: torch.Tensor | None = None
 
-        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-        self.compressor_ratio = getattr(
-            kv_cache_spec,
-            "compress_ratio",
-            getattr(kv_cache_spec, "tokens_per_state", 0),
-        )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
         self.layer_names = list(layer_names)
@@ -840,10 +886,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            self.sas_metadata_buffer_size, dtype=torch.int32, device=self.device
         )
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            QLI_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
         # the original length. Persistent buffers keep their addresses stable
@@ -912,61 +958,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
-        # We now want to reorder the batch so that the "decode" requests are at
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
-        decodes = []
-        prefills = []
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens <= self.decode_threshold:
-                decodes.append(i)
-            else:
-                prefills.append(i)
-
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
-        first_prefill = 0
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill], decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
-                break
-
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        return modified_batch
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendDSAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def set_num_actual_tokens(
         self,
@@ -1366,15 +1366,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if preamble is None:
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-            if (
-                self.speculative_config is not None
-                and getattr(self.speculative_config, "method", None) == "dspark"
-                and getattr(self.speculative_config, "enable_adaptive_verification", False)
-                and self.num_prefills == 0
+            if self.speculative_config is not None and getattr(
+                self.speculative_config, "enable_adaptive_verification", False
             ):
-                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                # Adaptive verification redistributes decode tokens on device,
+                # so CPU query lengths may underestimate an individual request.
+                # Include the speculative-token limit plus one bonus token,
+                # while preserving the bound for longer prefill requests.
                 max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
             preamble = (
                 max_seqlen_q,
@@ -1606,8 +1604,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
-                    result[:DSA_METADATA_BUFFER_SIZE]
+                self.spec_sas_metadata[draft_index - 1][: self.sas_metadata_buffer_size].copy_(
+                    result[: self.sas_metadata_buffer_size]
                 )
                 return self.spec_sas_metadata[draft_index - 1]
             return result
@@ -1775,7 +1773,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        output[: self.sas_metadata_buffer_size] = sas_metadata
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
@@ -2045,7 +2043,7 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        self.qli_metadata_buffer[:QLI_METADATA_BUFFER_SIZE] = qli_metadata
         if use_specialized_metadata:
             metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
         return self.qli_metadata_buffer
@@ -2280,6 +2278,27 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
+        if (
+            self.n_local_groups == 1
+            and not _has_weight_scale(self.wo_a)
+            and o_proj_input.shape[0] <= _WO_A_SMALL_M_LIMIT
+        ):
+            # Single local group (TP >= o_groups): the grouped transpose matmul
+            # degenerates to a plain linear, but npu_transpose_batchmatmul pays
+            # a ~2x fixed kernel cost at small batch sizes (M << N), where its
+            # kernel selection dominates. Run the plain 2D matmul on the same
+            # 3D ND weight — it is [1, K, N] contiguous, so view(K, N) is free.
+            # Batches above _WO_A_SMALL_M_LIMIT keep the original kernel: in
+            # the compute-bound regime the transpose kernel wins again
+            # (measured ~10% at prefill-sized M).
+            # The weight_scale check keeps quantized wo_a (layout owned by the
+            # quantization path) on the original transpose path when fp8
+            # attention is not applicable.
+            num_tokens, group_hidden = o_proj_input.shape[0], o_proj_input.shape[2]
+            return torch.matmul(
+                o_proj_input.view(num_tokens, group_hidden),
+                self.wo_a.weight.view(group_hidden, -1),
+            ).unsqueeze(1)
         return torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,
@@ -2388,15 +2407,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Prepare cache updates and report whether local writes can be skipped."""
-        return False
+    def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare caches and optionally return invocation-local Q intermediates."""
+        return False, None
 
     def _get_o_proj_input_shape(
         self,
@@ -2441,18 +2454,24 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return output
         layer_metadata = self._get_layer_metadata(layer_name, attn_metadata)
         common_attn_metadata = layer_metadata.attention
+        save_layer_name = layer_name
         if common_attn_metadata is None:
             common_attn_metadata = layer_metadata.swa
+            if self.swa_cache_layer is not None:
+                # Push needs the registered SWA cache name to submit the write
+                # before a rotating slot is reused.
+                save_layer_name = get_swa_save_layer_name(layer_name, self.swa_cache_layer.prefix)
         actual_tokens = common_attn_metadata.num_actual_tokens
 
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
+        cache_is_prepared, prepared_query = self._prepare_caches_and_query(
             layer_name,
             hidden_states,
             kv_cache,
             attn_metadata,
+            layer_metadata,
         )
         if actual_tokens == 0:
             output.zero_()
@@ -2464,7 +2483,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             notify_kv_cache_written(layer_name)
             with attention_transfer_window():
                 pass
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
             return output
 
         req_metadata = _require_req_metadata(common_attn_metadata)
@@ -2474,6 +2493,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv_cache,
             layer_metadata,
             cache_is_prepared,
+            prepared_query=prepared_query,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -2491,7 +2511,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         # o
         self._forward_o_proj(o_proj_input, output)
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
 
         return output_padded
 
@@ -2810,6 +2830,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
@@ -2855,7 +2876,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        if prepared_query is not None:
+            assert cache_is_prepared
+            q, qr, qr_pertoken_scale = prepared_query
+            compressor_overlap_output = None
+        elif self.multistream_dsv4_dsa_overlap:
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,

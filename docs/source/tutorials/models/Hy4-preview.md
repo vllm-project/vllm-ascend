@@ -15,7 +15,7 @@ This document describes how to quickly get started with Hy4 model inference depl
     **Current status and constraints**
 
     - Hy4 Preview is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:hy4-a3`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - Only **Atlas A3 (A3)** is supported now. Other Ascend hardware (e.g., Atlas A2 Products) is not supported for Hy4 Preview.
+    - Only **Atlas A3 products** are supported now. Other Ascend hardware (e.g., Atlas A2 products) is not supported for Hy4 Preview.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for Hy4 Preview. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
 ## 2 Supported Features
@@ -28,9 +28,9 @@ The features below are the ones enabled by the verified deployment commands in [
 
 | Feature | Description | Configuration |
 | --- | --- | --- |
-| Tensor Parallel (TP) | Splits the model across all 16 NPUs within a node. | `--tensor-parallel-size 16` |
+| Tensor Parallelism (TP) | Splits the model across all 16 NPUs within a node. | `--tensor-parallel-size 16` |
 | Expert Parallelism (EP) | Distributes the MoE experts (256 routed + 1 shared per layer) across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 96k. | `--data-parallel-size 2` |
+| Data Parallelism (DP) | Multi-node DP across 2 nodes, extending the context to 96k. | `--data-parallel-size 2` |
 | W8A8 Quantization | Loads the W8A8 quantized weights (Ascend quantization). | `--quantization ascend` |
 | Automatic Prefix Caching | Reuses the KV cache for shared prompt prefixes. | `--enable-prefix-caching` |
 | Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
@@ -56,9 +56,9 @@ This document uses the quantized [Hy4-preview-w8a8](https://www.modelscope.cn/mo
 
 | Hardware | Ascend HDK | CANN version | torch_npu version | vLLM | vLLM-Ascend version |
 | --- | --- | --- | --- | --- | --- |
-| Atlas 800I A3 (A3) | 25.5.0 (recommended) | CANN 9.0.1 | 2.10.0.post2 | Based on v0.23.0 | Based on v0.23.0 |
+| Atlas A3 products | 25.5.0 (recommended) | CANN 9.0.1 | 2.10.0.post2 | Based on v0.23.0 | Based on v0.23.0 |
 
-Hy4 Preview currently supports **only the Atlas 800I A3 (A3)** hardware; other Ascend hardware (e.g., Atlas 800I A2) is not supported.
+Hy4 Preview currently supports **only the Atlas A3 products** hardware; other Ascend hardware (e.g., Atlas A2 products) is not supported.
 
 Before getting started, confirm that the firmware/driver is installed correctly. The recommended HDK version is 25.5.0. Run the following command to confirm; the version shown in the output header is the HDK version.
 
@@ -76,6 +76,8 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 #### Download Docker Image
 
 ```bash
@@ -92,31 +94,18 @@ The output should contain the downloaded `quay.io/ascend/vllm-ascend:hy4-a3`.
 
 #### Create Docker Container
 
-Use the following command to create the container. The Atlas 800I A3 is a 16-card device, so you need to mount `/dev/davinci[0-15]` and the management devices. Also mount the driver library and the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
+Use the following command to create the container. The Atlas 800I A3 exposes 16 DIE devices, so select all of them with `ASCEND_VISIBLE_DEVICES=0-15`. Ascend Docker Runtime mounts the device nodes, the management devices, and the driver libraries. Also mount the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:hy4-a3
 export CONTAINER_NAME=vllm_ascend_hy4
 
-# Generate NPU device mount parameters (Atlas 800I A3: /dev/davinci[0-15])
-DEVICES=""
-for i in $(seq 0 15); do
-    DEVICES="${DEVICES} --device /dev/davinci${i}"
-done
-
 docker run -itd \
+    --net=host \
     --name ${CONTAINER_NAME} \
     --shm-size=1000g \
-    ${DEVICES} \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /mnt/weight:/mnt/weight \
     ${IMAGE} bash
 ```
@@ -160,19 +149,19 @@ vllm serve /path/to/Hy4-preview-w8a8 \
   --gpu-memory-utilization 0.92 \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 ### 5.2 Multi-Node Co-Located Deployment
 
-DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes share the host network via `--net=host`. Use the same command as the A3 single-node deployment, executed inside the container.
+DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes must be started with `--net=host` (add this flag to the `docker run` command in Section 4.1); otherwise they do not share the host network and multi-node DP/HCCL communication will fail. Use the same command as the A3 single-node deployment, executed inside the container.
 
 Startup order:
 
 1. First execute the following script in the container on Node 1 (rank 0, including the API);
 2. After seeing the `Started DP Coordinator process` log, execute the corresponding script in the container on Node 2;
-3. After about 20 minutes, seeing `Application startup complete` indicates that the service is ready. The startup time is related to the disk read/write speed of the weights, etc.
+3. After about 10 minutes, seeing `Application startup complete` indicates that the service is ready. The startup time is related to the disk read/write speed of the weights, etc.
 
 **Node 1 script:**
 
@@ -218,7 +207,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
@@ -264,7 +253,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
@@ -272,7 +261,7 @@ vllm serve ${MODEL} \
 
 Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. The following logs indicate that the service has been started successfully:
 
-```text
+```output
 INFO:     Started server process [PID]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -296,7 +285,7 @@ curl -sS -X POST http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: app
 
 The server prints the log of the received request, similar to:
 
-```text
+```output
 INFO:     [IP]:[PORT] - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ```
 

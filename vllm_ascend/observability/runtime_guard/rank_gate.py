@@ -143,7 +143,7 @@ def should_dump_kv_on_rank() -> bool:
 
 
 def should_run_wave_sync_on_rank() -> bool:
-    """True when this rank should run ``sync_for_step`` / ``end_of_wave_sync``.
+    """True when this rank should run ``begin_wave`` / ``end_of_wave``.
 
     Config bus + KV dump live on last PP only. Early PP stages already no-op
     detect/dump via other gates; skipping the wave entry avoids empty local

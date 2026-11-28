@@ -183,6 +183,11 @@ class TokenRepeatDetector(ConfigBackedDetector):
         self._consumed_len.pop(req_id, None)
         self._alerted.discard(req_id)
 
+    def on_disabled(self) -> None:
+        self._states.clear()
+        self._consumed_len.clear()
+        self._alerted.clear()
+
     def check_all(
         self,
         sampled_token_ids: list[list[int]] | None,
@@ -197,8 +202,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
         unit tests), tokens are appended here first.
 
         Always advances via Store ``cumulative_output_since`` + ``_consumed_len``
-        so a second call in the same wave cannot re-score ids that append
-        dedupe skipped (W1-1 / R-04).
+        so a second call does not re-score ids already folded.
         """
         if not self._precheck():
             return []

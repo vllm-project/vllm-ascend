@@ -126,19 +126,33 @@ class TestFLALazyImports(unittest.TestCase):
             events.append("device")
             return object()
 
+        # `init_device` builds the runner through the
+        # `_init_workspace_and_model_runner` / `_make_model_runner` hooks; the
+        # runner module they import through has to be faked instead of the bound class.
+        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
+        runner_module.__dict__.update(NPUModelRunner=lambda *args: events.append("model_runner"))
         namespace = {
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
-            "NPUModelRunner": lambda *args: events.append("model_runner"),
+            "get_ascend_config": lambda: SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                )
+            ),
+            "logger": Mock(),
         }
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
-        worker = SimpleNamespace(
+        init_wam = _load_function("vllm_ascend/worker/worker.py", "_init_workspace_and_model_runner", namespace)
+        make_model_runner = _load_function("vllm_ascend/worker/worker.py", "_make_model_runner", namespace)
+        worker: SimpleNamespace = SimpleNamespace(
             _init_device=select_device,
-            use_v2_model_runner=False,
-            vllm_config=object(),
+            _init_workspace_and_model_runner=lambda: init_wam(worker),
+            _make_model_runner=lambda: make_model_runner(worker),
+            vllm_config=SimpleNamespace(is_mm_encoder_only=False),
             rank=1,
         )
-        init_device(worker)
+        with patch.dict(sys.modules, {"vllm_ascend.worker.v2.model_runner": runner_module}):
+            init_device(worker)
         self.assertEqual(events, ["device", "register", "model_runner"])
 
 
@@ -151,8 +165,18 @@ class TestFLAImportBoundaries(unittest.TestCase):
                 # Function bodies execute at use time, not module discovery.
                 return
 
+            def visit_If(self, node):
+                if isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+                    for statement in node.orelse:
+                        self.visit(statement)
+                else:
+                    self.generic_visit(node)
+
             def visit_ImportFrom(self, node):
-                if node.module and node.module.startswith("vllm.third_party.flash_linear_attention"):
+                # Importing a Kimi submodule also loads its model package and FLA.
+                if node.module and node.module.startswith(
+                    ("vllm.third_party.flash_linear_attention", "vllm.models.kimi_k3")
+                ):
                     raise AssertionError(f"eager FLA import at line {node.lineno}: {node.module}")
 
         for path in paths:

@@ -62,11 +62,9 @@ alternative implementation of EPLB.
 
 ## Request and layer flow
 
-At runner initialization, platform validation checks the Model Runner version,
-EPLB mode, quantization layout, and execution features. Unsupported
-combinations fail before serving. Model Runner V1 keeps its legacy EPLB path;
-Model Runner V2 uses the upstream control plane. V1-only controls and V2 EPLB
-configuration cannot be mixed.
+At runner initialization, platform validation checks EPLB mode, quantization
+layout, and execution features. Unsupported combinations fail before serving.
+Ascend uses the upstream EPLB control plane.
 
 At the start of a Model Runner V2 batch, the runner tells
 `AscendEPLBController` whether the batch belongs to the configured load
@@ -85,8 +83,9 @@ Each MoE layer then follows one routing path:
    the layer's device lookup.
 3. The quantization method receives the routing weights and physical IDs and
    runs fused MoE. It does not select experts again.
-4. The same device operation records selected physical experts in the upstream
-   load buffer when its collection phase is enabled, then fused MoE executes.
+4. After the fused MoE call returns, the EPLB load recorder accumulates token
+   counts for each physical expert in the upstream load buffer when load
+   collection is enabled for the batch.
 
 Phase selection filters only the load submitted by a rank. Every rank still
 advances the upstream EPLB state machine and participates in its collectives in
@@ -181,7 +180,7 @@ Changes to this integration must preserve these invariants:
 6. The worker does not reuse transfer workspace before the main thread
    commits the layer and refreshes routing.
 7. Unsupported modes fail during initialization instead of silently degrading.
-8. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
+8. EPLB-disabled execution stays isolated from the EPLB path.
 9. The routing hot path avoids host loops, device-to-host synchronization, and
    mutable Python mapping work.
 
@@ -197,15 +196,15 @@ committed `EplbState` and the in-place lookup refresh. For successful movement
 with unchanged model behavior, inspect the quantization-owned weight view. For
 missing or shifted load statistics, verify that the fused routing operation
 records physical IDs and excludes padding. Startup rejections should be checked against
-the user-guide support matrix and
+the [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md) support matrix and
 [additional configuration reference](../../user_guide/configuration/additional_config.md).
 
-Useful log anchors: `Ascend EPLB selected ...` lines record the communicator
+Useful log anchors: `Ascend EPLB selected …` lines record the communicator
 consensus decision; `Ascend async EPLB cycle committed` lines summarize each
 committed movement cycle (predicted imbalance — mean and p95 max-to-average
 rank-load ratios, lower is better — before and after, changed layers,
 transfer counts); with `--eplb-config.log_balancedness true`, upstream
-`EPLB step: ... balancedness=...` lines record per-step load balance.
+`EPLB step: … balancedness=…` lines record per-step load balance.
 
 Repository test placement and registration rules are documented in the
 [testing guide](../contribution/testing.md).
