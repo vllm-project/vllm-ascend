@@ -18,15 +18,17 @@ from vllm.sampling_params import RequestOutputKind
 
 from tests.e2e.conftest import VllmRunner
 
-MODELS = [
-    "Qwen/Qwen3.5-35B-A3B",
-    "Qwen/Qwen3-30B-A3B",
+CASES = [
+    ("Qwen/Qwen3.5-35B-A3B", "default"),
+    ("Qwen/Qwen3-30B-A3B", "default"),
+    ("Qwen/Qwen3.5-35B-A3B", "allgather"),
+    ("Qwen/Qwen3-30B-A3B", "fused_mc2"),
 ]
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model,comm_case", CASES)
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
-def test_moe_routing_replay(model):
+def test_moe_routing_replay(model, comm_case):
     """Every token row carries its own routing decision (regression for #15451).
 
     With DP == 1 and TP > 1 the TP-sharded strategies still pad and split the
@@ -34,22 +36,20 @@ def test_moe_routing_replay(model):
     rank's shard; a capture that treats that shard as the whole batch leaves the
     rows owned by the other TP ranks unwritten.
 
-    Both strategies are covered from this one engine. ``set_moe_comm_method``
-    picks MC2 for a batch of at most ``mc2_tokens_capacity`` tokens and ALLTOALL
-    above it, and ``set_mc2_tokens_capacity`` derives that capacity from
-    ``max_cudagraph_capture_size`` when ``cudagraph_capture_sizes`` is set -- 8
-    tokens here, split over the two TP ranks. The prompts are submitted one at a
-    time so each prefill is a step of its own: the short one prefills inside the
-    size-8 graph (still MC2), the long one goes through ALLTOALL.
+    The default EP cases cover MC2 and ALLTOALL in one engine. Disabling EP
+    selects ALLGATHER; the fused configuration selects FUSED_MC2. Prompts are
+    submitted one at a time so each prefill is a separate step.
     """
-    prompts = [
-        "Hello, please introduce yourself.",  # 6 tokens -> MC2
-        "Hello, please introduce yourself. " * 8,  # 49 tokens -> ALLTOALL
-    ]
+    prompts = ["Hello, please introduce yourself."]
+    if comm_case == "default":
+        # With graph sizes up to 8, the long prefill exceeds MC2 capacity.
+        prompts.append("Hello, please introduce yourself. " * 8)
+    additional_config = {"enable_fused_mc2": 1} if comm_case == "fused_mc2" else None
     with VllmRunner(
         model,
         tensor_parallel_size=2,
-        enable_expert_parallel=True,
+        enable_expert_parallel=comm_case != "allgather",
+        additional_config=additional_config,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         distributed_executor_backend="mp",
         enable_return_routed_experts=True,
