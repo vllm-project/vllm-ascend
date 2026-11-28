@@ -1437,6 +1437,10 @@ def create_kv_cache_runtime_views(
                     continue
                 raw_cache = backing[start : start + span]
                 block_stride = descriptor.block_stride
+                if isinstance(spec, MambaSpec):
+                    cache_shapes = tuple((num_blocks, *shape) for shape in spec.shapes)
+                    caches[name] = create_cache_component_views(raw_cache, cache_shapes, spec.dtypes, block_stride)
+                    continue
                 # Migrate allocation callers from get_kv_cache_shape to this interface gradually.
                 # Keep the legacy hook for other models and allocation paths until they migrate.
                 # The backend describes the cache views bound to the layer.

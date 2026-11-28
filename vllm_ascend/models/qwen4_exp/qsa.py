@@ -33,12 +33,10 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
-from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
-from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapesAndDtypes,
     maybe_save_kv_layer_to_connector,
@@ -811,12 +809,6 @@ class AscendQSAIndexerBackend(QSAIndexerBackend):
 
 qsa_indexer.QSAIndexerBackend = AscendQSAIndexerBackend
 
-
-# Flash Next's companion caches also need runtime views from the unified pool.
-# PLE uses the same manager-block state indexing as GDN.
-PleShortConvAttentionBackend.get_runtime_shapes_and_dtypes = staticmethod(  # type: ignore[attr-defined]
-    AscendGDNAttentionBackend.get_runtime_shapes_and_dtypes
-)
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
