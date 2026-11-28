@@ -9,7 +9,7 @@ moving cache or scheduler knowledge back into the model.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -43,6 +44,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.models.deepseek_v41.dcp_prefill import DCPReadLayout
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -197,6 +199,7 @@ class AscendDSAV41Metadata(AttentionMetadata):
     storage_block_size: int
     is_compressor_state: bool
     flat_slot_mapping: torch.Tensor | None = None
+    dcp_read_layout: DCPReadLayout | None = None
     cache_kind: str = "unknown"
     # MRV2 producer ownership follows this forward's metadata, including capture.
     device_metadata_executor: Any = None
@@ -689,6 +692,11 @@ class AscendDSAV41Impl:
             folded_name = self.index_k_source_prefix + "_folded"
             folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
+        read_metadata = metadata.indexer.cache
+        if (layout := read_metadata.dcp_read_layout) is not None:
+            group = get_dcp_group()
+            source_cache = tuple(layout.gather(plane, group) for plane in source_cache)
+            read_metadata = replace(read_metadata, block_table=layout.block_table)
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
             torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
@@ -697,7 +705,7 @@ class AscendDSAV41Impl:
             prepared_indexer.weights,
             positions,
             source_cache,
-            metadata.indexer.cache,
+            read_metadata,
             quantized_query=prepared_indexer.quantized_query,
             query_scale=prepared_indexer.query_scale,
             is_candidate_source=self.role.is_candidate_source,
@@ -722,6 +730,10 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
+        attention = metadata.attention
+        if attention is not None and (layout := attention.dcp_read_layout) is not None:
+            source_cache = layout.gather(source_cache, get_dcp_group())
+            metadata = replace(metadata, attention=replace(attention, block_table=layout.block_table))
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             compressed_lengths = None
@@ -901,6 +913,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        self.dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
         self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
         self._uses_a5_packed_cache = self._device_backend is not None
         text_config = vllm_config.model_config.hf_text_config
@@ -1085,9 +1099,16 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         values = dict(self.common_v41_batch_metadata["batch"])
         values.update(self._request_counts_metadata)
         values["cache_seq_lens"] = values["seq_lens"]
+        block_table = common.block_table_tensor[:num_reqs]
+        read_layout = None
+        if self.dcp_size > 1 and self._cache_kind in {"long_kv", "index_k"}:
+            read_layout = DCPReadLayout.build(
+                block_table, values["seq_lens"], common.max_seq_len, self.kv_cache_spec.block_size, self.dcp_size
+            )
 
         return AscendDSAV41Metadata(
-            block_table=common.block_table_tensor[:num_reqs],
+            block_table=block_table,
+            dcp_read_layout=read_layout,
             slot_mapping=(self._slot_mapping[:num_tokens] if is_state else self._slot_mapping_2d[:0]),
             flat_slot_mapping=None,
             compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
@@ -1945,6 +1966,11 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     def __init__(self, vllm_config, prefix, spec):
         super().__init__()
         self.prefix = prefix
+        if getattr(getattr(vllm_config, "parallel_config", None), "decode_context_parallel_size", 1) > 1:
+            self.supports_dcp = isinstance(spec, AscendMLAAttentionSpec) and not isinstance(
+                spec, AscendSlidingWindowMLASpec
+            )
+            spec = replace(spec, dcp_sharded=self.supports_dcp)
         self.spec = spec
         self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.empty(0)
         context = vllm_config.compilation_config.static_forward_context

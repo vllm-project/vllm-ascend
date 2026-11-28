@@ -2310,12 +2310,10 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     if engram_config.embedding_across_dp:
         raise ValueError("Ascend Engram does not support embedding_across_dp")
     parallel_config = vllm_config.parallel_config
-    if (
-        parallel_config.enable_elastic_ep
-        or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.decode_context_parallel_size != 1
-    ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with DCP=1.")
+    if parallel_config.enable_elastic_ep or parallel_config.tensor_parallel_size not in (1, 2, 4, 8):
+        raise ValueError("Ascend Engram requires TP=1/2/4/8.")
+    if parallel_config.decode_context_parallel_size > 1:
+        _validate_v41_producer_dcp(vllm_config)
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "rfork", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
@@ -2353,8 +2351,37 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
+def _validate_v41_producer_dcp(vllm_config: VllmConfig) -> None:
+    from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+
+    parallel = vllm_config.parallel_config
+    transfer = getattr(vllm_config, "kv_transfer_config", None)
+    if not (
+        parallel.decode_context_parallel_size == parallel.tensor_parallel_size == 2
+        and parallel.pipeline_parallel_size == parallel.prefill_context_parallel_size == 1
+        and transfer is not None
+        and transfer.is_kv_producer
+        and not transfer.is_kv_consumer
+        and vllm_config.use_v2_model_runner
+        and vllm_config.model_config.enforce_eager
+        and vllm_config.speculative_config is None
+        and uses_a5_packed_cache()
+        and parallel.cp_kv_cache_interleave_size == vllm_config.cache_config.block_size
+    ):
+        raise ValueError(
+            "V4.1 requires DCP=1 except for A5 eager MRV2 PD producers with TP=DCP=2, "
+            "PCP=PP=1, whole-block stripes and no speculation."
+        )
+
+
 def _validate_target_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate DCP support for the target model."""
+    if (
+        vllm_config.parallel_config.decode_context_parallel_size > 1
+        and getattr(vllm_config.model_config, "architecture", None) == "DeepseekV41ForCausalLM"
+    ):
+        _validate_v41_producer_dcp(vllm_config)
+        return
     if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
         vllm_config.model_config
     ):

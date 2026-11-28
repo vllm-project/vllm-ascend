@@ -2970,6 +2970,13 @@ For common environment, installation, and parameter issues, refer to the
 
 ## 11 Limitations
 
+On Ascend 950, eager MRV2 PD prefill can stripe long KV and index pages with
+`--tensor-parallel-size 2 --decode-context-parallel-size 2`. Set
+`--cp-kv-cache-interleave-size` equal to `--block-size` and use PCP=PP=1
+without speculative decoding. The decode consumer runs with DCP=1. The
+TP2 producer needs the A5 mixed-quant attention path to accept 32 local query
+heads (see [#20266](https://github.com/vllm-project/vllm-ascend/pull/20266)).
+
 - The documented A3 deployments use either one server in colocated mode or two
   servers in 1P1D mode, with an Ascend W4A8 checkpoint and INT8 Engram storage.
 - The documented A2 deployments use two servers: one Prefill and one Decode
