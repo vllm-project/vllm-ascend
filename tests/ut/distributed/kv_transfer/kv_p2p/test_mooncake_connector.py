@@ -1415,6 +1415,52 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[3], [1024, 1024])
         mock_get_meta.assert_not_called()
 
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_uses_per_component_block_size_scale(self, mock_get_meta):
+        page_bytes = 32 * 1024
+        self.thread.block_size = 1024
+        group_spec = {"kv_cache_spec_type": "FullAttentionSpec", "block_size": 1024}
+        self.thread.kv_group2layeridx = {0: (group_spec, [0])}
+        self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x100_000, 0x200_000, 0x300_000]]
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x500_000, 0x600_000, 0x700_000]]}
+        self.thread.block_len_per_addr = [[page_bytes, page_bytes, page_bytes]]
+        self.thread.block_stride_per_addr = [[page_bytes, page_bytes, page_bytes]]
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[page_bytes, page_bytes, page_bytes]]
+        self.thread.block_size_scale = [[8, 8, 2]]
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[8, 8, 2]]}
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.block_size = 1024
+        worker.block_size_scale = [[8, 8, 2]]
+        split_meta = types.SimpleNamespace(
+            local_block_ids=([1],),
+            local_full_block_ids=([0, 1],),
+            remote_block_ids=([0, 1],),
+            num_computed_tokens=1024,
+            num_external_tokens=1024,
+            remote_block_size=1024,
+        )
+        local_kernel_ids, remote_kernel_ids = worker._get_kernel_block_ids([0], split_meta, 0, group_spec)
+        self.assertEqual(local_kernel_ids, list(range(8, 16)))
+        self.assertEqual(remote_kernel_ids, list(range(8, 16)))
+
+        req = dict(self.test_req, local_block_ids=[local_kernel_ids], remote_block_ids=[remote_kernel_ids])
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(
+            call_args[1],
+            [0x100_000 + 8 * page_bytes, 0x200_000 + 8 * page_bytes, 0x300_000 + 2 * page_bytes],
+        )
+        self.assertEqual(
+            call_args[2],
+            [0x500_000 + 8 * page_bytes, 0x600_000 + 8 * page_bytes, 0x700_000 + 2 * page_bytes],
+        )
+        self.assertEqual(call_args[3], [8 * page_bytes, 8 * page_bytes, 2 * page_bytes])
+        mock_get_meta.assert_not_called()
+
     def test_transfer_combined_attention_views_preserves_unselected_blocks(self):
         # Match MRv1's block-major allocation, with different P/D block counts.
         remote = torch.arange(6 * 2 * 4, dtype=torch.float32, device="cpu").view(6, 2, 2, 1, 2).permute(1, 0, 2, 3, 4)

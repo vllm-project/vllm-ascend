@@ -840,6 +840,9 @@ class KVCacheRecvingThread(threading.Thread):
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
+            remote_block_size_scale = self.remote_block_size_scale.get(remote_engine_id, {}).get(
+                remote_handshake_port
+            )
             remote_kv_group2layeridx = self.remote_kv_group2layeridx.get(remote_engine_id, {}).get(
                 remote_handshake_port,
                 self.kv_group2layeridx,
@@ -918,6 +921,8 @@ class KVCacheRecvingThread(threading.Thread):
             if not is_mamba_group:
                 grouped_remote_block_ids: list[list[int]] = []
                 grouped_local_block_ids: list[list[int]] = []
+                kernel_remote_block_ids: list[int] = []
+                kernel_local_block_ids: list[int] = []
                 if has_group_blocks:
                     is_group_transfer_end = group_pull.is_group_transfer_end
                     # Block ids are already expanded to kernel granularity and truncated in
@@ -1005,6 +1010,15 @@ class KVCacheRecvingThread(threading.Thread):
                             )
                 continue
 
+            first_local_idx = raw_layer_indices[0]
+            first_remote_idx = get_remote_layer_idx(first_local_idx, group_spec, raw_layer_indices)
+            base_local_scale = get_cache_slot_block_scale(self.block_size_scale, first_local_idx, 0, 1)
+            base_remote_scale = get_cache_slot_block_scale(
+                remote_block_size_scale, first_remote_idx, 0, base_local_scale
+            )
+            grouped_blocks_by_scale: dict[tuple[int, int], tuple[list[list[int]], list[list[int]]]] = {
+                (base_local_scale, base_remote_scale): (grouped_remote_block_ids, grouped_local_block_ids)
+            }
             for layer_idx in layer_indices:
                 remote_layer_idx = get_remote_layer_idx(
                     layer_idx,
@@ -1025,9 +1039,36 @@ class KVCacheRecvingThread(threading.Thread):
                     else:
                         if not has_group_blocks:
                             continue
+                        slot_local_scale = get_cache_slot_block_scale(
+                            self.block_size_scale, layer_idx, cache_idx, base_local_scale
+                        )
+                        slot_remote_scale = get_cache_slot_block_scale(
+                            remote_block_size_scale, remote_layer_idx, cache_idx, slot_local_scale
+                        )
+                        scale_pair = (slot_local_scale, slot_remote_scale)
+                        cached_groups = grouped_blocks_by_scale.get(scale_pair)
+                        if cached_groups is None:
+                            slot_local_ids = rescale_kernel_block_ids(
+                                kernel_local_block_ids, base_local_scale, slot_local_scale
+                            )
+                            slot_remote_ids = rescale_kernel_block_ids(
+                                kernel_remote_block_ids, base_remote_scale, slot_remote_scale
+                            )
+                            num_slot_blocks = min(len(slot_remote_ids), len(slot_local_ids))
+                            slot_remote_ids = slot_remote_ids[:num_slot_blocks]
+                            slot_local_ids = slot_local_ids[:num_slot_blocks]
+                            if tp_num_need_pulls == 1:
+                                cached_groups = group_concurrent_contiguous(slot_remote_ids, slot_local_ids)
+                            else:
+                                cached_groups = (
+                                    [[block_id] for block_id in slot_remote_ids],
+                                    [[block_id] for block_id in slot_local_ids],
+                                )
+                            grouped_blocks_by_scale[scale_pair] = cached_groups
+                        slot_grouped_remote_ids, slot_grouped_local_ids = cached_groups
                         transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
-                            grouped_remote_block_ids,
-                            grouped_local_block_ids,
+                            slot_grouped_remote_ids,
+                            slot_grouped_local_ids,
                             src_block_stride=remote_block_stride,
                             dst_block_stride=block_stride,
                             block_len=inner_block_len,
@@ -4446,6 +4487,36 @@ def ensure_zmq_recv(
             else:
                 logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
+
+
+def get_cache_slot_block_scale(
+    block_size_scale: list[list[int]] | None,
+    layer_idx: int,
+    cache_idx: int,
+    default: int = 1,
+) -> int:
+    """Return a cache component's logical-to-kernel block scale when recorded."""
+    if block_size_scale and layer_idx < len(block_size_scale) and cache_idx < len(block_size_scale[layer_idx]):
+        return block_size_scale[layer_idx][cache_idx]
+    return default
+
+
+def rescale_kernel_block_ids(block_ids: list[int], from_scale: int, to_scale: int) -> list[int]:
+    """Map kernel block IDs expanded at ``from_scale`` to ``to_scale``."""
+    if from_scale == to_scale or not block_ids:
+        return block_ids
+    rescaled: list[int] = []
+    seen: set[int] = set()
+    for kernel_id in block_ids:
+        manager_id, offset = divmod(kernel_id, from_scale)
+        start = (offset * to_scale) // from_scale
+        end = ((offset + 1) * to_scale + from_scale - 1) // from_scale
+        for slot_offset in range(start, end):
+            slot_kernel_id = manager_id * to_scale + slot_offset
+            if slot_kernel_id not in seen:
+                seen.add(slot_kernel_id)
+                rescaled.append(slot_kernel_id)
+    return rescaled
 
 
 def transfer_groups_need_independent_block_ids(
