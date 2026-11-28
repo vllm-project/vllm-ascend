@@ -799,6 +799,16 @@ Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a fixed
 draft length. Ascend rejects DCP greater than 1 when the dynamic schedule is
 active.
 
+### Verifying the Feature
+
+For online serving, check the draft-token counter before and after sending a generation request to the same server.
+
+```shell
+curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:spec_decode_num_draft_tokens_total'
+```
+
+An increase in the counter confirms that speculative decoding generated draft tokens.
+
 ## Configuration Parameters
 
 | Parameter | Type | Default | Required | Allowed values and meaning |
