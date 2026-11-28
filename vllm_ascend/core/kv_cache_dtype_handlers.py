@@ -85,3 +85,22 @@ class Hif8AscendHandler:
 
     def quant_mode(self):
         return KVQuantMode.CUSTOM
+
+
+@register_kv_cache_dtype("int8_qfa")
+class Int8QfaAscendHandler:
+    """QFA INT8-GQA KV cache: INT8 K/V payloads in the packet-paged layout.
+
+    The A3 QFA backend (AscendQFA3Int8Impl) self-manages the packet cache
+    (PA_NZ K/V + per-page FP32 K descale), so the generic table only needs
+    the torch dtype the cache constructor resolves; quant dispatch stays
+    with the backend (KVQuantMode.CUSTOM, the mxfp8 precedent).
+    """
+
+    name = "int8_qfa"
+
+    def torch_dtype(self) -> torch.dtype:
+        return torch.int8
+
+    def quant_mode(self):
+        return KVQuantMode.CUSTOM
