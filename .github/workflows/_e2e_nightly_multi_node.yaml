@@ -277,10 +277,20 @@ jobs:
       - name: Prepare scripts
         id: prepare-scripts
         run: |
-          install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
-          install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
-          install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
-          install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
+          mkdir -p /root/.cache/tests
+          install_lock_timeout=60
+          # Serialize the complete bundle across jobs sharing this directory.
+          # Keep the lock file: removing it would let writers lock different inodes.
+          (
+            flock --exclusive --timeout "$install_lock_timeout" 9 || {
+              echo "::error::Could not acquire the shared CI script install lock within ${install_lock_timeout}s."
+              exit 1
+            }
+            install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
+            install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
+            install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
+            install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
+          ) 9>>/root/.cache/tests/.install.lock
           if ${{ startsWith(inputs.request_id, 'daily-') }} && bash .github/workflows/scripts/stage_ci_actions.sh; then
             echo 'daily_issue_action_ready=true' >> "$GITHUB_OUTPUT" || true
           fi
