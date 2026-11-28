@@ -92,10 +92,13 @@ def expected_shapes(config):
 def validate_header(header, config):
     expected = expected_shapes(config)
     mapped = {}
-    entries = {name: info for name, info in header.items() if name != "__metadata__"}
-    for name in entries:
+    entries = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
         if not name.startswith(PREFIX):
             raise ValueError(f"Unexpected tensor outside standalone DSpark: {name}")
+        entries[name] = info
     # Use the same upstream mapping for header validation and tensor loading.
     for mapped_name, info in MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights(entries.items()):
         if mapped_name in mapped:
