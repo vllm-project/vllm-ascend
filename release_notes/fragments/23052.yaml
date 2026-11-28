@@ -1,0 +1,4 @@
+pr: 23052
+entries:
+  - category: performance
+    text: Native single-tier CPU KV offloading on Ascend avoids redundant KV buffer padding and reduces host-side attention tiling overhead during eager inference.

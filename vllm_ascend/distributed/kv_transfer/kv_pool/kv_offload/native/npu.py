@@ -43,6 +43,8 @@ class _NPUWorkerMixin:
 class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
     """Single CPU-tier offloading with pinned host tensors and NPU DMA."""
 
+    requires_device_kv_alignment = False
+
     @override
     def create_worker(
         self,
