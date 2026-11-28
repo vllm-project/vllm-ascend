@@ -14,6 +14,7 @@ from tests.e2e.common.rlhf.weight_transfer.case import (
 from tests.e2e.common.rlhf.weight_transfer.hccl import (
     run_hccl_weight_transfer_transaction,
 )
+from vllm_ascend.utils import is_950
 
 
 @pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl", model_cases=QWEN_CASES))
@@ -21,8 +22,9 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     run_hccl_weight_transfer_transaction(case, packed)
 
 
+@pytest.mark.skipif(not is_950(), reason="MXFP8 weight transfer requires Ascend 950")
 @pytest.mark.e2e_model(QWEN35_W8A8_MXFP_CASE.model)
 @pytest.mark.parametrize(("case", "packed"), [(QWEN35_W8A8_MXFP_CASE, True)], ids=["packed-qwen35-quant-mxfp8"])
-def test_hccl_quantize_weight_transfer(case: WeightUpdateModelCase, packed: bool):
+def test_hccl_quant_weight_transfer(case: WeightUpdateModelCase, packed: bool):
     # Packed HCCL preserves FP8 weight/scale dtypes through opaque byte buffers.
     run_hccl_weight_transfer_transaction(case, packed)
