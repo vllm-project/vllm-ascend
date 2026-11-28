@@ -644,11 +644,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 logger.error("Driver IP is not set, skip to start Netloader server")
             else:
                 if self.listen_port is None:
-                    listen_port = find_free_port()
+                    listen_port = find_free_port(driver_ip)
                     for _ in range(MAX_FREE_PORT_RETRIES):
                         if listen_port <= 65535 - DRAFT_PORT_OFFSET:
                             break
-                        listen_port = find_free_port()
+                        listen_port = find_free_port(driver_ip)
                     else:
                         logger.warning(
                             "Failed to find listen port <= %s after %s retries; skip Netloader server",

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import socket
 import time
 from typing import Any
 
@@ -173,10 +172,13 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
         kv_connector_extra_config=extra_config,
     )
 
-    port: int
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
-        port = s.getsockname()[1]
+    # The publisher binds tcp://*:port, so let ZMQ itself allocate the port
+    # on all interfaces: a loopback-only probe could hand back a port that
+    # is already held on the node's other addresses, and the publisher bind
+    # would fail later.
+    with zmq.Context() as probe_ctx, probe_ctx.socket(zmq.PUB) as probe:  # type: ignore[attr-defined]
+        probe.bind("tcp://*:0")
+        port = int(probe.getsockopt_string(zmq.LAST_ENDPOINT).rsplit(":", 1)[1])  # type: ignore[attr-defined]
 
     events_endpoint = f"tcp://*:{port}"
     kv_events_config = KVEventsConfig(

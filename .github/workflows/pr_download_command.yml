@@ -55,6 +55,11 @@ concurrency:
   group: ascend-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.event.client_payload.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
+# The GITHUB_TOKEN only reads the checkout; comments and reactions use
+# PAT_TOKEN, and the sync-tools call uses MODEL_SYNC_PAT.
+permissions:
+  contents: read
+
 jobs:
   download:
     name: Download models and datasets

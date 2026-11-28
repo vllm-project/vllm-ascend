@@ -53,6 +53,9 @@ on:
           - releases/v0.20.2rc
           - releases/v0.18.0
 
+permissions:
+  contents: read
+
 jobs:
   build-a2:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}

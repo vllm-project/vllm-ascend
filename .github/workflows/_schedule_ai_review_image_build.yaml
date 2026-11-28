@@ -8,6 +8,11 @@ on:
     paths:
       - '.github/workflows/dockerfiles/Dockerfile.ai-review'
 
+# The GITHUB_TOKEN only reads the checkout; the image push authenticates to
+# Quay with its own credentials.
+permissions:
+  contents: read
+
 # only cancel in-progress runs of the same workflow
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

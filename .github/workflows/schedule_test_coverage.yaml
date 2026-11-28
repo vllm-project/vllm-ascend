@@ -42,9 +42,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  # Ceiling for the _selected_tests.yaml reusable workflow called by
+  # run-full-tests: paths-filter inside it reads the PR changed-file list
+  # through the API.
+  pull-requests: read
+
 jobs:
   select-full-tests:
     if: github.event_name == 'workflow_dispatch'
+    # resolve_latest_release_branch.py queries the GitHub search API for PRs,
+    # which needs issues: read.
+    permissions:
+      contents: read
+      issues: read
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint

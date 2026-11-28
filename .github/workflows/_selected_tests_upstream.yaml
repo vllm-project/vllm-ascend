@@ -84,6 +84,9 @@ env:
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
+permissions:
+  contents: read
+
 jobs:
     e2e-upstream_pr:
         runs-on: linux-aarch64-a2b3-1

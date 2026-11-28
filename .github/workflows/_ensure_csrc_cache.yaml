@@ -66,6 +66,9 @@ env:
   AWS_REGION: ap-southeast-1
   RUNS_ON_RUNNER_NAME: ""
 
+permissions:
+  contents: read
+
 jobs:
   prepare-cache-checks:
     name: Prepare csrc cache checks

@@ -108,6 +108,9 @@ on:
       SYNC_TOOLS_TOKEN:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   generate-matrix:
     runs-on: linux-amd64-cpu-1-hk

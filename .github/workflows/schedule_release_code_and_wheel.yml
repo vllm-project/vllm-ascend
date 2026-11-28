@@ -37,6 +37,9 @@ on:
           - v0.21.0rc1
           - v0.20.2rc1
 
+permissions:
+  contents: read
+
 jobs:
   build_and_release_code:
     name: release code

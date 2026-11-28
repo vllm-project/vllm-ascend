@@ -177,7 +177,7 @@ def _patch_loader_common(monkeypatch):
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
-    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda: 8888)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda *args, **kwargs: 8888)
     return dummy_model
 
 

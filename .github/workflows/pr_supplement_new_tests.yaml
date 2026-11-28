@@ -9,8 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  upload-merged-new-tests:
-    name: Supplement New Tests
+  # Collect the diff-derived test list without any secrets in scope: this job
+  # fetches the (untrusted) PR head and runs the collector over it, so it must
+  # stay isolated from the OBS credentials, which only the upload job below
+  # receives. The handoff to the trusted job is the collected YAML artifact.
+  collect-new-tests:
+    name: Collect new tests
     if: >-
       ${{
         github.event.pull_request.merged == true &&
@@ -20,9 +24,10 @@ jobs:
         )
       }}
     runs-on: linux-amd64-cpu-2-hk
-    env:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+    outputs:
+      supported: ${{ steps.target.outputs.supported }}
+      obs_object: ${{ steps.target.outputs.obs_object }}
+      has_tests: ${{ steps.collect.outputs.has_tests }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -107,11 +112,54 @@ jobs:
             echo "No new or moved tests to upload"
           fi
 
+      - name: Upload collected tests artifact
+        if: ${{ steps.collect.outputs.has_tests == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: merged-new-tests-${{ github.run_id }}
+          path: merged_new_tests.yaml
+          if-no-files-found: error
+          retention-days: 7
+
+  # Trusted job: the only place the OBS credentials exist. It never fetches
+  # PR content itself - the collected YAML arrives through the run artifact
+  # and is parsed as data (yaml.safe_load) by the merge script.
+  merge-and-upload:
+    name: Merge into OBS extra_recommended_tests.yaml
+    needs: collect-new-tests
+    if: >-
+      ${{
+        needs.collect-new-tests.outputs.supported == 'true' &&
+        needs.collect-new-tests.outputs.has_tests == 'true'
+      }}
+    runs-on: linux-amd64-cpu-2-hk
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          # This job holds the OBS credentials and never pushes; do not leave
+          # the GITHUB_TOKEN persisted in .git/config next to them.
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Download collected tests artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: merged-new-tests-${{ github.run_id }}
+          path: .
+
       - name: Merge into OBS extra_recommended_tests.yaml
         id: merge
-        if: ${{ steps.collect.outputs.has_tests == 'true' }}
         env:
-          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
+          OBS_OBJECT: ${{ needs.collect-new-tests.outputs.obs_object }}
         run: |
           set -euo pipefail
           OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${OBS_OBJECT}"
@@ -144,7 +192,7 @@ jobs:
       - name: Upload extra_recommended_tests.yaml to OBS
         if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
         env:
-          OBS_OBJECT: ${{ steps.target.outputs.obs_object }}
+          OBS_OBJECT: ${{ needs.collect-new-tests.outputs.obs_object }}
         run: |
           set -euo pipefail
           if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then

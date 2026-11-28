@@ -941,13 +941,16 @@ void SparseAttnSharedkvMetadataCpuKernel::SplitFD(SplitResult &splitRes)
     // 计算FD的总数据量
     uint64_t totalFDLoad = 0;
     for (uint32_t i = 0; i < splitRes.numOfFdHead; i++) {
-        totalFDLoad += splitRes.fdRes.fdS2SplitNum[i] * splitRes.fdRes.fdMSize[i];
+        // 64-bit product: the 32-bit multiply may overflow before widening.
+        const uint64_t fdLoad = static_cast<uint64_t>(splitRes.fdRes.fdS2SplitNum[i]) * splitRes.fdRes.fdMSize[i];
+        totalFDLoad += fdLoad;
     }
     // 计算每个核处理的load
     uint64_t averageLoad = totalFDLoad / aivCoreNum_;
     uint32_t curCoreIndex = 0;
     for (uint32_t i = 0; i < splitRes.numOfFdHead; i++) {
-        uint32_t curFDVectorNum = splitRes.fdRes.fdS2SplitNum[i] * splitRes.fdRes.fdMSize[i] / averageLoad;
+        const uint64_t fdLoad = static_cast<uint64_t>(splitRes.fdRes.fdS2SplitNum[i]) * splitRes.fdRes.fdMSize[i];
+        uint32_t curFDVectorNum = static_cast<uint32_t>(fdLoad / averageLoad);
         uint32_t curAveMSize = splitRes.fdRes.fdMSize[i] / curFDVectorNum;
         for (uint32_t vid = 0; vid < curFDVectorNum; vid++) {
             splitRes.fdRes.fdIdx[curCoreIndex] = i;

@@ -21,9 +21,15 @@ on:
   issue_comment:
     types: [created]
 
+permissions:
+  contents: read
+
 jobs:
   slashCommandDispatch:
     if: (github.event.issue.pull_request != null || startsWith(github.event.comment.body, '/wait-feedback')) && github.event.comment.user.type == 'User'
+    # Adds emoji reactions to the triggering comment via the GITHUB_TOKEN.
+    permissions:
+      issues: write
     runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Slash Command Dispatch

@@ -89,6 +89,11 @@
 # - You can scale the number of encoder, pd, prefiller and decoder servers as needed.
 # - The proxy dispatches requests based on a least-loaded strategy,
 #   using a priority queue to balance the active token workload across instances.
+# - Request-supplied local file:// image URLs are validated by the proxy: the
+#   path must resolve inside the directory passed via --local-image-root
+#   (default: the directory the proxy was started from). Requests naming
+#   files outside that root are rejected. Use absolute paths:
+#   file:///data/images/a.png with --local-image-root /data/images.
 # - For production, ensure your backend servers are robust and secure.
 #
 # For more details, see the code and comments in this file.
@@ -104,8 +109,10 @@ import ipaddress
 import math
 import os
 import sys
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -295,6 +302,12 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
+    )
+    parser.add_argument(
+        "--local-image-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Root directory that request-supplied file:// image URLs must resolve inside",
     )
     args = parser.parse_args()
     if len(args.pd_hosts) != len(args.pd_ports):
@@ -500,11 +513,36 @@ def parse_png_size(data: bytes):
     return w, h
 
 
-def get_hw_from_local(path: str):
-    if path.startswith("file://"):
-        path = path[7:]
+def get_hw_from_local(path: str, image_root: Path | None = None):
+    """Probe image dimensions for a request-supplied local file:// image.
 
-    with open(path, "rb") as f:
+    The URL is validated, never rewritten: it must be a local file URL whose
+    path resolves, after os.path.realpath (which collapses ".." and follows
+    symlinks), inside ``image_root`` - the --local-image-root CLI flag,
+    defaulting to the directory the proxy was started from - and the same
+    validated path is the one opened. Request-controlled strings therefore
+    never reach open() unvalidated: no traversal, no symlink escape, and no
+    basename-collision mismatch against a same-named file elsewhere in the
+    root.
+    """
+    root = os.path.realpath(image_root if image_root is not None else Path.cwd())
+    if not path.startswith("file://"):
+        raise ValueError("only file:// image URLs are supported for local image size probing")
+
+    parsed = urllib.parse.urlsplit(path)
+    if parsed.netloc not in ("", "localhost"):
+        raise ValueError(f"unsupported file:// URL {path!r}: use file:///<path inside {root}>")
+
+    requested = urllib.parse.unquote(parsed.path)
+    if not requested:
+        raise ValueError(f"file:// URL {path!r} carries no image path")
+    fullpath = os.path.realpath(requested)
+    if not fullpath.startswith(root + os.sep):
+        raise ValueError(f"image_url must resolve inside {root}")
+    if not os.path.isfile(fullpath):
+        raise ValueError(f"image_url does not name an existing file inside {root}")
+
+    with open(fullpath, "rb") as f:
         data = f.read(65536)
 
     if data.startswith(b"\x89PNG"):
@@ -512,7 +550,7 @@ def get_hw_from_local(path: str):
     return parse_jpeg_size(data)
 
 
-def calculate_messages_size(ori_req_data, ori_req_body):
+def calculate_messages_size(ori_req_data, ori_req_body, image_root: Path | None = None):
     messages = ori_req_data.get("messages")
     stats = {
         "text_char_count": 0,
@@ -536,7 +574,7 @@ def calculate_messages_size(ori_req_data, ori_req_body):
                 if img_url.startswith("data:image"):
                     h, w = fast_get_hw(img_url)
                 else:
-                    h, w = get_hw_from_local(img_url)
+                    w, h = get_hw_from_local(img_url, image_root=image_root)
                 stats["mul_token"] += math.ceil(h / 32) * math.ceil(w / 32)
             elif content_type == "video_url":
                 stats["mul_token"] += len(ori_req_body) * 32
@@ -584,7 +622,7 @@ async def _handle_completions(api: str, request: Request):
         request_id_api = get_api_request_id(api, request_id)
         mul_flag = False
 
-        stats_info = calculate_messages_size(req_data, req_body)
+        stats_info = calculate_messages_size(req_data, req_body, image_root=global_args.local_image_root)
         text_length = stats_info["text_char_count"]
         encoder_score = stats_info["mul_token"]
         if stats_info["mul_token"] != 0:
@@ -846,8 +884,10 @@ async def start_profile(request: Request):
         return JSONResponse(content={"status": "done", "results": results}, status_code=200)
 
     except Exception as e:
+        # Log details server-side only: the exception text can carry
+        # request-controlled data and must not be echoed to the client.
         print(f"Error in start_profile: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": "internal error while forwarding profile request"}, status_code=500)
 
 
 @app.post("/stop_profile")
@@ -899,8 +939,10 @@ async def stop_profile(request: Request):
         return JSONResponse(content={"status": "done", "results": results}, status_code=200)
 
     except Exception as e:
+        # Log details server-side only: the exception text can carry
+        # request-controlled data and must not be echoed to the client.
         print(f"Error in stop_profile: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": "internal error while forwarding profile request"}, status_code=500)
 
 
 if __name__ == "__main__":

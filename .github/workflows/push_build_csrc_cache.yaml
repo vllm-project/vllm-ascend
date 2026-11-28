@@ -39,6 +39,9 @@ concurrency:
   group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   prepare-targets:
     runs-on: linux-amd64-cpu-2-hk
