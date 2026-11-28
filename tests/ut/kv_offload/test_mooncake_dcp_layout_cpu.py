@@ -13,7 +13,55 @@ from typing import Any
 
 import pytest
 
-SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py"
+PKG = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p"
+SOURCE = PKG / "mooncake_connector.py"
+WORKER_SOURCE = PKG / "mooncake_v1/pull/worker.py"
+SCHEDULER_SOURCE = PKG / "mooncake_v1/pull/scheduler.py"
+CLASS_SOURCES = {
+    "MooncakeConnectorWorker": WORKER_SOURCE,
+    "MooncakeConnectorScheduler": SCHEDULER_SOURCE,
+}
+# The mooncake_v1 split moved these symbols out of the entry module; the
+# contract under test still applies, so read each from its defining module.
+SPLIT_SOURCES = {
+    "GroupPull": PKG / "mooncake_v1/pull/metadata.py",
+    "GroupTransferInfo": PKG / "mooncake_v1/common/block_selection.py",
+    "is_dcp_replicated_attention_group": PKG / "mooncake_v1/common/block_selection.py",
+}
+
+
+def _delegate_aliases() -> dict[str, str]:
+    """pull_* aliases the entry module uses for the split helpers."""
+    aliases: dict[str, str] = {}
+    for node in ast.parse(SOURCE.read_text()).body:
+        if isinstance(node, ast.ImportFrom) and node.module and "mooncake_v1" in node.module:
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _split_module_bindings() -> dict[str, Any]:
+    """Names the extracted delegate bodies resolve when they run.
+
+    After the split the connector methods delegate to pure helpers that live in
+    the pull/common packages, so those helpers must be visible to the
+    AST-executed method bodies, under both their own names and the aliases the
+    entry module imports them as.
+    """
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common import block_selection
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import metadata as pull_metadata
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import scheduler as pull_scheduler
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import transfer_plan
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import worker as pull_worker
+
+    bindings: dict[str, Any] = {}
+    for module in (block_selection, pull_metadata, transfer_plan, pull_worker, pull_scheduler):
+        bindings.update({name: value for name, value in vars(module).items() if not name.startswith("__")})
+    for alias_name, target in _delegate_aliases().items():
+        if target in bindings:
+            bindings[alias_name] = bindings[target]
+    return bindings
 
 
 @pytest.fixture(
@@ -28,7 +76,7 @@ SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_trans
     ]
 )
 def worker(request):
-    tree = ast.parse(SOURCE.read_text())
+    tree = ast.parse(WORKER_SOURCE.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MooncakeConnectorWorker")
     names = {
         "_get_kernel_block_ids",
@@ -50,13 +98,12 @@ def worker(request):
         "_get_remote_host_info_by_port",
     }
     cls.body = [node for node in cls.body if getattr(node, "name", None) in names]
-    nodes = [
-        node
-        for node in tree.body
-        if getattr(node, "name", None)
-        in {"GroupPull", "transfer_groups_need_independent_block_ids", "is_dcp_replicated_attention_group"}
-    ]
+    nodes = [node for node in tree.body if getattr(node, "name", None) == "transfer_groups_need_independent_block_ids"]
+    for split_name, split_source in SPLIT_SOURCES.items():
+        split_tree = ast.parse(split_source.read_text())
+        nodes.extend(node for node in split_tree.body if getattr(node, "name", None) == split_name)
     scope: dict[str, Any] = {
+        **_split_module_bindings(),
         "dataclass": dataclass,
         "defaultdict": defaultdict,
         "copy": copy,
@@ -67,7 +114,7 @@ def worker(request):
     exec(
         compile(
             "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[*nodes, cls], type_ignores=[])),
-            str(SOURCE),
+            str(WORKER_SOURCE),
             "exec",
         ),
         scope,
@@ -310,19 +357,27 @@ def test_unsharded_only_model_with_dcp_topology(worker):
 
 @pytest.mark.parametrize("dcp_size", [1, 2, 8])
 def test_scheduler_prompt_truncation_uses_each_groups_dcp_size(dcp_size):
-    tree = ast.parse(SOURCE.read_text())
-    info = next(n for n in tree.body if getattr(n, "name", None) == "GroupTransferInfo")
+    tree = ast.parse(SCHEDULER_SOURCE.read_text())
+    info_tree = ast.parse(SPLIT_SOURCES["GroupTransferInfo"].read_text())
+    info = next(n for n in info_tree.body if getattr(n, "name", None) == "GroupTransferInfo")
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakeConnectorScheduler")
     cls.body = [n for n in cls.body if getattr(n, "name", None) == "_get_transfer_block_ids"]
-    scope: dict[str, Any] = {"dataclass": dataclass, "cdiv": lambda a, b: (a + b - 1) // b}
+    scope: dict[str, Any] = {
+        **_split_module_bindings(),
+        "dataclass": dataclass,
+        "cdiv": lambda a, b: (a + b - 1) // b,
+    }
     exec(
         compile(
             "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[info, cls], type_ignores=[])),
-            str(SOURCE),
+            str(SCHEDULER_SOURCE),
             "exec",
         ),
         scope,
     )
+    # Only one method is kept above; clear the ABC contract so the extracted class
+    # can be instantiated without the facade-only abstract methods.
+    scope["MooncakeConnectorScheduler"].__abstractmethods__ = frozenset()
     scheduler = scope["MooncakeConnectorScheduler"]()
     scheduler.dcp_size = dcp_size
     scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))

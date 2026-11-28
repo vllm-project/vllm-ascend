@@ -1,5 +1,7 @@
 import threading
 
+from vllm.logger import logger
+
 
 class GlobalTE:
     def __init__(self):
@@ -47,19 +49,47 @@ class GlobalTE:
                     self.transfer_engine = engine
         return self.transfer_engine
 
-    def register_buffer(self, ptrs: list[int], sizes: list[int]):
+    def register_buffer(self, ptrs: list[int], sizes: list[int]) -> bool:
+        """Register the buffers once; return whether this call registered them.
+
+        Returns False when the process-wide transfer engine already tracks a
+        registration (another connector or an earlier startup) and nothing was
+        done here.
+        """
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
             # Register once per process. Once recorded, buffers dropped by
             # unregister_buffer() come back through reregister_buffer(), so a
             # stray call here cannot register a still-registered buffer twice.
             if self.registered_buffers:
-                return
+                return False
+            registered: list[tuple[int, int]] = []
             for ptr, size in zip(ptrs, sizes):
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
+                    # Release the buffers this call already registered: a failed
+                    # startup must not leave native registrations behind that no
+                    # owner tracks. Best effort, the failure below is re-raised.
+                    for registered_ptr, _ in reversed(registered):
+                        try:
+                            unregister_ret = self.transfer_engine.unregister_memory(registered_ptr)
+                        except Exception as error:
+                            logger.warning(
+                                "Mooncake memory rollback unregistration failed for ptr=%#x, error=%s. ",
+                                registered_ptr,
+                                error,
+                            )
+                            continue
+                        if unregister_ret != 0:
+                            logger.warning(
+                                "Mooncake memory rollback unregistration failed for ptr=%#x, ret_value=%s. ",
+                                registered_ptr,
+                                unregister_ret,
+                            )
                     raise RuntimeError("Mooncake memory registration failed.")
-            self.registered_buffers = list(zip(ptrs, sizes))
+                registered.append((ptr, size))
+            self.registered_buffers = registered
+            return True
 
     def unregister_buffer(self):
         with self.register_buffer_lock:
