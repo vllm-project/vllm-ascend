@@ -60,6 +60,11 @@ def _apply_fused_rotary(
     # The 310P kernel returns input aliases despite its functional schema.
     # Torch 2.14 checks that contract on the compiled graph's first invocation.
     if _CHECK_COMPILED_ROPE_ALIASING and torch.compiler.is_compiling():
+        # The cached views have the warm-up length during tracing. Tie their
+        # token dimension to the query so broadcast does not specialize it.
+        num_tokens = query.shape[1]
+        cos = cos.narrow(1, 0, num_tokens)
+        sin = sin.narrow(1, 0, num_tokens)
         return _apply_rotary_torch(query, key, cos, sin, is_neox_style)
     rotary_mode = "half" if is_neox_style else "interleave"
     return torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
