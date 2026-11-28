@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 import contextlib
 import hashlib
 import math
@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -464,6 +465,43 @@ class KVCacheSendingThread(threading.Thread):
                 )
 
 
+def _kv_cache_tensor_count(thread: Any) -> int:
+    """Number of registered KV cache tensors, or 0 when the thread has none."""
+    kv_cache_config = getattr(thread, "kv_cache_config", None)
+    return len(getattr(kv_cache_config, "kv_cache_tensors", ()) or ())
+
+
+def _validate_kv_base_addr_counts(
+    local_addrs: list[int],
+    remote_kv_caches_base_addrs: list[int],
+    remote_handshake_port: int,
+    context: str,
+) -> None:
+    """Verify that both sides export the same number of KV cache tensors.
+
+    The transfer loop pairs addresses by position: the n-th local address is
+    paired with the n-th remote address. ``zip`` silently truncates to the
+    shorter list, so a Prefill/Decode layout mismatch (for example speculative
+    decoding enabled on one side only) used to drop KV layers, or bind them to
+    the wrong KV cache group, without any error. The handshake carries no tensor
+    identity, so a mismatch in either direction cannot be verified and is
+    rejected instead of being passed on to the transfer.
+    """
+    local_count = len(local_addrs)
+    remote_count = len(remote_kv_caches_base_addrs)
+    if local_count == remote_count:
+        return
+    raise ValueError(
+        f"KV cache base address count mismatch between Prefill and Decode: "
+        f"local={local_count}, remote={remote_count}, "
+        f"remote_handshake_port={remote_handshake_port} ({context}). "
+        f"KV cache base addresses are paired by position, so a mismatch would "
+        f"silently drop layers or bind them to the wrong KV cache group. Make "
+        f"both roles export the same KV cache tensors, e.g. by using the same "
+        f"speculative-decoding settings and parallel layout."
+    )
+
+
 class KVCacheRecvingThread(threading.Thread):
     def __init__(
         self,
@@ -566,6 +604,13 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.proc_not_transfer_request_lock = threading.Lock()
+        # Requests whose KV cache transfer failed, e.g. because the Prefill and
+        # Decode engines export different KV cache layouts. They are reported
+        # to the scheduler through ``get_transfer_results().failed_recving`` so
+        # the request is failed or recomputed instead of being served with the
+        # KV cache that was never transferred.
+        self.failed_recv_requests: set[str] = set()
+        self.failed_recv_requests_lock = threading.Lock()
 
     def add_request(
         self,
@@ -608,6 +653,18 @@ class KVCacheRecvingThread(threading.Thread):
             A set of request IDs that have been completed.
         """
         return self.task_tracker.get_and_clear_finished_requests()
+
+    def mark_failed_recv_request(self, request_id: str) -> None:
+        """Record that the KV cache transfer for ``request_id`` failed."""
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.add(request_id)
+
+    def get_and_clear_failed_recv_requests(self) -> set[str]:
+        """Get and clear the requests whose KV cache transfer failed."""
+        with self.failed_recv_requests_lock:
+            failed_recv_requests = self.failed_recv_requests
+            self.failed_recv_requests = set()
+            return failed_recv_requests
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -806,6 +863,18 @@ class KVCacheRecvingThread(threading.Thread):
                 len(remote_kv_caches_base_addrs),
             )
 
+        try:
+            _validate_kv_base_addr_counts(
+                local_addrs,
+                remote_kv_caches_base_addrs,
+                remote_handshake_port=remote_handshake_port,
+                context=f"kv_cache_tensors={_kv_cache_tensor_count(self)}, "
+                f"prefill_pp_size={self._prefill_pp_size}",
+            )
+        except ValueError:
+            self.mark_failed_recv_request(req_meta["request_id"])
+            raise
+
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
         for i in range(self.hma_group_size):
@@ -932,6 +1001,18 @@ class KVCacheRecvingThread(threading.Thread):
         ):
             raise ValueError("Dense Mooncake P/D cache geometry is incomplete.")
         logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
+
+        try:
+            _validate_kv_base_addr_counts(
+                local_kv_caches_base_addrs,
+                remote_kv_caches_base_addrs,
+                remote_handshake_port=remote_handshake_port,
+                context=f"layers[{first_layer_index}:{end_layer_index}], prefill_pp_rank={prefill_pp_rank}",
+            )
+        except ValueError:
+            self.mark_failed_recv_request(req_meta["request_id"])
+            raise
+
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
 
@@ -1317,6 +1398,21 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        """Get finished transfers, including requests whose receive failed.
+
+        Block-level failures (``get_block_ids_with_load_errors``) cannot be used
+        here: models with more than one KV cache group reject them because a
+        flat block-id set cannot be mapped back to requests. A failed transfer
+        is therefore reported per request through ``failed_recving``, which also
+        keeps the request in ``finished_recving`` so the scheduler can release
+        its transfer wait state.
+        """
+        results = super().get_transfer_results(finished_req_ids)
+        if self.connector_worker is not None:
+            results.failed_recving |= self.connector_worker.get_and_clear_failed_recv_requests()
+        return results
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -2013,6 +2109,12 @@ class MooncakeConnectorWorker:
                 len(done_recving),
             )
         return done_sending, done_recving
+
+    def get_and_clear_failed_recv_requests(self) -> set[str]:
+        """Get and clear the requests whose KV cache transfer failed here."""
+        if self.kv_role != "kv_consumer" or self.kv_recv_thread is None:
+            return set()
+        return self.kv_recv_thread.get_and_clear_failed_recv_requests()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""

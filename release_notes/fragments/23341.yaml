@@ -1,0 +1,10 @@
+pr: 23341
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Mooncake hybrid Prefill/Decode KV transfer silently pairing KV cache base addresses by
+      position when the two engines export a different number of tensors. A count mismatch (for example
+      speculative decoding configured on the Decode engine only) used to drop tail layers or bind layers
+      to the wrong KV cache group while the request still completed; the transfer is now rejected in both
+      directions and the request is reported as a failed receive, so it fails or is recomputed instead of
+      returning output decoded from KV cache that was never transferred.
