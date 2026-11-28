@@ -149,8 +149,6 @@ variants:
       - '--trust-remote-code'
       - '--safetensors-load-strategy'
       - lazy
-      - '--dtype'
-      - bfloat16
       - '--enable-prefix-caching'
       - '--compilation-config'
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
@@ -219,6 +217,19 @@ variants:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: "vllm serve"
+
+presets:
+  ascend_a3_w8a8_tp2_ep:
+    label: A3 W8A8 TP2 with expert parallelism
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_a3
+    default: true
+    args:
+      - '--enable-expert-parallel'
+    source:
+      href: https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment
 
 hardware_notes:
   ascend_910b:
