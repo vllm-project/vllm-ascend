@@ -339,13 +339,18 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        # ``__init__`` -> ``set_moe_parameters`` -> ``extract_moe_parameters``
+        # sets this for real deployments. Modules built without ``__init__``
+        # (weight-loading tests, PP-missing-layer stubs) simply have no
+        # redundant slots.
+        num_redundant_experts = getattr(self, "num_redundant_experts", 0)
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
-            num_redundant_experts=self.num_redundant_experts,
+            num_redundant_experts=num_redundant_experts,
         )
 
         params_dict = dict(self.named_parameters())
