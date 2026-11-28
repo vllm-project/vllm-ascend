@@ -72,6 +72,8 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+        HardwareCapability.MLA_FLASH_A3_SPLIT_CACHE,
+        HardwareCapability.STRIDED_MLA_PREFILL_GATHER,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,

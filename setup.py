@@ -154,6 +154,13 @@ if not envs.SOC_VERSION:
     envs.SOC_VERSION = soc_version
 
 
+CANN_SOC_VERSION = {
+    "910b": "ascend910b1",
+    "910c": "ascend910_9392",
+    "310p": "ascend310p1",
+}.get(envs.SOC_VERSION, envs.SOC_VERSION)
+
+
 def gen_build_info():
     soc_version = envs.SOC_VERSION
     device_type = hardware.device_type_from_soc_version(soc_version).name
@@ -287,12 +294,6 @@ class cmake_build_ext(build_ext):
 
         cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
 
-        soc_version_map = {
-            "910b": "ascend910b1",
-            "910c": "ascend910_9392",
-            "310p": "ascend310p1",
-        }
-        CANN_SOC_VERSION = soc_version_map.get(envs.SOC_VERSION, envs.SOC_VERSION)
         cmake_args += [f"-DSOC_VERSION={CANN_SOC_VERSION}"]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
@@ -396,6 +397,20 @@ class cmake_build_ext(build_ext):
             shutil.copytree(src_cann_ops_custom, dst_cann_ops_custom)
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
+    def build_flash_mla(self, num_jobs: int) -> None:
+        # CI restores the native libraries from vllm_ascend/lib for editable
+        # installs. Regular wheels collect the same paths from build_lib.
+        package_root = ROOT_DIR if self.editable_mode or self.inplace else self.build_lib
+        build_dir = os.path.abspath(os.path.join(package_root, "vllm_ascend", "lib", "flash_mla_a3"))
+        build_env = {
+            **os.environ,
+            "BUILD_DIR": build_dir,
+            "PYTHON": sys.executable,
+            "SOC_VERSION": CANN_SOC_VERSION,
+            "MAX_JOBS": str(num_jobs),
+        }
+        subprocess.check_call(["bash", "csrc/flash_mla_a3/build.sh"], cwd=ROOT_DIR, env=build_env)
+
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
             # First, ensure ACLNN custom-ops is built and installed.
@@ -403,6 +418,12 @@ class cmake_build_ext(build_ext):
 
         # Then, run the standard build_ext command to compile the extensions
         super().run()
+
+        if (
+            envs.COMPILE_CUSTOM_KERNELS
+            and hardware.device_type_from_soc_version(CANN_SOC_VERSION) is hardware.AscendDeviceType.A3
+        ):
+            self.build_flash_mla(self.compute_num_jobs())
 
 
 class custom_install(install):
@@ -497,6 +518,7 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
+        "vllm_ascend.ops.flash_mla_a3": ["LICENSE*", "NOTICE.md"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

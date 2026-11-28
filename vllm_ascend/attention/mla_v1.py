@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass, fields
-from typing import Any, ClassVar, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -34,6 +34,18 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter, A3MLAConfig, get_a3_mla_ops, supports_a3_mla
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.bailing_flashmla import (
+    BAILING_MLA_LATENT_DIM,
+    BAILING_MLA_PAGE_SIZE,
+    BAILING_MLA_ROPE_DIM,
+    BAILING_MLA_SUPPORTED_HEADS,
+    BailingBalancedGraphPlan,
+    BailingFlashMLABatch,
+    BailingFlashMLAGraph,
+    supports_bailing_flashmla,
+    supports_bailing_flashmla_cache,
+    supports_bailing_flashmla_full_graph,
+)
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
@@ -80,6 +92,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     uses_sfa_dspark_kv_transfer,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.ops.flash_mla_a3.prefill_fia import (
+    PrefillFiaSegments,
+    prefill_fia_once,
+    prepare_prefill_fia_segments,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
@@ -97,9 +114,17 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 
+if TYPE_CHECKING:
+    from vllm_ascend.ops.flash_mla_a3.graph_decode import GraphDecodePlan
+
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
+
+# Bound the temporary packed K/V and RoPE allocations for joined prefill.
+MAX_JOINED_MLA_PREFILL_TOKENS = 32_768
+MAX_JOINED_MLA_PREFILL_QUERIES = 8192
+MAX_JOINED_MLA_PREFILL_REQUESTS = 4
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -314,6 +339,7 @@ class AscendMLAPrefillMetadata:
     cos: torch.Tensor = None
     actual_seq_lengths_q: list[int] | None = None
     pcp_local_num_input_tokens: int | None = None
+    joined_fia_segments: PrefillFiaSegments | None = None
 
 
 @dataclass
@@ -335,6 +361,8 @@ class AscendMLADecodeMetadata:
     # Owned by the metadata builder, so it is None for every model that does
     # not need it.
     nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = None
+    bailing_flashmla: BailingFlashMLABatch | None = None
+    bailing_flashmla_graph: "GraphDecodePlan | BailingBalancedGraphPlan | None" = None
 
 
 @dataclass
@@ -478,6 +506,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
+        self.use_bailing_flashmla = bool(layer_names) and all(
+            getattr(static_forward_context[name].impl, "use_bailing_flashmla", False) for name in layer_names
+        )
+        self.bailing_flashmla_graph = (
+            BailingFlashMLAGraph(vllm_config, tuple(layer_names))
+            if self.use_bailing_flashmla and supports_bailing_flashmla_full_graph(vllm_config)
+            else None
+        )
         flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
         a3_choices = {getattr(static_forward_context[name].impl, "use_a3_mla_sink", False) for name in layer_names}
         self.use_a3_mla_sink = True in a3_choices
@@ -489,7 +525,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                "A3 MLA sink" if self.use_a3_mla_sink else backend_name if True in flashmla_choices else "FIA",
+                "A3 MLA sink"
+                if self.use_a3_mla_sink
+                else "A3 FlashMLA"
+                if self.use_bailing_flashmla
+                else backend_name
+                if True in flashmla_choices
+                else "FIA",
             )
         if True in flashmla_choices or self.use_a3_mla_sink:
             impl = static_forward_context[layer_names[0]].impl
@@ -878,6 +920,19 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             cos = sin = None
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
+        joined_fia_segments = None
+        if (
+            getattr(self, "use_bailing_flashmla", False)
+            and common_attn_metadata.causal
+            and chunked_context_metadata is not None
+            and len(chunked_context_metadata.seq_tot) == 1
+            and 0 < len(actual_seq_lengths_q) <= MAX_JOINED_MLA_PREFILL_REQUESTS
+            and actual_seq_lengths_q[-1] <= MAX_JOINED_MLA_PREFILL_QUERIES
+            and 0 < chunked_context_metadata.seq_tot[0] <= MAX_JOINED_MLA_PREFILL_TOKENS - actual_seq_lengths_q[-1]
+        ):
+            joined_fia_segments = prepare_prefill_fia_segments(
+                actual_seq_lengths_q, chunked_context_metadata.chunk_actual_seq_lengths_kv_list[0]
+            )
         return AscendMLAPrefillMetadata(
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             query_lens=prefill_query_lens,
@@ -892,6 +947,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin=sin,
             cos=cos,
             actual_seq_lengths_q=actual_seq_lengths_q,
+            joined_fia_segments=joined_fia_segments,
         )
 
     def build_decode_metadata(
@@ -948,6 +1004,30 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin = sin[: self.num_decode_tokens, ...]
         else:
             cos = sin = None
+        bailing_flashmla = None
+        prefill_flags = getattr(common_attn_metadata, "is_prefilling", None)
+        if (
+            getattr(self, "use_bailing_flashmla", False)
+            and common_attn_metadata.attn_state
+            in (
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.ChunkedPrefill,
+            )
+            and (prefill_flags is None or not prefill_flags[: self.num_decodes].any())
+            and len(seq_lens_list) == self.block_table.size(0) == len(actual_seq_lengths_q)
+        ):
+            bailing_flashmla = BailingFlashMLABatch.from_query_ends(
+                actual_seq_lengths_q, self.num_decode_tokens, self.block_table.device
+            )
+            if bailing_flashmla is not None and (
+                common_attn_metadata.seq_lens_cpu is None
+                or (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.scheduler_config.async_scheduling
+                )
+            ):
+                bailing_flashmla.device_lengths = common_attn_metadata.seq_lens[: self.num_decodes]
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -959,6 +1039,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin=sin,
             cos=cos,
             nope_zero_rope_cache=self.nope_zero_rope_cache,
+            bailing_flashmla=bailing_flashmla,
         )
         return decode_metadata
 
@@ -982,7 +1063,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             assert capture_metadata.max_query_len <= self.reorder_batch_threshold
             return self._build_external_flashmla(0, capture_metadata, retain_for_graph=True)
         # Keep backend-specific PCP context on the same build path as replay.
-        return self.build(0, capture_metadata, **kwargs)
+        metadata = self.build(0, capture_metadata, **kwargs)
+        graph = getattr(self, "bailing_flashmla_graph", None)
+        if graph is not None and metadata.decode is not None and metadata.num_prefills == 0:
+            metadata.decode.bailing_flashmla_graph = graph.prepare(capture_metadata, causal=metadata.causal)
+        return metadata
 
     def build_for_graph_capture(
         self,
@@ -1071,6 +1156,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
     _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    use_strided_prefill_gather = False
 
     def __init__(
         self,
@@ -1170,6 +1256,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.layer_name,
             draft_quant_config=kwargs.get("layer_quant_config") if self._is_k3_dspark_draft else None,
         )
+        self.use_strided_prefill_gather = get_current_hardware_profile().supports(
+            HardwareCapability.STRIDED_MLA_PREFILL_GATHER
+        ) and not (self.use_pcp or self.use_dcp or self.fa_quant_layer or self.enable_kv_nz)
         self.dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )
@@ -1208,6 +1297,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
                 self.a3_mla_adapter = A3MLAAdapter(config, *ops)
         self.use_a3_mla_sink = self.a3_mla_adapter is not None
+        self.use_bailing_flashmla = (
+            not self.is_draft_model
+            and not self.fa_quant_layer
+            and self.sliding_window is None
+            and self.num_heads in BAILING_MLA_SUPPORTED_HEADS
+            and self.num_kv_heads == 1
+            and self.kv_lora_rank == BAILING_MLA_LATENT_DIM
+            and self.qk_rope_head_dim == BAILING_MLA_ROPE_DIM
+            and supports_bailing_flashmla(self.vllm_config, enable_kv_nz=self.enable_kv_nz)
+        )
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_prolog_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -1637,6 +1736,91 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
+    def _project_prefill_context(
+        self,
+        q_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: tuple[torch.Tensor, ...],
+        rope_dim: int,
+        attn_metadata: AscendMLAMetadata,
+        index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None and prefill_metadata.chunked_context is not None
+        chunked_context = prefill_metadata.chunked_context
+        context_table = self.get_context_block_table(attn_metadata)
+        cache_kv_c = kv_c_and_k_pe_cache[0]
+        cache_k_pe = kv_c_and_k_pe_cache[1]
+        latent_kv_dim = cache_kv_c.size(-1)
+        toks = chunked_context.seq_tot[index]
+        context_seq_len_npu = self.get_context_seq_len_npu(index, attn_metadata)
+        context_starts = chunked_context.starts[index]
+        if self.use_quant_flashmla:
+            if not cache_kv_c.dtype == cache_k_pe.dtype == torch.float8_e4m3fn:
+                raise ValueError("QuantFlashMLA prefill history requires FP8 latent and positional cache.")
+            # Gather the stored FP8 bits with the original token/page strides.
+            packed = load_mla_cache_context_rows(
+                cache_kv_c.view(torch.int8),
+                cache_k_pe.view(torch.int8),
+                context_table,
+                context_seq_len_npu,
+                context_starts,
+                toks,
+            )
+            # BF16 represents the stored FP8 values exactly; latent descale follows below.
+            rows = packed.view(cache_kv_c.dtype).to(q_pe.dtype).unsqueeze(1)
+            kv_c_normed, k_pe = rows.split((latent_kv_dim, rope_dim), dim=-1)
+        else:
+            num_heads = cache_k_pe.size(2)
+            kv_c_normed = cache_kv_c.new_empty(toks, num_heads, latent_kv_dim)
+            # The fused gather leaves the latent output unfilled with a zero-width
+            # RoPE operand. Give it the latent cache twice and drop the duplicate.
+            pe_cache = cache_k_pe if rope_dim > 0 else cache_kv_c
+            k_pe = q_pe.new_empty(toks, num_heads, rope_dim) if rope_dim > 0 else torch.empty_like(kv_c_normed)
+            used_direct_gather = False
+            if self.use_strided_prefill_gather and rope_dim > 0:
+                from vllm_ascend.ops.triton.strided_mla_prefill_gather import try_gather_strided_prefill
+
+                used_direct_gather = try_gather_strided_prefill(
+                    cache_kv_c,
+                    pe_cache,
+                    context_table,
+                    chunked_context.cu_seq_lens[index],
+                    context_starts,
+                    kv_c_normed,
+                    k_pe,
+                )
+            if not used_direct_gather:
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c,
+                    pe_cache,
+                    context_table,
+                    context_seq_len_npu,
+                    context_starts,
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
+            if rope_dim == 0:
+                k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
+        kv_c_normed, k_pe = self._reorg_kvcache(
+            kv_c_normed,
+            k_pe,
+            chunked_context=chunked_context,
+            chunk_idx=index,
+            toks=toks,
+        )
+        if kv_c_normed.numel() == 0:
+            return None
+        kv_c_normed = kv_c_normed.squeeze()
+        if self.fa_quant_layer and self.support_fp8_attention:
+            kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
+                torch.bfloat16
+            )
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+
+        return k_nope, k_pe, v
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1652,14 +1836,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
 
-        context_table = self.get_context_block_table(attn_metadata)
         current_attn_result = prefix_output, prefix_lse
         iters = len(prefill_metadata.chunked_context.seq_tot)
-        cache_kv_c = kv_c_and_k_pe_cache[0]
-        cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
-
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
         if iters == 0:
@@ -1694,71 +1872,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
         }
 
-        use_quant_flashmla = self.use_quant_flashmla
-        if use_quant_flashmla and not (cache_kv_c.dtype == cache_k_pe.dtype == torch.float8_e4m3fn):
-            raise ValueError("QuantFlashMLA prefill history requires FP8 latent and positional cache.")
-
         for i in range(iters):
-            toks = prefill_metadata.chunked_context.seq_tot[i]
-            context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            context_start = prefill_metadata.chunked_context.starts[i]
-            if use_quant_flashmla:
-                # Gather the stored FP8 bits with the original token/page strides.
-                packed = load_mla_cache_context_rows(
-                    cache_kv_c.view(torch.int8),
-                    cache_k_pe.view(torch.int8),
-                    context_table,
-                    context_seq_len_npu,
-                    context_start,
-                    toks,
-                )
-                # CP reorganization concatenates the two components before gathering.
-                # BF16 represents the stored FP8 values exactly; latent descale follows below.
-                rows = packed.view(cache_kv_c.dtype).to(q_pe.dtype).unsqueeze(1)
-                kv_c_normed, k_pe = rows.split((latent_kv_dim, rope_dim), dim=-1)
-            else:
-                kv_c_normed = torch.empty(
-                    toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device
-                )
-                # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
-                # and its output buffer are both zero-width, and the fused paged
-                # gather silently leaves the latent output unfilled. Hand it the
-                # latent cache twice and drop the duplicate.
-                if rope_dim == 0:
-                    pe_cache = cache_kv_c
-                    k_pe = torch.empty_like(kv_c_normed)
-                else:
-                    pe_cache = cache_k_pe
-                    k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
-
-                DeviceOperator.kv_cache_load(
-                    cache_kv_c,
-                    pe_cache,
-                    context_table,
-                    context_seq_len_npu,
-                    context_start,
-                    key=kv_c_normed,
-                    value=k_pe,
-                )
-                if rope_dim == 0:
-                    k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
-            kv_c_normed, k_pe = self._reorg_kvcache(
-                kv_c_normed,
-                k_pe,
-                chunked_context=prefill_metadata.chunked_context,
-                chunk_idx=i,
-                toks=toks,
-            )
-            if kv_c_normed.numel() == 0:
+            projected = self._project_prefill_context(q_pe, kv_c_and_k_pe_cache, rope_dim, attn_metadata, i)
+            if projected is None:
                 continue
-            kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and self.support_fp8_attention:
-                kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
-                    torch.bfloat16
-                )
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+            k_nope, k_pe, v = projected
 
             actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
             common_kwargs["actual_seq_lengths_kv"] = actual_seq_lengths_kv
@@ -1821,7 +1939,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_meta = attn_metadata.prefill
 
         actual_seq_lengths_q = prefill_meta.actual_seq_lengths_q
-        actual_seq_lengths_kv = actual_seq_lengths_q.copy()
 
         # FIA with TND layout only supports bfloat16, convert if needed
         original_dtype = q_nope.dtype
@@ -1833,9 +1950,36 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.to(torch.bfloat16)
             value = value.to(torch.bfloat16)
 
-        attn_output = torch.empty(num_tokens, self.num_heads, self.v_head_dim, dtype=q_nope.dtype, device=q_nope.device)
-        attn_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=q_nope.device)
+        use_a3_prefill = (
+            getattr(self, "use_bailing_flashmla", False)
+            and not need_dtype_convert
+            and self.qk_nope_head_dim == self.v_head_dim == 128
+        )
+        history = prefill_meta.chunked_context
+        joined_fia_segments = getattr(prefill_meta, "joined_fia_segments", None)
+        if use_a3_prefill and isinstance(joined_fia_segments, PrefillFiaSegments):
+            projected = self._project_prefill_context(
+                q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, 0
+            )
+            if projected is not None:
+                history_k, history_rope, history_value = projected
+                output = prefill_fia_once(
+                    q_nope,
+                    q_pe,
+                    k_nope,
+                    value,
+                    k_pe,
+                    history_k,
+                    history_value,
+                    history_rope,
+                    segments=joined_fia_segments,
+                    mask=prefill_meta.attn_mask,
+                    scale=self.scale,
+                    before_attention=record_attention_compute_start,
+                )
+                return output.reshape(num_tokens, self.num_heads * self.v_head_dim)
 
+        needs_history_lse = not use_a3_prefill or (history is not None and bool(history.seq_tot))
         common_kwargs = {
             "num_heads": self.num_heads,
             "num_key_value_heads": self.num_heads,
@@ -1847,9 +1991,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             "antiquant_scale": None,
             "block_table": None,
             "block_size": 0,
-            "softmax_lse_flag": True,
+            "softmax_lse_flag": needs_history_lse,
             "actual_seq_lengths": actual_seq_lengths_q,
-            "actual_seq_lengths_kv": actual_seq_lengths_kv,
+            "actual_seq_lengths_kv": actual_seq_lengths_q,
         }
         record_attention_compute_start()
 
@@ -1866,9 +2010,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             query, key.contiguous(), value.contiguous(), **common_kwargs
         )
 
-        attn_output, attn_lse = self._compute_prefill_context(
-            q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
-        )
+        if needs_history_lse:
+            attn_output, attn_lse = self._compute_prefill_context(
+                q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
+            )
 
         attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim])
 
@@ -3007,6 +3152,55 @@ class AscendMLAImpl(MLAAttentionImpl):
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        graph_plan = getattr(decode_meta, "bailing_flashmla_graph", None)
+        # MRV2 creates the full graph outside the model forward context. The
+        # capture metadata carries the plan into the physical capture.
+        if (
+            graph_plan is not None
+            and _EXTRA_CTX.capturing
+            and not _EXTRA_CTX.is_draft_model
+            and block_size == BAILING_MLA_PAGE_SIZE
+            and q_nope.dtype == q_pe.dtype == k_nope.dtype == k_pe.dtype == torch.bfloat16
+        ):
+            from vllm_ascend.ops.flash_mla_a3.graph_decode import flash_mla_decode_graph
+
+            query = (
+                q_nope.reshape(-1, self.num_heads, self.kv_lora_rank),
+                q_pe.reshape(-1, self.num_heads, self.qk_rope_head_dim),
+            )
+            if query[0].size(0) == graph_plan.block_table.size(0) * graph_plan.query_length:
+                record_attention_compute_start()
+                if isinstance(graph_plan, BailingBalancedGraphPlan):
+                    logger.info_once("Ling A3 FlashMLA captured balanced decode with a shared device page schedule.")
+                    return self._v_up_proj(graph_plan.attention(query, (k_nope, k_pe)))
+                logger.info_once("Ling A3 FlashMLA captured uniform decode using device lengths and page tables.")
+                return self._v_up_proj(flash_mla_decode_graph(query, (k_nope, k_pe), graph_plan))
+        if (
+            getattr(self, "use_bailing_flashmla", False) is True
+            and decode_meta.bailing_flashmla is not None
+            and block_size == BAILING_MLA_PAGE_SIZE
+            and q_nope.dtype == q_pe.dtype == torch.bfloat16
+            and not _EXTRA_CTX.is_draft_model
+            and not _EXTRA_CTX.is_draft_model_prefill
+            and not _EXTRA_CTX.capturing
+            and not torch.npu.is_current_stream_capturing()
+            and supports_bailing_flashmla_cache((k_nope, k_pe), q_nope.device)
+        ):
+            query = (
+                q_nope.reshape(-1, self.num_heads, self.kv_lora_rank),
+                q_pe.reshape(-1, self.num_heads, self.qk_rope_head_dim),
+            )
+            record_attention_compute_start()
+            attn_output = decode_meta.bailing_flashmla.attention(
+                query,
+                (k_nope, k_pe),
+                decode_meta.block_table,
+                decode_meta.seq_lens_list,
+                scale=self.scale,
+                causal=attn_metadata.causal,
+                attn_mask=decode_meta.attn_mask,
+            )
+            return self._v_up_proj(attn_output)
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
@@ -3638,6 +3832,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
+
+        graph_plan = getattr(getattr(attn_metadata, "decode", None), "bailing_flashmla_graph", None)
+        if isinstance(graph_plan, BailingBalancedGraphPlan) and _EXTRA_CTX.capturing and not _EXTRA_CTX.is_draft_model:
+            graph_plan.update_for_layer(layer_name)
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (

@@ -158,6 +158,10 @@ class HardwareCapability(Enum):
     MLA_FLASH = auto()
     # NoPE Prolog V3 with W8A8 projections and per-group INT8 KV.
     SFA_NOPE_PROLOG_V3 = auto()
+    # Standalone FlashMLA for BF16 decode with component-major pages on A3.
+    MLA_FLASH_A3_SPLIT_CACHE = auto()
+    # Gather prefill history from component-major MLA pages.
+    STRIDED_MLA_PREFILL_GATHER = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -411,6 +415,8 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+    HardwareCapability.MLA_FLASH_A3_SPLIT_CACHE,
+    HardwareCapability.STRIDED_MLA_PREFILL_GATHER,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,

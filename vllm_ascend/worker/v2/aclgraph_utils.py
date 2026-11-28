@@ -197,6 +197,9 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
+        # Device-metadata kernels can replay without host-side attention updates.
+        if not graph.tasks:
+            return super().run_fullgraph(desc)
         resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
