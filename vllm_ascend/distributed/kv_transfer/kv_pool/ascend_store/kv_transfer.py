@@ -17,7 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend, MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -244,8 +244,13 @@ class KVTransferThread(threading.Thread):
         if len(gvas) == 0:
             return 0
 
-        # direction: 0/SMEMB_COPY_L2G = save (write), 1/SMEMB_COPY_G2L = load (read)
-        dir_name = "save(L2G)" if direction == 0 else "load(G2L)" if direction == 1 else f"dir{direction}"
+        is_g2l = direction == MmcDirect.COPY_G2L.value
+        if is_g2l:
+            dir_name = "load(G2L)"
+        elif direction == MmcDirect.COPY_L2G.value:
+            dir_name = "save(L2G)"
+        else:
+            dir_name = f"dir{direction}"
         logger.debug(
             "[KVPOOL] batch_copy %s gvas=%d total_bytes=%d",
             dir_name,
@@ -260,7 +265,7 @@ class KVTransferThread(threading.Thread):
             max_transfer_addrs = len(gvas)
 
         assert self.m_store.store is not None
-        max_g2l_transfer_addrs = self.max_g2l_transfer_addrs if direction == 1 else 0
+        max_g2l_transfer_addrs = self.max_g2l_transfer_addrs if is_g2l else 0
         for start in range(0, len(gvas), max_transfer_addrs):
             end = start + max_transfer_addrs
             split_gvas, split_addrs, split_sizes = self._split_transfer_packets(

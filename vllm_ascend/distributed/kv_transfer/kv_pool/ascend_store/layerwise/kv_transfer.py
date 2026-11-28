@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
@@ -801,7 +802,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 gvas_array,
                 addr_array,
                 size_array,
-                0,
+                MmcDirect.COPY_L2G.value,
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
@@ -1135,7 +1136,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             gvas_array,
             addr_array,
             size_array,
-            1,
+            MmcDirect.COPY_G2L.value,
             self.max_transfer_blocks,
             self.max_transfer_bytes,
         )

@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -221,7 +222,7 @@ class DSparkPrefixCache:
                     raise RuntimeError("DSpark prefix read lease failed")
                 # Rewarm before leasing only: a leased object must not move.
                 gvas = self._gvas(chunk)
-                self._copy(range(start, start + len(chunk)), gvas, blocks_by_group, 1)
+                self._copy(range(start, start + len(chunk)), gvas, blocks_by_group, MmcDirect.COPY_G2L.value)
             finally:
                 if leased and self.backend.batch_remove_lease(leased) != 0:
                     raise RuntimeError("DSpark prefix read lease release failed")
@@ -270,7 +271,7 @@ class DSparkPrefixCache:
                 if not allocated:
                     continue
                 # WRITING objects need not expose readable metadata until publication.
-                self._copy(owned_indices, owned_gvas, blocks_by_group, 0)
+                self._copy(owned_indices, owned_gvas, blocks_by_group, MmcDirect.COPY_L2G.value)
                 statuses = self.backend.batch_write_finish(allocated, [0] * len(allocated))
                 if statuses is None or len(statuses) != len(allocated) or any(result != 0 for result in statuses):
                     raise RuntimeError("DSpark prefix publication failed")
