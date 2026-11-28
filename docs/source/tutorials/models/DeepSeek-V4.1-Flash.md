@@ -2107,7 +2107,11 @@ Select the tab for the target hardware.
     ock.mmc.local_service.protocol = device_sdma
     ock.mmc.local_service.dram.size = 200GB
     ock.mmc.local_service.max.dram.size = 1024GB
-    ock.mmc.local_service.storage.enabled = false
+    ock.mmc.local_service.storage.enabled = true
+    ubsio.disk.path = /dev/loop0
+    ubsio.mem.size_in_gb = 50
+    ubsio.standalone.device_count = 1
+    ubsio.standalone.force_new_disk = true
     ```
 
     `world_size` is the maximum number of LocalServices that can join the pool, not
