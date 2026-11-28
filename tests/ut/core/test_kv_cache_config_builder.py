@@ -236,3 +236,73 @@ def test_core_applies_capacity_and_converges_worker_layouts(monkeypatch, overrid
     replanned = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=3)
     assert replanned.num_blocks == 3
     assert {tensor.size for tensor in replanned.kv_cache_tensors} == {3 * p}
+
+
+@pytest.mark.parametrize(
+    "model_type,has_sliding",
+    [("qwen3_next", True), ("kimi_linear", False)],
+)
+def test_pr_d_end_to_end_planning_gate_characterization(model_type, has_sliding):
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=8192,
+            supports_kv_cache_grouping=False,
+            hf_config=SimpleNamespace(model_type=model_type),
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        kv_transfer_config=None,
+        speculative_config=None,
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+        ),
+    )
+    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=64, head_size_v=64, dtype=torch.bfloat16)
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (full.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=full.real_page_size_bytes,
+    )
+    specs = {"model.layers.0.self_attn": full, "model.layers.1.linear_attn": mamba}
+    if has_sliding:
+        specs["model.layers.2.self_attn"] = SlidingWindowSpec(
+            block_size=128, num_kv_heads=1, head_size=32, head_size_v=32, dtype=torch.bfloat16, sliding_window=4096
+        )
+
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert all(g.kv_cache_spec.page_size_bytes == full.real_page_size_bytes for g in groups)
+    plan = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=4)
+    assert len(plan.kv_cache_tensors) == len(specs)
+    assert all(t.size == 4 * full.real_page_size_bytes for t in plan.kv_cache_tensors)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Upstream vLLM U3: resolve_kv_cache_layout filters has_layer_views before checking MambaSpec",
+)
+def test_resolve_kv_cache_layout_dcp_replicated_draft_hybrid_upstream_u3():
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    dcp_target = FullAttentionSpec(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, dcp_sharded=True)
+    replicated_draft = FullAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=64, dtype=torch.bfloat16, dcp_sharded=False, is_draft=True
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (dcp_target.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=dcp_target.real_page_size_bytes,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_cache_layout=None),
+        kv_transfer_config=None,
+    )
+    layout = resolve_kv_cache_layout(vllm_config, [["LBNHC", "LBHNC"]], [dcp_target, replicated_draft, mamba])
+    assert layout is KVCacheLayout.LBNHC
