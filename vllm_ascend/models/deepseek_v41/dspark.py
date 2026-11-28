@@ -284,7 +284,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         scatter_cache_sk(cache.kv_cache, slot_mapping, values)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        hidden_states = self.embed_tokens(input_ids)
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel_moe:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -295,6 +295,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
+        hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
         last_layer = None

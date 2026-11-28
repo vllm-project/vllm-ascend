@@ -18,6 +18,7 @@ from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
+from vllm_ascend.models.common.ops import sequence_parallel as sp
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
 from vllm_ascend.models.deepseek_v41.dspark import (
@@ -197,7 +198,8 @@ def test_v41_public_setter_preserves_checkpoint_aux_layer_ids(multimodal, adapti
     assert hf_config.dspark_target_layer_ids == [0, 37, 38, 39]
 
 
-def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypatch):
+@pytest.mark.parametrize("skip_padding,context_available", [(True, True), (False, True), (True, False)])
+def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypatch, skip_padding, context_available):
     class Layer:
         @staticmethod
         def hc_collapse(hidden, pre_mix):
@@ -210,7 +212,7 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
     input_ids = torch.tensor([11, 12, 13, 14])
     padding = torch.tensor([False, True, False, False])
     forward_context = SimpleNamespace(is_padding=padding)
-    sharded_hidden = hidden[:2].unsqueeze(1).repeat(1, 4, 1)
+    sharded_hidden = hidden[:2]
     sharded_ids = input_ids[:2]
     gathered = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     sp_shard = MagicMock(side_effect=[sharded_hidden, sharded_ids])
@@ -219,9 +221,9 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
     monkeypatch.setattr(deepseek_v41_dspark_module, "sp_shard", sp_shard)
     monkeypatch.setattr(deepseek_v41_dspark_module, "sp_all_gather", sp_all_gather)
     monkeypatch.setattr(deepseek_v41_dspark_module, "sp_padding_mask", padding_mask)
-    monkeypatch.setattr(deepseek_v41_dspark_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "is_forward_context_available", lambda: context_available)
     monkeypatch.setattr(deepseek_v41_dspark_module, "get_forward_context", lambda: forward_context)
-    monkeypatch.setattr(deepseek_v41_dspark_module.envs, "VLLM_MOE_SKIP_PADDING", True)
+    monkeypatch.setattr(deepseek_v41_dspark_module.envs, "VLLM_MOE_SKIP_PADDING", skip_padding)
 
     model = SimpleNamespace(
         embed_tokens=MagicMock(return_value=hidden),
@@ -233,12 +235,123 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
 
     output = DeepseekV41DSparkModel.forward(model, input_ids, torch.arange(4))
 
-    padding_mask.assert_called_once()
-    assert forward_context.is_padding.tolist() == [False, True]
-    assert sp_shard.call_args_list[0].args[0].shape == (4, 4, 4)
+    if skip_padding and context_available:
+        padding_mask.assert_called_once()
+        assert forward_context.is_padding.tolist() == [False, True]
+    else:
+        padding_mask.assert_not_called()
+        assert forward_context.is_padding is padding
+    assert sp_shard.call_args_list[0].args[0] is hidden
     assert sp_shard.call_args_list[1].args[0] is input_ids
     sp_all_gather.assert_called_once()
     torch.testing.assert_close(output, gathered[:4])
+
+
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+@pytest.mark.parametrize(
+    "num_tokens,tp_size,rank",
+    [
+        (tokens, size, rank)
+        for tokens, size in [(0, 4), (1, 8), (3, 4), (8, 1), (8, 2), (8, 8), (10, 4)]
+        for rank in range(size)
+    ],
+)
+@pytest.mark.parametrize("hc_mult", [1, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("padding_kind", ["none", "mixed", "all"])
+def test_v41_draft_shard_before_hc_expansion(
+    monkeypatch, sequence_parallel, num_tokens, tp_size, rank, hc_mult, dtype, padding_kind
+):
+    hidden_size = 8
+    hidden = torch.arange(num_tokens * hidden_size, dtype=dtype).reshape(num_tokens, hidden_size)
+    input_ids = torch.arange(num_tokens, dtype=torch.int64) + 11
+    positions = torch.arange(num_tokens, dtype=torch.int64) + 7
+    padding = None
+    if padding_kind != "none":
+        padding = torch.ones(num_tokens, dtype=torch.bool)
+        if padding_kind == "mixed":
+            padding[::2] = False
+    module = deepseek_v41_dspark_module
+    monkeypatch.setattr(sp, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    monkeypatch.setattr(module.envs, "VLLM_MOE_SKIP_PADDING", True)
+    monkeypatch.setattr(module, "is_forward_context_available", lambda: True)
+
+    monkeypatch.setattr(sp, "get_tensor_model_parallel_rank", lambda: rank)
+    context = SimpleNamespace(is_padding=padding)
+    monkeypatch.setattr(module, "get_forward_context", lambda: context)
+    expanded = hidden.unsqueeze(-2).repeat(1, hc_mult, 1)
+    expected_hidden = sp._ascend_sp_shard_impl(expanded) if sequence_parallel else expanded
+    expected_ids = sp._ascend_sp_shard_impl(input_ids) if sequence_parallel else input_ids
+    expected_padding = padding
+    if sequence_parallel:
+        expected_padding = sp._ascend_sp_padding_mask_impl(
+            torch.zeros(num_tokens, dtype=torch.bool) if padding is None else padding
+        )
+    expected_mix = torch.zeros(expected_hidden.shape[0], hc_mult, dtype=torch.float32)
+    expected_mix[:, 0] = 1.0
+
+    def assert_bits(actual, expected):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+
+    class Layer:
+        def __call__(self, actual_positions, actual_hidden, pre_mix, llama_4_scaling, input_ids):
+            assert actual_positions is positions
+            assert llama_4_scaling is None
+            assert_bits(actual_hidden, expected_hidden)
+            assert actual_hidden.is_contiguous()
+            assert_bits(input_ids, expected_ids)
+            assert_bits(pre_mix, expected_mix)
+            if expected_padding is None:
+                assert context.is_padding is None
+            else:
+                assert_bits(context.is_padding, expected_padding)
+            return actual_hidden, pre_mix
+
+        @staticmethod
+        def hc_collapse(actual_hidden, pre_mix):
+            assert_bits(pre_mix, expected_mix)
+            return actual_hidden[:, 0]
+
+    def shard(value):
+        # Guard the optimization itself, beyond numerical equivalence.
+        assert value.ndim <= 2
+        return sp._ascend_sp_shard_impl(value)
+
+    def padding_mask(is_padding, embeddings):
+        assert embeddings is hidden
+        return sp._ascend_sp_padding_mask_impl(
+            embeddings.new_zeros(num_tokens, dtype=torch.bool) if is_padding is None else is_padding
+        )
+
+    def gather(value):
+        assert_bits(value, expected_hidden[:, 0])
+        # Reconstruct rank-order output using the original full-HC path.
+        shards = []
+        for gather_rank in range(tp_size):
+            with patch.object(sp, "get_tensor_model_parallel_rank", return_value=gather_rank):
+                shards.append(sp._ascend_sp_shard_impl(expanded)[:, 0])
+        return torch.cat(shards, dim=0)
+
+    shard_mock = MagicMock(side_effect=shard)
+    gather_mock = MagicMock(side_effect=gather)
+    mask_mock = MagicMock(side_effect=padding_mask)
+    monkeypatch.setattr(module, "sp_shard", shard_mock)
+    monkeypatch.setattr(module, "sp_all_gather", gather_mock)
+    monkeypatch.setattr(module, "sp_padding_mask", mask_mock)
+    model = SimpleNamespace(
+        embed_tokens=MagicMock(return_value=hidden),
+        hc_mult=hc_mult,
+        use_sequence_parallel_moe=sequence_parallel,
+        layers={"40": Layer(), "41": Layer()},
+    )
+    output = DeepseekV41DSparkModel.forward(model, input_ids, positions)
+    assert_bits(output, hidden)
+    model.embed_tokens.assert_called_once_with(input_ids)
+    assert shard_mock.call_count == (2 if sequence_parallel else 0)
+    assert gather_mock.call_count == int(sequence_parallel)
+    assert mask_mock.call_count == int(sequence_parallel)
 
 
 def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
