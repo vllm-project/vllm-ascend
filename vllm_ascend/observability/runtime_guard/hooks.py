@@ -31,6 +31,9 @@ have ``runtime_guard`` from ``RuntimeGuardProcessor.bind``.
 Decorator placement: guard step decorators must sit INSIDE
 ``@torch.inference_mode()`` so wave sync stays in that context. The worker
 idle decorator has no inference-mode wrapper — ``_dummy_run`` owns it.
+
+rare_chars-specific stash / batch-sharded wrap / async feed helpers live in
+:mod:`hooks_rare` and are re-exported here for a stable import surface.
 """
 
 from __future__ import annotations
@@ -47,12 +50,41 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.observability.runtime_guard.hooks_rare import (
+    _rare_chars_active,
+    feed_rare_batch_safe,
+    maybe_feed_rare_sync_output,
+    rare_chars_active,
+    stash_pre_sample_logits,
+    take_pre_sample_logits,
+    take_rare_batch_for_async,
+    wrap_compute_logits_for_pre_sample,
+)
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 
 logger = init_logger_ascend(__name__)
 
 # Stashed by ``runtime_guard_step`` for the same-wave sample phase.
 _SCHEDULER_OUTPUT_ATTR = "_pending_scheduler_output"
+
+__all__ = [
+    "AscendAsyncOutput",
+    "check_before_sample_from_batch",
+    "get_postprocess_sampled",
+    "is_async_output_rank",
+    "maybe_wrap_v2_async_output",
+    "need_pre_sample_hook",
+    "note_postprocess_sampled",
+    "rare_chars_active",
+    "runtime_guard_idle_step",
+    "runtime_guard_sample_tokens",
+    "runtime_guard_step",
+    "stash_pre_sample_logits",
+    "take_pre_sample_logits",
+    "wrap_compute_logits_for_pre_sample",
+    "wrap_postprocess_sampled",
+    "_rare_chars_active",
+]
 
 
 def runtime_guard_step(execute_model_fn):
@@ -120,7 +152,7 @@ def _peek_sample_pre_state(runner: Any) -> tuple[Any, Any]:
 def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finished_req_ids: Any) -> SamplePhaseResult:
     """Assemble SamplePhaseResult inside the guard layer (not on the runner)."""
     req_ids = list(getattr(input_batch, "req_ids", None) or [])
-    sampled, _num = get_postprocess_sampled(runner)
+    sampled, num_sampled = get_postprocess_sampled(runner)
     # AsyncOutput.sampled_token_ids is padded until get_output() trims; defer
     # after-sample for AsyncModelRunnerOutput (W2-3 / D-11).
     return SamplePhaseResult(
@@ -131,6 +163,7 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
         valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
         req_ids_output_copy=req_ids,
         finished_req_ids=finished_req_ids,
+        num_sampled=num_sampled,
     )
 
 
@@ -181,6 +214,7 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         output = result.model_runner_output
         if guard.needs_sample_phase_hooks():
             output = maybe_wrap_v2_async_output(output, self)
+            maybe_feed_rare_sync_output(guard, output)
         return output
 
     return wrapper
@@ -209,7 +243,9 @@ def get_postprocess_sampled(runner: Any) -> tuple[Any, Any]:
 
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""
-    if not bool(guard.runtime_config.detector_get("logits_finite", "enabled", False)):
+    cfg = guard.runtime_config
+    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or rare_chars_active(guard)
+    if not need_logits:
         return False
     return bool(guard.action_executor.is_action_leader())
 
@@ -219,15 +255,24 @@ def check_before_sample_from_batch(
     logits: Any,
     input_batch: Any,
 ) -> None:
-    """Pack batch fields and call :meth:`RuntimeGuardProcessor.check_before_sample`."""
+    """Pack batch fields and call :meth:`RuntimeGuardProcessor.check_before_sample`.
+
+    Also stashes logits for ``rare_chars`` so Guard-side (top1, chosen) logprobs
+    can be computed after sample without ``SamplingParams.logprobs``.
+    """
+    cfg = guard.runtime_config
+    if rare_chars_active(guard):
+        stash_pre_sample_logits(guard.runner, logits)
     logits_indices = getattr(input_batch, "logits_indices", None)
     if logits_indices is None:
         logits_indices = getattr(guard.runner, "logits_indices", None)
-    guard.check_before_sample(
-        logits=logits,
-        logits_indices=logits_indices,
-        input_batch=input_batch,
-    )
+    # logits_finite path is a no-op when that detector is off.
+    if bool(cfg.detector_get("logits_finite", "enabled", False)):
+        guard.check_before_sample(
+            logits=logits,
+            logits_indices=logits_indices,
+            input_batch=input_batch,
+        )
 
 
 def _restore_bound_override(obj: Any, name: str, orig: Any, *, had_instance_attr: bool) -> None:
@@ -247,38 +292,6 @@ def _safe_check_after_sample(runner: Any, output: Any) -> None:
         )
     except Exception:
         logger.exception("[runtime_guard soft-fail] async check_after_sample raised")
-
-
-@contextmanager
-def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterator[None]:
-    """Wrap ``model.compute_logits`` so ``check_before_sample`` runs once before grammar.
-
-    Parent ``sample`` has no mid-hook between logits and grammar; wrapping the
-    bound method inserts the check without copying upstream ``sample()``.
-    Restored in ``finally``. Fires once per context (v2 calls ``compute_logits``
-    twice per step).
-    """
-    model = runner.model
-    # Prefer deleting the instance override so the class method is restored.
-    had_instance_attr = "compute_logits" in getattr(model, "__dict__", {})
-    orig = model.compute_logits
-    guard = runner.runtime_guard
-    fired = False
-
-    def wrapped(hidden_states, *args, **kwargs):
-        nonlocal fired
-        logits = orig(hidden_states, *args, **kwargs)
-        if not fired:
-            fired = True
-            batch = input_batch if input_batch is not None else getattr(runner, "input_batch", None)
-            check_before_sample_from_batch(guard, logits, batch)
-        return logits
-
-    model.compute_logits = wrapped
-    try:
-        yield
-    finally:
-        _restore_bound_override(model, "compute_logits", orig, had_instance_attr=had_instance_attr)
 
 
 @contextmanager
@@ -321,12 +334,17 @@ def maybe_wrap_v2_async_output(output: Any, runner: Any) -> Any:
 
     Non-output ranks keep the bare ``AsyncOutput`` (unique_reply_rank already
     forwards only TP0 into ``get_output``).
+
+    Attaches this step's rare_chars :class:`RareLogprobBatch` onto the wrapper
+    so async scheduling cannot overwrite a single runner-level slot before
+    ``get_output``.
     """
     if not isinstance(output, AsyncOutput):
         return output
     if not is_async_output_rank():
         return output
-    return AscendAsyncOutput(output, runner)
+    rare_batch = take_rare_batch_for_async(runner)
+    return AscendAsyncOutput(output, runner, rare_batch=rare_batch)
 
 
 class AscendAsyncOutput(AsyncModelRunnerOutput):
@@ -334,14 +352,22 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
 
     Must be the only after-sample IO append for v2: ``AsyncOutput.sampled_token_ids``
     is padded until ``get_output`` trims with ``num_sampled`` (W2-3 / D-11).
+
+    ``rare_batch`` is the per-step :class:`RareLogprobBatch` for rare_chars;
+    owned by this output object so overlapping async steps cannot cross-feed.
     """
 
-    def __init__(self, inner: AsyncOutput, runner: Any):
+    def __init__(self, inner: AsyncOutput, runner: Any, *, rare_batch: Any = None):
         self._inner = inner
         self._runner = runner
+        self._rare_batch = rare_batch
 
     def get_output(self) -> ModelRunnerOutput:
         output = self._inner.get_output()
+        batch = self._rare_batch
+        self._rare_batch = None
+        if batch is not None:
+            feed_rare_batch_safe(self._runner, output, batch)
         _safe_check_after_sample(self._runner, output)
         return output
 

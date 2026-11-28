@@ -314,6 +314,13 @@ class RequestGuardState:
     # In-flight KV dump arms (queued → drain/drop). Reap waits so finished
     # requests can still complete an already-armed dump_kv (+1 wave).
     dump_jobs: int = 0
+    # In-flight rare_chars D2H+feed jobs (RareLogprobFeedQueue). Reap waits
+    # so clear_finished cannot wipe detector rows while delayed feeds run, and
+    # finish_rare_chars is deferred until these pins drain.
+    rare_feed_jobs: int = 0
+    # Set when rare_feed_jobs was force-zeroed past max_deferred_waves. Look-ahead
+    # may still be incomplete — reap must skip finish_rare_chars for this req.
+    rare_feed_force_cleared: bool = False
 
 
 class RequestGuardStore:
@@ -473,6 +480,57 @@ class RequestGuardStore:
                 if state is not None and state.dump_jobs > 0:
                     state.dump_jobs -= 1
 
+    def add_rare_feed_jobs(self, req_ids: Iterable[str] | None) -> None:
+        """Pin reqs until async rare_chars D2H+feed completes.
+
+        Never resurrects a reaped or force-cleared request: a late feed after
+        reap must not recreate Store state.
+        """
+        if not req_ids:
+            return
+        with self._lock:
+            for raw in req_ids:
+                if not raw:
+                    continue
+                rid = str(raw)
+                if rid in self._reaped_set:
+                    continue
+                state = self._by_req.get(rid)
+                if state is None:
+                    self._discard_reaped_locked(rid)
+                    state = RequestGuardState(req_id=rid)
+                    self._by_req[rid] = state
+                if state.rare_feed_force_cleared:
+                    continue
+                state.rare_feed_jobs += 1
+
+    def accept_rare_feed(self, req_id: str) -> bool:
+        """True when a late/async rare feed may still update detector state.
+
+        Unknown ids are allowed (first feed of a live request). Reaped or
+        force-cleared ids are rejected so a delayed FeedQueue job cannot
+        resurrect rows after reap.
+        """
+        if not req_id:
+            return False
+        rid = str(req_id)
+        with self._lock:
+            if rid in self._reaped_set:
+                return False
+            state = self._by_req.get(rid)
+            return not (state is not None and state.rare_feed_force_cleared)
+
+    def finish_rare_feed_jobs(self, req_ids: Iterable[str] | None) -> None:
+        if not req_ids:
+            return
+        with self._lock:
+            for raw in req_ids:
+                if not raw:
+                    continue
+                state = self._by_req.get(str(raw))
+                if state is not None and state.rare_feed_jobs > 0:
+                    state.rare_feed_jobs -= 1
+
     def is_request_finished(self, req_id: str) -> bool:
         """True when Store has marked this req finished (not merely unknown)."""
         if not req_id:
@@ -510,6 +568,26 @@ class RequestGuardStore:
                 return True
             mark = int(current_wave)
             state.finish_mark_wave = mark
+        # Rare logprob feeds should complete before clear. Soft-defer for one
+        # ``max_deferred_waves`` window; then force-reap so a stuck waiter
+        # cannot pin request state forever.
+        if state.rare_feed_jobs > 0:
+            age = int(current_wave) - mark
+            cap = int(self.max_deferred_waves)
+            if age < cap:
+                return False
+            # Past cap: drop pins so Store/detectors can clear. Mark incomplete so
+            # _reap_finished_requests skips finish_rare_chars (look-ahead untrustworthy).
+            if age == cap or (cap > 0 and age % cap == 0):
+                logger.warning(
+                    "[runtime_guard reap] force clear for req=%s rare_feed_jobs=%s "
+                    "age_waves=%s; skip rare finish (incomplete feed)",
+                    state.req_id,
+                    state.rare_feed_jobs,
+                    age,
+                )
+            state.rare_feed_jobs = 0
+            state.rare_feed_force_cleared = True
         if state.cpu_jobs > 0 or state.dump_jobs > 0:
             if int(current_wave) - mark < int(self.max_deferred_waves):
                 return False
@@ -541,6 +619,28 @@ class RequestGuardStore:
                 if self._ready_to_reap_locked(self._by_req[rid], current_wave=w):
                     out.append(rid)
             return out
+
+    def partition_rare_finish_reapable(self, reapable: Iterable[str] | None) -> tuple[list[str], list[str]]:
+        """Split reapable ids into (finishable, force_cleared_incomplete).
+
+        ``rare_feed_force_cleared`` means pins were dropped past
+        ``max_deferred_waves``; look-ahead finish would be untrustworthy.
+        """
+        if not reapable:
+            return [], []
+        finishable: list[str] = []
+        incomplete: list[str] = []
+        with self._lock:
+            for raw in reapable:
+                if not raw:
+                    continue
+                rid = str(raw)
+                state = self._by_req.get(rid)
+                if state is not None and state.rare_feed_force_cleared:
+                    incomplete.append(rid)
+                else:
+                    finishable.append(rid)
+        return finishable, incomplete
 
     def clear(
         self,

@@ -119,12 +119,33 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
-Each step runs a device `isfinite` reduction and one all-finite gate. Default
-path launches a non-blocking host copy of that gate and waits in
-`check_deferred`. On a hit only, bad rows / `logits_indices` / `finite_kind`
-are resolved (indices are snapshotted at pre-sample when needed). Set
-`item_sync: true` when you need kind/attribution against pristine pre-sample
-logits. Retired: `check_every_tokens` (multi-step window) — ignored if present.
+### rare_chars
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 |
+
+Algorithm knobs live in packaged ``detector/rare/rare.json`` (not runtime_config):
+``think_end`` (default ``auto``, resolved from the served tokenizer) and
+``alert_monitor`` (default ``false`` = strict-tier alerts only). The
+per-tokenizer rare table is always built at model warmup from the served
+tokenizer; the shared GB model (`rare_gb.npz`) ships with the package.
+
+Guard collects `(top1, sampled)` natural-log logprobs from a pre-sample logits
+stash via Ascend Triton ``_narrow_collect_partials`` / ``_narrow_collect_finish`` (no API
+``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
+logits by stride. Each step's ``RareLogprobBatch`` is attached to that step's
+``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to
+``RareLogprobFeedQueue``; that worker waits for collect, issues the D2H, then
+pack+feeds. Request finish flushes look-ahead at reap after ``rare_feed_jobs``
+drain. Prefer shadow/`report` first — strict-tier holdout false-positive
+rate can exceed 0.1% on some corpora.
+
+If warmup/native bind fails, a process-local ``RareCharsSession.warmup_failed`` latch
+skips further stash/collect until ``enabled`` is set false then true again (hot-reload).
+Feature / GB-input numeric ids are owned by ``rare_feed_native.c`` and loaded through
+``rare_enums`` (CI asserts agreement). Pipeline and state details:
+[Runtime Guard feature guide — rare_chars pipeline](../feature_guide/runtime_guard.md#rare_chars-pipeline).
 
 ### manual_trigger
 

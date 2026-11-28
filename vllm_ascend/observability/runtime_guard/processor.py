@@ -38,6 +38,7 @@ from vllm_ascend.observability.runtime_guard.detector.manager import DetectorMan
 from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager
 from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
 from vllm_ascend.observability.runtime_guard.processor_dump import RuntimeGuardDumpMixin
+from vllm_ascend.observability.runtime_guard.processor_rare import RuntimeGuardRareMixin
 from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
 from vllm_ascend.observability.runtime_guard.rank_gate import (
     runner_tp_rank,
@@ -73,9 +74,14 @@ class SamplePhaseResult:
     valid_sampled_token_ids: Any
     req_ids_output_copy: Any
     finished_req_ids: Any
+    # Per-request accepted count from postprocess_sampled; 0 marks chunked-prefill
+    # phantom rows that must not enter rare_chars (vLLM zeroes num_sampled there).
+    num_sampled: Any = None
 
 
-class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, RuntimeGuardReportMixin):
+class RuntimeGuardProcessor(
+    RuntimeGuardBusMixin, RuntimeGuardDumpMixin, RuntimeGuardRareMixin, RuntimeGuardReportMixin
+):
     """Process-wide singleton: config sync → detect → report / dump_kv.
 
     Create / attach a runner with :meth:`bind` (or ``RuntimeGuardProcessor(runner)``).
@@ -223,6 +229,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self.action_executor.stop()
         except Exception:
             logger.debug("[runtime_guard] action worker stop failed", exc_info=True)
+        try:
+            from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
+                shutdown_rare_logprob_feed_queue,
+            )
+
+            shutdown_rare_logprob_feed_queue()
+        except Exception:
+            logger.debug("[runtime_guard] rare feed queue stop failed", exc_info=True)
 
     # ---- step entry (all ranks) --------------------------------------------
 
@@ -390,6 +404,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         :meth:`~RequestGuardStore.mark_finished` runs here so the last stamp /
         detect / append still see the same state. Sidecars + clear happen in
         :meth:`_reap_finished_requests`.
+
+        When ``rare_chars`` is enabled, look-ahead flush runs at reap (after
+        ``rare_feed_jobs`` drain) so async D2H+feed cannot race ``finish_row``.
         """
         if not finished_req_ids:
             return
@@ -405,6 +422,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
+        # Drain pins normally → finish look-ahead. Force-cleared pins → skip
+        # finish (incomplete feed); still clear to avoid Store/detector leaks.
+        self._finish_rare_chars_on_reap(reapable)
         store.clear_many(reapable, detectors=self.detectors)
         self.wave_tracker.discard_many(reapable)
 
@@ -514,9 +534,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # finish before end-of-wave so a same-wave manual report can read the
         # prompt cache; reap waits until the next ``begin_wave``.
         result = sample_fn()
-        # Hook 3: mark_finished
-        self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         if not self.needs_sample_phase_hooks():
+            self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
             self.end_of_wave(has_scheduled_tokens=True)
             return result
@@ -524,6 +543,18 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
         if result.input_batch is not None:
             self._last_input_batch = result.input_batch
+        # Hook 2b: rare_chars from Guard-stashed logits (no API
+        # SamplingParams.logprobs). Must run before logits reuse /
+        # async after-sample deferral.
+        self._soft_fail(
+            "check_rare_chars",
+            lambda: self.check_rare_chars_from_stash(
+                sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
+                num_sampled=getattr(result, "num_sampled", None),
+            ),
+        )
+        # Hook 3: mark_finished (once; after rare collect stash)
+        self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
         # accepted_token_nums_fn callback when detection is off; soft-fail
         # lives inside check_after_spec itself.

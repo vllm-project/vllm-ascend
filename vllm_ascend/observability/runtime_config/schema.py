@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FieldKind = Literal["bool", "int", "float", "list_int"]
+FieldKind = Literal["bool", "int", "float", "list_int", "str"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,5 +128,10 @@ def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -
             )
         elif f.kind == "list_int":
             section[f.name] = coerce_list_int(section[f.name], path)
+        elif f.kind == "str":
+            val = section[f.name]
+            if not isinstance(val, str):
+                raise ValueError(f"{path} must be a string, got {type(val).__name__}")
+            section[f.name] = val
         else:
             raise ValueError(f"unknown ConfigField.kind {f.kind!r} for {path}")
