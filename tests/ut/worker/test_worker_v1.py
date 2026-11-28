@@ -621,7 +621,10 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-        worker.model_runner = SimpleNamespace(model=MagicMock())
+        worker.model_runner = SimpleNamespace(
+            model=MagicMock(),
+            restore_kv_cache_static_state=lambda: None,
+        )
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["kv_cache"])
