@@ -551,6 +551,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
+            cu_q = getattr(attn_metadata, "qsa_request_cu_q", None)
             result = qsa_gbsa_attention(
                 query[:num_tokens],
                 key_cache,
@@ -561,6 +562,8 @@ class AscendQSAImpl(AttentionImplBase[Any]):
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                query_start_loc=cu_q,
+                max_query_len=attn_metadata.max_query_len if cu_q is not None else 1,
                 prepared_metadata=getattr(
                     attn_metadata,
                     "qsa_gbsa_metadata",
@@ -684,6 +687,19 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
                 common_attn_metadata.num_actual_tokens,
                 phases,
             )
+        # A packed query segment is the causal suffix of its request. Graph
+        # padding and PCP sharding can break that relationship.
+        elif pcp_context is None and common_attn_metadata.graph_pad_size < 0:
+            n = common_attn_metadata.num_reqs
+            starts = common_attn_metadata.query_start_loc_cpu[: n + 1]
+            if (
+                n > 0
+                and n == metadata.block_table.shape[0]
+                and starts[0].item() == 0
+                and starts[-1].item() == metadata.num_actual_tokens
+                and (starts.diff() > 0).all().item()
+            ):
+                metadata.qsa_request_cu_q = common_attn_metadata.query_start_loc[: n + 1].to(torch.int64)
         return metadata
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
