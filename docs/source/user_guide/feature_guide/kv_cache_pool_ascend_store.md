@@ -646,6 +646,8 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
+> **Before deployment:** See [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference).
+
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
@@ -688,7 +690,15 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
     Script location: [mem_scan.py](https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py)
 
-3. **950PR&950DT Products only (disable signature verification + mount key paths + install kernel package):**
+3. **Check software compatibility:**
+
+    Review the [Memcache software compatibility reference](#memcache-software-compatibility-reference), which supplements the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference) and the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md).
+
+4. **Check super pod boundaries (A3 `device_sdma`):**
+
+    A3 `device_sdma` uses HCCS; all Prefill and Decode ranks must be in the same super pod, otherwise `transfer page error` occurs. Also ensure switches do not age out connections during the tens-of-minutes model loading window (see the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md)).
+
+5. **950PR&950DT Products only (disable signature verification + mount key paths + install kernel package):**
 
     ```shell
     # Step 1: Disable HDK signature verification (only needs to be executed once per machine)
@@ -718,7 +728,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
     Update `/lib/route.conf` inside the container.
 
-4. **Check disk status before enabling SSD:**
+6. **Check disk status before enabling SSD:**
 
     ```shell
     lsblk /dev/nvme1n1                    # No partitions expected
@@ -1623,6 +1633,20 @@ Existing configurations must replace `consumer_is_to_load` with `enable_lookup` 
 | 800 I/T A3 | >= 26.0 or >= 25.5 (with Mooncake >= v0.3.11) | >= 9.1.0 | LingQu Computing Network >= 1.5 (required for both Mooncake FabricMem and Memcache `device_sdma`); recommended `ASCEND_ENABLE_USE_FABRIC_MEM=1` |
 | 800 I/T A2 | >= 25.5 recommended | >= 9.1.0 | `HCCL_INTRA_ROCE_ENABLE=1` direct transfer |
 
+### Memcache Software Compatibility Reference {: #memcache-software-compatibility-reference }
+
+This table adds Memcache-specific checks to the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference); use the stricter requirement when both apply. Also compare against the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md).
+
+| Item | A2 (`device_rdma`) | A3 HCCS (`device_sdma`) | A3 NPU RDMA (`device_rdma`) | 950PR&950DT Products (`device_urma`/`device_rdma`) | How to check |
+| ---- | ------------------ | ----------------------- | ---------------------------- | -------------------------------- | ------------ |
+| HDK firmware | N/A | >= 7.8.0.6.201 | N/A | N/A | `/usr/local/Ascend/driver/tools/upgrade-tool --device_index -1 --component -1 --version` |
+| Page size | 4K (64K since v1.3.1) | N/A | 4K (64K since v1.3.1) | 4K, 64K | `getconf PAGESIZE` |
+| OS kernel | N/A | 5.10.0 <= kernel < 6.6.0-114.0.0 | N/A | N/A | `uname -a` |
+| BIOS / A3 memory | N/A | 1 TB (upgrade required); 1.5/2 TB (recommended); 3 TB (not required) | N/A | N/A | `dmidecode -t bios`; see [expanding A3 memory](https://gitcode.com/Ascend/memcache/wiki/MemCache%E6%89%A9%E5%A4%A7A3%E5%8F%AF%E7%94%A8%E5%86%85%E5%AD%98%E7%A9%BA%E9%97%B4.md) |
+| Max cluster scale | 16 nodes | Within one super pod | 8 nodes | Per model type | - |
+
+If A3 `device_sdma` reports `sdma move comperr`, verify the HDK firmware version.
+
 ### QoS Configuration
 
 Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
@@ -1705,7 +1729,7 @@ Public FAQ references:
 
 ### Issue 5: Memcache Related Issues
 
-Pre-operation checks (memory inspection, A3 available memory scanning, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks) are described in "Step 1: Prerequisite Checks" of [Scenario 2: Memcache Backend](#scenario-2-memcache-backend). For Memcache troubleshooting, refer to the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
+For compatibility, see [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference); for pre-operation checks, see "Step 1: Prerequisite Checks" in [Scenario 2: Memcache Backend](#scenario-2-memcache-backend); for other troubleshooting, see the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
 
 ### Issue 6: DSv4 Deployment Notes
 
