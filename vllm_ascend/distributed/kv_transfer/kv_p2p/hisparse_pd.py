@@ -11,7 +11,7 @@ from functools import partial
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeTransferMetadata
@@ -285,13 +285,8 @@ def validate_hisparse_pd_config(transfer, kv_cache_config: KVCacheConfig) -> Non
         if kv_cache_config.hisparse_host_num_blocks is None:
             raise ValueError("Mooncake memfabric consumer requires HiSparse Host Source")
         transferable = [group for group in kv_cache_config.kv_cache_groups if group.enable_kv_transfer]
-        if len(transferable) < 2 or not transferable[0].host_resident or transferable[1].role != "hisparse_indexer":
+        if len(transferable) != 2 or not transferable[0].host_resident or transferable[1].role != "hisparse_indexer":
             raise ValueError("Mooncake memfabric requires Host Source and NPU Indexer transfer groups")
-        for group in transferable[2:]:
-            spec = group.kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-            if group.host_resident or group.role != "default" or not all(layer.is_draft for layer in specs):
-                raise ValueError("Mooncake memfabric only supports draft KV as additional transfer groups")
     elif kv_cache_config.hisparse_host_num_blocks is not None:
         raise ValueError("Mooncake memfabric producer must use ordinary Prefill KV")
 

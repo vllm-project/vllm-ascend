@@ -3,13 +3,12 @@ import ctypes
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
     _HiSparsePDWorker,
@@ -299,17 +298,6 @@ def test_memfabric_layout_validation_distinguishes_p_and_d():
     validate_hisparse_pd_config(NS(is_kv_consumer=True), cache)
     with pytest.raises(ValueError, match="ordinary Prefill KV"):
         validate_hisparse_pd_config(NS(is_kv_consumer=False), cache)
-    draft = NS(enable_kv_transfer=True, host_resident=False, role="default", kv_cache_spec=NS(is_draft=True))
-    cache.kv_cache_groups.append(draft)
-    validate_hisparse_pd_config(NS(is_kv_consumer=True), cache)
-    draft.kv_cache_spec = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs={"draft": replace(make_full_spec(), is_draft=True)}
-    )
-    validate_hisparse_pd_config(NS(is_kv_consumer=True), cache)
-    draft.kv_cache_spec = NS(is_draft=False)
-    with pytest.raises(ValueError, match="transfer groups"):
-        validate_hisparse_pd_config(NS(is_kv_consumer=True), cache)
-    cache.kv_cache_groups.pop()
     cache.kv_cache_groups.pop()
     with pytest.raises(ValueError, match="transfer groups"):
         validate_hisparse_pd_config(NS(is_kv_consumer=True), cache)

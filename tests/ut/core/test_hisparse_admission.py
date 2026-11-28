@@ -15,15 +15,12 @@ from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import HiSparseResidentManager, register_all_kvcache_specs
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -32,9 +29,8 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import aligned_hisparse_allocation_config
-from vllm_ascend.hisparse.binding import _bind_indexer_views, prepare_hisparse_cache_views
+from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 BLOCK_SIZE = 16
 
@@ -66,26 +62,22 @@ def _cache_configs(
     in_flight_blocks=2,
     block_size=BLOCK_SIZE,
     hot_units=1,
-    draft=False,
 ):
     # Register Core types before the combined builder adds its import-only spec.
     register_all_kvcache_specs(None)
     hf_text_config = SimpleNamespace(model_type="glm_moe_dsa", index_topk=16)
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(device_buffer_size=16384 if draft else 2 * block_size)
-        ),
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig(device_buffer_size=2 * block_size)),
         model_config=SimpleNamespace(
             hf_config=hf_text_config,
             hf_text_config=hf_text_config,
             max_model_len=max_model_blocks * block_size,
             supports_kv_cache_grouping=False,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1, decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=device_blocks,
             prefix_cache_retention_interval=None,
-            kv_cache_layout=KVCacheLayout.BLHNC,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
@@ -98,26 +90,17 @@ def _cache_configs(
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
-            is_index_group_leader=not draft or index in (0, 1, 2, 6),
+            is_index_group_leader=True,
         )
         for index in range(hot_units)
     }
-    for index in (0, 1, 2, 6) if draft else (0,):
-        specs[f"indexer.{index}" if draft else "indexer"] = (AscendSFAIndexerCacheSpec if draft else MLAAttentionSpec)(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            cache_role=SparseCacheRole.INDEXER,
-        )
-    if draft:
-        specs["draft"] = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=256,
-            dtype=torch.bfloat16,
-            is_draft=True,
-        )
+    specs["indexer"] = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        cache_role=SparseCacheRole.INDEXER,
+    )
     builder = AscendKVCacheConfigBuilder()
     groups = builder.get_kv_cache_groups(config, specs)
     cache = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=device_blocks)
@@ -125,25 +108,6 @@ def _cache_configs(
         # Model the number of usable Host pages left after other requests.
         cache.hisparse_host_num_blocks = host_blocks
     return config, cache
-
-
-def test_draft_group_keeps_indexer_pages_dividing_shared_stride():
-    config, cache = _cache_configs(pool_connector=None, block_size=128, hot_units=10, max_model_blocks=72, draft=True)
-    indexer_group = next(group for group in cache.kv_cache_groups if group.role is KVCacheGroupRole.HISPARSE_INDEXER)
-    stride = _pool_bytes_per_block(config, cache.kv_cache_groups)
-    assert stride == 589824
-    indexer_pages = [spec.page_size_bytes for spec in indexer_group.kv_cache_spec.kv_cache_specs.values()]
-    assert set(indexer_pages) == {32768}
-    assert all(stride % page == 0 for page in indexer_pages)
-    name, spec = next(iter(indexer_group.kv_cache_spec.kv_cache_specs.items()))
-    cache_view = torch.empty_strided(
-        (2, spec.num_kv_heads, spec.block_size, spec.head_size),
-        (stride // spec.dtype.itemsize, spec.block_size * spec.head_size, spec.head_size, 1),
-        dtype=spec.dtype,
-    )
-    layer = SimpleNamespace()
-    _bind_indexer_views({name: cache_view}, {name: spec}, {name: layer})
-    assert layer.hisparse_block_stride == 18
 
 
 def _cache_manager(config, cache):
