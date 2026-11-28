@@ -17,8 +17,8 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 
 # patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers and
 # patch_triton overwrites causal_conv1d_update with the NPU Triton kernel, so
@@ -48,12 +48,7 @@ else:
 # left to rebind on Ascend.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
-import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
-
-# Re-apply the V2-only runner selection on pickled configs, plus the V2
-# feature patches, in worker processes.
-import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
@@ -69,13 +64,10 @@ import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dspark  # noqa
 
-# Remove this block and patch_adaptive_verification.py when vLLM 0.33.0 support ends.
-if vllm_version_is("0.33.0"):
-    import vllm_ascend.patch.worker.patch_adaptive_verification  # noqa
-
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
     from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as _ar_spec
 
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
@@ -83,10 +75,8 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
     )
 
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
-    if not vllm_version_is("0.33.0"):
-        from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
-
-        _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+    _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_v2_static_kernel  # noqa

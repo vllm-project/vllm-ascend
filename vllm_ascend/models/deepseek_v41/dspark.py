@@ -213,16 +213,17 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         )
 
         # V4.1 keeps the checkpoint quantization contract on the composite
-        # config.  Its DSpark main projection is FP8 in the release checkpoint,
-        # so constructing a BF16 linear drops the scale parameter and makes the
-        # draft loader fail on ``main_proj.scale``.
+        # config.  Release checkpoints mark main_proj FP8, and ModelSlim
+        # ascend_v1 checkpoints might mark it W8A8_MXFP8.  A BF16 linear drops the
+        # scale parameter and makes the draft loader fail on main_proj.scale.
         checkpoint_config = getattr(draft_model_config, "hf_config", None)
         model_quant_config = getattr(checkpoint_config, "quantization_config", None)
+        quant_method = None if model_quant_config is None else model_quant_config.get("quant_method")
+        if quant_method is None and vllm_config.quant_config is not None:
+            quant_method = vllm_config.quant_config.get_name()
         main_proj_quant_config = (
             vllm_config.quant_config
-            if DeviceOperator.get_dsv41_packed_cache_ops() is not None
-            and model_quant_config is not None
-            and model_quant_config.get("quant_method") == "fp8"
+            if DeviceOperator.get_dsv41_packed_cache_ops() is not None and quant_method in ("fp8", "ascend")
             else None
         )
         self.main_proj = ColumnParallelLinear(
@@ -231,7 +232,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             bias=False,
             return_bias=False,
             quant_config=main_proj_quant_config,
-            prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
+            # Match the checkpoint name so per-layer quant descriptions resolve.
+            prefix="mtp.0.main_proj",
             gather_output=True,
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -266,7 +268,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
             attn.packed_cache_ops.write_attention_cache(
-                cache.kv_cache[0],
+                cache.kv_cache,
                 slot_mapping,
                 values,
                 kind="win",
@@ -279,7 +281,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 torch.int32
             )
             slot_mapping.masked_fill_(~valid.unsqueeze(-1), -1)
-        scatter_cache_sk(cache.kv_cache[0], slot_mapping, values)
+        scatter_cache_sk(cache.kv_cache, slot_mapping, values)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)

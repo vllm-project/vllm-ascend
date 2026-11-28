@@ -46,13 +46,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
+from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
-from vllm_ascend.utils import vllm_version_is
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -208,10 +208,7 @@ def test_finish_weight_update():
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
-    if vllm_version_is("0.33.0"):
-        mock_finalize.assert_called_once_with(engine.model, engine.model_config)
-    else:
-        mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
+    mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
     engine._packed_importer.close.assert_called_once_with()
 
 
@@ -292,7 +289,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
         assert kwargs["npu_uuid"] == "node-0"
         assert kwargs["buffer_size_bytes"] == 16
         for i in range(2):
-            yield dict(
+            yield PackedIpcChunk(
                 names=[f"w{i}"], dtype_names=["float32"], shapes=[[4]], tensor_sizes=[16], ipc_handle={"node-0": (i,)}
             )
             assert events[-1] == "sync"
@@ -308,6 +305,14 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     expected_chunk = ["update", "sync", "reuse"] if is_sender else ["sync", "reuse"]
     assert events == expected_chunk * 2
     assert engine.client.update_weights.call_count == (2 if is_sender else 0)
+    for i, call in enumerate(engine.client.update_weights.call_args_list):
+        payload = call.args[0]
+        assert isinstance(payload, dict)
+        assert payload["names"] == [f"w{i}"]
+        assert payload["dtype_names"] == ["float32"]
+        assert payload["shapes"] == [[4]]
+        assert payload["tensor_sizes"] == [16]
+        assert payload["ipc_handles"] == {"node-0": (i,)}
 
 
 @pytest.mark.parametrize("is_sender", [False, True])
@@ -347,31 +352,6 @@ def test_packed_receive_rejects_missing_sizes():
     ):
         engine.receive_weights(types.SimpleNamespace(tensor_sizes=None))
     engine.model.load_weights.assert_not_called()
-
-
-def test_receive_scopes_mtp_completeness_check_to_loading():
-    from vllm.model_executor.model_loader.mtp_validation import is_mtp_completeness_check_enabled
-
-    engine = object.__new__(NPUIPCWeightTransferEngine)
-    engine.device = types.SimpleNamespace(index=1)
-    engine.packed = False
-    engine.model = MagicMock()
-    info = engine.parse_update_info(
-        dict(names=["w"], dtype_names=["float32"], shapes=[[1]], ipc_handles=[{"node-1": (None,) * 6 + (9,)}])
-    )
-
-    def load(weights):
-        assert not is_mtp_completeness_check_enabled()
-        raise RuntimeError("load failed")
-
-    engine.model.load_weights.side_effect = load
-    with (
-        _patch_rebuild_npu_tensor(lambda *args: torch.ones(1)),
-        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-1"),
-        pytest.raises(RuntimeError, match="load failed"),
-    ):
-        engine.receive_weights(info)
-    assert is_mtp_completeness_check_enabled()
 
 
 def test_uuid_uses_assigned_device_with_visibility_mapping():

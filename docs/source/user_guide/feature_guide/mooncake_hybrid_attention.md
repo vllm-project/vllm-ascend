@@ -84,7 +84,7 @@ can restore committed data using their current local block allocations.
 
 ### Transfer and Cache Updates
 
-Future-layer loads can overlap the current attention computation. Device events
+Future-layer loads can overlap the current attention computation. Host events
 ensure that transfers access cache data after the relevant updates and that
 attention waits for its required loads.
 
@@ -140,7 +140,7 @@ Hybrid models require `fail`; `recompute` is not supported. When using
 `MultiConnector`, set this policy on the top-level `kv-transfer-config` and
 update its `AscendStoreConnector` entry with the role and extra configuration
 shown above. Decode pool access is disabled by default; enable
-`consumer_is_to_load` explicitly if Decode needs to load from the pool. See
+`enable_lookup: true` explicitly if Decode needs to load from the pool. See
 [Configure Prefill and Decode Nodes](mooncake_layerwise_adaptation_and_optimization.md#configure-prefill-and-decode-nodes)
 for role behavior and IPC identifier requirements.
 

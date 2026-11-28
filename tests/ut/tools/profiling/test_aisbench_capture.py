@@ -13,6 +13,7 @@ from tools.profiling import capture
 
 @pytest.fixture
 def benchmark(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     root = tmp_path / "profile"
     spec = capture.ProfileSpec(enabled=True, output="raw")
     for name, value in spec.environment().items():
@@ -33,12 +34,19 @@ def benchmark(tmp_path, monkeypatch):
     for name in ("REQUEST_CONF_DIR", "DATASET_CONF_DIR"):
         monkeypatch.setattr(aisbench, name, str(tmp_path))
     process, controller = Mock(), Mock()
+    process.return_value.wait.return_value = 0
+    monkeypatch.setattr(aisbench.os, "killpg", Mock(), raising=False)
     controller.finish.return_value = {"status": "success", "reason": "duration_reached"}
     factory = Mock(return_value=controller)
     monkeypatch.setattr(aisbench.subprocess, "Popen", process)
     monkeypatch.setattr(aisbench, "ProfileController", factory)
-    log = f"Current exp folder: {tmp_path}\nPerformance Result files located in {tmp_path}."
-    monkeypatch.setattr(aisbench.AisbenchRunner, "_check_runtime_stdout", lambda self: log)
+
+    def completed_log(runner):
+        for name in ("perf.csv", "perf.json"):
+            (runner.work_dir / name).write_bytes((tmp_path / name).read_bytes())
+        return f"Current exp folder: {runner.work_dir}\nPerformance Result files located in {runner.work_dir}."
+
+    monkeypatch.setattr(aisbench.AisbenchRunner, "_check_runtime_stdout", completed_log)
     config = dict(
         benchmark_name="perf",
         benchmark_artifact_name="model__perf",

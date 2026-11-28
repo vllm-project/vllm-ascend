@@ -17,14 +17,20 @@
 # This file is a part of the vllm-ascend project.
 #
 from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.block_table import BlockTables
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+block_tables_cls: type[BlockTables]
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-    from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables as AscendBlockTables
+    from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
+
+    block_tables_cls = Ascend310PBlockTables
 else:
     from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
+    block_tables_cls = AscendBlockTables
+
 # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
 # but vllm default is torch.int64 dtype.
-model_runner.BlockTables = AscendBlockTables
+model_runner.BlockTables = block_tables_cls

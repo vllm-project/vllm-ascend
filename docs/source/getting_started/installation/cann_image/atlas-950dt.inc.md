@@ -29,17 +29,8 @@
             --name vllm-ascend-cann \
             --net=host \
             --shm-size=1g \
-            --device /dev/davinci0 \
-            --device /dev/davinci_manager \
-            --device /dev/ummu \
-            --device /dev/uburma \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
+            -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -it "$IMAGE" bash
         ```
@@ -55,17 +46,8 @@
             --name vllm-ascend-cann \
             --net=host \
             --shm-size=1g \
-            --device /dev/davinci0 \
-            --device /dev/davinci_manager \
-            --device /dev/ummu \
-            --device /dev/uburma \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
+            -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -it "$IMAGE" bash
         ```

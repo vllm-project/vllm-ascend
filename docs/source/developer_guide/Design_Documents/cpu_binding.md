@@ -183,7 +183,7 @@ Computation:
 
 Global slice view:
 
-```text
+```output
 CPU range: 0                                                             639
            |-- worker0/NPU0 --|-- worker1/NPU1 --| ... |-- worker15/NPU15 --|
            |      0-39        |      40-79       | ... |      600-639       |
@@ -191,7 +191,7 @@ CPU range: 0                                                             639
 
 Role split inside each worker slice:
 
-```text
+```output
 40-CPU worker slice
 | IRQ CPUs | main worker process and subthreads | ACL thread | release thread |
 |  c0-c1   |              c2-c37                |    c38     |      c39       |
@@ -262,7 +262,7 @@ Ascend 950 NPU0: worker=[...]
   cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU
   numbering or cpuset layout crosses NUMA boundaries.
 - `topo_affinity` depends on usable output from `npu-smi info -t topo`.
-- IRQ binding requires writable `/proc/irq` and resolvable PCI/IRQ information.
+- IRQ binding requires writable `/proc/irq` and resolvable PCIe/IRQ information.
   950PR&950DT Products skips IRQ binding even when `/proc/irq` is writable.
 - 950PR&950DT Products UVB polling thread binding requires visibility into the host PID
   namespace. Docker containers must be created with `--pid=host`; otherwise

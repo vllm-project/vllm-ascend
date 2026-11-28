@@ -20,9 +20,12 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
+
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -105,22 +108,55 @@ def _remap_modelslim_mtp_layer_ids(
 _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 
 
+def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
+    """Keep the Qwen4Exp MTP draft on the target's actual RoPE contract.
+
+    vLLM rebuilds the draft ``ModelConfig`` without propagating the target's
+    ``language_model_only`` option.  By this point the target has already had
+    M-RoPE removed, so mirror that canonical transformation onto the draft.
+    """
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return
+
+    target_model_config = getattr(speculative_config, "target_model_config", None)
+    if target_model_config is None:
+        target_model_config = vllm_config.model_config
+    draft_model_config = speculative_config.draft_model_config
+    if (
+        getattr(target_model_config, "uses_mrope", None) is False
+        and getattr(draft_model_config, "uses_mrope", None) is True
+    ):
+        _strip_qwen4_exp_mrope(draft_model_config)
+
+
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
+    # Align the speculator-owned config before upstream derives the runtime
+    # draft config and its QSA cache specs from it.
+    _align_draft_rope_with_target(vllm_config)
     # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
     # graph capture cannot retain an undersized cache.
     _align_qwen4_exp_mtp_position_cache(vllm_config)
-    draft_vllm_config = _upstream_make_draft_vllm_config(
-        vllm_config,
-        mtp_start_layer_idx,
-    )
-    num_mtp_layers = getattr(
-        vllm_config.model_config.hf_text_config,
-        "mtp_num_hidden_layers",
-        1,
-    )
+    if num_mtp_layers is None:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+        )
+        num_mtp_layers = getattr(
+            vllm_config.model_config.hf_text_config,
+            "mtp_num_hidden_layers",
+            1,
+        )
+    else:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+            num_mtp_layers,
+        )
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,
         mtp_start_layer_idx,
@@ -150,10 +186,11 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         if positions.ndim > 1:
             positions = positions[0]
 
-        # Ascend PP loads the local MTP drafter on the last target stage. It is
-        # therefore the first logical draft stage even though the global PP
-        # coordinator reports that it is not the first target stage.
-        if get_pp_group().is_first_rank or intermediate_tensors is None:
+        # The V2 speculator builds the complete local drafter on the last
+        # target PP rank. Follow the upstream Qwen4Exp contract: the absence
+        # of transported intermediates identifies that local drafter entry,
+        # independently of the global target-model PP rank.
+        if intermediate_tensors is None:
             assert hidden_states is not None
             if inputs_embeds is None:
                 assert input_ids is not None
@@ -174,6 +211,10 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
+        # Match the upstream transport contract: the drafter boundary is
+        # full-token, and HC SP owns the local shard independently of MoE SP.
+        if self.use_hc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=None,
@@ -190,6 +231,13 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
+        if self.use_hc_sequence_parallel:
+            full_num_tokens = positions.shape[-1]
+            multi_hidden_size = multi_hidden.shape[-1]
+            gathered_hidden = sp_all_gather(torch.cat((multi_hidden, sample_hidden_states), dim=-1))[:full_num_tokens]
+            multi_hidden, sample_hidden_states = gathered_hidden.split((multi_hidden_size, hidden_size), dim=-1)
+            multi_hidden = multi_hidden.contiguous()
+            sample_hidden_states = sample_hidden_states.contiguous()
         return sample_hidden_states, multi_hidden
 
 
@@ -199,6 +247,14 @@ upstream_mtp.Qwen4ExpMultiTokenPredictor = AscendQwen4ExpMultiTokenPredictor
 
 class AscendQwen4ExpMTP(upstream_mtp.Qwen4ExpMTP):
     """Qwen4Exp MTP model bound to the Ascend-patched decoder."""
+
+    def process_weights_after_loading(self) -> None:
+        from .hc_fused import prepare_model_textgr_weights
+
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     def embed_input_ids(
         self,

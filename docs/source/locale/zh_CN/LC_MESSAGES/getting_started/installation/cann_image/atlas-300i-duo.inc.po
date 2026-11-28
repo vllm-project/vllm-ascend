@@ -18,17 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "=== \"Atlas 300I DUO\""
-msgstr "=== \"Atlas 300I DUO\""
-
 msgid "#### Pull the image"
 msgstr "#### 拉取镜像"
-
-msgid "=== \"Ubuntu\""
-msgstr "=== \"Ubuntu\""
-
-msgid "=== \"openEuler\""
-msgstr "=== \"openEuler\""
 
 msgid "#### Start the container"
 msgstr "#### 启动容器"
@@ -38,3 +29,6 @@ msgstr "=== \"Ubuntu\""
 
 msgid "=== \"openEuler\""
 msgstr "=== \"openEuler\""
+
+msgid "=== \"Atlas 300I Duo\""
+msgstr "=== \"Atlas 300I Duo\""

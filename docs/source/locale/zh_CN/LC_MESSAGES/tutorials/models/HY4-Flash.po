@@ -1,0 +1,400 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-22 06:27+0000\n"
+"PO-Revision-Date: 2026-11-22 06:27+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Hy4-Flash(Experimental)"
+msgstr "# Hy4-Flash（实验性）"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"The \"PD Separation Deployment\" mentioned in this document is provided only"
+" as an example/reference design to demonstrate the basic process of "
+"deploying Prefill and Decode in separated mode. It is not recommended for "
+"use in the production environment."
+msgstr ""
+"本文档中提到的“PD 分离部署”仅作为示例/参考设计提供，用于演示以分离模式部署 Prefill 与 Decode 的基本流程，不建议在生产环境中使用。"
+
+msgid ""
+"**For the production environment on the customer side, [MindIE "
+"Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md)"
+" + vLLM-Ascend is recommended.**"
+msgstr ""
+"**客户侧生产环境建议使用 [MindIE "
+"Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md)"
+" + vLLM-Ascend。**"
+
+msgid ""
+"This release has been validated only on 950DT products. A2 and A3 have not "
+"yet been validated; support is planned for future releases."
+msgstr "本版本仅在 Ascend 950DT系列产品 上完成验证。A2 与 A3 尚未验证，计划在后续版本中支持。"
+
+msgid ""
+"Hy4-Flash is a Mixture-of-Experts model with sliding-window attention, "
+"IndexPool sparse attention, iHC, and Engram conditional memory. The "
+"checkpoint has 42 language-model layers and an embedded five-layer DFly "
+"draft for speculative decoding."
+msgstr ""
+"Hy4-Flash 是一个混合专家（MoE）模型，采用滑动窗口注意力、IndexPool 稀疏注意力、iHC 以及 Engram 条件记忆。该权重包含 "
+"42 层语言模型层，并内嵌了一个用于投机解码的五层 DFly draft。"
+
+msgid ""
+"This document covers environment and model preparation, single-node "
+"deployment, PD disaggregation, functional verification, accuracy and "
+"performance evaluation, and performance tuning on 950DT products."
+msgstr "本文档涵盖 Ascend 950DT系列产品 上的环境与模型准备、单节点部署、PD 分离、功能验证、精度与性能评测以及性能调优。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Refer to the [Supported "
+"Models](../../user_guide/support_matrix/supported_models.md) page for the "
+"support matrix and the [Feature "
+"Guide](../../user_guide/feature_guide/index.md) for feature configuration."
+msgstr ""
+"支持矩阵请参阅[支持的模型](../../user_guide/support_matrix/supported_models.md)页面，特性配置请参阅[特性指南](../../user_guide/feature_guide/index.md)。"
+
+msgid ""
+"The deployment scripts use native FP8 weights, BF16 computation, FP8 KV "
+"cache, expert parallelism, and Model Runner V2. The Decode service enables "
+"five-token DFly speculative decoding. All serving examples enable "
+"asynchronous scheduling. The single-node and Prefill examples enable prefix "
+"caching; PD Decode disables it."
+msgstr ""
+"部署脚本使用原生 FP8 权重、BF16 计算、FP8 KV cache、专家并行以及 Model Runner V2。Decode 服务启用五 "
+"token 的 DFly 投机解码。所有服务示例均启用异步调度。单节点与 Prefill 示例启用前缀缓存；PD Decode 则禁用前缀缓存。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"Prepare the Hy4-Flash FP8 checkpoint, including its tokenizer, model "
+"configuration, Engram tables, and embedded DFly weights."
+msgstr "准备 Hy4-Flash FP8 权重，包括其 tokenizer、模型配置、Engram 表以及内嵌的 DFly 权重。"
+
+msgid "| Weight Version | Deployment | Download Links |"
+msgstr "| 权重版本 | 部署机型 | 下载链接 |"
+
+msgid ""
+"| Hy4-Flash FP8 | 950DT products | "
+"[ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/Hy4-flash-FP8) |"
+msgstr ""
+"| Hy4-Flash FP8 | Ascend 950DT系列产品 | "
+"[ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/Hy4-flash-FP8) |"
+
+msgid ""
+"Download the complete checkpoint to a local directory on each deployment "
+"host. In Section 4.1, replace `<HY4_FLASH_FP8_PATH>` with that host "
+"directory. The container mounts it at `/models/Hy4-Flash-FP8`, which is the "
+"model path used by the serving and benchmark commands below."
+msgstr ""
+"将完整权重下载到每台部署主机的本地目录。在第 4.1 节中，将该主机目录替换 `<HY4_FLASH_FP8_PATH>`。容器会将其挂载到 "
+"`/models/Hy4-Flash-FP8`，即下方服务与基准测试命令所使用的模型路径。"
+
+msgid "### 3.2 Verify Multi-node Communication"
+msgstr "### 3.2 验证多节点通信"
+
+msgid ""
+"Prepare the NPU interconnect by following [Verify inter-node "
+"connectivity](../features/pd_disaggregation_mooncake_multi_node.md#verify-"
+"multi-node-communication-environment)."
+msgstr ""
+"请按照[验证节点间连通性](../features/pd_disaggregation_mooncake_multi_node.md#verify-"
+"multi-node-communication-environment)中的说明准备 NPU 互联。"
+
+msgid ""
+"Prepare the UB endpoint configuration directory used by "
+"`ascend_local_comm_res_path`. Set `UB_ENDPOINTS_PATH` to that directory in "
+"both role scripts."
+msgstr ""
+"准备 `ascend_local_comm_res_path` 所使用的 UB endpoint 配置目录。在两个角色的脚本中，将 "
+"`UB_ENDPOINTS_PATH` 设置为该目录。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "Choose the Hy4-Flash image for your container environment:"
+msgstr "根据容器环境选择 Hy4-Flash 镜像："
+
+msgid "| Image Variant | Image |"
+msgstr "| 镜像变体 | 镜像 |"
+
+msgid ""
+"| Ubuntu | [quay.io/ascend/vllm-"
+"ascend:hy4-flash-a5](https://quay.io/repository/ascend/vllm-"
+"ascend?tab=tags&tag=hy4-flash-a5) |"
+msgstr ""
+"| Ubuntu | [quay.io/ascend/vllm-"
+"ascend:hy4-flash-a5](https://quay.io/repository/ascend/vllm-"
+"ascend?tab=tags&tag=hy4-flash-a5) |"
+
+msgid ""
+"| openEuler | [quay.io/ascend/vllm-"
+"ascend:hy4-flash-a5-openeuler](https://quay.io/repository/ascend/vllm-"
+"ascend?tab=tags&tag=hy4-flash-a5-openeuler) |"
+msgstr ""
+"| openEuler | [quay.io/ascend/vllm-"
+"ascend:hy4-flash-a5-openeuler](https://quay.io/repository/ascend/vllm-"
+"ascend?tab=tags&tag=hy4-flash-a5-openeuler) |"
+
+msgid ""
+"Run the following on each 950DT products host. Set the model path to the FP8"
+" checkpoint. The example uses the openEuler image; set `IMAGE` to "
+"`quay.io/ascend/vllm-ascend:hy4-flash-a5` for the Ubuntu image."
+msgstr ""
+"在每台 Ascend 950DT系列产品 主机上执行以下操作。将模型路径设置为 FP8 权重路径。示例使用 openEuler 镜像；若使用 "
+"Ubuntu 镜像，请将 `IMAGE` 设置为 `quay.io/ascend/vllm-ascend:hy4-flash-a5`。"
+
+msgid ""
+"Run the serving commands in Section 5 inside the container. For the "
+"remaining environment requirements, refer to "
+"[Installation](../../getting_started/installation.md)."
+msgstr ""
+"在容器内运行第 5 节中的服务命令。其余环境要求请参阅[安装](../../getting_started/installation.md)。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid ""
+"For standard `vllm serve` arguments, refer to [Serving "
+"Arguments](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-"
+"specific options, refer to [Additional "
+"Configuration](../../user_guide/configuration/additional_config.md) and "
+"[Environment Variables](../../user_guide/configuration/env_vars.md)."
+msgstr ""
+"标准 `vllm serve` "
+"参数请参阅[服务参数](https://docs.vllm.ai/en/latest/cli/serve/#arguments)。昇腾专属选项请参阅[附加配置](../../user_guide/configuration/additional_config.md)和[环境变量](../../user_guide/configuration/env_vars.md)。"
+
+msgid "### 5.1 Single-Node Deployment"
+msgstr "### 5.1 单节点部署"
+
+msgid "=== \"950DT products\""
+msgstr "=== \"Ascend 950DT系列产品\""
+
+msgid "Use eight NPUs for TP8 with expert parallelism:"
+msgstr "使用 8 个 NPU 进行 TP8 专家并行："
+
+msgid "### 5.2 PD Disaggregation (1P1D)"
+msgstr "### 5.2 PD 分离（1P1D）"
+
+msgid ""
+"Set `MODEL_PATH`, `VLLM_PATH`, `VLLM_ASCEND_PATH`, and `UB_ENDPOINTS_PATH` "
+"for the serving environment."
+msgstr ""
+"为服务环境设置 `MODEL_PATH`、`VLLM_PATH`、`VLLM_ASCEND_PATH` 和 `UB_ENDPOINTS_PATH`。"
+
+msgid ""
+"The following configuration uses eight NPUs on one host. Prefill uses "
+"TP4/DP1 in eager mode. Decode uses TP1/DP4 with shared Engram tables, FULL "
+"decode graphs, and five-token DFly."
+msgstr ""
+"以下配置在单台主机上使用 8 个 NPU。Prefill 在 eager 模式下使用 TP4/DP1。Decode 使用 TP1/DP4，并启用共享 "
+"Engram 表、FULL 解码图和五 token 的 DFly。"
+
+msgid "| Role | NPUs | TP | DP | API Port | KV Port |"
+msgstr "| 角色 | NPU 数量 | TP | DP | API 端口 | KV 端口 |"
+
+msgid "**Prefill Node (P)**"
+msgstr "**Prefill 节点（P）**"
+
+msgid "Save the following as `run_prefill.sh`:"
+msgstr "将以下内容保存为 `run_prefill.sh`："
+
+msgid "Start the Prefill service:"
+msgstr "启动 Prefill 服务："
+
+msgid "**Decode Node (D)**"
+msgstr "**Decode 节点（D）**"
+
+msgid "Save the following as `run_decode.sh`:"
+msgstr "将以下内容保存为 `run_decode.sh`："
+
+msgid "Start the Decode service:"
+msgstr "启动 Decode 服务："
+
+msgid "**Proxy**"
+msgstr "**代理**"
+
+msgid "Save the following as `run_proxy.sh`:"
+msgstr "将以下内容保存为 `run_proxy.sh`："
+
+msgid ""
+"Start the proxy after both services report `Application startup complete`:"
+msgstr "在两个服务均输出 `Application startup complete` 后启动代理："
+
+msgid "Send requests to the proxy on port `8000`."
+msgstr "向代理的 `8000` 端口发送请求。"
+
+msgid "Check readiness:"
+msgstr "检查就绪状态："
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "### 6.1 Text"
+msgstr "### 6.1 文本"
+
+msgid ""
+"Send requests to port `8000` for either the single-node service or the PD "
+"proxy:"
+msgstr "对于单节点服务或 PD 代理，均可向 `8000` 端口发送请求："
+
+msgid ""
+"Example response excerpt (reasoning text and unrelated fields omitted):"
+msgstr "响应示例片段（已省略推理文本和无关字段）："
+
+msgid "### 6.2 Single Image"
+msgstr "### 6.2 单图"
+
+msgid ""
+"Use the single-node visual service from [Section 5.1](#51-single-node-"
+"deployment):"
+msgstr "使用 [5.1 节](#51-single-node-deployment)中的单节点视觉服务："
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评测"
+
+msgid "### 7.1 Using EvalScope"
+msgstr "### 7.1 使用 EvalScope"
+
+msgid "Install EvalScope in the evaluation client environment:"
+msgstr "在评测客户端环境中安装 EvalScope："
+
+msgid ""
+"Prepare the AIME2026 and GPQA-Diamond datasets and set their local paths. "
+"Run each dataset once with concurrency 16:"
+msgstr "准备 AIME2026 和 GPQA-Diamond 数据集并设置其本地路径。以并发度 16 对每个数据集各运行一次："
+
+msgid "### 7.2 Text Evaluation"
+msgstr "### 7.2 文本评测"
+
+msgid ""
+"The following results use the TP8 + EP service with FP8 weights, BF16 "
+"computation, FP8 KV, and DFly 5, with prefix caching and asynchronous "
+"scheduling enabled."
+msgstr "以下结果使用 TP8 + EP 服务，采用 FP8 权重、BF16 计算、FP8 KV 和 DFly 5，并启用前缀缓存和异步调度。"
+
+msgid ""
+"| Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | "
+"batch_size | generation_kwargs |"
+msgstr ""
+"| 数据集 | 硬件 | 得分 | max-model-len | max-num-seqs | max_out_len | batch_size | "
+"generation_kwargs |"
+
+msgid ""
+"| AIME2026 | Ascend 950DT | 29/30 (96.67%) | 131072 | 32 | 131072 | 16 | "
+"temperature=0.9, top_p=1.0, top_k=-1 |"
+msgstr ""
+"| AIME2026 | Ascend 950DT | 29/30 (96.67%) | 131072 | 32 | 131072 | 16 | "
+"temperature=0.9, top_p=1.0, top_k=-1 |"
+
+msgid ""
+"| GPQA-Diamond | Ascend 950DT | 182/198 (91.92%) | 131072 | 32 | 131072 | 16"
+" | temperature=0.9, top_p=1.0, top_k=-1 |"
+msgstr ""
+"| GPQA-Diamond | Ascend 950DT | 182/198 (91.92%) | 131072 | 32 | 131072 | 16"
+" | temperature=0.9, top_p=1.0, top_k=-1 |"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评测"
+
+msgid "### 8.1 Using vLLM Bench"
+msgstr "### 8.1 使用 vLLM Bench"
+
+msgid "Run the following benchmark against the service on port `8000`:"
+msgstr "对端口 `8000` 上的服务运行以下基准测试："
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid "| Configuration | Single Node | Prefill | Decode |"
+msgstr "| 配置 | 单节点 | Prefill | Decode |"
+
+msgid "| KV cache | FP8 | FP8 | FP8 |"
+msgstr "| KV 缓存 | FP8 | FP8 | FP8 |"
+
+msgid "| Graph mode | FULL_DECODE_ONLY | NONE | FULL_DECODE_ONLY |"
+msgstr "| 图模式 | FULL_DECODE_ONLY | NONE | FULL_DECODE_ONLY |"
+
+msgid "| Engram CPU offload | Enabled | Enabled | Enabled |"
+msgstr "| Engram CPU 卸载 | 启用 | 启用 | 启用 |"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid ""
+"Keep the `prefill` and `decode` topology declarations consistent in both "
+"roles' `--kv-transfer-config`. For general tuning methods, refer to "
+"[Optimization and "
+"Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md)."
+msgstr ""
+"确保两个角色的 `--kv-transfer-config` 中 `prefill` 和 `decode` "
+"的拓扑声明保持一致。通用调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid ""
+"For common environment and installation issues, refer to the [Public "
+"FAQs](../../faqs.md)."
+msgstr "常见环境与安装问题请参考[公共常见问题](../../faqs.md)。"
+
+msgid "### 10.1 Engram Tables Are Replicated Across Decode Ranks"
+msgstr "### 10.1 Engram 表在各 Decode Rank 间被复制"
+
+msgid "**Symptom:** Decode host-memory use increases when starting DP4."
+msgstr "**现象：** 启动 DP4 时 Decode 主机内存占用增加。"
+
+msgid ""
+"**Resolution:** Keep `\"cpu_offload\":true` and `\"dp_shared_memory\":true` "
+"in the Decode `--engram-config`. Prefill uses DP1 and keeps "
+"`\"dp_shared_memory\":false`, as shown in [Section 5.2](#52-pd-"
+"disaggregation-1p1d)."
+msgstr ""
+"**解决方法：** 在 Decode 的 `--engram-config` 中保留 `\"cpu_offload\":true` 和 "
+"`\"dp_shared_memory\":true`。Prefill 使用 DP1 并保留 "
+"`\"dp_shared_memory\":false`，如[第 5.2 节](#52-pd-disaggregation-1p1d)所示。"
+
+msgid "### 10.2 Model Loading Is Still in Progress or Startup Fails"
+msgstr "### 10.2 模型加载仍在进行中或启动失败"
+
+msgid ""
+"Follow `prefill.log` and `decode.log` while weights load and Decode graphs "
+"are captured. Start the proxy after both services report `Application "
+"startup complete` and their `/health` endpoints return `200`."
+msgstr ""
+"在权重加载和 Decode 图捕获期间，跟踪 `prefill.log` 和 `decode.log`。待两个服务均报告 `Application "
+"startup complete` 且其 `/health` 端点返回 `200` 后，再启动代理。"
+
+msgid ""
+"If a service exits, inspect its first error and check the model/source "
+"paths, visible NPUs, Engram configuration, and UB endpoint directory against"
+" the corresponding role script."
+msgstr "如果某个服务退出，请检查其首个错误，并对照相应角色的脚本检查模型/源路径、可见 NPU、Engram 配置和 UB 端点目录。"

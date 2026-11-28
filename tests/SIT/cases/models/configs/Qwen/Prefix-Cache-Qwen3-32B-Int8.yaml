@@ -27,7 +27,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"weight_nz_mode": 1, "enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": true}}'
+      - '{"weight_nz_mode": 1, "enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
     test_content:
       - "benchmark_comparisons"
     benchmark_comparisons_args:

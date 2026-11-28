@@ -43,6 +43,7 @@ def _load_model_module(monkeypatch):
         "vllm.model_executor.models.qwen3_dspark": SimpleNamespace(Qwen3DSparkModel=torch.nn.Module),
         "vllm_ascend.models.minimax_m3.minimax_m3": SimpleNamespace(MiniMaxM3MLP=object),
         "vllm_ascend.models.qwen3_dspark": SimpleNamespace(AscendQwen3DSparkForCausalLM=DSparkLoader),
+        "vllm_ascend.utils": SimpleNamespace(vllm_version_is=lambda version: False),
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -117,6 +118,30 @@ def checkpoint():
 
 def _header(tensors):
     return {name: {"shape": list(value.shape), "dtype": "BF16"} for name, value in tensors.items()}
+
+
+def test_hf_override_uses_versioned_config_class(adapter_modules, checkpoint, monkeypatch, tmp_path):
+    module = adapter_modules.weights
+    source, tensors = checkpoint
+    source = {**source, "architectures": [module.ADAPTER_ARCHITECTURE], "bos_token_id": 0, "eos_token_id": 1}
+    hf_config = SimpleNamespace(
+        model_type="minimax_m3_text", _name_or_path=str(tmp_path / "dspark"), to_dict=lambda: source
+    )
+    read_header = Mock(return_value=_header(tensors))
+    monkeypatch.setattr(module, "read_draft_header", read_header)
+
+    actual = module.draft_hf_override(hf_config)
+
+    from transformers import MiniMaxM3VLTextConfig
+
+    assert isinstance(actual, MiniMaxM3VLTextConfig)
+    read_header.assert_called_once_with(tmp_path)
+    assert actual.num_hidden_layers == source["num_hidden_layers"]
+    assert actual.hidden_size == source["hidden_size"]
+    assert actual.intermediate_size == source["dspark_ffn_hidden_size"]
+    assert actual.target_layer_ids == source["dspark_target_layer_ids"]
+    assert actual.n_predict == source["dspark_block_size"]
+    assert actual.rope_parameters["rope_theta"] == source["rope_theta"]
 
 
 def test_native_bf16_loading_preserves_tensor_identity_and_values(adapter_modules, checkpoint):

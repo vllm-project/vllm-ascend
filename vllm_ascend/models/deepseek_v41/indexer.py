@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 index projections, quantized QLI and cross-layer candidate selection."""
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 import torch_npu
 from torch import nn
@@ -28,10 +31,13 @@ from vllm_ascend.ops.triton.quantize_indexer_query import (
     quantize_indexer_query,
 )
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
 )
+
+_QW_FLASH_SHAPE = (5120, 1280, 32, 128, 64)
 
 
 class DeepseekV41Indexer(nn.Module):
@@ -50,6 +56,8 @@ class DeepseekV41Indexer(nn.Module):
         compress_ratio,
         quant_config=None,
         is_candidate_source=False,
+        *,
+        main_q_projection,
     ):
         super().__init__()
         self.owns_k = owns_k
@@ -81,6 +89,18 @@ class DeepseekV41Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
+        self.fused_prologue_qw = None
+        shape = (config.hidden_size, config.q_lora_rank, self.n_heads, self.width, self.rope_width)
+        # The QW kernel is specialized for this Flash shape. Other shapes use the standard indexer projections.
+        if (
+            self.packed_cache_ops is not None
+            and shape == _QW_FLASH_SHAPE
+            and self.weights_proj.weight.dtype == torch.bfloat16
+            and main_q_projection.can_share_mxfp8_input(self.wq_b, group_size=32)
+        ):
+            from ops.indexer_prologue_qw_vllm import indexer_prologue_qw  # type: ignore[import-not-found]
+
+            self.fused_prologue_qw = indexer_prologue_qw
         if owns_k:
             self.wk = nn.Linear(
                 config.head_dim,
@@ -108,6 +128,19 @@ class DeepseekV41Indexer(nn.Module):
                 else None
             )
 
+    def process_weights_after_loading(self):
+        if self.fused_prologue_qw is None:
+            return
+        weight = self.wq_b.weight
+        scale = self.wq_b.weight_scale
+        # The MXFP8 linear method puts K first. QW needs output channels first
+        # for both tensors, including when finalization runs again after a reload.
+        if scale.shape[0] != self.n_heads * self.width:
+            weight.data = torch_npu.npu_format_cast(weight.data.T, ACL_FORMAT_FRACTAL_NZ)
+            scale.data = scale.data.transpose(0, 1)
+        head_weight = self.weights_proj.weight
+        head_weight.data = torch_npu.npu_format_cast(head_weight.data, ACL_FORMAT_FRACTAL_NZ)
+
     @staticmethod
     def _output(linear, value):
         output = linear(value)
@@ -120,11 +153,11 @@ class DeepseekV41Indexer(nn.Module):
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
         DeviceOperator.apply_partial_rotary_inplace(key, cos, sin, start=self.width - self.rope_width, end=self.width)
         key = key.squeeze(1)
-        k_cache, scale_cache = self.k_cache.kv_cache[0]
+        k_cache, scale_cache = self.k_cache.kv_cache
         if self.packed_cache_ops is not None:
             self.packed_cache_ops.write_index_cache((k_cache, scale_cache), slots, key)
             if self.k_cache_folded is not None:
-                fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache[0], slots)
+                fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache, slots)
             return
         quantized, scale = torch_npu.npu_dynamic_quant(key, dst_type=torch.int8)
         scatter_cache_sk(k_cache, slots, quantized)
@@ -176,6 +209,21 @@ class DeepseekV41Indexer(nn.Module):
 
     def project_query(self, qr):
         return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
+
+    def project_fused(self, hidden_states, quantized_qr, qr_scale, cos, sin):
+        """Reuse the main Q projection's MXFP8 inputs, with no second quantize."""
+        prologue = cast(Callable[..., tuple[torch.Tensor, ...]], self.fused_prologue_qw)
+        return prologue(
+            hidden_states,
+            quantized_qr,
+            self.wq_b.weight.data,
+            self.weights_proj.weight.data,
+            qr_scale,
+            self.wq_b.weight_scale.data,
+            sin.view(-1, self.rope_width),
+            cos.view(-1, self.rope_width),
+            softmax_scale=self.weights_scale,
+        )
 
     def apply_query_rope(self, query, cos, sin):
         DeviceOperator.apply_partial_rotary_inplace(query, cos, sin, start=self.width - self.rope_width, end=self.width)
@@ -279,10 +327,28 @@ class DeepseekV41Indexer(nn.Module):
             mask_mode=3,
             cmp_ratio=self.compress_ratio,
         )
+        # Sequence metadata may be staged on another stream. Candidate lengths
+        # are produced by the source in this forward and must be consumed on the
+        # current stream, including during ACL graph capture/replay.
         op_metadata = source_metadata.qli_metadata
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
         mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
-        selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
+        candidate_block_length = candidate_lengths if uses_candidate_filter else None
+        if uses_candidate_filter:
+            if candidate_block_length is None:
+                raise ValueError("A3 QSLI consumer requires source candidate lengths")
+            op_metadata = torch.ops._C_ascend.npu_quant_sparse_lightning_indexer_metadata(
+                quantized_query.shape[1],
+                key.shape[2],
+                quantized_query.shape[2],
+                topk,
+                2,
+                candidate_block_length=candidate_block_length,
+                batch_size=seqused_k.numel(),
+                max_seqlen_k=source_metadata.max_cache_seq_len,
+                **common,
+            )
+        selected, _, candidate_out, candidate_len = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
             quantized_query,
             key,
             weights,
@@ -293,11 +359,14 @@ class DeepseekV41Indexer(nn.Module):
             block_table=source_metadata.block_table,
             metadata=op_metadata,
             candidate_topk_index=candidates if uses_candidate_filter else None,
+            candidate_block_length=candidate_block_length,
             candidate_mode=mode,
             candidate_topk_blocks=candidate_topk_blocks,
             candidate_block_size=candidate_block_size,
             **common,
         )
+        if is_candidate_source and candidate_lengths is not None:
+            candidate_lengths.copy_(candidate_len)
         selected = prepare_indexer_indices(
             selected.squeeze(1),
             positions,

@@ -25,7 +25,18 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
     vllm_config = cast(
         Any,
-        SimpleNamespace(speculative_config=SimpleNamespace(method="extract_hidden_states", enforce_eager=None)),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="extract_hidden_states",
+                enforce_eager=None,
+                custom_method=None,
+                speculator_config=SimpleNamespace(
+                    speculator_class=(
+                        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator"
+                    )
+                ),
+            )
+        ),
     )
     device = torch.device("cpu")
 

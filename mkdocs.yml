@@ -172,17 +172,18 @@ extra:
   # release and its complete compatible stack have been published and verified;
   # do not update it for main development. Git and container tags include the
   # leading "v" and are used across tutorials.
-  vllm_version: v0.30.0
-  vllm_ascend_version: v0.30.0
+  vllm_version: v0.32.0
+  vllm_ascend_version: v0.32.0rc1
   # Stable documentation target used by the developer-preview banner.
   stable_vllm_ascend_version: v0.30.0
   # PyPI versions omit the leading "v" and are used by installation commands/tests.
-  release_vllm_ascend_version: 0.30.0
-  release_vllm_version: 0.30.0
+  release_vllm_ascend_version: 0.32.0rc1
+  release_vllm_version: 0.32.0
   # The supported Python range and the Python version inside release images differ.
   release_python_version: ">= 3.10, < 3.13"
   release_image_python_version: "3.12"
-  release_hdk_version: "26.1.1"
+  release_hdk_version_a2_a3_300i_200i: "26.2.RC1"
+  release_hdk_version_a5: "25.6.RC3.1"
   release_cann_version: "9.2.1"
   release_pytorch_version: "2.10.0"
   release_torch_npu_version: "2.10.0.post7"
@@ -191,17 +192,11 @@ extra:
   release_fla_npu_version: "26.9.1"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
-  # The framework versions derive from requirements.txt via req_version() so
-  # the pins have a single source of truth; update this group only when the
-  # verified main build image changes.
+  # docs/hooks/macros_main.py reads framework versions from requirements.txt.
+  # Update this group when the verified main build image changes.
   cann_image_tag: 9.2.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.2.1"
-  main_pytorch_version: '{{ req_version("torch") }}'
-  main_torch_npu_version: '{{ req_version("torch-npu") }}'
-  main_torchvision_version: '{{ req_version("torchvision") }}'
-  main_torchaudio_version: '{{ req_version("torchaudio") }}'
-  main_triton_ascend_version: '{{ req_version("triton-ascend") }}'
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
@@ -265,6 +260,8 @@ nav:
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md
+        - tutorials/models/Hy4.md
+        - tutorials/models/HY4-Flash.md
         - tutorials/models/Minitron-8B-Base.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
         - tutorials/models/gpt-oss-120b.md
@@ -295,6 +292,7 @@ nav:
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/device_selection.md
+        - user_guide/configuration/unified_output_directory.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
         - user_guide/configuration/runtime_config.md
@@ -385,6 +383,7 @@ nav:
     - community/contributors.md
     - community/issue-workflow-guidelines.md
     - community/slash-commands.md
+    - community/ai-review.md
     - community/versioning_policy.md
     - User Stories:
         - community/user_stories/index.md

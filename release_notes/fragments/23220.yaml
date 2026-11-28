@@ -1,0 +1,6 @@
+pr: 23220
+entries:
+  - category: feature
+    text: >-
+      Added support for separate MLA query and KV components in decode context
+      parallelism. DCP can mask empty local attention rows during output merging.

@@ -7,12 +7,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 from safetensors.torch import save_file
+from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import vocab_parallel_embedding
 from vllm.model_executor.models import deepseek_v2
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.models import quarot_utils, qwen3_dflash2
 from vllm_ascend.ops import vocab_parallel_embedding as ascend_vocab
 from vllm_ascend.patch.worker import patch_deepseek_v2
@@ -21,7 +23,11 @@ from vllm_ascend.patch.worker import patch_deepseek_v2
 def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant_config=None):
     group = SimpleNamespace(world_size=pp_size, is_first_rank=pp_rank == 0, is_last_rank=pp_rank == pp_size - 1)
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
-    monkeypatch.setattr(eagle_utils, "get_pp_group", lambda: group)
+    # vLLM main gates on in_single_pp_stage(); v0.34.0 reads the PP group size.
+    if hasattr(eagle_utils, "in_single_pp_stage"):
+        monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: pp_size > 1)
+    else:
+        monkeypatch.setattr(eagle_utils, "get_pp_group", lambda: group)
     hf_config = SimpleNamespace(
         model_type="glm_moe_dsa",
         vocab_size=65,
@@ -41,7 +47,6 @@ def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant
             uses_target_hidden_states=True,
             draft_model_config=SimpleNamespace(may_use_target_embed=True),
         ),
-        use_v2_model_runner=True,
     )
     initial = torch.nn.Embedding(65, 2) if group.is_first_rank or existing else PPMissingLayer()
 
@@ -65,6 +70,17 @@ def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant
     model = deepseek_v2.DeepseekV2Model.__new__(deepseek_v2.DeepseekV2Model)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=config, prefix="language_model.model")
     return model, initial
+
+
+@pytest.fixture
+def _initialized_ascend_config():
+    # Ascend embedding helpers consult the process config even in this CPU-only
+    # test. Give the real code path its default config and avoid depending on
+    # whichever singleton a preceding test left behind.
+    clear_ascend_config()
+    init_ascend_config(VllmConfig())
+    yield
+    clear_ascend_config()
 
 
 @pytest.mark.parametrize(
@@ -94,7 +110,9 @@ def test_target_embedding_provisioning_scope(monkeypatch, pp_size, pp_rank, meth
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("rotated", [False, True])
-def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(monkeypatch, tmp_path, tp_rank, rotated):
+def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
+    monkeypatch, tmp_path, tp_rank, rotated, _initialized_ascend_config
+):
     # Exercise the real embedding factory, TP shard loader, target load_weights
     # and upstream sharing check. Only distributed setup and unrelated MoE /
     # transformer-layer construction are replaced for this CPU regression.
@@ -105,6 +123,7 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
     monkeypatch.setattr(ascend_vocab, "enable_pcp_embedding_lmhead_weight_sharding", lambda: False)
     monkeypatch.setattr(ascend_vocab, "embedding_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "lmhead_tp_enable", lambda: False)
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "get_tp_group", lambda: SimpleNamespace(rank_in_group=tp_rank, world_size=2))
     target, _ = _make_target(monkeypatch, 2, 1, "dflash")
     assert isinstance(target.embed_tokens, vocab_parallel_embedding.VocabParallelEmbedding)

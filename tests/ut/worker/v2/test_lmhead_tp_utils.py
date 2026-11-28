@@ -198,7 +198,7 @@ def test_compute_draft_logits_forwards_module_index(monkeypatch, lmhead_enabled)
         (AscendGemma4Speculator, True),
         (AscendDFlashSpeculator, True),
         (AscendDSparkSpeculator, True),
-        (AscendDFlash2Speculator, False),
+        (AscendDFlash2Speculator, True),
         (AscendLiLiCorrSpeculator, False),
     ],
 )
@@ -268,6 +268,36 @@ def test_draft_samples_dp_wide_request_rows_not_target_tokens(draft_mixin, local
             assert draft._lmhead_pad_size == 5
     assert draft._lmhead_pad_size is None
     state.num_tokens_across_dp.max.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "dummy,capacity,local_reqs,expected,cudagraph_mode",
+    [
+        (True, 5, 6, 5, ar_module.CUDAGraphMode.PIECEWISE),
+        (True, 5, 2, 2, ar_module.CUDAGraphMode.NONE),
+        (True, None, 6, 6, ar_module.CUDAGraphMode.NONE),
+    ],
+)
+def test_prefill_dummy_sampling_respects_outer_dp_capacity(
+    monkeypatch, dummy, capacity, local_reqs, expected, cudagraph_mode
+):
+    spec, _ = _speculator()
+    spec.method = "mtp"
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+    spec._eplb_dummy_run = dummy
+    spec._lmhead_pad_size = capacity
+    spec.draft_attn_layer_names = None
+    metadata, slots = {"draft": object()}, {"draft": object()}
+    parent_prefill = MagicMock()
+    monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(ar_module.TargetDependentARSpeculator, "_prefill", parent_prefill)
+
+    spec._prefill(local_reqs, 24, metadata, slots, None, cudagraph_runtime_mode=cudagraph_mode)
+
+    # Only the sampling/writeback request count changes. Forward still consumes
+    # the target's 24-token padded inputs and original attention metadata.
+    parent_prefill.assert_called_once_with(expected, 24, metadata, slots, None, cudagraph_mode, None, False)
+    assert spec._lmhead_pad_size == capacity
 
 
 @pytest.mark.parametrize("requests,expected", [(None, 8), (0, 1), (1, 1), (2, 2), (5, 5), (8, 8), (64, 8)])
