@@ -70,13 +70,13 @@ def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
             setattr(config, name, value)
 
 
-# Default seed shared by the sources; draft updates may select an independent seed.
+# Default payload shared by the transfer tests.
 FIXED_WEIGHT_SEED = 20260915
 
 
-def _parameter_seed(name: str, seed: int = FIXED_WEIGHT_SEED) -> int:
+def _parameter_seed(name: str, payload_seed: int) -> int:
     """Stable per-name seed, so a payload does not depend on iteration order."""
-    digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
+    digest = hashlib.sha256(f"{payload_seed}:{name}".encode()).digest()
     return int.from_bytes(digest[:8], "little") % (2**63 - 1)
 
 
@@ -86,11 +86,11 @@ def _sampled_tensor(
     dtype: torch.dtype,
     device: torch.device,
     *,
+    payload_seed: int,
     num_experts: int,
     sample_on_cpu: bool,
     norm_suffixes: tuple[str, ...],
     integer_topk_names: tuple[str, ...] | None,
-    seed: int = FIXED_WEIGHT_SEED,
 ) -> torch.Tensor:
     """Deterministically sample one payload tensor from its name.
 
@@ -106,7 +106,7 @@ def _sampled_tensor(
     and the rest get a plain bit table.
     """
     sample_device = torch.device("cpu") if sample_on_cpu else device
-    generator = torch.Generator(device=sample_device).manual_seed(_parameter_seed(name, seed))
+    generator = torch.Generator(device=sample_device).manual_seed(_parameter_seed(name, payload_seed))
 
     if not dtype.is_floating_point:
         assert num_experts > 0, f"{name}: integer table needs n_routed_experts"
@@ -213,7 +213,7 @@ class FixedRandomWeightSource(WeightSource):
         assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
         self._parameters = parameters
         self._device = device
-        self._seed = seed
+        self.seed = seed
         # Keep the two checkpoint namespaces separate. A draft session sends
         # draft_source, never a target payload with a synthetic "draft." prefix.
         self.draft_source: FixedRandomWeightSource | None = (
@@ -242,11 +242,11 @@ class FixedRandomWeightSource(WeightSource):
             shape,
             dtype,
             self._device,
+            payload_seed=self.seed,
             num_experts=self._num_experts,
             sample_on_cpu=False,
             norm_suffixes=("norm.weight",),
             integer_topk_names=None,
-            seed=self._seed,
         )
 
     @cached_property
@@ -493,6 +493,8 @@ class DeepseekV41WeightSource(WeightSource):
     because nothing is synthesised through an HF model first.
     """
 
+    seed = FIXED_WEIGHT_SEED
+
     def __init__(self, case: Any, device: torch.device) -> None:
         text = _dsv41_text_config(case)
         self._case = case
@@ -608,6 +610,7 @@ class DeepseekV41WeightSource(WeightSource):
             spec.shape,
             spec.dtype,
             self._device,
+            payload_seed=self.seed,
             num_experts=self._num_experts,
             sample_on_cpu=True,
             norm_suffixes=("norm.weight", "attn_sink"),

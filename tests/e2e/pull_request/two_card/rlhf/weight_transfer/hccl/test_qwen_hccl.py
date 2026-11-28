@@ -9,9 +9,8 @@ from tests.e2e.common.rlhf.weight_transfer.case import (
     PACKED_LANE_SKIP_REASON,
     QWEN3_DFLASH_CASE,
     QWEN3_EAGLE3_CASE,
-    QWEN_CASES,
     WeightUpdateModelCase,
-    pytest_model_cases,
+    pytest_qwen_reload_cases,
 )
 from tests.e2e.common.rlhf.weight_transfer.hccl import (
     run_draft_hccl_weight_transfer,
@@ -19,9 +18,9 @@ from tests.e2e.common.rlhf.weight_transfer.hccl import (
 )
 
 
-@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl", model_cases=QWEN_CASES))
-def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    run_hccl_weight_transfer_transaction(case, packed)
+@pytest.mark.parametrize(("case", "packed", "reload_mode"), pytest_qwen_reload_cases("hccl"))
+def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, reload_mode: str):
+    run_hccl_weight_transfer_transaction(case, packed, reload_mode=reload_mode)
 
 
 @pytest.mark.parametrize(
