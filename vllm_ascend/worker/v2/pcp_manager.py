@@ -239,14 +239,16 @@ class AscendPCPManager(PCPManager):
     # classification, dispatch sizing, and PCP partitioning overrides
     # once all supported vLLM versions provide equivalent behavior.
     def prepare_pcp_batch_req_state(self, batch_state):
-        """Classify cached one-token prompt tails as PCP decode work.
+        """Classify one new prompt token over cached context as decode work.
 
         Request lifecycle state remains in ``is_prefilling_np``. The separate
         mask controls graph dispatch and PCP partitioning for every attention
-        backend, without making a fresh one-token prompt use decode.
-        This classification only applies to PCP-only decode request sharding.
+        backend, without making a fresh one-token prompt use decode. With DCP,
+        the resulting decode queries are replicated across PCP ranks.
         """
-        if batch_state is None or not self.is_decode_sharded or not batch_state.has_prefill:
+        if batch_state is None or not batch_state.has_prefill:
+            return batch_state
+        if self.dcp_world_size == 1 and not self.is_decode_sharded:
             return batch_state
 
         num_new_tokens = batch_state.num_scheduled_tokens

@@ -34,7 +34,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
-    has_requests_to_run_as_prefill,
+    apply_prefill_as_decode_mask,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -202,17 +202,20 @@ class AscendMlaDCPMetadataBuilder(
             may have only one local fragment, so row counts need not be 2:1.
         """
         context = getattr(self, "_pcp_context", None)
-        if not self.use_pcp or context is None or not has_requests_to_run_as_prefill(context.global_batch):
+        if not self.use_pcp or context is None:
+            return None, None, None
+        batch = context.global_batch
+        is_prefilling = apply_prefill_as_decode_mask(batch.is_prefilling_np, batch.prefill_runs_as_decode_np)[
+            : batch.num_reqs
+        ]
+        if not is_prefilling.any():
             return None, None, None
         if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:
             raise ValueError("PCP+DCP chunks require global tables and the upstream request mapping.")
 
-        batch = context.global_batch
         # The global sequence end bounds every fragment's history. Local
         # attention still consumes only its own seq_lens - query_lens.
-        gather_lens = torch.from_numpy(
-            np.where(batch.is_prefilling_np[: batch.num_reqs], batch.seq_lens_np[: batch.num_reqs], 0)
-        ).to(torch.int32)
+        gather_lens = torch.from_numpy(np.where(is_prefilling, batch.seq_lens_np[: batch.num_reqs], 0)).to(torch.int32)
         local_rows = list(context.local_to_global_req_indices[self.num_decodes : self.num_decodes + self.num_prefills])
         gather_block_table = context.global_block_tables[self._pcp_cache_group_idx][: batch.num_reqs]
         return gather_lens, local_rows, gather_block_table

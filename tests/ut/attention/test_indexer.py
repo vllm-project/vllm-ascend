@@ -251,6 +251,50 @@ def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_co
     assert metadata.num_decode_tokens == metadata.num_actual_tokens == 2
 
 
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sharded_indexer_uses_local_dcp_lengths_for_cached_short_prefill(mock_cos_sin):
+    mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
+    builder = _make_builder(pcp_size=2, dcp_size=2, sharded_dcp=True)
+    builder.use_native_dcp_qli = True
+    common = _make_common_metadata()
+    common.num_actual_tokens = common.num_input_tokens = 2
+    common.query_start_loc = common.query_start_loc_cpu = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common.max_query_len = 1
+    common.is_prefilling = torch.tensor([False, False])
+    common.seq_lens = torch.tensor([130, 131], dtype=torch.int32)
+    common.positions = common.seq_lens - 1
+    common.pcp_cache_group_idx = 0
+    common.pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=common.num_reqs,
+            is_prefilling_np=torch.tensor([True, False]),
+            prefill_runs_as_decode_np=torch.tensor([True, False]),
+        ),
+        global_block_tables=(common.block_table_tensor,),
+        global_block_table_num_blocks=None,
+    )
+    expected_lengths = torch.tensor([2, 3], dtype=torch.int32)
+
+    def build_local_key_lengths(seq_lens, out, world_size, rank, interleave):
+        assert (world_size, rank, interleave) == (2, 1, _KERNEL_BLOCK_SIZE)
+        assert seq_lens.tolist() == [130, 131]
+        out.copy_(expected_lengths)
+
+    ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    ops.build_local_key_lengths = Mock(side_effect=build_local_key_lengths)
+    ops.build_local_lengths = Mock()
+    with (
+        patch.dict("sys.modules", {ops.__name__: ops}),
+        patch.object(indexer_module, "get_dcp_group", return_value=SimpleNamespace(world_size=2, rank_in_group=1)),
+    ):
+        metadata = builder.build(0, common)
+
+    ops.build_local_key_lengths.assert_called_once()
+    assert metadata.kv_gather_block_ids is None
+    assert metadata.num_decode_tokens == 2
+    torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
+
+
 @pytest.mark.parametrize("pcp_size,dcp_size,expected_decode_tokens", [(2, 1, 1), (2, 2, 1), (1, 8, 1)])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")

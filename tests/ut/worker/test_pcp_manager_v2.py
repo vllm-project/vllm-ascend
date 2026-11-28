@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from contextlib import nullcontext
+from dataclasses import fields
 from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -637,7 +638,7 @@ def _make_global_pcp_batch():
     base_batch.is_padding.fill_(False)
 
     return AscendInputBatch(
-        **base_batch.__dict__,
+        **{field.name: getattr(base_batch, field.name) for field in fields(InputBatch)},
         seq_lens_np=np.array([18], dtype=np.int32),
         attn_state="global-attn-state",
     )
@@ -710,14 +711,17 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
-@pytest.mark.parametrize("pcp_rank,expected_num_tokens", [(0, 1), (1, 0)])
-def test_partition_batch_assigns_mla_short_prefill_as_sharded_decode(pcp_rank, expected_num_tokens):
+@pytest.mark.parametrize("dcp_size,full_graph", [(1, False), (2, False), (2, True)])
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+def test_partition_batch_assigns_short_prefill_decode_ownership(dcp_size, full_graph, pcp_rank):
     global_batch = _make_global_pcp_batch()
     global_batch.num_scheduled_tokens = np.array([1], dtype=np.int32)
     global_batch.num_tokens = 1
-    global_batch.num_tokens_after_padding = 1
-    global_batch.query_start_loc_np = np.array([0, 1], dtype=np.int32)
-    global_batch.query_start_loc[:2].copy_(torch.tensor([0, 1], dtype=torch.int32))
+    padded_reqs = 2 if full_graph else 1
+    global_batch.num_tokens_after_padding = padded_reqs
+    global_batch.num_reqs_after_padding = padded_reqs
+    global_batch.query_start_loc_np = np.arange(padded_reqs + 1, dtype=np.int32)
+    global_batch.query_start_loc = torch.from_numpy(global_batch.query_start_loc_np)
     global_batch.num_computed_tokens_np = np.array([127], dtype=np.int32)
     global_batch.prefill_len_np = np.array([128], dtype=np.int32)
     global_batch.num_computed_prefill_tokens_np = np.array([127], dtype=np.int32)
@@ -735,31 +739,40 @@ def test_partition_batch_assigns_mla_short_prefill_as_sharded_decode(pcp_rank, e
         pcp_world_size=2,
         pcp_rank=pcp_rank,
         device=torch.device("cpu"),
-        shard_decode_requests=True,
+        shard_decode_requests=dcp_size == 1,
+        dcp_world_size=dcp_size,
         max_num_reqs=1,
         max_num_tokens=4,
     )
-    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE)
+    manager.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    batch_desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, padded_reqs, padded_reqs, 1) if full_graph else None
 
     with (
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
             side_effect=_mock_async_copy_to_cpu,
         ),
+        patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu),
         patch(
             "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
             side_effect=AssertionError("decode-only short prefill must retain the global attention state"),
         ),
     ):
-        local_batch = _partition_batch(manager, global_batch)
+        local_batch = _partition_batch(manager, global_batch, batch_desc=batch_desc)
 
     assert manager.global_batch is global_batch
     assert global_batch.is_prefilling_np.tolist() == [True]
-    assert local_batch.num_tokens == expected_num_tokens
-    assert local_batch.is_prefilling_np.tolist() == [True]
-    assert local_batch.prefill_runs_as_decode_np.tolist() == [True]
+    assert local_batch.num_tokens == int(pcp_rank == 0 or dcp_size > 1)
+    assert local_batch.is_prefilling_np.tolist() == ([True, False] if full_graph else [True])
+    assert local_batch.prefill_runs_as_decode_np.tolist() == ([True, False] if full_graph else [True])
     assert local_batch.decode_graph_eligible is True
     assert local_batch.attn_state == "global-decode-state"
+    if dcp_size > 1:
+        assert local_batch.positions.tolist() == ([127, 0] if full_graph else [127])
+        assert local_batch.seq_lens_np.tolist() == ([128, 0] if full_graph else [128])
+        assert local_batch.pcp.dcp_local_seq_lens_cpu_upper_bound.tolist() == ([64, 0] if full_graph else [64])
+        assert manager._gathered_kv_write_mask.tolist() == [True] + [False] * (2 * padded_reqs - 1)
 
 
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
@@ -1977,10 +1990,12 @@ def test_short_prefill_uses_decode_request_ownership(num_prefill_tokens, kpool):
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(4, num_prefill_tokens)
 
 
-@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh", "dcp"])
-def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
-    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh"])
+def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(dcp_size, next_step):
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=dcp_size == 1, dcp_world_size=dcp_size)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    manager.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
     batch_state = vllm_model_runner.BatchReqState(
         req_ids=["tail", "decode"],
         num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
@@ -2006,8 +2021,6 @@ def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
         batch_state = batch_state._replace(is_prefilling_np=np.array([False, False]), has_prefill=False)
     elif next_step == "fresh":
         batch_state = batch_state._replace(num_computed_prefill_tokens_np=np.array([0, 128], dtype=np.int32))
-    elif next_step == "dcp":
-        manager.vllm_config.parallel_config.decode_context_parallel_size = 2
 
     result = manager.prepare_pcp_batch_req_state(batch_state)
     assert result is batch_state

@@ -923,9 +923,14 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len,
                     batch_state.decode_graph_eligible,
                 )
-        if self._target_uses_flashmla and batch_state is not None:
-            # The backend order must precede derived inputs and graph dispatch.
-            batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if batch_state is not None:
+            # Standalone DCP builders also need effective decodes before real
+            # prefills when equal-length requests tie in upstream's ordering.
+            # PCP establishes this order while partitioning the batch.
+            if self._target_uses_flashmla or (
+                self.dcp_size > 1 and self.pcp_manager is None and batch_state.has_prefill
+            ):
+                batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         if self.pcp_manager is not None:
             self.pcp_manager.set_dispatch_batch_req_state(batch_state)
         expert_offload.prepare_batch(self, batch_state)

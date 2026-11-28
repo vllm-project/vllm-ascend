@@ -170,6 +170,8 @@ When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
 
+With Model Runner V2, an extension that adds one prompt token to cached context can use decode attention across the DCP ranks. Speculative draft tokens do not count toward this limit.
+
 #### KV-cache Transfer
 
 The following constraint applies to both standalone DCP and PCP+DCP:
