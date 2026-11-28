@@ -331,6 +331,7 @@ nav:
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/pipeline_parallel.md
         - user_guide/feature_guide/flash_attention.md
+        - user_guide/feature_guide/bnsd_prefill.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
         - user_guide/feature_guide/rl.md
