@@ -18,7 +18,6 @@
 import argparse
 import json
 import os
-import re
 import time
 import urllib.error
 import urllib.request
@@ -118,11 +117,19 @@ def trigger_regular_ci(repo_url: str, token: str, pr_number: int) -> None:
     send_api_request(labels_url, token, "POST", {"labels": ["ci-run"]})
 
 
+def pr_number_from_title(title: str, prefix: str) -> int | None:
+    if not title.startswith(prefix):
+        return None
+    number = title[len(prefix) :]
+    if number.isascii() and number.isdecimal() and not number.startswith("0"):
+        return int(number)
+    return None
+
+
 def reject_invalid_label(repo: str, token: str, signal: dict) -> None:
-    match = re.fullmatch(r"Check skip_ci for PR ([1-9][0-9]*)", signal["display_title"])
-    if match is None:
+    pr_number = pr_number_from_title(signal["display_title"], "Check skip_ci for PR ")
+    if pr_number is None:
         return
-    pr_number = int(match[1])
     repo_url = f"{API_ROOT}/repos/{repo}"
     pull = current_pull(repo_url, token, pr_number, signal, has_skip_ci=True)
     if not pull:
@@ -168,10 +175,9 @@ def reject_invalid_label(repo: str, token: str, signal: dict) -> None:
 
 
 def revoke(repo: str, token: str, signal: dict) -> None:
-    match = re.fullmatch(r"Revoke skip_ci for PR ([1-9][0-9]*)", signal["display_title"])
-    if match is None:
+    pr_number = pr_number_from_title(signal["display_title"], "Revoke skip_ci for PR ")
+    if pr_number is None:
         return
-    pr_number = int(match[1])
     repo_url = f"{API_ROOT}/repos/{repo}"
     if not current_pull(repo_url, token, pr_number, signal):
         return
