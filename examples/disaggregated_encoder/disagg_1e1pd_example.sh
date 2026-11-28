@@ -21,13 +21,15 @@ EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
+MM_IMAGE_PATH="${MM_IMAGE_PATH:-}"  # local image for the smoke request; see tools/send_mm_request.py (dataset vllm-ascend/mm_request)
+
+# EPD runs on Model Runner V2, the only model runner: Model Runner V1 has been
+# removed, so do not set VLLM_USE_V2_MODEL_RUNNER=0 (it fails at startup).
+# The VL encoder graph is supported on Model Runner V2; there is no V1 fallback.
 
 ###############################################################################
 # Helpers
 ###############################################################################
-# Find the git repository root directory
-VLLM_ROOT="/vllm-workspace/vllm"
-
 START_TIME=$(date +"%Y%m%d_%H%M%S")
 ENC_LOG=$LOG_PATH/encoder_${START_TIME}.log
 PD_LOG=$LOG_PATH/pd_${START_TIME}.log
@@ -36,7 +38,7 @@ PROXY_LOG=$LOG_PATH/proxy_${START_TIME}.log
 wait_for_server() {
     local port=$1
     timeout "$TIMEOUT_SECONDS" bash -c "
-        until curl -s localhost:$port/v1/chat/completions > /dev/null; do
+        until curl -sf localhost:$port/health > /dev/null; do
             sleep 1
         done" && return 0 || return 1
 }
@@ -149,9 +151,12 @@ echo "All services are up!"
 # Single request with local image
 ###############################################################################
 echo "Running single request with local image (non-stream)..."
-echo "Running single request with local image (non-stream)..."
 
-base64_image=$(base64 -w 0 "${VLLM_ROOT}/tests/v1/ec_connector/integration/hato.jpg")
+if [[ -z "$MM_IMAGE_PATH" ]]; then
+    echo "MM_IMAGE_PATH is required: path to a local image (see tools/send_mm_request.py)" >&2
+    exit 1
+fi
+base64_image=$(base64 -w 0 "$MM_IMAGE_PATH")
 
 cat > /tmp/request.json << EOF
 {
@@ -198,8 +203,6 @@ vllm bench serve \
   --seed                0 \
   --num-prompts         $NUM_PROMPTS \
   --port                $PROXY_PORT
-
-PIDS+=($!)
 
 # cleanup
 echo "cleanup..."

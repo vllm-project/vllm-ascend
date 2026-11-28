@@ -274,6 +274,10 @@ a3:
         os: linux-aarch64-a3-800t-4
         config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
         config_base_path: tests/SIT/cases/models/configs/Qwen
+      - name: qwen3-vl-8b-epd-mrv2
+        os: linux-aarch64-a3-800t-4
+        config_file_path: Qwen3-VL-8B-EPD-MRV2.yaml
+        config_base_path: tests/SIT/cases/features/epd
       - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
         os: linux-aarch64-a3-800t-2
         config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml

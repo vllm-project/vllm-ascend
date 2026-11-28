@@ -1,0 +1,4 @@
+pr: 22877
+entries:
+  - category: documentation
+    text: Added an expanded Ascend Disaggregated Encoder (EPD) guide covering the E/P/D role and topology matrix, the encoder-cache connector matrix, and the reference proxy health, metrics, shutdown and retry semantics. EPD runs on Model Runner V2 only because Model Runner V1 has been removed, so setting VLLM_USE_V2_MODEL_RUNNER=0 is rejected at startup.

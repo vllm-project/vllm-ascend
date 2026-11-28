@@ -26,7 +26,6 @@ import json
 import logging
 import multiprocessing
 import os
-import shlex
 import signal
 import subprocess
 import sys
@@ -38,14 +37,10 @@ from typing import Any, TypeVar
 
 import huggingface_hub
 import numpy as np
-import openai
-import psutil
 import pytest
-import requests
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
-from requests.exceptions import RequestException
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BatchEncoding, BatchFeature
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -57,7 +52,8 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.multi_node.internal_dp.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
+from tests.e2e.common.epd.epd_servers import DISAGG_EPD_PROXY_SCRIPT, DisaggEpdProxy, RemoteEPDServer  # noqa: F401
+from tests.e2e.common.serving.remote_openai_server import RemoteOpenAIServer  # noqa: F401
 from tests.e2e.coverage_taxonomy import (
     validate_coverage_marker,
 )
@@ -106,9 +102,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-DISAGG_EPD_PROXY_SCRIPT = (
-    Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
-)
 DISAGG_PD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent
     / "examples"
@@ -262,242 +255,6 @@ class MooncakeLauncher:
             self.process.wait(timeout=5)
         except ProcessLookupError:
             pass
-
-
-class RemoteOpenAIServer:
-    DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-
-    def _start_server(self, model: str, server_cmd: list[str], env_dict: dict[str, str] | None) -> None:
-        """Subclasses override this method to customize server process launch"""
-        env = os.environ.copy()
-        # the current process might initialize npu,
-        # to be safe, we should use spawn method
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        if env_dict is not None:
-            env.update(env_dict)
-        logger.info("Starting server with command: %s", " ".join(server_cmd))
-        self.proc: subprocess.Popen = subprocess.Popen(
-            server_cmd,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-
-    def __init__(
-        self,
-        model: str,
-        vllm_serve_args: list[str] | str,
-        *,
-        server_host: str = "0.0.0.0",
-        server_port: int = 8080,
-        env_dict: dict[str, str] | None = None,
-        seed: int | None = None,
-        auto_port: bool = True,
-        nodes_info: list[NodeInfo] | None = None,
-        disaggregated_prefill: DisaggregatedPrefillCfg | None = None,
-        proxy_port: int | None = None,
-        max_wait_seconds: float | None = None,
-        override_hf_configs: dict[str, Any] | None = None,
-    ) -> None:
-        if isinstance(vllm_serve_args, str):
-            vllm_serve_args = shlex.split(vllm_serve_args)
-        else:
-            vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
-        if auto_port:
-            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError("You have manually specified the port when `auto_port=True`.")
-
-            # No need for a port if using unix sockets
-            if "--uds" not in vllm_serve_args:
-                # Don't mutate the input args
-                vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
-        if seed is not None:
-            if "--seed" in vllm_serve_args:
-                raise ValueError(f"You have manually specified the seed when `seed={seed}`.")
-
-            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
-
-        if override_hf_configs is not None:
-            vllm_serve_args = vllm_serve_args + ["--hf-overrides", json.dumps(override_hf_configs)]
-
-        self.host = str(server_host)
-        self.port = int(server_port)
-        # for multi-nodes test
-        self.nodes_info = nodes_info
-        self.disaggregated_prefill = disaggregated_prefill
-        self.cur_index = os.getenv("LWS_WORKER_INDEX", 0)
-        self.proxy_port = proxy_port
-
-        self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 2800
-        if self.disaggregated_prefill:
-            assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
-            self._wait_for_server_pd(timeout=max_wait_seconds)
-        else:
-            self._wait_for_multiple_servers([(self.host, self.url_for("health"))], timeout=max_wait_seconds)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._terminate_server()
-
-    def _poll(self) -> int | None:
-        """Subclasses override this method to customize process polling"""
-        return self.proc.poll()
-
-    def hang_until_terminated(self, url) -> None:
-        """
-        Wait until the server process terminates.
-        This is for headless mode, where the api server
-        process only exists in the leader node.
-        """
-        logger.info("Hanging until server process terminates...")
-        client = requests
-        try:
-            while True:
-                try:
-                    resp = client.get(url, timeout=5)
-                    if resp.status_code != 200:
-                        break
-                    time.sleep(5)
-                except Exception:
-                    break
-        finally:
-            self._terminate_server()
-
-    def _wait_for_server_pd(self, timeout: float):
-        # Wait for all api_server nodes ready
-        assert self.nodes_info is not None, "cluster info must be provided"
-        proxy_port = self.proxy_port
-
-        def url_health(ip: str, port: int) -> str:
-            return f"http://{ip}:{port}/health"
-
-        targets = [
-            (node_info.ip, url_health(node_info.ip, self.port))
-            for node_info in self.nodes_info
-            if not node_info.headless
-        ]
-
-        # Wait for proxy ready
-        master_node = self.nodes_info[0]
-        url_proxy = f"http://{master_node.ip}:{proxy_port}/healthcheck"
-
-        # Wait for master node proxy first
-        self._wait_for_multiple_servers([(master_node.ip, url_proxy)], timeout=timeout)
-
-        # Then wait for all api_server nodes
-        self._wait_for_multiple_servers(targets=targets, timeout=timeout)
-
-    def _wait_for_multiple_servers(
-        self, targets, timeout: float, log_interval: float = 30.0, always_check_nodes: bool = False
-    ):
-        """
-        targets: List[(node_ip, url)]
-        log_interval
-        """
-        start = time.time()
-        client = requests
-
-        # Key by (node_ip, url): several servers may share one IP (e.g. the
-        # single-node PD/EPD modes start multiple engines on 127.0.0.1), so a
-        # plain-IP key would collapse their readiness state together and make
-        # the timeout message report an empty not-ready list.
-        ready = {(node_ip, url): False for node_ip, url in targets}
-
-        last_log_time = 0.0
-
-        while True:
-            now = time.time()
-            all_ready = True
-            should_log = (now - last_log_time) >= log_interval
-
-            for node_ip, url in targets:
-                if ready[(node_ip, url)] and not always_check_nodes:
-                    continue
-
-                try:
-                    resp = client.get(url)
-                    if resp.status_code == 200:
-                        ready[(node_ip, url)] = True
-                        logger.info("[READY] Node %s: %s is ready.", node_ip, url)
-                except RequestException:
-                    all_ready = False
-                    if should_log:
-                        logger.debug("[WAIT] %s: connection failed", url)
-
-                    # check unexpected exit
-                    result = self._poll()
-                    if result is not None and result != 0:
-                        self._terminate_server()
-                        raise RuntimeError(f"Server at {node_ip} exited unexpectedly.") from None
-
-            if should_log:
-                last_log_time = now
-
-            if all_ready:
-                break
-
-            if now - start > timeout:
-                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
-                self._terminate_server()
-                raise RuntimeError(
-                    f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
-                ) from None
-
-            time.sleep(5)
-
-    @property
-    def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-    def _terminate_server(self) -> None:
-        """Subclasses override this method to customize server process termination"""
-        self._terminate_process_tree(self.proc)
-
-    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
-        try:
-            parent = psutil.Process(proc.pid)
-        except psutil.NoSuchProcess:
-            return
-
-        children = parent.children(recursive=True)
-
-        try:
-            parent.terminate()
-            parent.wait(timeout=60)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            with contextlib.suppress(psutil.NoSuchProcess):
-                parent.kill()
-
-        for child in children:
-            with contextlib.suppress(psutil.NoSuchProcess):
-                child.terminate()
-
-        _, still_alive = psutil.wait_procs(children, timeout=10)
-
-        for child in still_alive:
-            with contextlib.suppress(psutil.NoSuchProcess):
-                child.kill()
-
-    def url_for(self, *parts: str) -> str:
-        return self.url_root + "/" + "/".join(parts)
-
-    def get_client(self, **kwargs):
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = 600
-        return openai.OpenAI(
-            base_url=self.url_for("v1"),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-            **kwargs,
-        )
-
-    def get_async_client(self, **kwargs):
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = 600
-        return openai.AsyncOpenAI(base_url=self.url_for("v1"), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs)
 
 
 def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
@@ -677,185 +434,6 @@ class DisaggPDProxy(RemotePDServer):
 
         timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 600.0
         self._wait_for_multiple_servers([(self.host, self.url_for("healthcheck"))], timeout=timeout_value)
-
-
-class RemoteEPDServer(RemoteOpenAIServer):
-    def _start_server(self, model: str, server_cmd: list[str], env_dict: dict[str, str] | None) -> None:
-        """Subclasses override this method to customize server process launch"""
-        raise NotImplementedError("RemoteEPDServer should use _start_server_with_prefix instead")
-
-    def __init__(
-        self,
-        vllm_serve_args: list[str] | list[list[str]],
-        server_host: str = "0.0.0.0",
-        env_dict: dict[str, str] | None = None,
-        max_wait_seconds: float | None = 2800,
-    ) -> None:
-        self._proc_list = []
-
-        self.env_dict: dict[str, str] = {}
-        if env_dict is not None:
-            self.env_dict.update(env_dict)
-
-        self.env_dict["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-        self.env_dict["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
-        self.env_dict["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-        self.vllm_serve_args_list = []
-        self.health_url_list = []
-        self.host = server_host
-
-        if isinstance(vllm_serve_args, list):
-            if not all(isinstance(item, list) for item in vllm_serve_args):
-                args_copy = copy.deepcopy(vllm_serve_args)
-                self.vllm_serve_args_list.append([str(arg) for arg in args_copy])
-            else:
-                self.vllm_serve_args_list = [
-                    [str(arg) for arg in sublist] for sublist in copy.deepcopy(vllm_serve_args)
-                ]
-        else:
-            raise RuntimeError("vllm_serves_args must be a list")
-
-        serve_arg_cmd = ["vllm", "serve"]
-
-        for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
-            self.env_dict["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
-            if isinstance(vllm_serve_arg, list):
-                if "--port" not in vllm_serve_arg:
-                    raise ValueError("You have to manually specify the port")
-                else:
-                    port_arg = "--port"
-                    try:
-                        index = vllm_serve_arg.index(port_arg)
-                    except ValueError:
-                        raise ValueError(f"--port not found in args: {vllm_serve_arg}")
-                    port_str = vllm_serve_arg[index + 1]
-                    self.port = int(port_str)
-            else:
-                vllm_serve_arg_str = str(vllm_serve_arg)
-                if "--port" not in vllm_serve_arg_str:
-                    raise ValueError("You have to manually specify the port")
-                else:
-                    raise ValueError(f"Unexpected type for vllm_serve_arg: {type(vllm_serve_arg)}")
-
-            self.health_url_list.append(super().url_for("health"))
-            vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
-            proc = self._start_server_with_prefix(vllm_serve_arg, self.env_dict, f"[VLLM_{i}] ")
-            self._proc_list.append(proc)
-
-        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
-        super()._wait_for_multiple_servers(
-            [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
-        )
-
-    def _poll(self) -> int | None:
-        return None
-
-    def _delete_shm(self) -> None:
-        for i, arg in enumerate(self.vllm_serve_args_list):
-            if "--ec-transfer-config" in arg:
-                index = arg.index("--ec-transfer-config")
-                config_str = arg[index + 1]
-                config_dict = json.loads(config_str)
-                ec_connector_extra_config = config_dict.get("ec_connector_extra_config", {})
-                shm_path = ec_connector_extra_config.get("shared_storage_path")
-                if shm_path:
-                    args = ["rm", "-r", "-f", str(shm_path)]
-                    print(f"delete shm_path is: {shm_path}")
-                    self._start_server_with_prefix(args, None, "[DELETE] ")
-
-    def _read_output(self, pipe, prefix):
-        try:
-            with pipe:
-                for line in iter(pipe.readline, ""):
-                    if line:
-                        print(f"{prefix}: {line}", end="")
-
-        except Exception as e:
-            print(f"error: {e}")
-            traceback.print_exc()
-
-    def _start_server_with_prefix(self, server_cmd: list[str], env_dict: dict[str, str] | None, log_prefix: str):
-        env = os.environ.copy()
-        if env_dict is not None:
-            env.update(env_dict)
-        proc = subprocess.Popen(
-            server_cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            bufsize=1,
-        )
-        stdout_thread = threading.Thread(target=self._read_output, args=(proc.stdout, log_prefix), daemon=True)
-        stderr_thread = threading.Thread(target=self._read_output, args=(proc.stderr, log_prefix), daemon=True)
-
-        stdout_thread.start()
-        stderr_thread.start()
-        return proc
-
-    def _terminate_server(self) -> None:
-        """Kill server processes and their children."""
-        print("vllm instance is stopping")
-        for proc in self._proc_list:
-            self._terminate_process_tree(proc)
-
-    def __enter__(self):
-        """Context manager entry point."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit point - clean up all processes."""
-        self._terminate_server()
-
-
-class DisaggEpdProxy(RemoteEPDServer):
-    def __init__(
-        self,
-        proxy_args: list[str] | str | None = None,
-        env_dict: dict[str, str] | None = None,
-        server_host: str = "0.0.0.0",
-        max_wait_seconds: float | None = 2800,
-    ) -> None:
-        if proxy_args is None:
-            proxy_args_list: list[str] = []
-        elif isinstance(proxy_args, str):
-            proxy_args_list = shlex.split(proxy_args)
-        else:
-            proxy_args_list = proxy_args
-
-        self.proxy_args = proxy_args_list
-        self.env_dict: dict[str, str] = {}
-        if env_dict is not None:
-            self.env_dict.update(env_dict)
-        self._proc_list = list()
-        self.host = server_host
-
-        print(f"proxy param is: {self.proxy_args}")
-        proxy_cmd = ["python", str(DISAGG_EPD_PROXY_SCRIPT), *self.proxy_args]
-        proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PROXY] ")
-        self._proc_list.append(proc)
-
-        if "--port" not in self.proxy_args:
-            raise ValueError("You have manually specified the port ")
-        else:
-            try:
-                index = self.proxy_args.index("--port")
-            except ValueError:
-                raise ValueError("--port not found in proxy args")
-            port_str = self.proxy_args[index + 1]
-            self.port = int(port_str)
-
-        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
-        super()._wait_for_multiple_servers([(self.host, super().url_for("health"))], timeout=timeout_value)
-
-    def __enter__(self):
-        """Context manager entry point."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit point - clean up all processes."""
-        super()._terminate_server()
 
 
 _DP_RUNNER_START_TIMEOUT_SECONDS = 900.0
