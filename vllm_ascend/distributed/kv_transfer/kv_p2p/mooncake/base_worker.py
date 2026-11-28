@@ -485,9 +485,8 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             num_tensor_blocks // self.num_blocks,
         )
 
-    @staticmethod
-    def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
-        """Describe single-head NHD as byte-equivalent HND without changing the cache."""
+    def _get_transfer_block_shape(self, spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
+        """Describe contiguous TP1 NHD as byte-equivalent HND without copying."""
         shape = tuple(cache.shape[1:])
         if (
             not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
@@ -518,11 +517,15 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             return shape  # HND
         if shape[1] != heads:
             raise ValueError(f"MooncakeConnector KV block shape {shape} does not match the spec's {heads} KV heads.")
-        if heads != 1:
-            raise ValueError("MooncakeConnector NHD requires exactly one KV head per TP rank.")
         if not cache[0].is_contiguous():
-            raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
-        return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
+            raise ValueError("MooncakeConnector NHD requires contiguous bytes within each KV block.")
+        if heads != 1 and self.tp_size != 1:
+            raise ValueError("MooncakeConnector multi-head NHD is only supported when TP size is 1.")
+        # A TP1 rank owns the complete contiguous NHD block. Mooncake's transfer
+        # metadata uses HND order, so transpose only the logical dimensions and
+        # preserve the number of heads. The registered address and bytes stay
+        # unchanged; no tensor copy or physical layout conversion is involved.
+        return (shape[1], shape[0], shape[2])
 
     def _validate_kv_sharing_layers(
         self,
