@@ -804,7 +804,18 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        for i in range(self.hma_group_size):
+        num_groups = min(self.hma_group_size, len(remote_block_ids), len(local_block_ids))
+        if num_groups < self.hma_group_size:
+            logger.warning_once(
+                "KV cache group count mismatch during Mooncake hybrid transfer: "
+                "local has %d groups but remote sent %d; transferring only the "
+                "first %d shared group(s). This is expected when speculative "
+                "decoding is enabled on the decode side only.",
+                self.hma_group_size,
+                len(remote_block_ids),
+                num_groups,
+            )
+        for i in range(num_groups):
             if not remote_block_ids[i] or not local_block_ids[i]:
                 continue
             cur_remote_block_ids = remote_block_ids[i]
