@@ -445,3 +445,27 @@ def test_lightning_schedule_matches_trimmed_or_padded_query(monkeypatch, full_gr
         torch.tensor([3, 16, rows], dtype=torch.int32),
     )
     torch.testing.assert_close(metadata.query_start_loc, torch.tensor([0, 2, 4, 6], dtype=torch.int32))
+
+
+@pytest.mark.parametrize("tail", range(4))
+def test_gbsa_prepared_metadata_keeps_512_explicit_groups(monkeypatch, tail):
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    adapter = adapter_cls(_Model(layer))
+    seen = []
+
+    def metadata(indices, counts, *args, **kwargs):
+        assert kwargs["residual_block_mode"] == 1
+        seen.append((indices.shape, counts.clone()))
+        return torch.zeros(3, dtype=torch.int32)
+
+    adapter._prepare_gbsa.__globals__["generic_block_sparse_attention_metadata"] = metadata
+    raw = SimpleNamespace(
+        token_to_req=torch.tensor([0], dtype=torch.int32),
+        logical_positions=torch.tensor([2047 + tail], dtype=torch.int32),
+        seq_lens=torch.tensor([2048 + tail], dtype=torch.int32),
+    )
+    main = SimpleNamespace(num_actual_tokens=1, block_table=torch.zeros((1, 17), dtype=torch.int32))
+    adapter._prepare_gbsa(layer, main, raw, full_graph=False, prepared_this_step={})
+    assert seen[0][0] == (2, 1, 512)
+    assert seen[0][1].tolist() == [[512], [512]]

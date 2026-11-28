@@ -24,10 +24,10 @@ inline int64_t checked_qsa_union_width(
     TORCH_CHECK(group_row_map.dim() == 2 && group_row_map.size(1) == 8,
                 "group_row_map must have shape [union_groups, 8]");
     const int64_t input_groups = compact_indices.size(1) - 3;
-    const int64_t topk = input_groups + (input_groups < 512 ? 1 : 0);
-    TORCH_CHECK(topk > 0 && (topk & (topk - 1)) == 0,
+    const int64_t sort_topk = input_groups + (input_groups < 512 ? 1 : 0);
+    TORCH_CHECK(sort_topk > 0 && (sort_topk & (sort_topk - 1)) == 0,
                 "QSA Union packed width must be a positive power of two");
-    return 8 * topk;
+    return 8 * (input_groups + 1);
 }
 
 inline std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_qsa_union_inputs(

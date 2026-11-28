@@ -23,6 +23,17 @@ def test_qsa_union_inputs_meta_rejects_non_power_of_two_width():
         build_qsa_union_inputs_from_compact(compact, visible, row_map)
 
 
+def test_qsa_union_inputs_meta_reserves_tail_beyond_saturated_topk():
+    enable_custom_op()
+    compact = torch.empty((8, 515), device="meta", dtype=torch.int32)
+    visible = torch.empty(8, device="meta", dtype=torch.int32)
+    row_map = torch.empty((1, 8), device="meta", dtype=torch.int32)
+    indices, counts, mask = build_qsa_union_inputs_from_compact(compact, visible, row_map)
+    assert indices.shape == (1, 1, 4104)
+    assert counts.shape == (1, 1)
+    assert mask.shape == (1, 1, 4104 * 4)
+
+
 @pytest.mark.parametrize("input_groups", [7, 511])
 def test_qsa_union_inputs_exact_membership(input_groups):
     # Lane bits restart at zero in the second request. Blocks contain four tokens.
@@ -50,17 +61,17 @@ def test_full_chunk_union_with_saturated_topk():
     compact[:, :384] = torch.arange(384)
     private = 512 + torch.arange(8)[:, None] * 128 + torch.arange(128)
     compact[:, 384:512] = private.repeat(rows // 8, 1)
-    # Each lane replaces its last private block with the same one-token tail.
+    # The tail is additional to all 512 complete groups in every lane.
     tail = 32767
     visible = torch.full((rows,), tail * 4 + 1, dtype=torch.int32)
     row_map = torch.arange(rows, dtype=torch.int32).reshape(-1, 8)
-    blocks = torch.cat((torch.arange(384), private[:, :127].flatten(), torch.tensor([tail])))
+    blocks = torch.cat((torch.arange(384), private.flatten(), torch.tensor([tail])))
     count = blocks.numel()
-    indices = torch.full((4096,), -1, dtype=torch.int32)
+    indices = torch.full((4104,), -1, dtype=torch.int32)
     indices[:count] = blocks
-    mask = torch.zeros((4096, 4), dtype=torch.int32)
+    mask = torch.zeros((4104, 4), dtype=torch.int32)
     mask[:384] = 255
-    mask[384 : count - 1] = (1 << torch.arange(8)).repeat_interleave(127)[:, None]
+    mask[384 : count - 1] = (1 << torch.arange(8)).repeat_interleave(128)[:, None]
     mask[count - 1, 0] = 255
     expected = (
         indices.expand(1, rows // 8, -1),
@@ -70,6 +81,22 @@ def test_full_chunk_union_with_saturated_topk():
     actual = torch.ops._C_ascend.qsa_union_inputs(compact.npu(), visible.npu(), row_map.npu())
     for output, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(output.cpu(), reference, rtol=0, atol=0)
+
+
+def test_union_tail_merges_with_another_lane_full_group():
+    compact = torch.full((2, 10), -1, dtype=torch.int32)
+    compact[0, 0] = 0
+    compact[1, :3] = torch.tensor([0, 1, 2])
+    visible = torch.tensor([9, 12], dtype=torch.int32)
+    row_map = torch.tensor([[0, 1, -1, -1, -1, -1, -1, -1]], dtype=torch.int32)
+    indices, counts, mask = torch.ops._C_ascend.qsa_union_inputs(compact.npu(), visible.npu(), row_map.npu())
+    assert counts.cpu().tolist() == [[3]]
+    assert indices.cpu()[0, 0, :3].tolist() == [0, 1, 2]
+    assert mask.cpu()[0, 0, :12].reshape(3, 4).tolist() == [
+        [3, 3, 3, 3],
+        [2, 2, 2, 2],
+        [3, 2, 2, 2],
+    ]
 
 
 @pytest.mark.parametrize("groups", [1021, 1022, 1023, 1024])
