@@ -32,7 +32,12 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
-from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend._310p.worker.v2.spec_utils import (
+    get_async_mtp_commit,
+    prepare_decode_inputs_cpu,
+    set_async_mtp_commit,
+    set_draft_step_host,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.mtp import get_mtp_draft_parallel_config
@@ -245,8 +250,32 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
                 self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
 
+    def _prepare_decode_inputs(
+        self,
+        input_batch: Any,
+        num_rejected: torch.Tensor,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: Any,
+    ) -> None:
+        """Override upstream Triton _prepare_decode_inputs_kernel for 310P."""
+        del skip_attn, batch_desc
+        prepare_decode_inputs_cpu(
+            self.draft_tokens[:num_reqs, 0],
+            input_batch.seq_lens,
+            num_rejected,
+            self.input_buffers,
+            self.sample_src_positions,
+            self.max_model_len,
+            self.max_num_reqs,
+            self.advance_draft_positions,
+        )
+
     @torch.inference_mode()
     def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if get_async_mtp_commit() is not None:
+            # Async MTP step 0 prepares inputs on device; skip pre-step0 host D2H.
+            return super().propose(*args, **kwargs)
         num_rejected = kwargs.get("num_rejected")
         if num_rejected is None and len(args) >= 7:
             num_rejected = args[6]
@@ -304,6 +333,11 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         num_speculative_steps: int | None = None,
     ) -> None:
         """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
+        commit = get_async_mtp_commit()
+        if commit is not None:
+            commit()
+            set_async_mtp_commit(None)
+
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -317,6 +351,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
         attn_metadata = None
         slot_mappings_by_layer = None
+        assert num_speculative_steps is not None
         # vLLM #60335 passes the per-batch step count on main.
         for step in range(1, num_speculative_steps):
             if not skip_attn and (self.advance_draft_positions or step == 1):

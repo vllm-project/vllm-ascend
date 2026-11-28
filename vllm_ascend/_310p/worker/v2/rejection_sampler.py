@@ -158,9 +158,10 @@ class RejectionSampler310V2(RejectionSampler):
 
         any_random = bool(np.any(temperature_np[idx_mapping_np] >= _SAMPLING_EPS))
         if any_random:
-            assert input_batch.input_ids_cpu is not None
-            assert input_batch.logits_indices_np is not None
-            draft_sampled_cpu = input_batch.input_ids_cpu[torch.from_numpy(input_batch.logits_indices_np)]
+            assert input_ids is not None and logits_indices is not None
+            # Read the exact token IDs fed into the model so probabilistic
+            # verification never observes stale/zeroed host staging buffers.
+            draft_sampled_cpu = input_ids.detach().to("cpu")
             source_generators = getattr(self.sampler, "_source_generators", {})
             # Persistent InputBatch arrays; slice to this step's request count.
             cu_num_logits_np = input_batch.cu_num_logits_np[: num_reqs + 1]
@@ -220,10 +221,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
-        target_logits = processed.index_select(0, target_rows)
-        bonus_token_ids = processed.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
-
-        target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
+        greedy_tokens = processed.argmax(dim=-1).to(torch.int32)
+        target_argmax = greedy_tokens.index_select(0, target_rows)
+        bonus_token_ids = greedy_tokens.index_select(0, bonus_rows).view(-1, 1)
         sampled = torch.full(
             (num_reqs, self.num_speculative_steps + 1),
             PLACEHOLDER_TOKEN_ID,

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar, Token
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -13,6 +16,49 @@ import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend._310p.worker.v2.sample.random_sample import random_sample
+
+_ASYNC_MTP_COMMIT: ContextVar[Callable[[], None] | None] = ContextVar(
+    "310p_async_mtp_commit",
+    default=None,
+)
+
+
+def get_async_mtp_commit() -> Callable[[], None] | None:
+    return _ASYNC_MTP_COMMIT.get()
+
+
+def set_async_mtp_commit(
+    commit: Callable[[], None] | None,
+) -> Token[Callable[[], None] | None]:
+    return _ASYNC_MTP_COMMIT.set(commit)
+
+
+def reset_async_mtp_commit(
+    token: Token[Callable[[], None] | None],
+) -> None:
+    _ASYNC_MTP_COMMIT.reset(token)
+
+
+@lru_cache(maxsize=16)
+def cached_offsets(device: torch.device, capacity: int) -> torch.Tensor:
+    return torch.arange(capacity, device=device)
+
+
+@lru_cache(maxsize=64)
+def cached_uniform_req_of_tok(device: torch.device, num_reqs: int, width: int) -> torch.Tensor:
+    return torch.arange(num_reqs, device=device).repeat_interleave(width)
+
+
+def copy_prefix_310p(buffer: torch.Tensor, values: torch.Tensor, offsets: torch.Tensor) -> None:
+    values = values.reshape(-1)
+    count = values.numel()
+    if count == 0:
+        return
+    if buffer.device.type == "npu" and (count * buffer.element_size()) % 32 != 0:
+        # An unaligned 310P prefix copy can overwrite the next padded slots.
+        buffer.index_copy_(0, offsets[:count], values)
+    else:
+        buffer[:count].copy_(values)
 
 
 def expand_idx_mapping_cpu(
@@ -312,6 +358,93 @@ def prepare_prefill_inputs_cpu(
     Full-buffer ``.cpu()`` of target/draft tensors was a major 310P MTP cost.
     """
     del max_num_reqs
+    if _ASYNC_MTP_COMMIT.get() is not None:
+        n = input_batch.num_reqs
+        num_tokens = int(input_batch.query_start_loc_np[n])
+        device = input_buffers.input_ids.device
+        full_offsets = cached_offsets(
+            device,
+            max(
+                input_buffers.input_ids.numel(),
+                input_buffers.query_start_loc.numel(),
+                num_tokens,
+            ),
+        )
+        if num_tokens > 0 and n > 0:
+            offsets = full_offsets[:num_tokens]
+            qsl = input_batch.query_start_loc[: n + 1]
+            qsl_long = qsl.to(dtype=torch.long)
+            starts = qsl_long[:-1]
+            ends = qsl_long[1:]
+            counts = ends - starts
+            rejected = num_rejected[:n].to(dtype=torch.long)
+            kept_end = ends - rejected
+            kept_len = (kept_end - starts).clamp_min(0)
+            kept_last = (kept_end - 1).clamp_min(0)
+
+            # Fast path for uniform-width batches avoids repeat_interleave kernel.
+            qsl_np = input_batch.query_start_loc_np[: n + 1]
+            width = num_tokens // n if num_tokens % n == 0 else 0
+            if width > 0 and int(qsl_np[0]) == 0 and np.all(np.diff(qsl_np) == width):
+                req_of_tok = cached_uniform_req_of_tok(device, n, width)
+            else:
+                req_of_tok = torch.repeat_interleave(full_offsets[:n], counts, output_size=num_tokens)
+
+            req_idx = input_batch.idx_mapping[:n].to(dtype=torch.long)
+            last_tok = last_sampled.reshape(-1).index_select(0, req_idx)
+            next_prefill = next_prefill_tokens.reshape(-1).index_select(0, req_idx).to(last_tok.dtype)
+            next_tok = torch.where(num_sampled[:n] > 0, last_tok, next_prefill)
+
+            kept_end_tok = kept_end.index_select(0, req_of_tok)
+            kept_len_tok = kept_len.index_select(0, req_of_tok)
+            has_kept = kept_len_tok > 0
+            is_shift = has_kept & (offsets < kept_end_tok - 1)
+            is_last = has_kept & (offsets == kept_end_tok - 1)
+
+            shift_ids = input_batch.input_ids.index_select(0, (offsets + 1).clamp_max(num_tokens - 1))
+            next_tok_per_tok = next_tok.index_select(0, req_of_tok)
+            old_ids = input_buffers.input_ids[:num_tokens]
+            new_ids = torch.where(
+                is_shift,
+                shift_ids.to(old_ids.dtype),
+                torch.where(is_last, next_tok_per_tok.to(old_ids.dtype), old_ids),
+            )
+            copy_prefix_310p(input_buffers.input_ids, new_ids, full_offsets)
+
+            old_pos = input_buffers.positions[:num_tokens]
+            new_pos = torch.where(
+                is_shift | is_last,
+                input_batch.positions[:num_tokens].to(old_pos.dtype),
+                old_pos,
+            )
+            copy_prefix_310p(input_buffers.positions, new_pos, full_offsets)
+
+            current_draft_step.zero_()
+            input_buffers.query_start_loc.fill_(num_tokens)
+            copy_prefix_310p(
+                input_buffers.query_start_loc,
+                qsl.to(input_buffers.query_start_loc.dtype),
+                full_offsets,
+            )
+            input_buffers.seq_lens.zero_()
+            copy_prefix_310p(
+                input_buffers.seq_lens,
+                input_batch.seq_lens[:n].to(input_buffers.seq_lens.dtype),
+                full_offsets,
+            )
+            last_token_indices.zero_()
+            copy_prefix_310p(
+                last_token_indices,
+                kept_last.to(last_token_indices.dtype),
+                full_offsets,
+            )
+        else:
+            current_draft_step.zero_()
+            input_buffers.query_start_loc.zero_()
+            input_buffers.seq_lens.zero_()
+            last_token_indices.zero_()
+        return last_token_indices
+
     num_reqs = input_batch.num_reqs
     query_start_loc_np = input_batch.query_start_loc_np
     idx_mapping_np = input_batch.idx_mapping_np
@@ -496,6 +629,11 @@ def set_prefill_host_meta(
         "last_sampled_np": last_sampled_np,
         "next_prefill_np": next_prefill_np,
     }
+
+
+def clear_prefill_host_meta() -> None:
+    global _PREFILL_HOST_META
+    _PREFILL_HOST_META = None
 
 
 def update_draft_inputs_cpu(
