@@ -293,7 +293,7 @@ After the service starts, you can verify whether the feature has taken effect in
 
 ## FAQs (Optional)
 
-**For general installation, environment, and deployment issues, please refer to the [Public FAQ](../faq.md). The following only includes troubleshooting issues specific to this feature.**
+**For general installation, environment, and deployment issues, please refer to the [Public FAQ](../faqs.md). The following only includes troubleshooting issues specific to this feature.**
 
 > **Writing Requirements**:
 >
