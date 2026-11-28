@@ -172,6 +172,14 @@ variants:
       - ascend_910c
     tp: 16
     min_vllm_version: 0.30.0
+    # spec_decoding is excluded from this list: MTP is static in extra_args
+    # (see above), matching the 910B w4a8_mtp variant.
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
     extra_args:
       - '--distributed-executor-backend'
       - mp
