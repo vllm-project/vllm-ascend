@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import ctypes
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullConnectorWorker
 
-from .helpers import make_full_spec
+from .helpers import make_full_spec, make_sfa_indexer_spec
 
 
 @pytest.mark.parametrize("shared,rank,expected", [(True, 0, [0, 1]), (True, 1, [1]), (False, 1, [0, 1])])
@@ -161,6 +164,56 @@ def test_pull_reorders_split_mla_page_before_bucket_completes(tokens, nope_bytes
     assert local_pages.raw[: 2 * page_bytes] == expected
 
 
+@pytest.mark.parametrize("local_tp,remote_tp,remote_rank", [(2, 4, 3), (4, 2, 1)])
+def test_unequal_tp_host_pull_finishes_after_exact_page_reorder(local_tp, remote_tp, remote_rank):
+    thread, remote = pull_layout()
+    thread.tp_size = local_tp
+    thread.tp_rank = 0
+    thread.local_metadata = NS(local_ip="127.0.0.1")
+    thread.finished_requests = queue.SimpleQueue()
+    thread.can_report_invalid_block_ids = False
+    local_page = ctypes.create_string_buffer(6)
+    remote_nope = ctypes.create_string_buffer(b"abcd")
+    remote_rope = ctypes.create_string_buffer(b"XY")
+    thread.kv_caches_base_addr = [[ctypes.addressof(local_page)]]
+    peer = NS(
+        kv_caches_base_addr=[[ctypes.addressof(remote_nope), ctypes.addressof(remote_rope)]],
+        local_ip="127.0.0.1",
+        te_rpc_port=9000,
+    )
+    remote.metadata_by_pcp_rank[0].metadata_by_tp_rank = {remote_rank: peer}
+    reading = threading.Event()
+    release = threading.Event()
+
+    def read(_session, destinations, sources, sizes):
+        reading.set()
+        assert release.wait(5)
+        for dst, src, size in zip(destinations, sources, sizes, strict=True):
+            ctypes.memmove(dst, src, size)
+        return 0
+
+    thread.engine = NS(batch_transfer_sync_read=read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            thread._execute_tp_transfer_bucket,
+            0,
+            0,
+            remote_rank,
+            1,
+            remote_tp,
+            1,
+            remote,
+            {0: {(0, 0): [("request", [0], [0])]}},
+        )
+        thread._track_request("request", NS(), {future: (0, 0, remote_rank, {"request"})}, None)
+        assert reading.wait(5)
+        assert thread.finished_requests.empty()
+        release.set()
+        future.result()
+    assert local_page.raw == b"abXcdY"
+    assert thread.finished_requests.get_nowait() == ("request", False)
+
+
 def test_pull_reads_one_descriptor_per_packed_mla_page():
     thread, remote = pull_layout()
     thread.block_strides = [[8]]
@@ -192,13 +245,25 @@ def test_pull_uses_selected_prefill_pcp_rank():
     assert sizes == [4, 2]
 
 
-def test_pull_rejects_different_tp_and_component_sizes():
+def test_pull_rejects_different_component_sizes():
     thread, remote = pull_layout()
-    with pytest.raises(ValueError, match="equal P/D TP"):
-        thread._append_spec_transfer_addresses(0, 0, 0, 1, 4, 1, {}, remote, [], [], [])
     remote.block_lens = [[4, 4]]
     with pytest.raises(ValueError, match="component sizes"):
         thread._append_spec_transfer_addresses(0, 0, 0, 1, 2, 1, {(0, 0): [("r", [1], [1])]}, remote, [], [], [])
+
+
+@pytest.mark.parametrize("local_tp,remote_tp", [(2, 4), (4, 2)])
+def test_unequal_tp_indexer_uses_one_replicated_prefill_rank(local_tp, remote_tp):
+    thread, _ = pull_layout()
+    thread.tp_size = local_tp
+    thread.tp_rank = local_tp - 1
+    thread.pcp_rank = 0
+    thread.dcp_size = 1
+    remote = NS(dcp_sharded=[False], indexer_replication_sizes=[1])
+    groups = thread._get_layer_remote_tp_rank_groups(
+        0, 0, make_sfa_indexer_spec(replication_size=1), remote, 1, remote_tp, 1
+    )
+    assert groups == [list(range(remote_tp))]
 
 
 def test_pull_rejects_decode_pcp():

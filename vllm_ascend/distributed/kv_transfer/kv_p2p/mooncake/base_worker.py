@@ -486,8 +486,14 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         )
 
     @staticmethod
-    def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
-        """Describe single-head NHD as byte-equivalent HND without changing the cache."""
+    def _get_transfer_block_shape(
+        spec: KVCacheSpec, cache: torch.Tensor, kv_cache_layout: str | None = None
+    ) -> tuple[int, ...]:
+        """Validate contiguous block payloads and describe them in head-major order.
+
+        BLHNC layer views have gaps between blocks, but each block must still
+        contain contiguous HND bytes. The outer stride is published separately.
+        """
         shape = tuple(cache.shape[1:])
         if (
             not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
@@ -512,16 +518,18 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             return shape
         if len(shape) != 3:
             raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
-        if shape[0] == shape[1] == heads and heads > 1:
+        # Equal head/token dimensions cannot identify the layout by shape alone.
+        # Use the resolved allocation layout, rather than the environment hint.
+        if shape[0] == shape[1] == heads and heads > 1 and kv_cache_layout not in ("HND", "LBHNC", "BLHNC"):
             raise ValueError(f"MooncakeConnector cannot distinguish HND from NHD for {shape} with {heads} KV heads.")
+        if not cache[0].is_contiguous():
+            raise ValueError("MooncakeConnector GQA requires contiguous bytes within each KV block.")
         if shape[0] == heads:
             return shape  # HND
         if shape[1] != heads:
             raise ValueError(f"MooncakeConnector KV block shape {shape} does not match the spec's {heads} KV heads.")
         if heads != 1:
             raise ValueError("MooncakeConnector NHD requires exactly one KV head per TP rank.")
-        if not cache[0].is_contiguous():
-            raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
         return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
 
     def _validate_kv_sharing_layers(
@@ -657,7 +665,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        block_shape = self._get_transfer_block_shape(spec, cache, self.kv_cache_config.kv_cache_layout)
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)
