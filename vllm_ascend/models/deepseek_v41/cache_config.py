@@ -9,7 +9,6 @@ import torch
 from vllm.config import VllmConfig
 
 # Both supported versions expose planning helpers in kv_cache_planning.
-from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -291,13 +290,11 @@ def get_deepseek_v41_pool_bytes_per_block(groups):
 def get_deepseek_v41_kv_cache_config(
     vllm_config: VllmConfig,
     groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
     """Place stage-local resource pages within one shared backing pool."""
     specs = _specs_from_groups(groups)
     page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
-    capacity = max(available_memory // sum(page_sizes), 0)
-    num_blocks = may_override_num_blocks(vllm_config, capacity)
     backing_size = num_blocks * sum(page_sizes)
     tensors: list[KVCacheTensor] = []
     slot_offset = 0

@@ -13,7 +13,6 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 
 # Both supported versions expose planning helpers in kv_cache_planning.
-from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -112,10 +111,9 @@ def pool_bytes_per_block(groups):
     return sum(size for size, _ in packed_layout(groups))
 
 
-def cache_config(vllm_config, groups, available_memory):
+def cache_config(groups, num_blocks):
     layout = packed_layout(groups)
     page_bytes = sum(size for size, _ in layout)
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // page_bytes)
     logger.info(
         "DeepSeek V4 TurboQuant KV: C4 slot=%d bytes, pool bytes/block=%d, groups=%d, blocks=%d",
         SLOT_BYTES,

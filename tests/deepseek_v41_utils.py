@@ -16,7 +16,6 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
-    get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     make_cache_groups,
 )
@@ -301,11 +300,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             model_version="deepseek_v41",
         )
     groups = make_cache_groups(group_cache_specs(specs))
-    return get_deepseek_v41_kv_cache_config(
-        runtime,
-        groups,
-        num_blocks * get_deepseek_v41_pool_bytes_per_block(groups),
-    )
+    return get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=num_blocks)
 
 
 def allocate_cache_views(config, device="cpu"):
