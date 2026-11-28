@@ -72,9 +72,10 @@ def prepare_qsa_lightning_v2_inputs(
     score_weight = math.ldexp(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _WEIGHT_FRACTION_BITS)), -_WEIGHT_FRACTION_BITS
     )
-    # Each program covers BLOCK_SIZE flat indices shared by all four outputs.
-    # Lengths, request boundaries and (token, head) weights have independent
-    # masks, so the grid only needs to cover the longest output range.
+    # One flat offset tile serves all four outputs. cu_query spans requests + 1
+    # boundaries, weights spans rows * heads (token, head) elements, and the
+    # length outputs span requests. Each store has its own bounds mask, so
+    # covering the longest range is sufficient to initialize every output.
     # BLOCK_SIZE controls vector tiling, independently of the compression ratio.
     block_size = 256
     grid = (triton.cdiv(max(requests + 1, weights.numel()), block_size),)
