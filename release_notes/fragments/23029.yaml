@@ -1,0 +1,7 @@
+pr: 23029
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Kimi-Linear model construction on Ascend: decoder layers without a
+      full-rank gate now use the GatedDeltaNet attention path instead of failing
+      the KDA full-rank gate assertion before the first forward.

@@ -767,6 +767,25 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             self.impl.g_proj = self.g_proj
 
 
+def _build_kda_attention(config, vllm_config: VllmConfig, prefix: str):
+    """Select the linear-attention layer for a KDA layer.
+
+    Upstream keeps the full-rank-gate KDA path private to Kimi-K3 and serves
+    standalone Kimi-Linear checkpoints (whose `linear_attn_config` has no
+    `use_full_rank_gate` key) with the shared GDN layer. Mirror that split here:
+    the Ascend KDA subclass builds on KimiK3DeltaAttention, which asserts on a
+    full-rank gate, so selecting it unconditionally fails to construct
+    Kimi-Linear.
+    """
+    kda_config = getattr(config, "linear_attn_config", None)
+    if not (isinstance(kda_config, dict) and kda_config.get("use_full_rank_gate", False)):
+        # The upstream module imports FLA, so defer it until worker device selection.
+        from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import KimiGatedDeltaNetAttention
+
+        return KimiGatedDeltaNetAttention(config, vllm_config, prefix=prefix)
+    return AscendKimiK3DeltaAttention(config, vllm_config, prefix=prefix)
+
+
 class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
     """Upstream Kimi decoder structure with Ascend attention backends."""
 
@@ -789,11 +808,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         quant_config = vllm_config.quant_config
 
         if config.is_kda_layer(layer_idx):
-            self.self_attn = AscendKimiK3DeltaAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.self_attn",
-            )
+            self.self_attn = _build_kda_attention(config, vllm_config, f"{prefix}.self_attn")
         elif getattr(config, "dsa_config", None) is not None and config.is_dsa_layer(layer_idx):
             self.self_attn = AscendKimiDSAAttention(config, vllm_config, f"{prefix}.self_attn", topk_indices_buffer)
         else:
