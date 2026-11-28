@@ -14,3 +14,26 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from copy import copy
+
+from vllm.config import ParallelConfig, VllmConfig, replace
+
+
+def get_mtp_draft_parallel_config(vllm_config: VllmConfig) -> ParallelConfig:
+    """Retain the target worker's topology and use the draft's resolved EP setting."""
+    target = vllm_config.parallel_config
+    spec = vllm_config.speculative_config
+    assert spec is not None and spec.draft_parallel_config is not None
+    draft = spec.draft_parallel_config
+    if target.enable_expert_parallel and not draft.enable_expert_parallel:
+        # A dense draft has no experts to balance. A target's redundant expert
+        # count or elastic EP flag would also fail ParallelConfig validation.
+        return replace(
+            target,
+            pipeline_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
+            enable_elastic_ep=False,
+            eplb_config=copy(draft.eplb_config),
+        )
+    return replace(target, pipeline_parallel_size=1)

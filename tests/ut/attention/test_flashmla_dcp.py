@@ -211,6 +211,7 @@ def runtime(monkeypatch):
         query_capacity=None,
         max_requests=8,
         pcp_size=1,
+        sliding_window=None,
         a3_adapter=None,
     ):
         impl = SimpleNamespace(
@@ -220,6 +221,7 @@ def runtime(monkeypatch):
             dtype=dtype,
             use_mla_rope=use_rope,
             use_quant_flashmla=quantized,
+            sliding_window=sliding_window,
             dcp_size=size,
             dcp_rank=rank,
             pcp_group=SimpleNamespace(world_size=pcp_size),
@@ -649,6 +651,45 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
 
 
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("masked", [False, True])
+def test_history_mask_reaches_exchange_before_current_merge(runtime, monkeypatch, pcp_size, masked):
+    impl = runtime.bind(
+        SimpleNamespace(
+            dcp_size=2,
+            tp_group=SimpleNamespace(world_size=1, unique_name="tp"),
+            dcp_group=SimpleNamespace(unique_name="dcp"),
+            pcp_group=SimpleNamespace(world_size=pcp_size, unique_name="pcp"),
+        )
+    )
+    history = torch.full((2, 2, 512), 18.0)
+    lse = torch.zeros(2, 2, 1)
+    mask = torch.tensor([True, False]) if masked else None
+
+    def exchange(output, stats, size, dim, group, pcp=None, *, defer_combine, output_mask=None):
+        assert defer_combine and dim == 1
+        assert (size, group, pcp) == ((1, "tp", "pcp") if pcp_size == 2 else (2, "dcp", None))
+        output, stats = output[:, : 2 // size], stats[:, : 2 // size]
+        if output_mask is not None:
+            stats = stats.masked_fill(output_mask[:, None, None], -torch.inf)
+        # The other source rank supplies valid history for both tokens.
+        return [output, torch.full_like(output, 8.0)], [stats, torch.zeros_like(stats)]
+
+    fused = Mock(side_effect=exchange)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", fused, raising=False)
+    recv = impl._merge_dcp_attention_output(history, lse, defer_combine=True, output_mask=mask)
+    current = torch.full_like(recv[0][0], 4.0)
+    actual = combine_outputs(
+        recv, 512, scatter_dim=1, local_output=current, local_lse=torch.zeros_like(current[..., :1])
+    )
+    # Equal finite LSEs give each valid contribution equal weight.
+    expected = torch.full_like(actual, 10.0)
+    if masked:
+        expected[0] = 6.0
+    torch.testing.assert_close(actual, expected)
+    assert fused.call_args.kwargs.get("output_mask") is mask
+
+
 def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
     builder = runtime.builder()
     flash = builder.build(common([260, 133], [130, 129]), 2, 259, True)
@@ -1054,6 +1095,33 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
 
 
+def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
+    builder = runtime.builder(size=1, heads=12, dtype=torch.bfloat16, sliding_window=1024)
+    inputs = common([1028], [8])
+    inputs.slot_mapping = torch.arange(1020, 1028)
+    flash = builder.build(inputs, 1, 8, False, retain_for_graph=True)
+    original_addresses = addresses(flash)
+    assert flash.used_q[0] == 8
+
+    # Same captured rows, but only four queries now belong to the draft.
+    with builder.limit_query_positions(torch.tensor([1024]), 1028):
+        replay = builder.build(inputs, 1, 8, False)
+    assert replay is flash and addresses(replay) == original_addresses
+    assert replay.cu[:2].tolist() == [0, 8]
+    assert replay.used_q[0] == 4 and replay.cache_lens[0] == 1028
+    assert replay.slots.tolist() == [1020, 1021, 1022, 1023, -1, -1, -1, -1]
+    assert replay.attn_mask is builder.attn_mask
+    metadata_kwargs = runtime.metadata_op.call_args.kwargs
+    assert (metadata_kwargs["mask_mode"], metadata_kwargs["win_left"], metadata_kwargs["win_right"]) == (4, 1023, 0)
+
+    # A fully clipped request keeps its physical rows; the next ordinary build recovers all eight.
+    with builder.limit_query_positions(torch.tensor([1029]), 1028):
+        empty = builder.build(inputs, 1, 8, False)
+        assert empty.cu[:2].tolist() == [0, 8] and not empty.used_q.any()
+        assert not empty.cache_lens.any() and (empty.slots == -1).all()
+    assert builder.build(inputs, 1, 8, False).used_q[0] == 8
+
+
 @pytest.mark.parametrize("causal", [False, True])
 def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
@@ -1062,7 +1130,8 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     flash = builder.build(inputs, 64, 256, False, retain_for_graph=True)
     original_addresses = addresses(flash)
     torch.testing.assert_close(inputs.query_start_loc_cpu, cu_before)
-    assert flash.used_q.tolist() == [4] * 64 + [0]
+    assert flash.used_q[:64].tolist() == [4] * 64
+    assert not flash.used_q[64:].any()
     for call in runtime.metadata_op.call_args_list:
         assert call.kwargs["max_seqlen_q"] == 4
         assert call.kwargs["max_seqlen_kv"] in (4, 140000)
@@ -1071,12 +1140,53 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     shorter = common([3] * 64, [3] * 64, tokens=256, causal=causal)
     replay = builder.build(shorter, 64, 192, False)
     assert replay is flash and addresses(replay) == original_addresses
-    assert replay.used_q.tolist() == [3] * 64 + [0]
+    assert replay.used_q[:64].tolist() == [3] * 64
+    assert not replay.used_q[64:].any()
+    assert replay.cu[-1].item() == 256 and replay.cu.diff().max().item() == 4
     if causal:
         assert not replay.cache_lens.any()
         assert replay.current is not None
     empty = builder.build(common([0] * 64, [0] * 64, tokens=256, causal=causal), 64, 0, False)
     assert empty is flash and not empty.used_q.any() and not empty.cache_lens.any()
+    assert empty.cu[-1].item() == 256 and empty.cu.diff().max().item() == 4
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_quant_metadata_splits_dspark7_graph_padding_on_replay(runtime, dcp_size):
+    builder = runtime.builder(size=dcp_size, quantized=True, query_capacity=8)
+    full = builder.build(common([32] * 4, [7] * 4, tokens=28), 4, 28, False, retain_for_graph=True)
+    original_addresses = addresses(full)
+
+    inputs = common([32], [7], tokens=28)
+    inputs.slot_mapping.copy_(torch.arange(25, 32))
+    sparse = builder.build(inputs, 1, 7, False)
+
+    assert sparse is full and addresses(sparse) == original_addresses
+    assert sparse.cu[:5].tolist() == [0, 7, 14, 21, 28]
+    assert torch.all(sparse.cu[4:] == 28)
+    assert sparse.used_q[0].item() == 7 and not sparse.used_q[1:].any()
+    assert not sparse.cache_lens[1:].any()
+    torch.testing.assert_close(sparse.slots[:7], inputs.slot_mapping)
+    assert torch.all(sparse.slots[7:] == -1)
+    torch.testing.assert_close(sparse.schedule, torch.cat((sparse.cache_lens, sparse.cu, sparse.used_q)))
+    if sparse.current is not None:
+        assert torch.all(sparse.current.slots[7:] == -1)
+        torch.testing.assert_close(sparse.current.schedule, torch.cat((sparse.used_q, sparse.cu, sparse.used_q)))
+
+
+def test_quant_metadata_respects_batch_limit_when_reserving_padding_rows(runtime, monkeypatch):
+    builder = runtime.builder(size=1, quantized=True, query_capacity=2, max_requests=8)
+    monkeypatch.setitem(builder.build.__func__.__globals__, "FLASHMLA_MAX_BATCH_SIZE", 9)
+    captured = builder.build(common([32] * 8, [2] * 8), 8, 16, False, retain_for_graph=True)
+    assert captured.used_q.numel() == 9
+
+    replay = builder.build(common([32] * 4, [2] * 4, tokens=16), 4, 8, False)
+    assert replay is captured and replay.cu.diff().max().item() == 2
+    replay_cu = replay.cu.clone()
+
+    with pytest.raises(ValueError, match="metadata batch limit"):
+        builder.build(common([32] * 8, [1] * 8, tokens=16), 8, 8, False)
+    torch.testing.assert_close(captured.cu, replay_cu)
 
 
 def test_quant_metadata_excludes_mixed_prefill_and_padding(runtime):
@@ -1141,3 +1251,73 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
     assert operation.call_args.args[6] == 1
     assert operation.call_args.kwargs["return_softmax_lse"]
+
+
+@pytest.mark.parametrize("kind", ["HISTORY", "CURRENT"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_dcp_query_layout_is_independent_of_output_mask(runtime, kind, split, masked):
+    flash = runtime.builder(size=8, heads=8).build(common([3], [2]), 1, 2, False)
+    batch = flash.current if kind == "CURRENT" else flash
+    q_nope, q_pe = torch.ones_like(batch.query[..., :512]), torch.full_like(batch.query[..., 512:], 2)
+    if split:
+        batch.query = None
+    else:
+        batch.query.fill_(float("nan"))
+    mask = torch.tensor([False, True]) if masked else None
+    batch.output_mask = mask
+    batch.adapter = Mock()
+    batch.adapter.attention.return_value = (q_nope.transpose(0, 1), q_nope[..., 0].T)
+    impl = runtime.bind(SimpleNamespace(use_quant_flashmla=False, kv_lora_rank=512, qk_rope_head_dim=64))
+    k_nope, k_pe = q_nope[:, :1], q_pe[:, :1]
+    if kind == "CURRENT":
+        impl._prepare_dcp_flashmla_current(flash, q_nope, q_pe, k_nope, k_pe)
+    impl._run_dcp_flashmla_attention(flash, q_nope, q_pe, k_nope, k_pe, attention_kind=runtime.scope["CPKVScope"][kind])
+    call = batch.adapter.attention.call_args
+    query = call.args[0]
+    if split:
+        assert isinstance(query, tuple) and query[0] is q_nope and query[1] is q_pe
+    else:
+        assert query is batch.query
+        torch.testing.assert_close(query, torch.cat((q_nope, q_pe), dim=-1))
+    assert call.kwargs.get("output_mask") is mask
+
+
+def test_split_current_allocates_component_pages_without_fused_query(runtime):
+    adapter = Mock()
+    prepared = adapter.for_capacity.return_value
+    prepared.allocate_cache.return_value = (torch.empty(5, 128, 1, 512), torch.empty(5, 128, 1, 64))
+    current = runtime.api.FlashMLACurrent.allocate_split(adapter, 129, 3, 2, torch.device("cpu"))
+    adapter.for_capacity.assert_called_once_with(2, 129)
+    prepared.allocate_cache.assert_called_once_with(5, device=torch.device("cpu"))
+    assert current.query is None and current.schedule is None
+    assert current.cache is prepared.allocate_cache.return_value
+    assert current.block_table.shape == (3, 2)
+    assert current.slots.tolist() == [-1] * 129
+    assert current.output_mask.shape == (129,) and current.output_mask.dtype == torch.bool
+
+
+def test_split_current_and_history_masks_refresh_independently(runtime, monkeypatch):
+    builder = runtime.builder(size=8, rank=1, heads=8)
+    allocate = builder._allocate
+
+    def allocate_split(tokens, rows, columns, causal):
+        batch = allocate(tokens, rows, columns, causal)
+        # Supply the split buffer contract without installing an attention provider.
+        batch.query = None
+        batch.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.schedule = None
+        return batch
+
+    monkeypatch.setattr(builder, "_allocate", allocate_split)
+    batch = builder.build(common([1, 5], [1, 1], tokens=3), 2, 2, False, retain_for_graph=True)
+    assert batch.output_mask.tolist() == [True, False, True]
+    assert batch.current.output_mask.tolist() == [False, False, True]
+    assert batch.current.slots.tolist() == [0, 128, -1]
+    schedule = batch.current.schedule
+    replay = builder.build(common([5, 0], [1, 1], tokens=3), 2, 2, False)
+    assert replay is batch and replay.current.schedule is schedule
+    assert replay.output_mask.tolist() == [False, True, True]
+    assert replay.current.output_mask.tolist() == [False, True, True]
+    assert replay.current.slots.tolist() == [0, -1, -1]

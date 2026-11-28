@@ -192,6 +192,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # accepted for signature compatibility only.
         fuse_qkv_rmsnorm: bool = False,
         shardq_eligible: bool = False,
+        *,
+        sliding_window: int | None = None,
+        dflash_draft_window: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -238,6 +241,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             dcp_q_replicate=self.dcp_q_replicate_enabled,
+            sliding_window=sliding_window,
+            dflash_draft_window=dflash_draft_window,
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
             index_group_builder=mla_modules.index_group_builder,

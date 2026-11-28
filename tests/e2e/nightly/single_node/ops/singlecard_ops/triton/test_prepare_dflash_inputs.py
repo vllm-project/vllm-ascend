@@ -249,6 +249,7 @@ ACCURACY_CASES = [
     },
     {
         "name": "query_position_clamp",
+        # Queries 62 and 63 keep their slots. The three rows past 63 must skip KV writes.
         "req_lens": [2],
         "position_starts": [60],
         "idx_mapping": [1],
@@ -478,6 +479,9 @@ def _build_reference(data, case):
             query_pos = last_valid_pos + 1 + query_off
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
+            if query_pos >= max_model_len:
+                ref.query_slot_mapping[query_idx] = PAD_SLOT_ID
+                continue
             ref.query_slot_mapping[query_idx] = _local_slot(
                 query_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
             )

@@ -1,9 +1,11 @@
 # mypy: ignore-errors
 
+import torch
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+from vllm_ascend.ops.triton.mamba.aligned_indices import compute_aligned_state_indices
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
@@ -19,6 +21,18 @@ from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_ker
 # ``postprocess_mamba_fused_kernel`` from
 # ``MambaSpecDecodeGPUContext.run_fused_postprocess_align``.
 mamba_utils._TEMPORAL_TILES = 1
+
+
+_upstream_aligned_state_indices = mamba_utils.MambaSpecDecodeGPUContext.compute_aligned_state_indices
+
+
+def _compute_aligned_state_indices(self, seq_lens: torch.Tensor, num_reqs: int) -> torch.Tensor:
+    if seq_lens.device.type != "npu":
+        return _upstream_aligned_state_indices(self, seq_lens, num_reqs)
+    return compute_aligned_state_indices(self, seq_lens, num_reqs)
+
+
+mamba_utils.MambaSpecDecodeGPUContext.compute_aligned_state_indices = _compute_aligned_state_indices
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
