@@ -1,0 +1,10 @@
+pr: 23471
+entries:
+  - category: feature
+    text: >-
+      The layerwise Mooncake PD example proxy now supports multiple processes
+      with --workers on platforms supporting TCP SO_REUSEPORT. When --workers
+      is greater than one, reserve callback ports from --port + 1 through
+      --port + --workers and make them reachable from decode nodes.
+      The default single-worker mode continues to use only the public port;
+      the proxy script can be copied and run without other repository files.
