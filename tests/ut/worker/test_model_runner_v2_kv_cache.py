@@ -58,7 +58,6 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     runner.vllm_config.attention_config.hisparse_config = None
     runner.vllm_config.kv_transfer_config.has_connector = lambda name: name == "AscendStoreConnector"
     runner.ascend_config.sparse_kv_offload_config.enabled = False
-    runner._kv_trace = None
     host = torch.empty(3 * page, dtype=torch.int8)
     backing = torch.empty(size + alignment - 1, dtype=torch.int8)
     host_pool = SimpleNamespace(allocate=MagicMock(return_value=host))
