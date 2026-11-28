@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -41,13 +42,33 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
-def _make_int8_block_view(
+def _describe_layout(tensor: torch.Tensor) -> str:
+    """One-line layout description used by the KV offload layout probe."""
+    element_size = tensor.element_size()
+    stride0_bytes = tensor.stride(0) * element_size if tensor.ndim > 0 else 0
+    return (
+        f"shape={tuple(tensor.shape)} stride={tuple(tensor.stride())} "
+        f"stride0_bytes={stride0_bytes} "
+        f"element_size={element_size} storage_offset={tensor.storage_offset()} "
+        f"storage_nbytes={tensor.untyped_storage().nbytes()} "
+        f"data_ptr={tensor.data_ptr()} storage_ptr={tensor.untyped_storage().data_ptr()}"
+    )
+
+
+def _make_int8_block_views(
     tensor: torch.Tensor,
     num_blocks: int,
     physical_blocks_per_manager_block: int,
     bytes_per_physical_block: int,
-) -> torch.Tensor:
-    """Build a zero-copy ``[num_blocks, page_bytes]`` cache view."""
+) -> list[tuple[torch.Tensor, int]]:
+    """Build zero-copy ``[num_blocks, page_bytes]`` views over one cache part.
+
+    Returns ``(view, copy_size_bytes)`` pairs. One manager block holds
+    ``physical_blocks_per_manager_block`` physical blocks of this part; when
+    those physical blocks are adjacent in storage a single coalesced view
+    covers the whole page, otherwise each physical block position gets its own
+    view so the copy size stays at one physical block.
+    """
     required_blocks = num_blocks * physical_blocks_per_manager_block
     if tensor.ndim < 1 or tensor.shape[0] < required_blocks:
         raise ValueError(
@@ -74,29 +95,48 @@ def _make_int8_block_view(
             f"stride_bytes={physical_stride_bytes}, "
             f"physical_block_bytes={bytes_per_physical_block}"
         )
-    if physical_blocks_per_manager_block > 1 and physical_stride_bytes != bytes_per_physical_block:
-        raise ValueError(
-            "Cannot coalesce a non-contiguous Ascend KV cache layout: "
-            f"stride_bytes={physical_stride_bytes}, "
-            f"physical_block_bytes={bytes_per_physical_block}"
-        )
 
-    page_size_bytes = bytes_per_physical_block * physical_blocks_per_manager_block
-    manager_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     byte_offset = tensor.storage_offset() * element_size
+    page_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(tensor.untyped_storage())
-    return torch.as_strided(
-        raw,
-        (num_blocks, page_size_bytes),
-        (manager_stride_bytes, 1),
-        byte_offset,
-    )
+    if physical_blocks_per_manager_block == 1 or physical_stride_bytes == bytes_per_physical_block:
+        return [
+            (
+                torch.as_strided(
+                    raw,
+                    (num_blocks, bytes_per_physical_block * physical_blocks_per_manager_block),
+                    (page_stride_bytes, 1),
+                    byte_offset,
+                ),
+                bytes_per_physical_block * physical_blocks_per_manager_block,
+            )
+        ]
+
+    # The physical blocks of one manager block are separated by a fixed gap that
+    # carries other data (Ascend packs the K/V counterpart or another layer into
+    # it), so a single contiguous page view would read that gap as payload.
+    # View `index` walks the `index`-th physical block of every manager block,
+    # keeping each copy at exactly one physical block.
+    return [
+        (
+            torch.as_strided(
+                raw,
+                (num_blocks, bytes_per_physical_block),
+                (page_stride_bytes, 1),
+                byte_offset + index * physical_stride_bytes,
+            ),
+            bytes_per_physical_block,
+        )
+        for index in range(physical_blocks_per_manager_block)
+    ]
 
 
 def _canonicalize_split_cache(
     cache_parts: Sequence[torch.Tensor],
     num_blocks: int,
     unpadded_page_size_bytes: int,
+    layer_name: str = "",
+    is_packed: bool | None = None,
 ) -> tuple[tuple[torch.Tensor, int], ...]:
     """Canonicalize separate K/V, scale, or recurrent-state tensors."""
     parts = tuple(cache_parts)
@@ -140,18 +180,30 @@ def _canonicalize_split_cache(
 
     bytes_per_physical_block = sum(size for _, size in selected)
     factor = unpadded_page_size_bytes // bytes_per_physical_block
-    return tuple(
-        (
-            _make_int8_block_view(
-                part,
+    views: list[tuple[torch.Tensor, int]] = []
+    for part, part_bytes in selected:
+        try:
+            views.extend(_make_int8_block_views(part, num_blocks, factor, part_bytes))
+        except ValueError:
+            # Report the measured tensor geometry before rejecting the layout,
+            # so a future unsupported layout can be diagnosed from one log line
+            # instead of a reproduction round trip.
+            logger.warning(
+                "KV offload layout probe: layer=%s is_packed=%s num_blocks=%d "
+                "unpadded_page_size_bytes=%d blocks_per_manager_block=%d "
+                "failed_part_bytes=%d coalesced_full_view=%s parts=[%s]",
+                layer_name,
+                is_packed,
                 num_blocks,
+                unpadded_page_size_bytes,
                 factor,
                 part_bytes,
-            ),
-            part_bytes * factor,
-        )
-        for part, part_bytes in selected
-    )
+                len(selected) == 1 and len(parts) > 1,
+                "; ".join(_describe_layout(part) for part in parts),
+            )
+            raise
+
+    return tuple(views)
 
 
 class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
@@ -281,6 +333,8 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             layer_cache,
                             num_blocks,
                             layer_spec.unpadded_page_size_bytes,
+                            layer_name,
+                            layer_is_packed.get(layer_name),
                         )
                         # A page mapping describes the complete local page and
                         # is valid only when one canonical view covers it. For
@@ -313,6 +367,8 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                         layer_cache,
                         num_blocks,
                         unpadded_page_size_bytes,
+                        layer_name,
+                        layer_is_packed.get(layer_name),
                     ):
                         add_view(layer_name, view, copy_size_bytes)
                 else:

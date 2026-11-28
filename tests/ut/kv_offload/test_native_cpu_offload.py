@@ -228,6 +228,44 @@ def test_split_kv_cache_rejects_noncontiguous_block_payload() -> None:
         )
 
 
+def test_split_cache_splits_gapped_physical_blocks() -> None:
+    """Ascend packs K and V into one slab: consecutive physical blocks of a
+    manager page are separated by the other part, so the page cannot be read as
+    one contiguous run. Each physical block position must become its own view."""
+    num_blocks = 3
+    blocks_per_page = 2
+    block_bytes = 4
+    physical_stride = 2 * block_bytes
+    storage = torch.arange(num_blocks * blocks_per_page * physical_stride, dtype=torch.int8)
+    key = storage.as_strided((num_blocks * blocks_per_page, block_bytes), (physical_stride, 1), 0)
+    value = storage.as_strided(
+        (num_blocks * blocks_per_page, block_bytes),
+        (physical_stride, 1),
+        block_bytes,
+    )
+
+    views = _canonicalize_split_cache(
+        (key, value),
+        num_blocks=num_blocks,
+        unpadded_page_size_bytes=2 * blocks_per_page * block_bytes,
+    )
+
+    assert len(views) == 2 * blocks_per_page
+    assert [copy_size for _, copy_size in views] == [block_bytes] * (2 * blocks_per_page)
+    assert [tuple(view.shape) for view, _ in views] == [(num_blocks, block_bytes)] * len(views)
+    assert [view.stride(0) for view, _ in views] == [blocks_per_page * physical_stride] * len(views)
+
+    # Views arrive part by part, then physical block by physical block, and each
+    # view starts one physical stride further into the part's storage.
+    for part_index, (part, part_offset) in enumerate(((key, 0), (value, block_bytes))):
+        for block_index in range(blocks_per_page):
+            view, _ = views[part_index * blocks_per_page + block_index]
+            assert view.data_ptr() == part.data_ptr() + block_index * physical_stride
+            for page in range(num_blocks):
+                slot_start = (page * blocks_per_page + block_index) * physical_stride + part_offset
+                assert view[page].tolist() == list(range(slot_start, slot_start + block_bytes))
+
+
 def test_ascend_connector_worker_accepts_separate_kv_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
