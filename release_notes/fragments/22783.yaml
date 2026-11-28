@@ -1,0 +1,4 @@
+pr: 22783
+entries:
+  - category: bugfix
+    text: Fixed Memcache prefix reuse and DSpark restores when a readable DRAM address follows an SSD descriptor.
