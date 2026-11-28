@@ -312,7 +312,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
+                store_on_host=enable_sfa(vllm_config)
+                and get_ascend_config().sparse_kv_offload_config.is_host_layer(layer_name),
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
@@ -456,6 +457,8 @@ def build_attn_metadata(
     full_graph_mode: bool = False,
     skip_ring_state_update: bool | None = None,
     req_ids_tensor: torch.Tensor | None = None,
+    selective_tail_rows: torch.Tensor | None = None,
+    selective_tail_slots: torch.Tensor | None = None,
     token_to_req: torch.Tensor | None = None,
     offload_dummy: bool = False,
     req_topk_buffer_slots: torch.Tensor | None = None,
@@ -585,6 +588,8 @@ def build_attn_metadata(
             max_seq_len=max_seq_len,
             causal=group_causal,
             req_ids_tensor=req_ids_tensor,
+            selective_tail_rows=selective_tail_rows,
+            selective_tail_slots=selective_tail_slots,
             token_to_req=token_to_req,
             offload_dummy=offload_dummy,
             req_topk_buffer_slots=req_topk_buffer_slots,
@@ -1518,13 +1523,15 @@ def _allocate_kv_cache(
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, layer_spec)
                 k_factor, v_factor = calc_split_factor([k_dim, v_dim])
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                offload_config = get_ascend_config().sparse_kv_offload_config
                 kv_cache_raw_tensors[layer_name] = allocate_kv_cache_tensors_for_sparse_kv_offload(
                     int(layer_size // k_factor),
                     int(layer_size // v_factor),
                     alignment,
                     get_tensor_model_parallel_rank(),
-                    get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
+                    offload_config.keep_device_kv_cache,
                     lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                    local_host_pool=offload_config.selective_offload,
                 )
         elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size

@@ -86,12 +86,13 @@ from vllm_ascend.core.kv_cache_placement import (
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
-from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.cpu_binding import bind_cpus, bind_rank_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import SELECTIVE_PD_STAGING_BYTES
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -99,6 +100,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_selective_sdma_device_memory_bytes,
+    get_sparse_kv_offload_dram_limit_bytes,
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -496,6 +499,17 @@ class NPUWorker(WorkerBase):
             tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
             self.local_rank += dp_local_rank * tp_pp_world_size
 
+        ascend_config = get_ascend_config()
+        rank_cpu_bindings = ascend_config.rank_cpu_bindings
+        prefetch_cpus = ascend_config.selective_prefetch_cpus
+        self.selective_prefetch_cpu = -1
+        if prefetch_cpus is not None and (rank_cpu_bindings is None or not self.use_v2_model_runner):
+            raise ValueError("selective_prefetch_cpus requires rank_cpu_bindings and Model Runner V2.")
+        if rank_cpu_bindings is not None:
+            bind_rank_cpus(self.local_rank, rank_cpu_bindings, selective_prefetch_cpus=prefetch_cpus)
+            if prefetch_cpus is not None:
+                self.selective_prefetch_cpu = prefetch_cpus[self.local_rank]
+
         # Publish the logical-to-physical mapping for topology queries.
         assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
         if assigned_physical_gpu_ids is not None:
@@ -605,7 +619,9 @@ class NPUWorker(WorkerBase):
             else:
                 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                self.model_runner = NPUModelRunnerV2(
+                    self.vllm_config, self.device, selective_prefetch_cpu=self.selective_prefetch_cpu
+                )
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
@@ -623,13 +639,23 @@ class NPUWorker(WorkerBase):
             return int(available_device_memory_bytes)
 
         kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
-        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        dram_limit_bytes = get_sparse_kv_offload_dram_limit_bytes(
+            sparse_kv_offload_config, self.vllm_config.parallel_config.tensor_parallel_size
+        )
+        # These buffers are allocated after profiling, when the KV caches are registered.
+        available_device_memory_bytes -= get_selective_sdma_device_memory_bytes(
+            self.vllm_config, sparse_kv_offload_config
+        )
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if sparse_kv_offload_config.selective_offload and kv_transfer_config and kv_transfer_config.is_kv_consumer:
+            available_device_memory_bytes -= SELECTIVE_PD_STAGING_BYTES
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
             vllm_config=self.vllm_config,
             available_device_memory_bytes=available_device_memory_bytes,
             dram_limit_bytes=dram_limit_bytes,
             keep_device_kv_cache=sparse_kv_offload_config.keep_device_kv_cache,
+            selective_offload=sparse_kv_offload_config.selective_offload,
         )
         logger.info_once(
             "Sparse KV offload memory plan: npu_limit=%d blocks, "
@@ -1071,7 +1097,8 @@ class NPUWorker(WorkerBase):
         # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
         # are already registered here; process-wide migration must not revisit
         # their pinned backing, which may also be shared across NUMA nodes.
-        if get_ascend_config().enable_cpu_binding:
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_cpu_binding and ascend_config.rank_cpu_bindings is None:
             engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
                 bind_cpus(

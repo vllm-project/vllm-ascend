@@ -545,6 +545,13 @@ class AscendSharedExperts:
                 quant_mode="dynamic",
             )
         else:
+            if self.swiglu_limit == 0:
+                # V2 validates these arguments even in standard SwiGLU mode.
+                swiglu_args = {"swiglu_mode": 0, "clamp_limit": 7.0, "glu_alpha": 1.702, "glu_bias": 1.0}
+            else:
+                swiglu_args = {"swiglu_mode": 1, "clamp_limit": self.swiglu_limit}
+                if get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS):
+                    swiglu_args.update(glu_alpha=self.swiglu_alpha, glu_bias=self.swiglu_beta)
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                 x=submitted_gate_up.gate_up,
                 weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
@@ -555,13 +562,7 @@ class AscendSharedExperts:
                 group_index=None,
                 activate_left=True,
                 quant_mode=1,
-                swiglu_mode=1,
-                clamp_limit=self.swiglu_limit,
-                **(
-                    {}
-                    if not get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS)
-                    else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
-                ),
+                **swiglu_args,
             )
         self._wait_for_routed_stage(
             milestones,

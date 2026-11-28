@@ -58,12 +58,16 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+set(SELECTIVE_LIM_KERNEL ${CMAKE_CURRENT_SOURCE_DIR}/csrc/attention/fused_lightning_indexer_manage/op_kernel/precomputed_topk.cpp)
+if(SOC_VERSION MATCHES "ascend310p.*")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
 else()
-    ascendc_library(vllm_ascend_kernels SHARED
-        ${VLLM_ASCEND_CUSTOM_OP}
-    )
+    if(SOC_VERSION MATCHES "ascend950")
+        set(VLLM_ASCEND_CUSTOM_OP ${SELECTIVE_LIM_KERNEL})
+    else()
+        list(APPEND VLLM_ASCEND_CUSTOM_OP ${SELECTIVE_LIM_KERNEL})
+    endif()
+    ascendc_library(vllm_ascend_kernels SHARED ${VLLM_ASCEND_CUSTOM_OP})
 endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
@@ -76,11 +80,6 @@ else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
-endif()
-
-# Sparse KV cache offloading is currently supported on Atlas A3 only.
-if(SOC_VERSION MATCHES "ascend910_93.*")
-  find_package(OpenMP REQUIRED)
 endif()
 
 include_directories(
@@ -101,8 +100,16 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(TARGET vllm_ascend_kernels)
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
+endif()
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
+endif()
+
+# The selective planner and Host gather also use OpenMP on 950.
+if(SOC_VERSION MATCHES "ascend910_93.*" OR (SOC_VERSION MATCHES "ascend950" AND TARGET vllm_ascend_kernels))
+  find_package(OpenMP REQUIRED)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
@@ -175,6 +182,7 @@ check_cxx_source_compiles("
     return 0;
   }
 " HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+
 if(HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
   message(STATUS "aclrtHostRegisterV2: pinned host registration available")
   target_compile_definitions(vllm_ascend_C PRIVATE CANN_HOST_REGISTER_V2_PINNED)
@@ -210,7 +218,7 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+if(SOC_VERSION MATCHES "ascend310p.*")
   target_link_libraries(
     vllm_ascend_C
     PUBLIC
@@ -227,7 +235,7 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+if(SOC_VERSION MATCHES "ascend310p.*")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

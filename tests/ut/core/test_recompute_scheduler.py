@@ -63,6 +63,31 @@ def test_recompute_scheduler_config_picks_sync_and_async_class():
     assert async_config.scheduler_cls == ("vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler")
 
 
+@pytest.mark.parametrize("selective", [False, True])
+def test_forced_reset_routes_selective_requests_to_prefill_node(selective):
+    scheduler = _make_preempt_scheduler()
+    scheduler.vllm_config = SimpleNamespace()
+    request = SimpleNamespace(request_id="req-1", client_index=2)
+    scheduler.running = [request]
+    scheduler.prev_step_scheduled_req_ids = {"req-1"}
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch("vllm_ascend.core.recompute_scheduler.uses_selective_kv_offload", return_value=selective),
+        patch.object(Scheduler, "reset_prefix_cache", return_value=True) as upstream_reset,
+    ):
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    upstream_reset.assert_called_once_with(not selective, False)
+    if selective:
+        scheduler.finish_requests.assert_called_once_with("req-1", RequestStatus.FINISHED_ABORTED)
+        assert scheduler._recomputed_reqs == [RecomputeReqInfo("req-1", 2)]
+        assert not scheduler.prev_step_scheduled_req_ids
+    else:
+        scheduler.finish_requests.assert_not_called()
+        assert not scheduler._recomputed_reqs
+
+
 def test_preempt_offloads_before_upstream_releases_blocks():
     connector = MagicMock()
     connector.update_state_before_preempt.return_value = True

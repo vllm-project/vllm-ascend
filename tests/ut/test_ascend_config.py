@@ -921,29 +921,59 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
-    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
-    def test_950_rejects_sparse_offload(self, mock_is_950):
-        for keep_device_kv_cache in (False, True):
-            for use_fused_overlap in (False, True):
-                with (
-                    self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
-                    self.assertRaisesRegex(ValueError, "not supported on 950PR&950DT Products"),
-                ):
-                    SparseKVOffloadConfig.from_additional_config(
-                        SimpleNamespace(speculative_config=None),
-                        {
-                            "enabled": True,
-                            "keep_device_kv_cache": keep_device_kv_cache,
-                            "use_fused_overlap": use_fused_overlap,
-                        },
-                    )
-        mock_is_950.assert_called()
+    def test_selective_offload_uses_model_full_shared_roles(self):
+        roles = ["full", "full", "full", "shared", "shared", "shared", "full"]
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(index_topk=128, indexer_types=roles, num_hidden_layers=len(roles)),
+                enforce_eager=True,
+            ),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+                tensor_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
+            speculative_config=None,
+        )
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "topk_buffer_size": 256})
 
-    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
-    def test_a5_allows_sparse_offload_disabled(self, mock_is_950):
+        self.assertFalse(config.use_fused_copy_sfa)
+        self.assertFalse(config.is_host_layer("model.layers.0.attn"))
+        self.assertTrue(config.is_host_layer("model.layers.3.attn"))
+        self.assertFalse(config.is_host_layer("model.layers.6.attn"))
+        vllm_config.parallel_config.tensor_parallel_size = 2
+        vllm_config.parallel_config.data_parallel_size = 2
+        self.assertTrue(SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True}).selective_offload)
+
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config = SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, cudagraph_capture_sizes=[1]
+        )
+        vllm_config.scheduler_config = SimpleNamespace(max_num_seqs=1)
+        SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "topk_buffer_size": 256})
+        vllm_config.scheduler_config.max_num_seqs = 2
+        vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2]
+        SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "topk_buffer_size": 256})
+        vllm_config.scheduler_config.max_num_seqs = 1
+        with self.assertRaisesRegex(ValueError, "cudagraph_capture_sizes"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        vllm_config.model_config.enforce_eager = True
+
+        roles[0] = "shared"
+        with self.assertRaisesRegex(ValueError, "starting with full"):
+            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+
+        roles[:] = ["full"] * len(roles)
+        legacy = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertFalse(legacy.selective_offload)
+        self.assertTrue(legacy.is_host_layer("model.layers.0.attn"))
+
+    def test_sparse_offload_disabled(self):
         config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(speculative_config=None), {})
         self.assertFalse(config.enabled)
-        mock_is_950.assert_not_called()
 
     def test_preempt_offload_is_mutually_exclusive(self):
         for multi_connector in (False, True):

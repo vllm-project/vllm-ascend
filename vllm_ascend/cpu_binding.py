@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 from collections import defaultdict
+from pathlib import Path
 
 import psutil
 import regex as re
@@ -792,6 +793,58 @@ class CpuAlloc:
         else:
             logger.info("CPU affinity applied without process-wide NUMA page migration.")
         self.bind_npu_irq()
+
+
+def bind_rank_cpus(local_rank: int, cpu_lists: list[str], *, selective_prefetch_cpus: list[int] | None = None) -> None:
+    """Apply an explicit local worker CPU mask before its runtime threads start."""
+    if not hasattr(os, "sched_setaffinity"):
+        raise RuntimeError("Explicit rank CPU binding requires Linux sched_setaffinity.")
+    if not 0 <= local_rank < len(cpu_lists):
+        raise ValueError(f"Explicit rank CPU binding has no CPU list for local rank {local_rank}.")
+
+    assigned: set[int] = set()
+    masks: list[set[int]] = []
+    for rank, cpu_list in enumerate(cpu_lists):
+        if not DeviceInfo.is_cpu_list(cpu_list) or any(
+            int(first) > int(last) for first, last in re.findall(r"(\d+)-(\d+)", cpu_list)
+        ):
+            raise ValueError(f"Explicit rank CPU binding has an invalid CPU list for local rank {rank}: {cpu_list!r}.")
+        mask = set(DeviceInfo.expand_cpu_list(cpu_list))
+        overlap = mask & assigned
+        if overlap:
+            raise ValueError(f"Explicit rank CPU bindings overlap at local rank {rank}: {sorted(overlap)}.")
+        assigned.update(mask)
+        masks.append(mask)
+
+    mask = masks[local_rank]
+    allowed = os.sched_getaffinity(0)
+    if selective_prefetch_cpus is not None:
+        if len(selective_prefetch_cpus) != len(cpu_lists) or any(cpu < 0 for cpu in selective_prefetch_cpus):
+            raise ValueError("selective_prefetch_cpus requires one nonnegative CPU ID per local rank.")
+        dedicated = set(selective_prefetch_cpus)
+        if len(dedicated) != len(selective_prefetch_cpus):
+            raise ValueError("selective_prefetch_cpus must assign a different physical core to each local rank.")
+        cpu = selective_prefetch_cpus[local_rank]
+        if cpu not in allowed:
+            raise ValueError(f"Selective prefetch CPU {cpu} is outside the allowed mask for local rank {local_rank}.")
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
+        siblings = set(DeviceInfo.expand_cpu_list(topology.read_text().strip()))
+        if siblings & (assigned | (dedicated - {cpu})):
+            raise ValueError(f"Selective prefetch core {cpu} overlaps a rank mask or another prefetch core.")
+
+    unavailable = mask - allowed
+    if unavailable:
+        raise ValueError(f"CPUs outside the allowed mask for local rank {local_rank}: {sorted(unavailable)}.")
+
+    os.sched_setaffinity(0, mask)
+    for thread in psutil.Process().threads():
+        if thread.id != os.getpid():
+            try:
+                os.sched_setaffinity(thread.id, mask)
+            except ProcessLookupError:
+                # The thread exited between enumeration and the syscall.
+                continue
+    logger.info("Explicit CPU binding for local rank %d: %s", local_rank, cpu_lists[local_rank])
 
 
 def bind_cpus(rank_id: int, npu_id: int, *, migrate_memory: bool = True) -> None:

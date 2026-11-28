@@ -187,6 +187,7 @@ class CopySfaTopkSlotAllocator:
         self.capacity = capacity
         self._free: list[int] = list(range(capacity))
         self._req_to_slot: dict[str, int] = {}
+        self._tail_positions: dict[str, int] = {}
 
     def bind(self, req_id: str) -> int:
         slot = self._req_to_slot.get(req_id)
@@ -198,8 +199,44 @@ class CopySfaTopkSlotAllocator:
         self._req_to_slot[req_id] = slot
         return slot
 
+    def tail_row(self, req_id: str, position: int, block_size: int) -> tuple[int, int]:
+        """Return the request's slot and first valid tail offset in this block."""
+        block = position // block_size
+        slot = self.bind(req_id)
+        first = self._tail_positions.get(req_id, position)
+        first = min(first, position) if first // block_size == block else position
+        self._tail_positions[req_id] = first
+        return slot, first % block_size
+
     def get(self, req_id: str) -> int | None:
         return self._req_to_slot.get(req_id)
+
+    def prepare_tail_inputs(
+        self,
+        req_ids: Sequence[str],
+        positions: Sequence[int],
+        block_size: int,
+        row_stride: int,
+        hot_tokens: int,
+        packed: np.ndarray,
+        *,
+        dummy: bool,
+    ) -> None:
+        """Pack request tail rows and shared-layer write slots in one Host buffer."""
+        padded = packed.size // 3
+        if packed.size != 3 * padded or len(req_ids) > padded or len(positions) < len(req_ids):
+            raise ValueError("Selective tail metadata does not cover the request batch")
+        packed.fill(-1)
+        if dummy:
+            return
+        rows, slots = packed[: 2 * padded].reshape(padded, 2), packed[2 * padded :]
+        for row, req_id in enumerate(req_ids):
+            position = int(positions[row])
+            if position < 0:
+                raise ValueError("Selective tail positions must be nonnegative")
+            slot, first = self.tail_row(req_id, position, block_size)
+            rows[row] = slot, first
+            slots[row] = slot * row_stride + hot_tokens + position % block_size
 
     def can_bind(self, req_id: str) -> bool:
         """Check admission without reserving a row before KV allocation succeeds."""
@@ -207,6 +244,7 @@ class CopySfaTopkSlotAllocator:
 
     def release(self, req_id: str) -> int | None:
         slot = self._req_to_slot.pop(req_id, None)
+        self._tail_positions.pop(req_id, None)
         if slot is not None:
             self._free.append(slot)
         return slot
