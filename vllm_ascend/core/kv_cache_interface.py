@@ -41,6 +41,12 @@ class AlignedKVCacheTensor(KVCacheTensor):
     alignment: int
 
 
+def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
+    """Apply the configured override when an Ascend caller starts from bytes."""
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    return num_blocks if override is None else override
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state

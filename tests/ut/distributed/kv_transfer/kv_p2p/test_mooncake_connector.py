@@ -18,12 +18,13 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.request import RequestStatus
 from zmq.constants import ROUTER
 from zmq.sugar.socket import Socket
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -54,7 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -398,17 +399,20 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             index_layer: index_spec,
         }
         self.assertFalse(is_kv_cache_spec_uniform(layer_specs))
-        uniform_spec = UniformTypeKVCacheSpecs(
-            block_size=128,
-            kv_cache_specs=layer_specs,
-        )
+        if vllm_version_is("0.34.0"):
+            uniform_spec = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=layer_specs)
+            groups = [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)]
+        else:
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            groups = [KVCacheGroup.from_layers(make_layer_cache_configs(layer_specs))]
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
         num_blocks = 10
-        allocated_config = get_kv_cache_config_from_groups(
+        allocated_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
             vllm_config,
-            [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
-            available_memory=uniform_spec.page_size_bytes * num_blocks,
+            groups,
+            num_blocks,
         )
         placements = {
             layer: tensor

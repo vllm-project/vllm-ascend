@@ -14,8 +14,6 @@ from math import lcm
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-
-# Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
@@ -35,6 +33,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
+    may_override_num_blocks,
 )
 
 

@@ -17,7 +17,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     _approximate_gcd,
-    may_override_num_blocks,
     unify_hybrid_kv_cache_specs,
 )
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
@@ -39,6 +38,7 @@ from vllm_ascend.core.kv_cache_compat import (
     get_group_layer_layouts,
     legacy_group_view,
 )
+from vllm_ascend.core.kv_cache_interface import may_override_num_blocks
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,

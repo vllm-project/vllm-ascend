@@ -13,11 +13,6 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
-
-try:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
-except ImportError:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
@@ -36,6 +31,7 @@ from vllm_ascend.core.kv_cache_compat import (
 )
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
+    may_override_num_blocks,
 )
 
 QSA_MAIN: Final = "qsa_main"
