@@ -1,0 +1,4 @@
+pr: 23265
+entries:
+  - category: bugfix
+    text: Fixed A5 MegaMoE selection for MTP draft experts converted from native FP8 to MXFP8 at model load time.

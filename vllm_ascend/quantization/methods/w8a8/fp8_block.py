@@ -343,12 +343,18 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         # a group size, which is how the upstream loader learns to narrow
         # `*_weight_scale_inv` per expert shard.
         self.group_size = self.block_k
-        self.model_dtype = get_current_vllm_config().model_config.dtype
+        vllm_config = get_current_vllm_config()
+        self.model_dtype = vllm_config.model_config.dtype
+        self._draft_model_config = (
+            vllm_config.speculative_config.draft_model_config
+            if getattr(vllm_config.model_config, "runner_type", None) == "draft"
+            else None
+        )
         self.moe_config = moe_config
         self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod()
         # MoE MXFP8 has group_size only. Snapshot the Linear helper here so
         # requantize does not call get_current_vllm_config() at load time.
-        self._mx_scale_alg = get_dynamic_mx_quant_scale_alg(get_current_vllm_config())
+        self._mx_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
         self.use_mxfp8 = True
         self._bf16_method: Any = None
 
@@ -432,6 +438,9 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             self.mxfp8_method.process_weights_after_loading(layer)
         else:
             self.bf16_method.process_weights_after_loading(layer)
+        if self._draft_model_config is not None:
+            # The routed experts recorded the type before the FP8 conversion.
+            self._draft_model_config.draft_moe_quant_type = self.quant_type
 
     def _resolve_experts(self, layer: torch.nn.Module, weight_name: str, scale_name: str) -> torch.Tensor:
         """Expand every expert of one MoE weight into the model dtype."""
