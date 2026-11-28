@@ -412,13 +412,17 @@ for PR CI.
 
 ### Skipping CI for a revert PR
 
-Add the `skip_ci` label to a PR whose title contains `[Revert]` to skip the
-E2E workflow's lint, CPU UT, NPU E2E, and CODEOWNERS checks. The `ci-gate` job
-verifies the current title, label, and head before reporting success. Removing
-`skip_ci` re-evaluates the waiver for the current commit and starts ordinary CI
-after the waiver has been revoked. Removing other labels does not restart the
-PR workflow. GitHub still applies the target branch's native rules, including
-DCO and required reviews.
+Repository members with Write, Maintain, or Admin access can add `skip_ci` to
+a PR whose title contains `[Revert]` to skip the E2E workflow's lint, CPU UT,
+NPU E2E, and CODEOWNERS checks. PRs that change `.github/`, including renames
+into or out of the directory, run regular CI. The bot removes `skip_ci` when
+it verifies that the person who applied it lacks Write access or that the PR
+changes `.github/`, and explains why in a PR comment. The `ci-gate` job verifies
+the current title, label authorization, and commit SHAs before reporting success.
+Removing `skip_ci` from an eligible PR re-evaluates the waiver for the current
+commit and starts ordinary CI after the waiver has been revoked. Removing other
+labels does not restart the PR workflow. GitHub still applies the target
+branch's native rules, including DCO and required reviews.
 
 ### CODEOWNERS approval gate
 

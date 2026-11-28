@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Revoke an existing skip_ci decision before starting CI on the same PR."""
+"""Reject invalid skip_ci labels or revoke an existing CI waiver."""
 
+import argparse
 import json
 import os
 import re
@@ -22,15 +23,23 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 from refresh_ci_gate import API_ROOT, _get_json, latest_pull_request_run, rerun_job
+from revert_waiver import (
+    active_label_event,
+    inspect_pr_paths,
+    label_actor_has_write_access,
+    skip_ci_events,
+    skip_ci_label,
+)
 
 PAGE_SIZE = 100
 GATE_WAIT_SECONDS = 300
 GATE_POLL_INTERVAL = 5
 
 
-def current_pull(repo_url: str, token: str, pr_number: int, signal: dict) -> dict | None:
+def current_pull(repo_url: str, token: str, pr_number: int, signal: dict, *, has_skip_ci: bool = False) -> dict | None:
     pull = _get_json(f"{repo_url}/pulls/{pr_number}", token)
     head = pull["head"]
     base = pull["base"]["ref"]
@@ -43,7 +52,7 @@ def current_pull(repo_url: str, token: str, pr_number: int, signal: dict) -> dic
         and head_repo.get("id") == signal_repo.get("id")
         and head_repo.get("id") is not None
         and (base == "main" or base.endswith("-dev") or base.startswith("releases/v"))
-        and not any(label["name"].casefold() == "skip_ci" for label in pull["labels"])
+        and (skip_ci_label(pull) is not None) == has_skip_ci
     ):
         return pull
     return None
@@ -51,19 +60,10 @@ def current_pull(repo_url: str, token: str, pr_number: int, signal: dict) -> dic
 
 def removal_exists(repo_url: str, token: str, pr_number: int, start: str, end: str) -> bool:
     # Confirm the signal against GitHub. The PR can change the relay workflow.
-    page = 1
-    while True:
-        events = _get_json(f"{repo_url}/issues/{pr_number}/events?per_page={PAGE_SIZE}&page={page}", token)
-        for event in events:
-            if (
-                event["event"] == "unlabeled"
-                and event["label"]["name"].casefold() == "skip_ci"
-                and start <= event["created_at"] <= end
-            ):
-                return True
-        if len(events) < PAGE_SIZE:
-            return False
-        page += 1
+    return any(
+        event["event"] == "unlabeled" and start <= event["created_at"] <= end
+        for event in skip_ci_events(repo_url, token, pr_number)
+    )
 
 
 def run_jobs(repo_url: str, token: str, run_id: int) -> dict:
@@ -86,7 +86,7 @@ def wait_for_gate(repo_url: str, token: str, run_id: int, previous_gate_id: int 
     raise TimeoutError(f"Could not verify the ci-gate result for run {run_id} in time.")
 
 
-def change_labels(url: str, token: str, method: str, body: dict | None = None) -> None:
+def send_api_request(url: str, token: str, method: str, body: dict | None = None) -> None:
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode() if body is not None else None,
@@ -105,17 +105,66 @@ def trigger_regular_ci(repo_url: str, token: str, pr_number: int) -> None:
     # Same labeled-event mechanism as /run, including the case where ci-run
     # is already on the PR. A GITHUB_TOKEN mutation would not emit a CI run.
     try:
-        change_labels(f"{repo_url}/labels", token, "POST", {"name": "ci-run"})
+        send_api_request(f"{repo_url}/labels", token, "POST", {"name": "ci-run"})
     except urllib.error.HTTPError as error:
         if error.code != 422:
             raise
     labels_url = f"{repo_url}/issues/{pr_number}/labels"
     try:
-        change_labels(f"{labels_url}/ci-run", token, "DELETE")
+        send_api_request(f"{labels_url}/ci-run", token, "DELETE")
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-    change_labels(labels_url, token, "POST", {"labels": ["ci-run"]})
+    send_api_request(labels_url, token, "POST", {"labels": ["ci-run"]})
+
+
+def reject_invalid_label(repo: str, token: str, signal: dict) -> None:
+    match = re.fullmatch(r"Check skip_ci for PR ([1-9][0-9]*)", signal["display_title"])
+    if match is None:
+        return
+    pr_number = int(match[1])
+    repo_url = f"{API_ROOT}/repos/{repo}"
+    pull = current_pull(repo_url, token, pr_number, signal, has_skip_ci=True)
+    if not pull:
+        return
+
+    # Match the live label event to the GitHub-authenticated run actor before
+    # removing a label for lack of permission.
+    actor_id = (signal.get("actor") or {}).get("id")
+    label_event = active_label_event(repo_url, token, pr_number) if actor_id else None
+    if (
+        label_event
+        and (label_event.get("actor") or {}).get("id") == actor_id
+        and not label_actor_has_write_access(repo_url, token, label_event)
+    ):
+        current = current_pull(repo_url, token, pr_number, signal, has_skip_ci=True)
+        latest = active_label_event(repo_url, token, pr_number)
+        if not current or not latest or latest["id"] != label_event["id"]:
+            return
+        reason = "this label requires Write, Maintain, or Admin access"
+    else:
+        current, protected_paths = inspect_pr_paths(f"{repo_url}/pulls/{pr_number}", token, pull)
+        if not protected_paths:
+            return
+        reason = "this PR changes `.github/`"
+
+    label = skip_ci_label(current)
+    if not label or current["state"] != "open":
+        return
+
+    issue_url = f"{repo_url}/issues/{pr_number}"
+    try:
+        send_api_request(f"{issue_url}/labels/{quote(label, safe='')}", token, "DELETE")
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return  # Someone already removed the label.
+        raise
+    send_api_request(
+        f"{issue_url}/comments",
+        token,
+        "POST",
+        {"body": f"Removed `skip_ci` because {reason}. Regular CI and CODEOWNERS approval apply."},
+    )
 
 
 def revoke(repo: str, token: str, signal: dict) -> None:
@@ -163,5 +212,8 @@ def revoke(repo: str, token: str, signal: dict) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reject-invalid-label", action="store_true")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-    revoke(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"], event["workflow_run"])
+    handler = reject_invalid_label if parser.parse_args().reject_invalid_label else revoke
+    handler(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"], event["workflow_run"])

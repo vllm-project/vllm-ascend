@@ -13,15 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Revert CI Waiver Removed
+name: Revert CI Waiver Label Changed
 run-name: >-
   ${{ github.event.label.name == 'skip_ci' &&
-      format('Revoke skip_ci for PR {0}', github.event.pull_request.number) ||
-      'Ignore unrelated label removal' }}
+      format('{0} skip_ci for PR {1}', github.event.action == 'labeled' && 'Check' || 'Revoke',
+             github.event.pull_request.number) ||
+      'Ignore unrelated label change' }}
 
 on:
   pull_request:
-    types: [unlabeled]
+    types: [labeled, unlabeled]
     branches:
       - main
       - '*-dev'
@@ -30,8 +31,8 @@ on:
 permissions: {}
 
 jobs:
-  signal-skip-ci-removal:
+  signal-skip-ci-change:
     if: github.event.label.name == 'skip_ci'
     runs-on: linux-amd64-cpu-1-hk
     steps:
-      - run: echo 'The refresh bot will verify the skip_ci removal.'
+      - run: echo 'The waiver bot will verify the skip_ci label change.'
