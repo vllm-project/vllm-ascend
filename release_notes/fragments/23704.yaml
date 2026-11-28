@@ -1,0 +1,12 @@
+pr: 23704
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MooncakeConnectorV2 initialization failures for HND/LBHNC/BLHNC
+      caches when the number of KV heads per rank equals the block token count.
+      GQA cache views with noncontiguous bytes inside a block now fail at
+      registration instead of risking incorrect transfers.
+  - category: feature
+    text: >-
+      HiSparse P/D Pull over MemFabric now supports different Prefill and Decode TP sizes,
+      with PCP=1 on Decode and DCP=1 on Prefill.
