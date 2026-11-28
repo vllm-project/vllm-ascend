@@ -244,6 +244,50 @@ GLM51_CASE = WeightUpdateModelCase(
 GLM_CASES = (GLM51_CASE,)
 
 
+def _kimi_k31_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+    from tests.e2e.common.rlhf.weight_transfer.weight_source import KimiK31WeightSource
+
+    return KimiK31WeightSource(case, device)
+
+
+KIMI_K31_CASE = WeightUpdateModelCase(
+    id="kimi-k3.1-pro-kda-dsa",
+    model="moonshotai/Kimi-K3.1-Pro",
+    weight_source_factory=_kimi_k31_source,
+    meta_config_attribute="text_config",
+    hf_overrides={
+        "quantization_config": None,
+        "text_config": {
+            "quantization_config": None,
+            "num_hidden_layers": 4,
+            "num_experts": 8,
+            "num_experts_per_token": 4,
+            "attn_res_block_size": 2,
+            "linear_attn_config": {
+                "kda_layers": [1, 2, 3],
+                "full_attn_layers": [4],
+                "num_heads": 96,
+                "head_dim": 128,
+                "short_conv_kernel_size": 4,
+                "use_full_rank_gate": True,
+                "gate_lower_bound": -5.0,
+            },
+            "dsa_config": {
+                "dsa_layers": [4],
+                "index_topk": 2048,
+                "index_head_dim": 128,
+                "index_num_heads": 32,
+                "index_rope_dim": 0,
+                "index_k_norm_type": "layernorm",
+                "index_topk_freq": 1,
+                "index_skip_topk_offset": 1,
+            },
+        },
+    },
+    extra_server_args=("--language-model-only", "--no-enable-prefix-caching", "--max-num-seqs", "1"),
+)
+
+
 # Bound KV allocation to leave room for the sparse-attention graph workspace.
 MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
 
@@ -323,7 +367,15 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE)
+MODEL_CASES = (
+    *QWEN_CASES,
+    *DEEPSEEK_CASES,
+    *DEEPSEEK_V41_CASES,
+    *GLM_CASES,
+    KIMI_K31_CASE,
+    MINIMAX_M3_CASE,
+    MINIMAX_M31_FLASH_CASE,
+)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
