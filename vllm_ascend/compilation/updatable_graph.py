@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import torch
@@ -67,7 +67,14 @@ class GraphUpdateTask:
 
     def bind(self, params: Params) -> "GraphUpdateTask":
         runtime_kwargs = {k: params.get(k, v) for k, v in self.kwargs.items()}
-        return replace(self, kwargs=runtime_kwargs)
+        return GraphUpdateTask(
+            operation=self.operation,
+            kwargs=runtime_kwargs,
+            provider=self.provider,
+            provider_index=self.provider_index,
+            handle=self.handle,
+            event=self.event,
+        )
 
     def apply(self, update_stream) -> None:
         torch.npu.graph_task_update_begin(update_stream, self.handle)

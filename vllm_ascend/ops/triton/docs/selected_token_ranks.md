@@ -1,6 +1,6 @@
 # selected_token_ranks
 
-> Source: `vllm_ascend/worker/v2/sample/logprob.py` (`_ranks_kernel`, called by `compute_topk_logprobs`).
+> Source: `vllm_ascend/worker/v2/sample/logprob.py` (`_ranks_kernel`, called by `compute_topk_scores` / `compute_topk_logprobs`).
 
 ## Description
 
@@ -19,7 +19,7 @@
   5. Reduce the counting vector to a scalar and store the rank as int64.
 - **Supported modes**: The operator is intended for Atlas A2, Atlas A3, and 950PR&950DT Products in the V2 score implementation. Single-operator tests run eagerly. End-to-end model ACL Graph and MTP coverage is not established by these tests.
 
-  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`, while the existing Ascend patch assigns the retired `compute_topk_logprobs` name. This rank-only change does not repair that binding. Direct calls to the Ascend wrapper and its operator tests execute this kernel; do not infer a changed standard-service result solely from this PR. See [the related score-binding work](https://github.com/vllm-project/vllm-ascend/pull/20434).
+  `vllm_ascend/patch/worker/patch_triton.py` rebinds `compute_topk_scores` on `logprob`, `prompt_logprob`, `sampler`, and `rejection_sampler`, so standard MRV2 callers execute this vector-core kernel.
 
 ## Parameters
 
