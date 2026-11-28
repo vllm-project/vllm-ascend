@@ -84,6 +84,19 @@ class FakeStore:
         return [0] * len(keys)
 
 
+@pytest.mark.parametrize(
+    "states,expected",
+    [([1, 0, 1, 1], [False, False, False])],
+)
+def test_review_transfer_lookup_normalizes_malformed_exists(states, expected):
+    # This entry preserves reported short-prefix hits and pads missing states;
+    # an overlong result raises internally and falls back to an all-miss list.
+    transfer = KVTransferThread.__new__(KVTransferThread)
+    transfer.m_store = SimpleNamespace(exists=lambda keys: states)
+
+    assert transfer.lookup(["a", "b", "c"]) == expected
+
+
 class FakeTokenDatabase(ChunkedTokenDatabase):
     def __init__(self, block_size=16):
         super().__init__([KeyMetadata("m", 0, 0, 0)], [block_size], None)
@@ -1391,6 +1404,228 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertNotIn("r1", t.stored_requests)
+
+
+# Verify the ordinary receiver preserves key/address/failure alignment for zero, shifted and wrapped ranks.
+@pytest.mark.parametrize("rank", [0, 1, 4])
+def test_receiver_rotation_for_tp_rank(rank):
+    selected_rank = rank
+    original = None
+    for rank in dict.fromkeys((0, selected_rank)):
+        store = FakeStore()
+        invalid_block_ids: set[int] = set()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=rank,
+            tp_size=8,
+            ready_event=threading.Event(),
+            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        request = ReqMeta(
+            req_id="rotation",
+            token_len_chunk=48,
+            block_ids=[5, 7, 9],
+            block_hashes=[b"a", b"b", b"c"],
+            load_spec=LoadSpec(0, 48, True, token_len=48),
+        )
+
+        def get(keys, addresses, sizes, store=store):
+            store.get_calls.append((list(keys), list(addresses), list(sizes)))
+            return [int(key.endswith("@62")) for key in keys]
+
+        with patch.object(store, "get", side_effect=get):
+            thread.request_queue.put(request)
+            thread._handle_request(request)
+        actual = store.get_calls[0]
+        if rank == 0:
+            original = actual
+        else:
+            offset = rank % 3
+            assert original is not None
+            assert actual == tuple(values[offset:] + values[:offset] for values in original)
+        assert invalid_block_ids == {7}
+        assert thread.get_and_clear_finished_requests() == {"rotation"}
+        assert thread.request_queue.unfinished_tasks == 0
+
+
+# Execute both normal sentinel shutdown and backend-exception termination through run().
+@pytest.mark.parametrize("fail", [False, True], ids=["none-sentinel", "backend-error"])
+def test_receiving_thread_run_termination(fail):
+    store = FakeStore()
+    thread = KVCacheStoreRecvingThread(
+        m_store=store, token_database=FakeTokenDatabase(), block_size=16, tp_rank=1, ready_event=threading.Event()
+    )
+    if fail:
+        thread.request_queue.put(
+            ReqMeta(
+                req_id="failure",
+                token_len_chunk=16,
+                block_ids=[5],
+                block_hashes=[b"a"],
+                load_spec=LoadSpec(0, 16, True, token_len=16),
+            )
+        )
+    else:
+        thread.request_queue.put(None)
+    with patch.object(store, "get", side_effect=RuntimeError("backend get failed")):
+        thread.start()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert thread.ready_event.is_set()
+    assert thread.request_queue.unfinished_tasks == 0
+    if fail:
+        with pytest.raises(RuntimeError, match="asynchronous transfer"):
+            thread.raise_if_failed()
+    else:
+        thread.raise_if_failed()
+
+
+# Verify absent and per-block error results mark the correct buffers without losing queue completion.
+@pytest.mark.parametrize("result,expected", [(None, {5, 7}), ([0, 1], {7})])
+def test_receiver_backend_failed_results_preserve_block_ids(result, expected):
+    store = FakeStore()
+    invalid_block_ids: set[int] = set()
+    receiver = KVCacheStoreRecvingThread(
+        m_store=store,
+        token_database=FakeTokenDatabase(),
+        block_size=16,
+        tp_rank=0,
+        ready_event=threading.Event(),
+        invalid_block_ids=invalid_block_ids,
+    )
+    request = ReqMeta(
+        "failed-result",
+        token_len_chunk=32,
+        block_ids=[5, 7],
+        block_hashes=[b"a", b"b"],
+        load_spec=LoadSpec(0, 32, True, token_len=32),
+    )
+    with patch.object(store, "get", return_value=result):
+        receiver.request_queue.put(request)
+        receiver._handle_request(request)
+    assert invalid_block_ids == expected
+    assert receiver.get_and_clear_finished_requests() == {"failed-result"}
+    assert receiver.request_queue.unfinished_tasks == 0
+
+
+@pytest.mark.parametrize("rank,limited", [(1, False), (3, True)])
+def test_layer_receiver_preserves_bytes_and_gaps_before_final_completion(rank, limited):
+    # Current GVA receivers preserve block order; TP rank staggers submission
+    # instead of rotating the removed KeyLayer thread's keys.
+    remote = np.arange(64, dtype=np.uint8).reshape(2, 2, 16)
+    caches = [np.full((6, 24), 253, dtype=np.uint8) for _ in range(2)]
+    database = FakeTokenDatabase()
+    database.set_group_buffers(
+        {0: [cache.ctypes.data for cache in caches]},
+        {0: [16, 16]},
+        {0: [24, 24]},
+        group_num_layers={0: 2},
+    )
+
+    def copy(gvas, addresses, sizes, direction):
+        assert direction == 1
+        for source, destination, size in zip(gvas, addresses, sizes, strict=True):
+            assert remote.ctypes.data <= source < source + size <= remote.ctypes.data + remote.nbytes
+            assert any(
+                cache.ctypes.data <= destination < destination + size <= cache.ctypes.data + cache.nbytes
+                for cache in caches
+            )
+            ctypes.memmove(destination, source, size)
+        return 0
+
+    receiver = KVCacheStoreLayerRecvingThread(
+        m_store=SimpleNamespace(store=SimpleNamespace(batch_copy=copy)),
+        token_database=database,
+        block_size=16,
+        tp_rank=rank,
+        tp_size=4,
+        dcp_size=1,
+        page_size_bytes=32,
+        ready_event=threading.Event(),
+        layer_load_finished_events=[threading.Event(), threading.Event()],
+        layer_save_finished_events=[threading.Event(), threading.Event()],
+        sync_save_events=[MagicMock(), MagicMock()],
+        num_layers=2,
+        h2d_stagger_us=3,
+        max_transfer_blocks=1 if limited else 0,
+        max_transfer_bytes=7 if limited else 0,
+    )
+    request = ReqMeta(
+        "layer-bytes",
+        block_ids_by_group=[[2, 4]],
+        block_ids_by_group_np=[np.asarray([2, 4])],
+        load_block_gvas_by_group_np=[np.asarray([remote[block].ctypes.data for block in range(2)])],
+        is_last_chunk=True,
+    )
+    for layer in range(2):
+        task = LayerTransferTask(
+            layer_id=layer,
+            layer_idx_in_group=layer,
+            block_ranges=[LayerBlockRange(request, 0, 2)],
+        )
+        load = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=layer)
+        assert receiver._get_h2d_stagger_delay_us(layer) == ((rank + layer) % 4) * 3
+        receiver.request_queue.put(load)
+        receiver._handle_request(load)
+        for cache_layer, cache in enumerate(caches):
+            expected = np.full_like(cache, 253)
+            if cache_layer <= layer:
+                expected[2, :16] = remote[0, cache_layer]
+                expected[4, :16] = remote[1, cache_layer]
+            np.testing.assert_array_equal(cache, expected)
+        assert receiver.layer_load_finished_events[layer].is_set()
+        assert receiver.get_and_clear_finished_requests() == ({"layer-bytes"} if layer == 1 else set())
+        assert receiver.request_queue.unfinished_tasks == 0
+        receiver.raise_if_failed()
+
+
+@pytest.mark.parametrize("rank,fail", [(1, False), (3, True)], ids=["none-sentinel", "backend-error"])
+def test_layer_receiving_thread_run_terminates_and_drains_current_task(rank, fail):
+    def copy(*args):
+        raise RuntimeError("layer copy failed")
+
+    receiver = KVCacheStoreLayerRecvingThread(
+        m_store=SimpleNamespace(set_device=lambda: None, store=SimpleNamespace(batch_copy=copy)),
+        token_database=FakeTokenDatabase(),
+        block_size=16,
+        tp_rank=rank,
+        tp_size=4,
+        dcp_size=1,
+        page_size_bytes=16,
+        ready_event=threading.Event(),
+        layer_load_finished_events=[threading.Event()],
+        layer_save_finished_events=[threading.Event()],
+        sync_save_events=[MagicMock()],
+        num_layers=1,
+    )
+    request = ReqMeta(
+        "layer-failure",
+        block_ids_by_group_np=[np.asarray([7])],
+        load_block_gvas_by_group_np=[np.asarray([100])],
+        is_last_chunk=True,
+    )
+    task = LayerTransferTask(layer_id=0, block_ranges=[LayerBlockRange(request, 0, 1)])
+    receiver.add_request(LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=0) if fail else None)
+    receiver.start()
+    try:
+        receiver.join(timeout=5)
+        assert not receiver.is_alive()
+        assert receiver.ready_event.is_set()
+        assert receiver.request_queue.unfinished_tasks == 0
+        assert receiver.get_and_clear_finished_requests() == set()
+        assert receiver.layer_load_finished_events[0].is_set() is fail
+        if fail:
+            with pytest.raises(RuntimeError, match="asynchronous transfer") as error:
+                receiver.raise_if_failed()
+            assert str(error.value.__cause__) == "layer copy failed"
+        else:
+            receiver.raise_if_failed()
+    finally:
+        receiver.stop()
+        receiver.join(timeout=5)
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
