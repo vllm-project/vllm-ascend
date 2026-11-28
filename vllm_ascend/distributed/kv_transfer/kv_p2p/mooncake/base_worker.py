@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
+    MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
@@ -51,6 +52,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
 )
+from vllm_ascend.distributed.kv_transfer.utils.spec_config import SpecConfigParityGuard
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     tensor_storage_key,
@@ -341,6 +343,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.kv_cache_config = kv_cache_config
         self.block_size = vllm_config.cache_config.block_size
         self.num_blocks = kv_cache_config.num_blocks
+        self._spec_guard = SpecConfigParityGuard(
+            vllm_config, role="decode" if self.kv_transfer_config.is_kv_consumer else "prefill"
+        )
 
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
@@ -705,6 +710,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
+            spec_config_fingerprint=self._spec_guard.local_fingerprint,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata
@@ -744,6 +750,16 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         if self.xfer_stats.is_empty():
             return None
         return self.xfer_stats.clone_and_reset()
+
+    def check_peer_spec_config(self, metadata: MooncakeTransferMetadataGroups, peer_label: str) -> None:
+        """Reject the peer when its speculative decoding config differs.
+
+        Called on the worker main thread right after the handshake metadata is
+        decoded, so a deployment error stops the engine instead of degrading
+        the transfers.
+        """
+        for pp_rank, pp_metadata in sorted(metadata.metadata_by_pp_rank.items()):
+            self._spec_guard.check(pp_metadata.spec_config_fingerprint, f"{peer_label}#pp{pp_rank}")
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         """Start D2D KV loading described by scheduler metadata."""

@@ -61,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     group_concurrent_contiguous as base_group_concurrent_contiguous,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.spec_config import SpecConfigParityGuard, peer_fingerprint
 from vllm_ascend.distributed.kv_transfer.utils.utils import RegisterRegions, validate_register_region_count
 from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer, refresh_block_size
 
@@ -762,6 +763,12 @@ class D2RHThread(threading.Thread):
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
+        # Speculative-decoding fingerprint reported by each peer, plus the guard
+        # that rejects a mismatch, mirroring KVCacheRecvingThread.
+        self.peer_spec_config: dict[tuple[str, int], str] = {}
+        self._spec_guard = SpecConfigParityGuard(
+            vllm_config, role="decode" if vllm_config.kv_transfer_config.is_kv_consumer else "prefill"
+        )
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.transfer_workers = max(
@@ -1249,6 +1256,11 @@ class D2RHThread(threading.Thread):
             self.remote_block_size_scale[agent_meta.engine_id][remote_handshake_port] = agent_meta.block_size_scale
             self.remote_block_stride_per_addr[agent_meta.engine_id][remote_handshake_port] = agent_meta.block_strides
             self.remote_kv_group2layeridx[agent_meta.engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
+            self.peer_spec_config[(agent_meta.engine_id, remote_handshake_port)] = peer_fingerprint(agent_meta)
+            self._spec_guard.check(
+                self.peer_spec_config[(agent_meta.engine_id, remote_handshake_port)],
+                f"{remote_host}:{remote_handshake_port}",
+            )
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -2311,6 +2323,7 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            spec_config_fingerprint=self._spec_guard.local_fingerprint,
         )
         self.xfer_handshake_metadata = metadata
 

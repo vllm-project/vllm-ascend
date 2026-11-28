@@ -368,6 +368,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             raise ValueError("Push requires matching D engine metadata")
         if metadata.use_kv_pp:
             raise ValueError("Push requires KVPP to be disabled on the decode node")
+        self.check_peer_spec_config(metadata, path)
         return metadata
 
     def _send_done(self, params: dict[str, Any], error: str | None) -> bool:

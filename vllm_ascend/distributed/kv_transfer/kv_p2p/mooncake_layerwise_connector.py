@@ -57,6 +57,11 @@ from vllm.v1.worker.utils import extract_layer_index
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.spec_config import (
+    KVTransferSpecConfigMismatch,
+    SpecConfigParityGuard,
+    peer_fingerprint,
+)
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -103,6 +108,10 @@ class LayerMetadata:
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     layer_metadata: dict[str, LayerMetadata]
+    # Layout-relevant speculative-decoding config of the peer engine, see
+    # vllm_ascend.distributed.kv_transfer.utils.spec_config. Empty for peers
+    # that predate the field; such peers skip the parity check.
+    spec_config_fingerprint: str = ""
 
 
 @dataclass
@@ -1284,6 +1293,12 @@ class MooncakeLayerwiseConnectorWorker:
         self.index_to_name = defaultdict(list)
         self.remote_layer_metadata: dict[str, dict[int, dict[str, LayerMetadata]]] = SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        # Speculative-decoding fingerprint reported by each peer, keyed by
+        # (peer engine id, handshake port).
+        self.peer_spec_config: dict[tuple[str, int], str] = {}
+        self._spec_guard = SpecConfigParityGuard(
+            vllm_config, role="prefill" if vllm_config.kv_transfer_config.is_kv_producer else "decode"
+        )
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]
@@ -1529,6 +1544,7 @@ class MooncakeLayerwiseConnectorWorker:
         metadata = MooncakeAgentMetadata(
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
+            spec_config_fingerprint=self._spec_guard.local_fingerprint,
         )
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
@@ -2016,6 +2032,10 @@ class MooncakeLayerwiseConnectorWorker:
                     continue
                 try:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
+                except KVTransferSpecConfigMismatch:
+                    # A speculative-config mismatch is a deployment error, not a
+                    # per-request transfer failure: let it abort the engine.
+                    raise
                 except Exception as e:
                     logger.warning(
                         "MooncakeLayerwiseConnector transfer fail. req_id=%s, layer_idx=%s, error=%s. ",
@@ -2101,6 +2121,7 @@ class MooncakeLayerwiseConnectorWorker:
             )
             self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.layer_metadata
             self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.te_rpc_port
+            self.peer_spec_config[(req_meta.remote_engine_id, req_meta.remote_port)] = peer_fingerprint(agent_meta)
             logger.debug(
                 "Query to port and kv base addr for request %s from %s:%s success "
                 "agent_meta.layer_metadata=%r agent_meta.te_rpc_port=%r",
@@ -2122,6 +2143,10 @@ class MooncakeLayerwiseConnectorWorker:
                 )
                 if ret < 0:
                     logger.error("Mooncake transfer failed to create link. session_id=%s, ret=%d. ", session_id, ret)
+        peer_label = f"{req_meta.remote_host}:{req_meta.remote_port}"
+        self._spec_guard.check(
+            self.peer_spec_config.get((req_meta.remote_engine_id, req_meta.remote_port), ""), peer_label
+        )
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta

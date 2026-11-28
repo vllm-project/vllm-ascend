@@ -1473,6 +1473,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     ) -> MooncakeTransferMetadataGroups:
         cached_metadata = self.remote_metadata.get(remote_engine_id)
         if cached_metadata is not None:
+            self.check_peer_spec_config(cached_metadata, f"{remote_host}:{remote_port}")
             return cached_metadata
 
         path = make_zmq_path("tcp", remote_host, remote_port)
@@ -1492,6 +1493,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             )
 
         transfer_metadata = self.decoder.decode(metadata_bytes)
+        self.check_peer_spec_config(transfer_metadata, f"{remote_host}:{remote_port}")
         self._validate_remote_metadata(transfer_metadata, remote_engine_id)
         remote_tp_rank_groups, remote_layer_index_pairs = self._build_remote_transfer_layout(transfer_metadata)
         self.remote_metadata[remote_engine_id] = transfer_metadata

@@ -63,6 +63,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.spec_config import SpecConfigParityGuard, peer_fingerprint
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -120,6 +121,10 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    # Layout-relevant speculative-decoding config of the peer engine, see
+    # vllm_ascend.distributed.kv_transfer.utils.spec_config. Empty for peers
+    # that predate the field; such peers skip the parity check.
+    spec_config_fingerprint: str = ""
 
 
 @dataclass
@@ -487,6 +492,12 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        # Speculative-decoding fingerprint reported by each peer, keyed by
+        # (peer engine id, handshake port).
+        self.peer_spec_config: dict[tuple[str, int], str] = {}
+        # Serialises lazy handshakes from the worker main thread and the receive
+        # thread, so one peer is only queried once.
+        self.peer_metadata_fetch_lock = threading.Lock()
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
         # last TP-offset pull task for each PP segment within a shard; applied once all pull tasks finish.
         self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
@@ -1509,6 +1520,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+                self.peer_spec_config[(engine_id, remote_handshake_port)] = peer_fingerprint(agent_meta)
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1518,6 +1530,33 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+
+    def _cached_peer_spec_config(self, remote_engine_id: str, remote_handshake_port: int) -> tuple[bool, str]:
+        """Return ``(is_cached, fingerprint)`` for this exact peer.
+
+        The peer is identified by engine id and handshake port: two Prefill
+        engines on different hosts can share a port, and reusing the first
+        engine's fingerprint would let the second engine's mismatch through.
+        """
+        with self.remote_metadata_lock:
+            ports = self.kv_caches_base_addr.get(remote_engine_id)
+            if ports is not None and remote_handshake_port in ports:
+                return True, self.peer_spec_config.get((remote_engine_id, remote_handshake_port), "")
+        return False, ""
+
+    def ensure_peer_spec_config(
+        self, remote_engine_id: str, remote_host: str, remote_handshake_port: int
+    ) -> str:
+        """Handshake with the identified peer if needed and return its fingerprint."""
+        cached, fingerprint = self._cached_peer_spec_config(remote_engine_id, remote_handshake_port)
+        if cached:
+            return fingerprint
+        with self.peer_metadata_fetch_lock:
+            cached, fingerprint = self._cached_peer_spec_config(remote_engine_id, remote_handshake_port)
+            if not cached:
+                self._get_remote_metadata(remote_host, remote_handshake_port)
+                _, fingerprint = self._cached_peer_spec_config(remote_engine_id, remote_handshake_port)
+        return fingerprint
 
     def _send_done_recv_signal(
         self,
@@ -2186,6 +2225,9 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self._spec_guard = SpecConfigParityGuard(
+            vllm_config, role="decode" if self.kv_role == "kv_consumer" else "prefill"
+        )
         if self.kv_role == "kv_consumer" and self.pcp_size > 1:
             raise ValueError(
                 "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
@@ -2748,6 +2790,7 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            spec_config_fingerprint=self._spec_guard.local_fingerprint,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -4042,6 +4085,34 @@ class MooncakeConnectorWorker:
 
         return (local_block_ids,), (remote_block_ids,)
 
+    def _check_peer_spec_config(
+        self, remote_engine_id: str, remote_host: str, remote_handshake_port: int
+    ) -> None:
+        """Reject the peer when its speculative decoding config differs.
+
+        Runs on the worker main thread on purpose: a mismatch is a deployment
+        error that cannot be recovered per request, and this is the earliest
+        point where the peer's config is known.
+        """
+        if self.kv_recv_thread is None:
+            return
+        peer_label = f"{remote_host}:{remote_handshake_port}"
+        try:
+            peer_raw = self.kv_recv_thread.ensure_peer_spec_config(
+                remote_engine_id, remote_host, remote_handshake_port
+            )
+        except Exception as exc:
+            # A failed handshake is a transfer problem, not a config mismatch:
+            # the receive path reports it per request. Never abort the engine
+            # because the peer was briefly unreachable.
+            logger.warning(
+                "Cannot verify the speculative decoding config of KV transfer peer %s: %s",
+                peer_label,
+                exc,
+            )
+            return
+        self._spec_guard.check(peer_raw, peer_label)
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id in metadata.reqs_in_batch:
@@ -4055,6 +4126,7 @@ class MooncakeConnectorWorker:
                 if self.kv_recv_thread is not None:
                     self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
                 continue
+            self._check_peer_spec_config(meta.remote_engine_id, meta.remote_host, meta.remote_port)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "start_load_kv for request %s from remote engine %s. "

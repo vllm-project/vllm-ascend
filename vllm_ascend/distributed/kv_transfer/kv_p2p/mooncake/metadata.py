@@ -41,6 +41,10 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    # Layout-relevant speculative-decoding config of this worker's engine, see
+    # vllm_ascend.distributed.kv_transfer.utils.spec_config. Empty for workers
+    # that predate the field; such peers skip the parity check.
+    spec_config_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
@@ -122,6 +126,9 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    # Speculative-decoding fingerprint reported by this PP rank's workers, see
+    # vllm_ascend.distributed.kv_transfer.utils.spec_config.
+    spec_config_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
