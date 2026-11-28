@@ -1,0 +1,4 @@
+pr: 19288
+entries:
+  - category: bugfix
+    text: Fixed EPLB recording mode (`eplb_config.expert_map_record_path`) on Model Runner V1, which started one expert-weight transfer and never completed it, so every later rebalance was skipped and the recorded expert map was a plan that had never been applied. Recording mode now records each plan without moving expert weights.
