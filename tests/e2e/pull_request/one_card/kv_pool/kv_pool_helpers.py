@@ -444,8 +444,12 @@ for _env, _key, _cast in (
     ("KV_POOL_MEMCACHE_UBSIO_RCACHE_EVICT", "ubsio.rcache.evict_water_level", int),
     ("KV_POOL_MEMCACHE_UBSIO_WCACHE_EVICT", "ubsio.wcache.evict_water_level", int),
 ):
-    if (raw := os.environ.get(_env)) not in (None, ""):
-        MEMCACHE_UBSIO_EXTRA[_key] = _cast(raw) if _cast is not bool else raw not in ("0", "false")
+    raw = os.environ.get(_env)
+    if raw is None or raw == "":
+        # mypy cannot see that the walrus form narrows `raw`, and the explicit
+        # None check keeps the loop body's argument types unambiguous.
+        continue
+    MEMCACHE_UBSIO_EXTRA[_key] = _cast(raw) if _cast is not bool else raw not in ("0", "false")
 # The tier-3 case skips below TP=2: on a single local_service process the 4GB
 # default DRAM tier is smaller than the ~4.5GB a 16128-token layerwise save
 # pre-allocates, so the save is abandoned and every round reports 0 hits. Set
