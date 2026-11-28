@@ -667,16 +667,58 @@ class BaseKVPoolScheduler(ABC):
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
 
-        for req_id in scheduler_output.preempted_req_ids:
-            self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
+        # A request preempted OUT OF BAND (reset_prefix_cache(reset_running_
+        # requests=True) preempts between schedule() calls, and the preempted
+        # ids survive in scheduler.reset_preempted_req_ids until
+        # _update_after_schedule clears them AFTER the step) is re-admitted
+        # from the waiting queue in the SAME SchedulerOutput that still
+        # carries its preempted id. update_state_after_alloc has just
+        # (re)registered it from its NEW allocation, so it must NOT be treated
+        # as abandoned here: popping its registration would make
+        # _process_new_request raise ("not in _unfinished_requests") and kill
+        # the engine, and reporting it as preempted to the worker would drop
+        # its NEW attempt's buffered evidence (the worker's get_finished
+        # forgets buffered evidence exactly for meta.preempted_req_ids),
+        # failing the delivery closed to recomputation. Ordinary in-step
+        # preemption can never produce the overlap: the waiting pass is
+        # skipped for the whole step whenever a request was preempted in it.
+        #
+        # The ABORTED attempt's state is a different matter: it belongs to the
+        # old block table and must be cleared exactly as for an abandoned
+        # request, and the worker must be told so it can drop the old
+        # attempt's durable save-offset high-water mark (kv_transfer.py would
+        # otherwise skip saving blocks up to it for the new attempt).
+        readmitted_req_ids = {request.req_id for request in scheduler_output.scheduled_new_reqs}
+        readmitted_req_ids &= scheduler_output.preempted_req_ids
+        abandoned_req_ids = scheduler_output.preempted_req_ids - readmitted_req_ids
+        # Ordinary steps touch none of the preemption bookkeeping (main builds
+        # schedulers through __new__ in metadata tests without these attributes).
+        if abandoned_req_ids:
+            self._preempted_req_ids.update(abandoned_req_ids)
+        for req_id in abandoned_req_ids | readmitted_req_ids:
+            # _process_new_request rebuilds the tracker from the NEW allocation,
+            # inheriting block_gvas / gva_block_offset from whatever tracker is
+            # still registered: drop the aborted attempt's tracker first.
             self._request_trackers.pop(req_id, None)
+            if req_id in readmitted_req_ids:
+                continue
             self._unfinished_requests.pop(req_id, None)
             self._async_loading_req_ids.discard(req_id)
+        if readmitted_req_ids:
+            for req_id in readmitted_req_ids:
+                # update_state_after_alloc does not discard a prior async-load
+                # entry when the re-admitted attempt has num_external_tokens == 0
+                # (store miss on the retry); the entry would otherwise stay and
+                # name a load that no longer exists.
+                load_spec = self.load_specs.get(req_id)
+                if load_spec is None or not load_spec.can_load:
+                    self._async_loading_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(
-            scheduler_output.preempted_req_ids,
+            abandoned_req_ids,
             self._async_loading_req_ids.copy(),
             cancelled_load_req_ids=cancelled_load_req_ids,
+            readmitted_req_ids=readmitted_req_ids,
         )
 
         for request in scheduler_output.scheduled_new_reqs:

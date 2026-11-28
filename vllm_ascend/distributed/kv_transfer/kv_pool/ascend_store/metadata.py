@@ -1345,11 +1345,17 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         loading_req_ids: set[str] | None = None,
         *,
         cancelled_load_req_ids: set[str] | None = None,
+        readmitted_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
         self.cancelled_load_req_ids = cancelled_load_req_ids if cancelled_load_req_ids is not None else set()
+        # Requests preempted out of band and re-admitted in the SAME step.
+        # Their ABORTED attempt's per-request state must be cleared (it
+        # belongs to the old block table), but they are NOT abandoned: the
+        # new attempt's state and buffered data stay untouched.
+        self.readmitted_req_ids = readmitted_req_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
