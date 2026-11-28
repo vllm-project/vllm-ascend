@@ -197,6 +197,7 @@ jobs:
               - 'tools/**'
               - 'CMakeLists.txt'
               - '!**/*.md'
+              - '!vllm_ascend/patch/__init__.py'
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -301,7 +302,7 @@ jobs:
           NPU_TYPE: ${{ matrix.group.npu_type }}
         run: |
           set -euo pipefail
-          uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}===26.10.0+feature"
+          uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}==26.11.0.dev20261126"
           python3 -c "import fla_npu.ops.ascendc"
 
       - name: Build MemFabric AccOffload for sparse KV lifecycle test
@@ -358,7 +359,7 @@ jobs:
         run: |
           set -euo pipefail
           uv pip install -r requirements-dev.txt
-          uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0+feature
+          uv pip install --no-deps flash-linear-attention-npu-a3==26.11.0.dev20261126
           uv pip install -e .
 
       - name: Uninstall Triton for 310P tests

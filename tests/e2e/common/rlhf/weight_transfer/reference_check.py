@@ -14,6 +14,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
+    FIXED_WEIGHT_SEED,
     FixedRandomWeightSource,
     fixed_startup_checkpoint,
 )
@@ -119,7 +120,7 @@ def reference_serve_args(
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
 _REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
+    tuple[str, int, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
 ] = {}
 
 
@@ -132,6 +133,7 @@ def reference_signature(
     tensor_parallel_size: int,
     device_index: int,
     env_dict: dict[str, str] | None = None,
+    payload_seed: int = FIXED_WEIGHT_SEED,
     server_host: str = "127.0.0.1",
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Signature of a server that loaded the payload at normal startup.
@@ -144,6 +146,7 @@ def reference_signature(
     """
     cache_key = (
         case.id,
+        payload_seed,
         gpu_memory_utilization,
         tensor_parallel_size,
         device_index,
@@ -267,6 +270,7 @@ def weight_transfer_servers(
     reference = reference_signature(
         source,
         case,
+        payload_seed=source.seed,
         port=get_open_port(),
         gpu_memory_utilization=gpu_memory_utilization,
         tensor_parallel_size=tensor_parallel_size,

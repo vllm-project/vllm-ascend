@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
@@ -22,31 +23,7 @@ ar_speculator.update_draft_inputs = update_draft_inputs_cpu
 # *after* patch_eagle_speculator (which would otherwise win).
 
 
-_orig_init_speculator = ascend_spec_decode.init_speculator
-
-
-def _init_speculator_310p(vllm_config, device, req_states=None):
-    speculative_config = vllm_config.speculative_config
-    assert speculative_config is not None
-    if (
-        speculative_config.method == "mtp"
-        and not speculative_config.use_gemma4_mtp()
-        and not speculative_config.use_multi_module_mtp()
-    ):
-        from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import (
-            AscendMTPSpeculator310,
-        )
-
-        return AscendMTPSpeculator310(vllm_config, device)
-    return _orig_init_speculator(vllm_config, device, req_states)
-
-
-ascend_spec_decode.init_speculator = _init_speculator_310p
-
-# Rebind if model_runner already imported ``init_speculator`` by name.
-try:
-    from vllm_ascend.worker.v2 import model_runner as _mr
-
-    _mr.init_speculator = _init_speculator_310p
-except Exception:
-    pass
+# Resolve only plain MTP to its Triton-free implementation on this worker.
+ascend_spec_decode._UPSTREAM_TO_ASCEND_SPECULATOR[MTPSpeculatorConfig.speculator_class] = (
+    "vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator.AscendMTPSpeculator310"
+)

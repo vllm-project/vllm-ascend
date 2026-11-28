@@ -18,9 +18,10 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
 import tempfile
-import time
+from contextlib import suppress
 from pathlib import Path
 
 import filelock
@@ -44,6 +45,12 @@ BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
 DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
+AISBENCH_STOP_TIMEOUT_SECONDS = 8
+AISBENCH_ERROR_TAIL_CHARS = 4000
+
+
+class AisbenchCleanupError(RuntimeError):
+    """A failed cleanup must stop scheduling further benchmark cases."""
 
 
 class AisbenchRunner:
@@ -75,9 +82,13 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        self.stdout_file = f"output_{self.task_type}.txt"
-        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
+        output_root = Path("outputs/aisbench_runs").resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        self.work_dir = Path(tempfile.mkdtemp(prefix=f"{safe_name(self.benchmark_artifact_name)}-", dir=output_root))
+        self.stdout_file = self.work_dir / f"output_{self.task_type}.txt"
+        aisbench_cmd.extend(["--work-dir", str(self.work_dir), "--debug"])
         print(f"running aisbench cmd: {aisbench_cmd}")
+        print(f"AISBench log: {self.stdout_file}", flush=True)
         env = None
         if self.profile_marker is not None:
             env = os.environ.copy()
@@ -85,13 +96,21 @@ class AisbenchRunner:
             env["PYTHONPATH"] = os.pathsep.join(filter(None, (repo_root, env.get("PYTHONPATH", ""))))
             env["ASCEND_PROFILE_REQUEST_MARKER"] = str(self.profile_marker)
             env["ASCEND_PROFILE_ENABLED"] = str(bool(self.profile_targets)).lower()
-        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True, env=env)
+        self._process_cleaned_up = False
+        with self.stdout_file.open("wb") as output:
+            self.proc = subprocess.Popen(
+                aisbench_cmd,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=os.name == "posix",
+            )
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
         self.port = port
         self.host_ip = host_ip
-        self.proc = None
+        self.proc: subprocess.Popen | None = None
         self.task_type = aisbench_config["case_type"]
         self.exp_folder = None
         self.result_line = None
@@ -157,6 +176,7 @@ class AisbenchRunner:
             self._run_aisbench_task()
             self._wait_for_task()
         except BaseException:
+            self._stop_aisbench_task()
             try:
                 self._finish_profiling(controller)
             except Exception as exc:
@@ -305,37 +325,65 @@ class AisbenchRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.proc is not None:
-            self.proc.terminate()
+        self._stop_aisbench_task()
+
+    def _stop_aisbench_task(self):
+        """Reap the CLI and stop its process group, including orphaned workers."""
+        if self.proc is None or self._process_cleaned_up:
+            return
+        try:
+            if os.name == "posix":
+                with suppress(ProcessLookupError):
+                    os.killpg(self.proc.pid, signal.SIGTERM)
+            elif self.proc.poll() is None:
+                self.proc.terminate()
             try:
-                self.proc.wait(8)
+                self.proc.wait(timeout=AISBENCH_STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+            finally:
+                # The CLI may already have exited while its workers are still alive.
+                if os.name == "posix":
+                    with suppress(ProcessLookupError):
+                        os.killpg(self.proc.pid, signal.SIGKILL)
+                self.proc.wait(timeout=AISBENCH_STOP_TIMEOUT_SECONDS)
+                self._process_cleaned_up = True
+        except Exception as exc:
+            raise AisbenchCleanupError(f"Failed to clean up AISBench pid={self.proc.pid}") from exc
 
-    def _wait_for_exp_folder(self):
-        while True:
-            line = self._check_runtime_stdout()
-            if "Current exp folder: " in line:
-                self.exp_folder = re.search(r"Current exp folder: (.*)", line).group(1)
-                print(f"Current exp folder: {self.exp_folder}")
-                return
-            self._check_runtime_error(line)
+    def _result_path(self, value):
+        path = Path(value.strip()).resolve()
+        if not path.is_relative_to(self.work_dir):
+            raise RuntimeError(f"AISBench result path is outside this run: {path}; expected {self.work_dir}")
+        return path
 
     def _wait_for_task(self):
-        self._wait_for_exp_folder()
+        assert self.proc is not None
+        try:
+            returncode = self.proc.wait()
+        finally:
+            self._stop_aisbench_task()
+        output = self._check_runtime_stdout()
+        if returncode != 0:
+            raise RuntimeError(
+                f"AISBench exited with code {returncode}; log: {self.stdout_file}\n"
+                f"{output[-AISBENCH_ERROR_TAIL_CHARS:]}"
+            )
+        self._check_runtime_error(output)
+        folder = re.search(r"Current exp folder: (.*)", output)
+        if folder is None:
+            raise RuntimeError(f"AISBench exited without an experiment directory; log: {self.stdout_file}")
+        self.exp_folder = str(self._result_path(folder.group(1)))
         result_msg = self.RESULT_MSG[self.task_type]
-        while True:
-            line = self._check_runtime_stdout()
-            if result_msg in line:
-                print(line)
-                self.result_line = line
-                return
-            self._check_runtime_error(line)
+        results = [line for line in output.splitlines() if result_msg in line]
+        if not results:
+            raise RuntimeError(f"AISBench exited without a {self.task_type} result; log: {self.stdout_file}")
+        self.result_line = results[-1]
+        print(self.result_line)
 
     def _check_runtime_stdout(self):
-        time.sleep(5)
-        cmd = f"tail -100 {self.stdout_file}"
-        return subprocess.check_output(cmd, shell=True).decode()
+        output = self.stdout_file.read_text(encoding="utf-8", errors="replace")
+        return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
 
     @staticmethod
     def _check_runtime_error(line):
@@ -345,7 +393,9 @@ class AisbenchRunner:
             raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = re.search(r"Performance Result files located in (.*)", self.result_line).group(1)[:-1]
+        result_dir = self._result_path(
+            re.search(r"Performance Result files located in (.*)", self.result_line).group(1).removesuffix(".")
+        )
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}.json")
@@ -356,7 +406,7 @@ class AisbenchRunner:
         self.result = [self.result_csv, self.result_json]
 
     def _get_result_accuracy(self):
-        acc_file = re.search(r"write csv to (.*)", self.result_line).group(1)
+        acc_file = self._result_path(re.search(r"write csv to (.*)", self.result_line).group(1))
         df = pd.read_csv(acc_file)
         self.result = float(df.iloc[0, -1])
 
@@ -453,6 +503,8 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
             with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
             logging.info("[%d/%d] Finished benchmark: %s", idx, total, benchmark_name)
+        except AisbenchCleanupError:
+            raise
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])

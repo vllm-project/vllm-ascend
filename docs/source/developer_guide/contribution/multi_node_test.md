@@ -183,7 +183,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     apiVersion: leaderworkerset.x-k8s.io/v1
     kind: LeaderWorkerSet
     metadata:
-      name: test-server
+      name: vllm
       namespace: vllm-project
     spec:
       replicas: 1

@@ -346,3 +346,15 @@ def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase
                 pytest.param(case, packed, id=f"{'packed' if packed else 'unpacked'}-{case.id}", marks=marks)
             )
     return parameters
+
+
+def pytest_qwen_reload_cases(backend: str) -> list[Any]:
+    """Exercise both reload modes for unpacked Qwen transfer; keep the packed skip once."""
+    import pytest
+
+    cases = []
+    for parameter in pytest_model_cases(backend, model_cases=QWEN_CASES):
+        case, packed = parameter.values
+        for mode in ("layerwise",) if packed else ("layerwise", "direct"):
+            cases.append(pytest.param(case, packed, mode, marks=parameter.marks, id=f"{parameter.id}-{mode}"))
+    return cases
