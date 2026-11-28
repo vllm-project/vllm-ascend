@@ -767,10 +767,7 @@ def get_sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
         SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num
         + SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV * properties.vector_core_num
     )
-    return max(
-        SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE,
-        round_up(entries, SPARSE_FLASH_MLA_PLAN_ALIGNMENT),
-    )
+    return round_up(entries, SPARSE_FLASH_MLA_PLAN_ALIGNMENT)
 
 
 def trans_rope_weight(weight, rope_dim):
