@@ -77,6 +77,4 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
     _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 
-# only patch routed experts capture in main2main.
-import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
 import vllm_ascend.patch.worker.patch_v2_static_kernel  # noqa

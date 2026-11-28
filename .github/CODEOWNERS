@@ -177,7 +177,6 @@
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
 /vllm_ascend/patch/platform/patch_fused_moe.py @freyfwt
 /vllm_ascend/patch/worker/patch_fused_moe.py @freyfwt
-/vllm_ascend/patch/worker/patch_routed_experts_capture.py @freyfwt
 /vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952 @hust17yixuan
 /vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
 /vllm_ascend/patch/worker/patch_step3p5.py @earthmanylf
