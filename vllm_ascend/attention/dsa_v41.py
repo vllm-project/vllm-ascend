@@ -48,6 +48,9 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.packed_cache_slot_mapping import (
+    build_packed_cache_slot_mapping as _fused_packed_slot_mapping,
+)
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -1170,6 +1173,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = req.cache_kind in {"long_kv", "index_k"}
+        plane_ratio = req.compress_ratio if compressed else 1
         if req.is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
             req.slot_mapping = self._slot_mapping[: req.num_input_tokens]
@@ -1185,17 +1189,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             prepared_flat_slots = self.common_v41_metadata.get(flat_slot_key)
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[: req.num_input_tokens]
-                if self._uses_a5_packed_cache and active_slots.device.type == "npu":
-                    assert self._device_backend is not None
-                    prepared_slots, prepared_flat_slots = self._device_backend.build_packed_cache_slot_mapping(
+                # Ratio 2 needs positions to identify completed pairs.
+                fused_slot_mapping_supported = plane_ratio in (1, 2) and (plane_ratio == 1 or req.positions is not None)
+                if active_slots.device.type == "npu" and fused_slot_mapping_supported:
+                    prepared_slots, prepared_flat_slots = _fused_packed_slot_mapping(
                         active_slots,
-                        req.positions,
+                        # Ratio 1 uses slots as an unused positions placeholder.
+                        req.positions if req.positions is not None else active_slots,
                         common.query_start_loc,
                         req.num_input_tokens,
                         req.num_actual_reqs,
                         req.num_actual_tokens,
                         req.storage_block_size,
-                        req.compress_ratio if compressed else 1,
+                        plane_ratio,
                         skip_update=kwargs.get("skip_ring_state_update", False),
                         coordinates_output=self._slot_mapping_2d[: req.num_input_tokens],
                         flat_output=self._flat_slot_mapping[: req.num_input_tokens],
@@ -1421,7 +1427,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                if full_source_cos is not None and full_source_sin is not None:
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         req.seq_lens,
@@ -1467,29 +1473,6 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
                         torch.zeros_like(input_positions),
                     )
                 )
-                if full_source_cos is not None and full_source_sin is not None:
-                    gather_idx = (
-                        self._c2_source_positions[: req.num_input_tokens]
-                        .reshape(-1, 1, 1, 1)
-                        .expand(
-                            req.num_input_tokens,
-                            1,
-                            1,
-                            full_source_cos.shape[-1],
-                        )
-                    )
-                    torch.gather(
-                        full_source_cos,
-                        0,
-                        gather_idx,
-                        out=self._c2_source_cos[: req.num_input_tokens],
-                    )
-                    torch.gather(
-                        full_source_sin,
-                        0,
-                        gather_idx,
-                        out=self._c2_source_sin[: req.num_input_tokens],
-                    )
 
             self._publish_task(
                 self.common_v41_metadata,
