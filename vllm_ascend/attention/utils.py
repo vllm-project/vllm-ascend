@@ -756,12 +756,9 @@ def round_up(val: int, align: int) -> int:
 SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC = 9
 SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV = 8
 SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 1024
-SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE = 2048
 
 
 def get_sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
-    if device.type != "npu":
-        return SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE
     properties = torch.npu.get_device_properties(device)
     entries = (
         SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num

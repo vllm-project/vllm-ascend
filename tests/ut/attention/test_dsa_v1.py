@@ -50,7 +50,6 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
-    SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE,
     AscendCommonAttentionMetadata,
     get_sparse_flash_mla_plan_buffer_size,
 )
@@ -219,12 +218,14 @@ def _make_builder(
     num_speculative_tokens: int | None = None,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
-    builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
-        layer_names=["model.layers.0.self_attn.attn"],
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-    )
+    properties = SimpleNamespace(cube_core_num=48, vector_core_num=96)
+    with patch.object(torch.npu, "get_device_properties", return_value=properties):
+        builder = AscendDSAMetadataBuilder(
+            kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
+            layer_names=["model.layers.0.self_attn.attn"],
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
 
     # These caches are supplied by model_runner through build() in production.
     builder.common_ratio_to_sas_metadata = {}
@@ -259,9 +260,13 @@ def test_sas_metadata_buffers_match_selected_operator(
     assert builder.qli_metadata_buffer.numel() == QLI_METADATA_BUFFER_SIZE
 
 
-def test_sparse_flash_mla_metadata_capacity():
+@pytest.mark.parametrize(
+    ("cube_cores", "vector_cores", "expected_capacity"),
+    [(32, 64, 1024), (96, 192, 3072)],
+)
+def test_sparse_flash_mla_metadata_capacity(cube_cores, vector_cores, expected_capacity):
     device = cast(torch.device, SimpleNamespace(type="npu"))
-    properties = SimpleNamespace(cube_core_num=96, vector_core_num=192)
+    properties = SimpleNamespace(cube_core_num=cube_cores, vector_core_num=vector_cores)
     with patch(
         "vllm_ascend.attention.utils.torch.npu.get_device_properties",
         return_value=properties,
@@ -269,15 +274,7 @@ def test_sparse_flash_mla_metadata_capacity():
         capacity = get_sparse_flash_mla_plan_buffer_size(device)
 
     get_device_properties.assert_called_once_with(device)
-    assert capacity == 3072
-
-
-def test_sparse_flash_mla_metadata_capacity_uses_legacy_size_on_cpu():
-    with patch("vllm_ascend.attention.utils.torch.npu.get_device_properties") as get_device_properties:
-        capacity = get_sparse_flash_mla_plan_buffer_size(torch.device("cpu"))
-
-    get_device_properties.assert_not_called()
-    assert capacity == SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE
+    assert capacity == expected_capacity
 
 
 def _build_draft_req_metadata(
