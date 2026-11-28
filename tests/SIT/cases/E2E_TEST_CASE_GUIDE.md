@@ -482,7 +482,7 @@ The framework derives proxy metadata from `routing.type`, and `routing.groups` a
 | --- | --- | --- |
 | `test_name` | No | Human-readable case name and result metadata |
 | `model` | Yes | Model prepended to each `vllm serve` command |
-| `num_nodes` | Yes | Number of config and template entries |
+| `num_nodes` | Yes | Number of nodes (pods) in the deployment; a node may own more than one config entry |
 | `npu_per_node` | Yes | NPU capacity used for layout validation |
 | `dp_load_balancing` | Yes | Must be `external` |
 | `cluster_hosts` | Local only | Explicit node IPs outside LWS |
@@ -598,7 +598,8 @@ benchmarks:
 
 The main `config` fields are:
 
-- `node_index`: Node that owns this config entry.
+- `node_index`: Node that owns this config entry. Optional; defaults to the entry position.
+- `device_start`: First NPU used by this config entry on its node. Optional; defaults to `0`.
 - `port_start`: First API port assigned to local DP ranks.
 - `dp_rpc_port`: RPC coordination port for the DP group.
 - `dp_size`: Global size of this DP group.
@@ -607,6 +608,12 @@ The main `config` fields are:
 - `dp_address`: DP master address. Use one group master address for every member of the same group.
 - `tp_size`, `cp_size`, `sp_size`, and `pp_size`: Parallel sizes expanded into the command template.
   Optional parallel sizes default according to the external DP loader.
+
+`routing.groups` lists config entry indices, and `templates` is indexed by config entry as well.
+A node may own several config entries as long as their NPU ranges do not overlap. This is how a
+single node hosts both roles: give the prefiller and decoder entries the same `node_index` with
+`device_start: 0` and `device_start: 8`, list the two entry indices in `routing.groups`, and use
+distinct `port_start`, `dp_rpc_port`, and `kv_port` values for the two instances.
 
 For disaggregated prefill, prefiller templates normally use `kv_role: kv_producer` and decoder templates use `kv_role: kv_consumer`.
 The framework derives the proxy script from `routing.type`, runs the proxy on node 0, and currently assigns port `1999`.

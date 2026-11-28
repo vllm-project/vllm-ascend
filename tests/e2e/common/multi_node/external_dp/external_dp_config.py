@@ -42,7 +42,12 @@ class RoutingConfig:
 
 @dataclass(frozen=True)
 class NodeInfo:
-    """Per-node external DP server topology loaded from one config entry."""
+    """One server topology loaded from a config entry.
+
+    Multiple entries may target the same ``node_index``; each entry then owns a
+    disjoint NPU range starting at ``device_start``. This is what allows a
+    single node to host both a prefiller and a decoder instance.
+    """
 
     ip: str
     port_start: int
@@ -62,6 +67,8 @@ class NodeInfo:
     master_port: int = 7060
     distributed_executor_backend: str = ""
     is_headless: bool = False
+    node_index: int = 0
+    device_start: int = 0
 
     @property
     def devices_per_rank(self) -> int:
@@ -85,8 +92,9 @@ class NodeTemplate:
 
 @dataclass(frozen=True)
 class RankInfo:
-    """One concrete vLLM server rank expanded from a node config."""
+    """One concrete vLLM server rank expanded from a config entry."""
 
+    config_index: int
     node_index: int
     role: str
     local_rank: int
@@ -309,18 +317,18 @@ class ExternalDPConfigLoader:
     def _parse_nodes(raw_config: dict[str, Any], cluster_ips: list[str]) -> list[NodeInfo]:
         nodes: list[NodeInfo] = []
         for index, raw_node in enumerate(raw_config["config"]):
-            raw_node_index = raw_node.get("node_index")
-            if raw_node_index is not None and int(raw_node_index) != index:
-                raise ValueError(f"config[{index}].node_index must equal {index}")
+            node_index = int(raw_node.get("node_index", index))
+            if node_index < 0 or node_index >= len(cluster_ips):
+                raise ValueError(f"config[{index}].node_index out of range: {node_index}")
             node = replace_cluster_placeholders(
                 raw_node,
                 cluster_ips=cluster_ips,
-                local_ip=cluster_ips[index],
-                current_node_index=index,
+                local_ip=cluster_ips[node_index],
+                current_node_index=node_index,
             )
             nodes.append(
                 NodeInfo(
-                    ip=cluster_ips[index],
+                    ip=cluster_ips[node_index],
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
                     dp_size=int(node.get("dp_size", 1)),
@@ -338,6 +346,8 @@ class ExternalDPConfigLoader:
                     master_port=int(node.get("master_port", 7060)),
                     distributed_executor_backend=str(node.get("distributed_executor_backend", "")),
                     is_headless=bool(node.get("is_headless", False)),
+                    node_index=node_index,
+                    device_start=int(node.get("device_start", 0)),
                 )
             )
         return nodes
@@ -383,10 +393,16 @@ class ExternalDPConfigLoader:
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
-        if len(config.nodes) != config.num_nodes:
-            raise AssertionError(f"config size ({len(config.nodes)}) != num_nodes ({config.num_nodes})")
-        if len(config.launch_templates) != config.num_nodes:
-            raise AssertionError(f"templates size ({len(config.launch_templates)}) != num_nodes ({config.num_nodes})")
+        expected_node_indices = set(range(config.num_nodes))
+        actual_node_indices = {node.node_index for node in config.nodes}
+        if actual_node_indices != expected_node_indices:
+            raise AssertionError(
+                f"config node_index coverage {sorted(actual_node_indices)} != [0, {config.num_nodes - 1}]"
+            )
+        if len(config.launch_templates) != len(config.nodes):
+            raise AssertionError(
+                f"templates size ({len(config.launch_templates)}) != config size ({len(config.nodes)})"
+            )
         if config.cluster_hosts and len(config.cluster_hosts) != config.num_nodes:
             raise AssertionError("cluster_hosts size mismatch")
 
@@ -404,18 +420,27 @@ class ExternalDPConfigLoader:
         seen_group_indices: dict[int, str] = {}
         for group_name, indices in groups.items():
             for index in indices:
-                if index < 0 or index >= config.num_nodes:
+                if index < 0 or index >= len(config.nodes):
                     raise ValueError(f"routing.groups.{group_name} index out of range: {index}")
                 if index in seen_group_indices:
-                    raise ValueError(f"node index {index} appears in both {seen_group_indices[index]} and {group_name}")
+                    raise ValueError(
+                        f"config index {index} appears in both {seen_group_indices[index]} and {group_name}"
+                    )
                 seen_group_indices[index] = group_name
+
+        missing = [index for index in range(len(config.nodes)) if index not in seen_group_indices]
+        if missing:
+            raise ValueError(f"routing.groups does not assign a role for config indices: {missing}")
 
         if config.routing.proxy_node_index < 0 or config.routing.proxy_node_index >= config.num_nodes:
             raise ValueError("routing.proxy_node_index out of range")
 
     @staticmethod
     def _validate_node_parallel_config(config: ExternalDPConfig) -> None:
-        for node_index, node in enumerate(config.nodes):
+        device_ranges: dict[int, list[tuple[int, int, int]]] = {}
+        port_ranges: dict[int, list[tuple[int, int, int]]] = {}
+        rpc_ports: dict[int, dict[int, int]] = {}
+        for config_index, node in enumerate(config.nodes):
             parallel_sizes = {
                 "dp_size": node.dp_size,
                 "dp_size_local": node.dp_size_local,
@@ -426,19 +451,47 @@ class ExternalDPConfigLoader:
             }
             invalid_sizes = {name: value for name, value in parallel_sizes.items() if value < 1}
             if invalid_sizes:
-                raise ValueError(f"node {node_index} parallel sizes must be >= 1: {invalid_sizes}")
+                raise ValueError(f"config[{config_index}] parallel sizes must be >= 1: {invalid_sizes}")
             if node.dp_rank_start < 0:
-                raise ValueError(f"node {node_index} dp_rank_start must be >= 0")
-            if node.devices_per_node > config.npu_per_node:
+                raise ValueError(f"config[{config_index}] dp_rank_start must be >= 0")
+            if node.device_start < 0:
+                raise ValueError(f"config[{config_index}] device_start must be >= 0")
+            device_start = node.device_start
+            device_end = device_start + node.devices_per_node
+            if device_end > config.npu_per_node:
                 raise ValueError(
-                    f"node {node_index} uses {node.devices_per_node} NPUs, but npu_per_node is {config.npu_per_node}"
+                    f"config[{config_index}] on node {node.node_index} uses NPUs "
+                    f"[{device_start}, {device_end}), but npu_per_node is {config.npu_per_node}"
                 )
+            for other_start, other_end, other_config_index in device_ranges.setdefault(node.node_index, []):
+                if device_start < other_end and other_start < device_end:
+                    raise ValueError(
+                        f"config[{config_index}] NPU range [{device_start}, {device_end}) overlaps "
+                        f"config[{other_config_index}] [{other_start}, {other_end}) on node {node.node_index}"
+                    )
+            device_ranges[node.node_index].append((device_start, device_end, config_index))
+            port_start = node.port_start
+            port_end = port_start + node.dp_size_local
+            for other_start, other_end, other_config_index in port_ranges.setdefault(node.node_index, []):
+                if port_start < other_end and other_start < port_end:
+                    raise ValueError(
+                        f"config[{config_index}] API port range [{port_start}, {port_end}) overlaps "
+                        f"config[{other_config_index}] [{other_start}, {other_end}) on node {node.node_index}"
+                    )
+            port_ranges[node.node_index].append((port_start, port_end, config_index))
+            node_rpc_ports = rpc_ports.setdefault(node.node_index, {})
+            if node.dp_rpc_port in node_rpc_ports:
+                raise ValueError(
+                    f"config[{config_index}] dp_rpc_port {node.dp_rpc_port} conflicts with "
+                    f"config[{node_rpc_ports[node.dp_rpc_port]}] on node {node.node_index}"
+                )
+            node_rpc_ports[node.dp_rpc_port] = config_index
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
-                raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+                raise ValueError(f"config[{config_index}] dp rank range exceeds dp_size")
             if node.nnodes > 1 and node.node_rank > 0 and not node.is_headless:
-                raise ValueError(f"node {node_index} is PP worker but not headless")
+                raise ValueError(f"config[{config_index}] is PP worker but not headless")
             if node.nnodes > 1 and not node.master_addr:
-                raise ValueError(f"node {node_index} uses multi-node PP but master_addr is empty")
+                raise ValueError(f"config[{config_index}] uses multi-node PP but master_addr is empty")
 
     @staticmethod
     def _validate_kv_pool(config: ExternalDPConfig) -> None:
@@ -449,44 +502,43 @@ class ExternalDPConfigLoader:
 
 
 class RankResolver:
-    """Expand node-level configs into concrete vLLM server ranks."""
+    """Expand config entries into concrete vLLM server ranks."""
 
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
     def resolve(self) -> list[RankInfo]:
-        role_by_node_index = self._role_by_node_index()
+        role_by_config_index = self._role_by_config_index()
         ranks: list[RankInfo] = []
-        for node_index, node_info in enumerate(self.config.nodes):
-            role = role_by_node_index[node_index]
-            ranks.extend(self._expand_node(node_index, role, node_info))
+        for config_index, node_info in enumerate(self.config.nodes):
+            role = role_by_config_index[config_index]
+            ranks.extend(self._expand_config(config_index, role, node_info))
         return ranks
 
-    def _role_by_node_index(self) -> dict[int, str]:
+    def _role_by_config_index(self) -> dict[int, str]:
         role_by_index: dict[int, str] = {}
-        for role, node_indices in self.config.routing.groups.items():
-            for index in node_indices:
+        for role, config_indices in self.config.routing.groups.items():
+            for index in config_indices:
                 role_by_index[index] = role
 
-        missing = [index for index in range(self.config.num_nodes) if index not in role_by_index]
+        missing = [index for index in range(len(self.config.nodes)) if index not in role_by_index]
         if missing:
-            raise ValueError(f"routing.groups does not assign role for node indices: {missing}")
+            raise ValueError(f"routing.groups does not assign role for config indices: {missing}")
         return role_by_index
 
     @staticmethod
-    def _expand_node(node_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
+    def _expand_config(config_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
         ranks: list[RankInfo] = []
         for local_rank in range(node_info.dp_size_local):
             dp_rank = node_info.dp_rank_start + local_rank
             port = node_info.port_start + local_rank
-            device_range = range(
-                local_rank * node_info.devices_per_rank,
-                (local_rank + 1) * node_info.devices_per_rank,
-            )
+            first_device = node_info.device_start + local_rank * node_info.devices_per_rank
+            device_range = range(first_device, first_device + node_info.devices_per_rank)
             visible_devices = ",".join(str(device) for device in device_range)
             ranks.append(
                 RankInfo(
-                    node_index=node_index,
+                    config_index=config_index,
+                    node_index=node_info.node_index,
                     role=role,
                     local_rank=local_rank,
                     dp_rank=dp_rank,
