@@ -34,12 +34,21 @@ bash format.sh
 
 #### Run CI locally
 
-After completing "Run lint" setup, you can run CI (Continuous integration) locally:
+After completing "Run lint" setup, you can run the CI lint stage locally:
+
+!!! note
+    `bash format.sh ci` runs `pre-commit run --all-files --hook-stage manual`, i.e.
+    the same style and static checks CI runs, not the unit or E2E tests. To run
+    tests locally, see [Testing](./testing.md).
 
 ```bash
 cd ~/vllm-project/
 
 # Install the vLLM commit verified by the main-branch plugin checkout.
+# Skip this block if you use the nightly-main container image, which already
+# ships vLLM and vllm-ascend: mounting your checkout over
+# /vllm-workspace/vllm-ascend shadows the installed package, so reinstall it
+# with `pip install -e . --no-build-isolation` before running anything.
 VLLM_COMMIT=$(tr -d '[:space:]' < vllm-ascend/.github/vllm-main-verified.commit)
 git init vllm
 git -C vllm fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_COMMIT"
@@ -48,7 +57,8 @@ cd vllm
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
-# Install requirements
+# Install requirements (pulls heavy deps such as lm-eval, mindstudio-probe and
+# librosa; expect several minutes and a working index URL)
 cd vllm-ascend
 # For Linux:
 pip install -r requirements-dev.txt
@@ -56,7 +66,8 @@ pip install -r requirements-dev.txt
 cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
-# Run ci:
+# Run the CI lint stage (style and static checks; unit and E2E tests are
+# documented in Testing):
 bash format.sh ci
 ```
 
