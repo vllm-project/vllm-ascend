@@ -13,6 +13,7 @@ from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorStateCache,
     Compressor,
 )
+from vllm_ascend.ops.triton.compressor.compressor_triton import compressor
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
@@ -186,3 +187,33 @@ class TestCompressorStateCache:
         assert spec.head_size == state_dim
         assert spec.sliding_window == 64
         assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][padding_index]
+
+
+class TestCompressorShapeGuard:
+    """The triton entry point rejects unsupported shapes with a clear error.
+
+    compressor is parameterized by hidden_dim/head_dim from config, but the
+    kernel path is only validated for hidden=5120/D=512 and cmp_ratio in
+    [2, 128]. The guards run before any triton launch, so they are exercised
+    on CPU without an NPU.
+    """
+
+    def _call(self, hidden_dim, head_dim, cmp_ratio):
+        x = torch.zeros(1, hidden_dim, dtype=torch.bfloat16)
+        wkv = torch.zeros(head_dim, hidden_dim, dtype=torch.float32)
+        wgate = torch.zeros(head_dim, hidden_dim, dtype=torch.float32)
+        state_cache = torch.zeros(1, 1, 2 * head_dim, dtype=torch.float32)
+        norm_w = torch.zeros(head_dim, dtype=torch.bfloat16)
+        compressor(x, wkv, wgate, state_cache, cmp_ratio, norm_w, num_cores=1)
+
+    def test_rejects_wrong_hidden_dim(self):
+        with pytest.raises(ValueError, match="hidden_dim=5120"):
+            self._call(hidden_dim=4096, head_dim=512, cmp_ratio=4)
+
+    def test_rejects_wrong_head_dim(self):
+        with pytest.raises(ValueError, match="head_dim=512"):
+            self._call(hidden_dim=5120, head_dim=256, cmp_ratio=4)
+
+    def test_rejects_out_of_range_ratio(self):
+        with pytest.raises(ValueError, match="2 <= cmp_ratio <= 128"):
+            self._call(hidden_dim=5120, head_dim=512, cmp_ratio=1)
