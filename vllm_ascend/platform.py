@@ -257,9 +257,8 @@ class NPUPlatform(Platform):
         # with dynamically per-token INT8 activations, dense and routed-expert
         # layers). Both are listed here because verify_quantization() checks
         # this list; patch_online_quant adds `int8_per_channel` to vLLM's
-        # method list and dispatches both to Ascend's method classes, while
-        # `apply_config_platform_defaults` rejects the online weight keys
-        # Ascend has no method for.
+        # method list and makes vLLM construct `AscendOnlineQuantizationConfig`,
+        # which rejects the online weight keys Ascend has no method for.
         *ASCEND_ONLINE_QUANT_METHODS,
     ]
 
@@ -585,14 +584,6 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
-
-        # Reject an online quantization request Ascend has no method for before
-        # any weight is loaded; vLLM would otherwise fail per layer.
-        from vllm_ascend.quantization.online_validate import (
-            validate_online_quantization,
-        )
-
-        validate_online_quantization(vllm_config)
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.

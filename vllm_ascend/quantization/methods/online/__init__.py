@@ -24,8 +24,8 @@ This package declares the recipes Ascend supports: ``ONLINE_LINEAR_METHODS`` /
 ``ONLINE_MOE_METHODS`` for the dispatch and ``ONLINE_SHORTHANDS`` for the
 ``--quantization`` names. ``patch_online_quant`` applies them on top of vLLM's
 tables; vLLM's other entries are left untouched, and a recipe Ascend cannot
-execute is rejected explicitly by ``vllm_ascend.quantization.online_validate``
-before the model is built.
+execute is rejected explicitly by ``AscendOnlineQuantizationConfig`` when the
+config is built.
 """
 
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
@@ -42,8 +42,8 @@ from .int8 import (
 
 # ``(layer kind, QuantKey) -> Ascend method class``. ``patch_online_quant``
 # writes these into vLLM's dispatch tables; their keys are the weight keys
-# ``online_validate`` accepts, so listing a method here is what makes a recipe
-# supported end to end.
+# ``AscendOnlineQuantizationConfig`` accepts, so listing a method here is what
+# makes a recipe supported end to end.
 ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kInt8StaticChannelSym: AscendInt8PerChannelOnlineLinearMethod,
 }
@@ -59,7 +59,7 @@ SUPPORTED_ONLINE_WEIGHT_KEYS: frozenset[QuantKey] = frozenset(ONLINE_LINEAR_METH
 # them with. They are *applied on top of* vLLM's table: a name vLLM already
 # knows is rewritten to this definition, every other vLLM entry is left
 # untouched, and a recipe Ascend cannot execute is rejected by
-# ``online_validate`` instead of being removed here.
+# ``AscendOnlineQuantizationConfig`` instead of being removed here.
 ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # Ascend's own name: per-channel INT8 weights with dynamically per-token
     # INT8 activations, for dense linear layers and routed experts. vLLM's
