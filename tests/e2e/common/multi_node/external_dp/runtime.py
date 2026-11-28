@@ -36,8 +36,14 @@ from tools.profiling.capture import ProfileSpec, ServeInstance, configure_profil
 
 logger = logging.getLogger(__name__)
 
-SERVER_READY_TIMEOUT_SECONDS = 3600
+# Fail here before the workflow's 360-minute budget kills the job; shares KV_POOL_PD_READY_TIMEOUT_S with pool_ab.py.
+SERVER_READY_TIMEOUT_SECONDS = int(os.environ.get("KV_POOL_PD_READY_TIMEOUT_S", "3600"))
 KV_POOL_READY_TIMEOUT_SECONDS = 300
+# Per-rank engine logs are dumped to stdout periodically and on failure so they survive a killed job.
+RANK_LOG_TAIL_LINES = int(os.environ.get("KV_POOL_PD_RANK_LOG_TAIL_LINES", "20"))
+RANK_LOG_DUMP_INTERVAL_SECONDS = int(os.environ.get("KV_POOL_PD_RANK_LOG_DUMP_INTERVAL_S", "180"))
+RANK_LOG_ERROR_TAIL_LINES = int(os.environ.get("KV_POOL_PD_RANK_LOG_ERROR_TAIL_LINES", "200"))
+RANK_LOG_TAIL_BYTES = 64 * 1024
 MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO = 0.9
 MOONCAKE_EVICTION_RATIO = 0.1
 MOONCAKE_DEFAULT_KV_LEASE_TTL = 11000
@@ -45,6 +51,7 @@ MOONCAKE_LIBRARY_PATHS = (
     "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake",
     "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages",
 )
+MEMCACHE_STANDALONE_DRAM_SIZE = "200GB"
 PRIMARY_NODE_INDEX = 0
 TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 ENV_VAR_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -226,13 +233,29 @@ class ExternalDPMooncakeManager(ExternalDPKVPoolManager):
 
 
 class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
-    """Materialize Memcache configs and manage one cluster-wide MetaService."""
+    """Materialize Memcache configs, one MetaService, and one standalone provider per node."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         runtime_dir = self.log_root / f"node-{self.current_node_index}" / "runtime"
         self.meta_config_path = (runtime_dir / "mmc-meta.conf").resolve()
         self.local_config_path = (runtime_dir / "mmc-local.conf").resolve()
+        self.standalone_config_path = (runtime_dir / "mmc-local-standalone.conf").resolve()
+        self.provider_process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        self._write_config()
+        if self.current_node_index == PRIMARY_NODE_INDEX:
+            self._start_service()
+        self._wait_ready()
+        self._start_provider()
+
+    def cleanup(self) -> None:
+        if self.provider_process is not None:
+            logger.info("Stopping memcache standalone provider pid=%d", self.provider_process.pid)
+            terminate_process_tree(self.provider_process.pid)
+            self.provider_process = None
+        super().cleanup()
 
     @property
     def memcache_config(self) -> MemcacheKVPoolConfig:
@@ -268,6 +291,9 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         local_config["ock.mmc.local_service.config_store_url"] = config_store_url
         self._write_text_atomic(self.meta_config_path, self._format_config(meta_config))
         self._write_text_atomic(self.local_config_path, self._format_config(local_config))
+        standalone_config = dict(local_config)
+        standalone_config["ock.mmc.local_service.dram.size"] = MEMCACHE_STANDALONE_DRAM_SIZE
+        self._write_text_atomic(self.standalone_config_path, self._format_config(standalone_config))
         self.server_envs = {"MMC_LOCAL_CONFIG_PATH": str(self.local_config_path)}
         logger.info("Generated Memcache configs for node %d", self.current_node_index)
 
@@ -281,6 +307,29 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         log_file = self.log_root / f"node-{self.current_node_index}" / "memcache-meta-service.log"
         self.process = start_logged_process(cmd, env, log_file)
         logger.info("Memcache MetaService launched on node 0")
+
+    def _start_provider(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            (
+                "import time\n"
+                "from memcache_hybrid import DistributedObjectStore\n"
+                "store = DistributedObjectStore()\n"
+                "res = store.init(0)\n"
+                "if res != 0:\n"
+                "    raise SystemExit(f'Failed to initialize memcache, res = {res}')\n"
+                "while True:\n"
+                "    time.sleep(1)\n"
+            ),
+        ]
+        env = {
+            "MMC_LOCAL_CONFIG_PATH": str(self.standalone_config_path),
+            "ASCEND_RT_VISIBLE_DEVICES": "0",
+        }
+        log_file = self.log_root / f"node-{self.current_node_index}" / "memcache-standalone-provider.log"
+        self.provider_process = start_logged_process(cmd, env, log_file)
+        logger.info("Memcache standalone provider launched on node %d", self.current_node_index)
 
     def _ready_ports(self) -> tuple[int, ...]:
         return (
@@ -498,6 +547,11 @@ class ExternalDPServerManager:
                 process = start_logged_process(server_cmd.cmd, server_cmd.env, log_file)
                 self.rank_processes.append((process, rank, log_file))
 
+            logger.info(
+                "External DP rank logs on node %d: %s",
+                self.current_node_index,
+                ", ".join(str(log_file) for _process, _rank, log_file in self.rank_processes),
+            )
             wait_ranks_ready(
                 local_ranks,
                 timeout=SERVER_READY_TIMEOUT_SECONDS,
@@ -646,17 +700,55 @@ def _format_rank_statuses(
     return "\n".join(parts)
 
 
+def _read_log_tail(log_file: Path, max_lines: int) -> str:
+    """Return the last lines of a live log file without reading the whole file."""
+    if max_lines <= 0:
+        return ""
+    try:
+        with log_file.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(size - RANK_LOG_TAIL_BYTES, 0))
+            content = handle.read().decode("utf-8", "replace")
+    except OSError as exc:
+        return f"    <cannot read {log_file}: {exc}>"
+    lines = content.splitlines()[-max_lines:]
+    if size > RANK_LOG_TAIL_BYTES:
+        lines.insert(0, "...")
+    return "\n".join(f"    {line}" for line in lines)
+
+
+def _log_rank_tails(entries: Iterable[tuple[RankInfo, Path]], max_lines: int, header: str) -> None:
+    """Print per-rank engine log tails; these lines end up in the CI job log."""
+    lines = [header]
+    for rank, log_file in entries:
+        try:
+            size = log_file.stat().st_size
+        except OSError:
+            size = -1
+        lines.append(f"  {rank_label(rank)} log={log_file} size={size}B")
+        lines.append(_read_log_tail(log_file, max_lines))
+    logger.info("\n".join(lines))
+
+
 def _raise_if_rank_process_exited(rank_processes: list[RankProcess] | None) -> None:
     if not rank_processes:
         return
 
     exited = []
+    exited_logs = []
     for process, rank, log_file in rank_processes:
         returncode = process.poll()
         if returncode is not None:
             exited.append(f"{rank_label(rank)} pid={process.pid} returncode={returncode} log={log_file}")
+            exited_logs.append((rank, log_file))
 
     if exited:
+        _log_rank_tails(
+            exited_logs,
+            RANK_LOG_ERROR_TAIL_LINES,
+            "External DP rank exited before ready, log tails:",
+        )
         raise RuntimeError("External DP rank process exited before ready: " + "; ".join(exited))
 
 
@@ -672,8 +764,22 @@ def wait_ranks_ready(
         if rank.is_headless:
             rank_ready[rank] = True
 
-    deadline = time.monotonic() + timeout
+    rank_log_files = {rank: log_file for _process, rank, log_file in rank_processes or []}
+    rank_proc_by_rank = {rank: process for process, rank, _log_file in rank_processes or []}
+    started = time.monotonic()
+    deadline = started + timeout
     last_log_time = 0.0
+    last_dump_time = started
+    last_dump_sizes: dict[Path, int] = {}
+    if rank_log_files:
+        logger.info(
+            "Rank log watchdog active: dump every %ds, %d lines per rank, %d lines on failure "
+            "(KV_POOL_PD_RANK_LOG_TAIL_LINES / KV_POOL_PD_RANK_LOG_DUMP_INTERVAL_S / "
+            "KV_POOL_PD_RANK_LOG_ERROR_TAIL_LINES)",
+            RANK_LOG_DUMP_INTERVAL_SECONDS,
+            RANK_LOG_TAIL_LINES,
+            RANK_LOG_ERROR_TAIL_LINES,
+        )
 
     while True:
         _raise_if_rank_process_exited(rank_processes)
@@ -694,6 +800,12 @@ def wait_ranks_ready(
                 unhealthy_after_ready.append(rank)
 
         if unhealthy_after_ready:
+            if rank_log_files:
+                _log_rank_tails(
+                    [(rank, rank_log_files[rank]) for rank in unhealthy_after_ready if rank in rank_log_files],
+                    RANK_LOG_ERROR_TAIL_LINES,
+                    "External DP rank became unhealthy after ready, log tails:",
+                )
             failed = "; ".join(rank_label(rank) for rank in unhealthy_after_ready)
             raise RuntimeError(f"External DP rank became unhealthy after ready: {failed}")
 
@@ -703,16 +815,52 @@ def wait_ranks_ready(
         now = time.monotonic()
         if now - last_log_time >= 30:
             logger.info(
-                "Polling external DP ranks: ready=%d/%d\n%s",
+                "Polling external DP ranks: ready=%d/%d elapsed=%ds\n%s",
                 sum(rank_ready.values()),
                 len(ranks),
+                int(now - started),
                 _format_rank_statuses(ranks, rank_ready),
             )
             last_log_time = now
 
+        if now - last_dump_time >= RANK_LOG_DUMP_INTERVAL_SECONDS:
+            pending = [rank for rank in ranks if not rank_ready[rank] and rank in rank_log_files]
+            if pending:
+                lines = [
+                    f"External DP rank startup progress: elapsed={int(now - started)}s "
+                    f"ready={sum(rank_ready.values())}/{len(ranks)}"
+                ]
+                for rank in pending:
+                    log_file = rank_log_files[rank]
+                    try:
+                        stat = log_file.stat()
+                        size, mtime = stat.st_size, stat.st_mtime
+                    except OSError:
+                        size, mtime = -1, 0.0
+                    previous = last_dump_sizes.get(log_file, 0)
+                    last_dump_sizes[log_file] = size
+                    process = rank_proc_by_rank.get(rank)
+                    alive = process.poll() is None if process is not None else None
+                    last_write_age = f"{int(time.time() - mtime)}s" if mtime else "n/a"
+                    lines.append(
+                        f"  {rank_label(rank)} log={log_file} size={size}B delta={size - previous:+d}B "
+                        f"alive={alive} last_write_age={last_write_age}"
+                    )
+                    if size == previous:
+                        lines.append("    (no new log output since last dump; stale tail follows)")
+                    lines.append(_read_log_tail(log_file, RANK_LOG_TAIL_LINES))
+                logger.info("\n".join(lines))
+            last_dump_time = now
+
         if now >= deadline:
             pending = [rank for rank in ranks if not rank_ready[rank]]
             pending_labels = "; ".join(rank_label(rank) for rank in pending)
+            if rank_log_files:
+                _log_rank_tails(
+                    [(rank, rank_log_files[rank]) for rank in pending if rank in rank_log_files],
+                    RANK_LOG_ERROR_TAIL_LINES,
+                    f"Timed out after {timeout}s waiting for external DP ranks, log tails:",
+                )
             raise TimeoutError(f"Timed out waiting for external DP ranks ready: {pending_labels}")
 
         time.sleep(5)

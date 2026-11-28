@@ -30,6 +30,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -861,6 +862,9 @@ class DisaggEpdProxy(RemoteEPDServer):
 _DP_RUNNER_START_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_REQUEST_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_DP_RUNNER_LOG_ECHO_INTERVAL_SECONDS = 10.0
+_DP_RUNNER_LOG_TAIL_LINES = 200
+_DP_RUNNER_LOG_TAIL_BYTES = 256 * 1024
 
 
 def _split_data_parallel_indices(num_items: int, dp_size: int) -> list[list[int]]:
@@ -916,8 +920,26 @@ def _normalize_score_inputs(text_1: str | list[str], text_2: str | list[str]) ->
     return list(text_1), list(text_2)
 
 
-def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, dp_size: int, master_port: int) -> None:
+def _run_vllm_runner_dp_worker(
+    conn,
+    llm_kwargs: dict[str, Any],
+    dp_rank: int,
+    dp_size: int,
+    master_port: int,
+    log_path: str | None = None,
+) -> None:
     llm = None
+    log_handle = None
+    if log_path:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        log_handle = open(log_path, "a", encoding="utf-8", errors="replace")
+        # Redirect the worker and every vLLM child it spawns to a real file.
+        # A surviving child must never keep the CI `pytest | tee` stdout pipe open.
+        os.dup2(log_handle.fileno(), 1)
+        os.dup2(log_handle.fileno(), 2)
+        with contextlib.suppress(Exception):
+            sys.stdout.reconfigure(line_buffering=True)
+            sys.stderr.reconfigure(line_buffering=True)
     try:
         os.environ["VLLM_DP_RANK"] = str(dp_rank)
         os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
@@ -1021,6 +1043,9 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         cleanup_dist_env_and_memory()
         with contextlib.suppress(Exception):
             conn.close()
+        if log_handle is not None:
+            with contextlib.suppress(Exception):
+                log_handle.close()
 
 
 class VllmRunner:
@@ -1515,6 +1540,15 @@ class DPVllmRunner(VllmRunner):
             **kwargs,
         )
 
+        self._dp_log_dir = (
+            Path(tempfile.gettempdir()) / "vllm_dp_runner" / f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        )
+        self._dp_log_dir.mkdir(parents=True, exist_ok=True)
+        self._dp_log_files: list[Path] = []
+        self._dp_echo_offsets: dict[Path, int] = {}
+        self._dp_echo_stop = threading.Event()
+        self._dp_echo_thread: threading.Thread | None = None
+
         cleanup_dist_env_and_memory()
         self._start_data_parallel_workers(llm_kwargs)
 
@@ -1572,20 +1606,27 @@ class DPVllmRunner(VllmRunner):
         try:
             for dp_rank in range(self._dp_size):
                 parent_conn, child_conn = ctx.Pipe()
+                log_file = self._dp_log_dir / f"rank-{dp_rank}.log"
                 proc = ctx.Process(
                     target=_run_vllm_runner_dp_worker,
-                    args=(child_conn, llm_kwargs, dp_rank, self._dp_size, master_port),
+                    args=(child_conn, llm_kwargs, dp_rank, self._dp_size, master_port, str(log_file)),
                 )
                 proc.start()
                 child_conn.close()
                 self._dp_parent_conns.append(parent_conn)
                 self._dp_processes.append(proc)
+                self._dp_log_files.append(log_file)
+
+            print(f"[dp_runner] per-rank engine logs: {self._dp_log_dir}", flush=True)
+            self._start_log_echo()
 
             for rank, conn in enumerate(self._dp_parent_conns):
                 if not conn.poll(self._dp_start_timeout):
+                    self._dump_rank_log(rank)
                     raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to start")
                 message = conn.recv()
                 if message["status"] != "ready":
+                    self._dump_rank_log(rank)
                     raise RuntimeError(
                         f"Failed to start data parallel worker {rank}:\n{message.get('traceback', 'unknown error')}"
                     )
@@ -1593,16 +1634,107 @@ class DPVllmRunner(VllmRunner):
             self._stop_data_parallel_workers()
             raise
 
+    def _start_log_echo(self) -> None:
+        if self._dp_echo_thread is not None:
+            return
+        self._dp_echo_stop.clear()
+        thread = threading.Thread(target=self._log_echo_loop, name="dp-rank-log-echo", daemon=True)
+        thread.start()
+        self._dp_echo_thread = thread
+
+    def _stop_log_echo(self) -> None:
+        self._dp_echo_stop.set()
+        thread = self._dp_echo_thread
+        if thread is not None:
+            thread.join(timeout=5)
+        self._dp_echo_thread = None
+
+    def _log_echo_loop(self) -> None:
+        while not self._dp_echo_stop.wait(_DP_RUNNER_LOG_ECHO_INTERVAL_SECONDS):
+            with contextlib.suppress(Exception):
+                self._echo_rank_logs_once()
+
+    def _echo_rank_logs_once(self) -> None:
+        """Print newly written DP rank log lines to stdout (CI visibility)."""
+        for rank, log_file in enumerate(self._dp_log_files):
+            try:
+                offset = self._dp_echo_offsets.get(log_file, 0)
+                with log_file.open("rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+            except OSError:
+                continue
+            if not chunk:
+                continue
+            cut = chunk.rfind(b"\n")
+            if cut < 0:
+                continue
+            complete = chunk[: cut + 1]
+            self._dp_echo_offsets[log_file] = offset + len(complete)
+            for line in complete.decode("utf-8", "replace").splitlines():
+                print(f"[dp{rank}] {line}", flush=True)
+
+    @staticmethod
+    def _read_log_tail(log_file: Path, max_lines: int = _DP_RUNNER_LOG_TAIL_LINES) -> str:
+        if max_lines <= 0:
+            return ""
+        try:
+            with log_file.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(size - _DP_RUNNER_LOG_TAIL_BYTES, 0))
+                content = handle.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+        return "\n".join(f"    {line}" for line in content.splitlines()[-max_lines:])
+
+    def _dump_rank_log(self, rank: int) -> None:
+        if rank < 0 or rank >= len(self._dp_log_files):
+            return
+        log_file = self._dp_log_files[rank]
+        print(f"[dp{rank}] engine log tail ({log_file}):", flush=True)
+        print(self._read_log_tail(log_file), flush=True)
+
+    @staticmethod
+    def _terminate_data_parallel_process(proc: Any) -> None:
+        """Terminate one DP worker and the whole vLLM process tree below it."""
+        try:
+            parent = psutil.Process(proc.pid)
+        except psutil.NoSuchProcess:
+            proc.join(timeout=1)
+            return
+        children: list[Any] = []
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            children = parent.children(recursive=True)
+        for child in children:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                child.terminate()
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            parent.terminate()
+        gone, alive = psutil.wait_procs([parent, *children], timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
+        del gone
+        for child in alive:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                child.kill()
+        if alive:
+            psutil.wait_procs(alive, timeout=5)
+        proc.join(timeout=5)
+
     def _stop_data_parallel_workers(self) -> None:
         for conn in self._dp_parent_conns:
             with contextlib.suppress(Exception):
                 conn.send({"command": "shutdown"})
 
         for proc in self._dp_processes:
-            proc.join(timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(timeout=5)
+            if not proc.is_alive():
+                proc.join(timeout=1)
+                continue
+            print(f"[dp_runner] stopping data parallel worker pid={proc.pid}", flush=True)
+            self._terminate_data_parallel_process(proc)
+
+        with contextlib.suppress(Exception):
+            self._echo_rank_logs_once()
+        self._stop_log_echo()
 
         for conn in self._dp_parent_conns:
             with contextlib.suppress(Exception):
