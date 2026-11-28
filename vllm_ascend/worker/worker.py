@@ -183,7 +183,7 @@ def _direct_host_submission_for_aclgraph_capture(mode: CUDAGraphMode) -> Iterato
     if (
         mode == CUDAGraphMode.NONE
         or getattr(torch_npu, "__version__", "") != "2.14.0"
-        or not get_current_hardware_profile().supports(HardwareCapability.ACLGRAPH_DIRECT_HOST_SUBMISSION)
+        or not get_current_hardware_profile().aclgraph_capture_requires_direct_host_submission
     ):
         yield
         return

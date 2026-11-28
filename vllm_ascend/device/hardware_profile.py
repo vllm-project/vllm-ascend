@@ -57,8 +57,6 @@ class HardwareCapability(Enum):
     # Legacy default: replace vLLM's custom-op list with ``["all"]`` during
     # platform configuration. Runtime extension loading is a separate contract.
     AUTO_ENABLE_CUSTOM_OPS = auto()
-    # TorchNPU 2.14 requires direct host submission during model ACL graph capture.
-    ACLGRAPH_DIRECT_HOST_SUBMISSION = auto()
     # Register ATB extension entry points eagerly during worker construction.
     ATB_EXTENSIONS = auto()
     # Run the ATB matmul warmup that avoids first-request cache-write latency.
@@ -337,6 +335,8 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    # A3 needs direct host submission for model ACL graph capture with TorchNPU 2.14.
+    aclgraph_capture_requires_direct_host_submission: bool = False
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
     minimax_m3_gbsa_bf16_softmax_precision: int = 0
@@ -409,7 +409,6 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.ACLGRAPH_DIRECT_HOST_SUBMISSION,
     HardwareCapability.GMM1_SITU_QUANT_MSD,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
@@ -455,6 +454,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            aclgraph_capture_requires_direct_host_submission=True,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
