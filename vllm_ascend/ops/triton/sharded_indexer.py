@@ -17,30 +17,38 @@ MIN_GROUPED_MERGE_SAVING_PERCENT = 10
 MIN_FUSED_SORT_ROW_PERCENT = 75
 
 
-@triton.jit(do_not_specialize=["ROWS"])
+@triton.jit
+def _candidate_row_valid(visible_lengths_ptr, row, rows):
+    if visible_lengths_ptr is not None:
+        return tl.load(visible_lengths_ptr + row, row < rows, 0) > 0
+    return row < rows
+
+
+@triton.jit(do_not_specialize=["rows"])
 def _pack_candidates(
-    indices,
-    scores,
-    packed,
-    ROWS,
-    index_row_stride: tl.constexpr,
-    score_row_stride: tl.constexpr,
-    index_col_stride: tl.constexpr,
-    score_col_stride: tl.constexpr,
+    indices_ptr,
+    scores_ptr,
+    packed_ptr,
+    rows,
+    INDEX_ROW_STRIDE: tl.constexpr,
+    SCORE_ROW_STRIDE: tl.constexpr,
+    INDEX_COL_STRIDE: tl.constexpr,
+    SCORE_COL_STRIDE: tl.constexpr,
     K: tl.constexpr,
     WORLD: tl.constexpr,
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     BLOCK: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
+    visible_lengths_ptr,
 ):
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)[None, :]
     lanes = tl.program_id(1) * (2 * BLOCK) + tl.arange(0, 2 * BLOCK)[None, :]
     row = tl.program_id(0) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)[:, None]
-    mask = (col < K) & (row < ROWS)
-    local = tl.load(indices + row * index_row_stride + col * index_col_stride, mask, -1)
-    # A5 exposes its native BF16 comparator; A3 already produces FP32.
-    score = tl.load(scores + row * score_row_stride + col * score_col_stride, mask, -float("inf")).to(tl.float32)
+    mask = (col < K) & _candidate_row_valid(visible_lengths_ptr, row, rows)
+    local = tl.load(indices_ptr + row * INDEX_ROW_STRIDE + col * INDEX_COL_STRIDE, mask, -1)
+    # Pack either BF16 or FP32 QLI scores as FP32 comparison keys.
+    score = tl.load(scores_ptr + row * SCORE_ROW_STRIDE + col * SCORE_COL_STRIDE, mask, -float("inf")).to(tl.float32)
     valid = (local >= 0) & (tl.abs(score) < float("inf"))
     local = tl.where(valid, local, 0).to(tl.int32)
     # Recover the remainder algebraically so mapping needs only one division.
@@ -49,7 +57,7 @@ def _pack_candidates(
     global_id = tl.where(valid, global_id, -1)
     score = tl.where(valid, score, -float("inf"))
     pair = tl.reshape(tl.join(global_id, score.to(tl.int32, bitcast=True)), (ROWS_PER_PROGRAM, 2 * BLOCK))
-    tl.store(packed + row * K * 2 + lanes, pair, (lanes < 2 * K) & (row < ROWS))
+    tl.store(packed_ptr + row * K * 2 + lanes, pair, (lanes < 2 * K) & (row < rows))
 
 
 @triton.jit
@@ -157,6 +165,7 @@ def _pack_sorted_candidates(
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
     SCORE_BITS: tl.constexpr,
+    visible_lengths_ptr,
 ):
     """Sort by descending score/ascending ID and pack global ID/score bits."""
     FP32_SIGNIFICAND_BITS: tl.constexpr = 24
@@ -171,10 +180,17 @@ def _pack_sorted_candidates(
     packed_offsets = tl.arange(0, 2 * BLOCK)
     # Flat, loop-carried rows avoid the larger live set of a row/column tile.
     for row_idx in range(tl.program_id(0), num_rows, tl.num_programs(0)):
-        local_ids = tl.load(indices_ptr + row_idx * INDEX_ROW_STRIDE + candidate_offsets * INDEX_COL_STRIDE)
-        candidate_scores = tl.load(scores_ptr + row_idx * SCORE_ROW_STRIDE + candidate_offsets * SCORE_COL_STRIDE).to(
-            tl.float32
+        active = _candidate_row_valid(visible_lengths_ptr, row_idx, num_rows)
+        local_ids = tl.load(
+            indices_ptr + row_idx * INDEX_ROW_STRIDE + candidate_offsets * INDEX_COL_STRIDE,
+            active,
+            -1,
         )
+        candidate_scores = tl.load(
+            scores_ptr + row_idx * SCORE_ROW_STRIDE + candidate_offsets * SCORE_COL_STRIDE,
+            active,
+            -float("inf"),
+        ).to(tl.float32)
         valid = (local_ids.to(tl.float32) >= 0) & (tl.abs(candidate_scores) < float("inf"))
         # This rank's local-to-global map is strictly increasing. Sorting
         # local keys preserves global-ID ties without rounding mapped IDs.
@@ -412,30 +428,32 @@ def select_local_candidates(indices, scores, world_size: int, rank: int, interle
     return output
 
 
-@triton.jit(do_not_specialize=["ROWS"])
+@triton.jit(do_not_specialize=["rows"])
 def _prepare_local_sort_inputs(
-    indices,
-    scores,
-    keys,
-    values,
-    ROWS,
+    indices_ptr,
+    scores_ptr,
+    keys_ptr,
+    values_ptr,
+    rows,
     INDEX_ROW: tl.constexpr,
     INDEX_COL: tl.constexpr,
     SCORE_ROW: tl.constexpr,
     SCORE_COL: tl.constexpr,
     K: tl.constexpr,
     BLOCK: tl.constexpr,
+    visible_lengths_ptr,
 ):
     col = tl.arange(0, BLOCK)
-    for row in range(tl.program_id(0), ROWS, tl.num_programs(0)):
-        local = tl.load(indices + row * INDEX_ROW + col * INDEX_COL, col < K, -1)
-        score = tl.load(scores + row * SCORE_ROW + col * SCORE_COL, col < K, -float("inf")).to(tl.float32)
+    for row in range(tl.program_id(0), rows, tl.num_programs(0)):
+        mask = (col < K) & _candidate_row_valid(visible_lengths_ptr, row, rows)
+        local = tl.load(indices_ptr + row * INDEX_ROW + col * INDEX_COL, mask, -1)
+        score = tl.load(scores_ptr + row * SCORE_ROW + col * SCORE_COL, mask, -float("inf")).to(tl.float32)
         valid = (local >= 0) & (tl.abs(score) < float("inf"))
-        tl.store(keys + row * K + col, tl.where(valid, local.to(tl.float32), float("inf")), col < K)
-        tl.store(values + row * K + col, tl.where(valid, score, -float("inf")), col < K)
+        tl.store(keys_ptr + row * K + col, tl.where(valid, local.to(tl.float32), float("inf")), col < K)
+        tl.store(values_ptr + row * K + col, tl.where(valid, score, -float("inf")), col < K)
 
 
-def _local_sort_inputs(indices, scores):
+def _local_sort_inputs(indices, scores, visible_lengths=None):
     keys = torch.empty(indices.shape, dtype=torch.float32, device=indices.device)
     values = torch.empty_like(keys)
     rows, _, topk = indices.shape
@@ -453,15 +471,16 @@ def _local_sort_inputs(indices, scores):
             scores.stride(-1),
             topk,
             1 << (topk - 1).bit_length(),
+            visible_lengths,
         )
     return keys, values
 
 
-def _sort_local_candidates(indices, scores):
+def _sort_local_candidates(indices, scores, visible_lengths=None):
     """Return exact FP32 ID keys and scores in score-desc/ID-asc order."""
     # For one owner the local-to-global mapping is strictly increasing.
     # The backend's 2**24 length bound makes these FP32 ID keys exact.
-    keys, values = _local_sort_inputs(indices, scores)
+    keys, values = _local_sort_inputs(indices, scores, visible_lengths)
     sorted_keys, id_order = torch.sort(keys, dim=-1, stable=True)
     values = torch.gather(values, -1, id_order)
     ordered_scores, score_order = torch.sort(values, dim=-1, descending=True, stable=True)
@@ -471,7 +490,15 @@ def _sort_local_candidates(indices, scores):
 
 
 def pack_local_candidates(
-    indices, scores, world_size: int, rank: int, interleave: int, *, sort_candidates=False, fuse_sort=False
+    indices,
+    scores,
+    world_size: int,
+    rank: int,
+    interleave: int,
+    *,
+    sort_candidates=False,
+    fuse_sort=False,
+    visible_lengths=None,
 ):
     """Pack local candidates as global INT32 IDs and FP32 score-bit pairs.
 
@@ -482,11 +509,23 @@ def pack_local_candidates(
     Callers must ensure this bound; it is not validated by the wrapper.
     Sorting orders scores descending, then IDs ascending. ``fuse_sort`` permits
     fused sorting for workloads that meet the occupancy and merge-work gates.
+    ``visible_lengths`` defaults to None. If supplied, it is a contiguous
+    INT32 tensor of shape [rows] or [rows, 1] on the candidate device.
+    Zero denotes padding or an empty local prefix. Pack masks those rows
+    before reading either candidate buffer. Positive lengths leave candidate
+    filtering to the ID and score checks. Candidate inputs are read-only.
     """
+    rows, _, topk = indices.shape
+    if visible_lengths is not None and (
+        visible_lengths.shape not in ((rows,), (rows, 1))
+        or visible_lengths.dtype != torch.int32
+        or visible_lengths.device != indices.device
+        or not visible_lengths.is_contiguous()
+    ):
+        raise ValueError("visible_lengths must be contiguous INT32 with shape [rows] or [rows, 1] on the same device")
     if scores.dtype not in (torch.bfloat16, torch.float32):
         raise TypeError(f"scores must have dtype torch.bfloat16 or torch.float32, got {scores.dtype}")
     score_bits = 16 if scores.dtype == torch.bfloat16 else 32
-    rows, _, topk = indices.shape
     packed = torch.empty((rows, topk, 2), dtype=torch.int32, device=indices.device)
     if rows:
         if sort_candidates and fuse_sort and topk == MAX_FUSED_TOPK:
@@ -514,11 +553,13 @@ def pack_local_candidates(
                     interleave,
                     log_block,
                     SCORE_BITS=score_bits,
+                    visible_lengths_ptr=visible_lengths,
                     multibuffer=False,
                 )
                 return packed
         if sort_candidates:
-            indices, scores = _sort_local_candidates(indices, scores)
+            indices, scores = _sort_local_candidates(indices, scores, visible_lengths)
+            visible_lengths = None  # Sort inputs already contain sentinels.
         block = PACK_COL_BLOCK
         rows_per_program = PACK_ROWS_PER_PROGRAM
         _pack_candidates[(triton.cdiv(rows, rows_per_program), triton.cdiv(topk, block))](
@@ -536,6 +577,7 @@ def pack_local_candidates(
             interleave,
             block,
             rows_per_program,
+            visible_lengths,
         )
     return packed
 
@@ -800,32 +842,3 @@ def build_local_key_lengths(seq_lens, key_lengths, world_size: int, rank: int, i
         _local_key_lengths[(triton.cdiv(requests, 128),)](
             seq_lens, key_lengths, requests, world_size, rank, interleave, 128
         )
-
-
-@triton.jit(do_not_specialize=["REQUESTS"])
-def _normalize_dcp_candidates(indices, scores, query_start_loc, REQUESTS, K: tl.constexpr, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    active_rows = tl.load(query_start_loc + REQUESTS)
-    active = (row < active_rows) & (col < K)
-    idx = tl.load(indices + row * K + col, active, -1)
-    score = tl.load(scores + row * K + col, active, -float("inf")).to(tl.float32)
-    valid = active & (idx >= 0) & (tl.abs(score) < float("inf"))
-    tl.store(indices + row * K + col, tl.where(valid, idx, -1), col < K)
-    tl.store(scores + row * K + col, tl.where(valid, score, -float("inf")), col < K)
-
-
-def normalize_dcp_candidates(indices, scores, query_start_loc):
-    """Clear invalid candidates and graph padding in native FP32 outputs in place.
-
-    QLI does not initialize rows beyond the cumulative query endpoint. Each
-    kernel lane owns its index/score slot, so no extra transport buffer is needed.
-    """
-    if scores.dtype != torch.float32:
-        raise TypeError("DCP candidate normalization requires native FP32 QLI scores")
-    rows, _, topk = indices.shape
-    if rows:
-        _normalize_dcp_candidates[(rows, triton.cdiv(topk, 256))](
-            indices, scores, query_start_loc, query_start_loc.numel() - 1, topk, 256
-        )
-    return indices, scores

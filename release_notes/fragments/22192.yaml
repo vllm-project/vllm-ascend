@@ -1,0 +1,4 @@
+pr: 22192
+entries:
+  - category: bugfix
+    text: Fixed the Ascend process group teardown path raising AttributeError when a group coordinator was created without the backend attribute, which broke the upstream vLLM FlashInfer PCIe IPC all-reduce test.

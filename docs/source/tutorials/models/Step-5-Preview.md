@@ -118,8 +118,7 @@ Inside the container, run `npu-smi info` and confirm that all eight NPUs are vis
 
 The container runs without `--privileged`: Ascend Docker Runtime injects the eight Davinci devices selected by `-e ASCEND_VISIBLE_DEVICES=0-7`, so no `--device` entry is needed for them. Add `--device` only if you start the container without that runtime.
 
-The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
-
+The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/root/.cache`; modify it according to the actual situation.
 The `docker run` command above opens an interactive container shell. Use that shell for the following steps. To open an additional shell, run this command from another terminal on the host:
 
 ```bash
@@ -668,7 +667,7 @@ Starting from the engine templates in [Section 5.2.1](#521-create-the-engine-tem
 
 - `--kv-transfer-config` becomes a `MultiConnector` with two children: `MooncakeConnectorV2` for direct Prefill-to-Decode transfer and `AscendStoreConnector` for the pool.
 - `MMC_LOCAL_CONFIG_PATH` points at that node's pool-client file from [Section 5.3.3](#533-configure-the-pool-client-on-every-engine-host).
-- `--enable-prefix-caching` stays on in both roles: each engine serves prefix hits from its local HBM cache first and only queries the pool for the blocks that miss in HBM, so HBM and the DRAM pool form a two-tier cache. `enable_lookup: true` on both `AscendStoreConnector` children turns that pool fallback on.
+- `--enable-prefix-caching` stays on in both roles: each engine serves prefix hits from its local HBM cache first and only queries the pool for the blocks that miss in HBM, so HBM and the DRAM pool form a two-tier cache.
 - The `LD_LIBRARY_PATH` from [Section 5.3.1](#531-prepare-the-pool-components) must be exported in the same shell that starts the engine, otherwise `AscendStoreConnector` cannot load the bundled MemCache libraries and pool initialization fails.
 
 The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from [Section 5.2.4](#524-key-pd-settings), because it is a separate connector with its own extra configuration. The commands below are complete; copy one per node and change only the per-node values called out after each tab.
@@ -754,7 +753,6 @@ The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from
                 "kv_connector_extra_config": {
                   "backend": "memcache",
                   "lookup_rpc_port": "0",
-                  "enable_lookup": true,
                   "use_layerwise": true
                 }
               }
@@ -847,7 +845,6 @@ The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from
                 "kv_connector_extra_config": {
                   "backend": "memcache",
                   "lookup_rpc_port": "1",
-                  "enable_lookup": true,
                   "use_layerwise": false
                 }
               }
@@ -1068,7 +1065,5 @@ For common environment, installation, and general parameter issues, please refer
 A: The scheduler limits, context length, or graph capture do not fit device memory. Lower `--max-num-seqs` or `--max-num-batched-tokens` first, then `--max-model-len` or `--gpu-memory-utilization`. On Decode, DP8 × TP4 can report `No available memory for the cache blocks`; keep the four-node group and cut the context or batch-token budget first, or fall back to TP8.
 - **Q: The pool hit rate is low or TTFT does not improve.**
 A: Shared prefixes must be block-aligned (the reference runs use multiples of 4096 tokens); a prefix that ends mid-block is never stored. Restart the engines between two identical measurements and read per-request metrics, not the cumulative counter. A 16k-token prefix occupies about 3.75 GiB per rank, so size `dram.size` per rank.
-- **Q: With the pool enabled, are prefix hits still served from local HBM?**
-A: Yes. `--enable-prefix-caching` stays on and `enable_lookup: true` makes each engine query the pool only for the blocks that miss in local HBM, so HBM is the first tier and the DRAM pool the second.
 - **Q: The Proxy hangs or stops forwarding.**
 A: A single-worker Proxy is blocked by one unfinished streaming handler. Restart the Proxy after any engine restart, and use non-streaming requests for load tests. A `JSONDecodeError` in the Proxy log means a backend returned an empty body or an HTML error page.
