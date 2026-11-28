@@ -124,6 +124,65 @@ def _engram_host_uva_gather_dequant_kernel(
     QUANTIZED: tl.constexpr,
     MXFP8: tl.constexpr,
 ):
+    for row in range(tl.program_id(0), rows, tl.num_programs(0)):
+        token = row // LOCAL_HEADS
+        head_local = row % LOCAL_HEADS
+        index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
+        owned = (index >= vocab_start) & (index < vocab_end)
+        local_row = tl.where(owned, index - vocab_start, 0)
+        chunk = local_row // CHUNK
+        local = local_row % CHUNK
+        if MXFP8:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.float8e4nv))
+        elif QUANTIZED:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
+        else:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.bfloat16))
+        col = tl.arange(0, WIDTH)
+        value = tl.load(codes + local * WIDTH + col).to(tl.float32)
+        if QUANTIZED:
+            if MXFP8:
+                scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.uint8))
+            else:
+                scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
+            if MXFP8:
+                # Read and decode each group scale once, then broadcast to
+                # its values instead of gathering WIDTH repeated bytes.
+                groups = tl.arange(0, WIDTH // GROUP)
+                scale = tl.load(scales + local * (WIDTH // GROUP) + groups)
+                scale = _decode_e8m0(scale)
+                value = tl.reshape(value, (WIDTH // GROUP, GROUP)) * scale[:, None]
+                value = tl.reshape(value, (WIDTH,))
+            else:
+                scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
+                value = value * scale
+        result = value.to(tl.bfloat16)
+        tl.store(
+            output + (token * PAD_HEADS + head_local) * WIDTH + col,
+            tl.where(owned, result, tl.zeros_like(result)),
+        )
+
+
+# Keep the single-row body separate so the capped kernel retains its measured implementation.
+@triton.jit
+def _engram_host_uva_gather_dequant_single_row_kernel(
+    codes_ptrs,
+    scales_ptrs,
+    ids,
+    output,
+    rows,
+    vocab_start,
+    vocab_end,
+    ids_stride_t,
+    CHUNK: tl.constexpr,
+    WIDTH: tl.constexpr,
+    GROUP: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    PAD_HEADS: tl.constexpr,
+    QUANTIZED: tl.constexpr,
+    MXFP8: tl.constexpr,
+):
     row = tl.program_id(0)
     if row < rows:
         token = row // LOCAL_HEADS

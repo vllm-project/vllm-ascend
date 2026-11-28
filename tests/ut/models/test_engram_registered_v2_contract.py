@@ -75,6 +75,7 @@ def test_wrapper_forwards_history_and_runtime_mode(registered_wrapper, mode, dum
         token_indices=token_indices,
         force_dummy=dummy,
         cg_mode=mode,
+        host_uva_core_percentage=75,
     )
     assert result == {"engram_lookups": "rows"}
     registered_wrapper.language_model.prepare_engram_inputs.assert_called_once_with(
@@ -88,6 +89,7 @@ def test_wrapper_forwards_history_and_runtime_mode(registered_wrapper, mode, dum
         token_indices=token_indices,
         force_dummy=dummy,
         cg_mode=mode,
+        host_uva_core_percentage=75,
     )
 
 

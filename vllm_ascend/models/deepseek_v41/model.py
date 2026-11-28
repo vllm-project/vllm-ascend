@@ -1486,6 +1486,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         mask_output_buffer=None,
         mask_ready_event=None,
         valid_token_count=None,
+        host_uva_core_percentage: int | None = None,
     ):
         """Hash on device with upstream NgramHashState, then look up head shards.
 
@@ -1598,7 +1599,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 if not direct:
                     batch_values = reader.lookup_layers(tables, gathered, cpu_hashes)
             for slot, (layer_id, table) in enumerate(zip(layer_ids, tables)):
-                lookup_options = {} if cpu_hashes is None else {"cpu_ids": cpu_hashes[:, slot]}
+                lookup_options: dict[str, Any] = {} if cpu_hashes is None else {"cpu_ids": cpu_hashes[:, slot]}
+                if host_uva_core_percentage is not None:
+                    lookup_options["host_uva_core_percentage"] = host_uva_core_percentage
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
                 if direct:
                     target = output_buffers[layer_id]
@@ -1802,6 +1805,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        host_uva_core_percentage: int | None = None,
     ):
         """Prepare fixed rows on main or publish them from one auxiliary stream.
 
@@ -1854,6 +1858,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             output_tokens=output_tokens,
             mask_output_buffer=graph_inputs["engram_mask"],
             mask_ready_event=graph_inputs.get("engram_mask_ready_event"),
+            host_uva_core_percentage=host_uva_core_percentage if overlap else None,
         )
         if not overlap:
             prepare()
@@ -2137,6 +2142,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        host_uva_core_percentage: int | None = None,
     ):
         return self.model.prepare_engram_inputs(
             input_ids,
@@ -2149,6 +2155,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
+            host_uva_core_percentage=host_uva_core_percentage,
         )
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
