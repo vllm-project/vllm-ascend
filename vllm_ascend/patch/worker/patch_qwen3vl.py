@@ -8,6 +8,7 @@ from vllm.model_executor.models.qwen3_vl import (
     pos_embed_interpolate_native,
 )
 
+from vllm_ascend.ops.helper.qknorm_rope_fusion import maybe_fused_qknorm_rope
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 from vllm_ascend.utils import enable_sp
 
@@ -49,14 +50,27 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
             rope_dim=self.rotary_emb.rotary_dim,
         )
     else:
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
+        fused = maybe_fused_qknorm_rope(
+            qkv,
+            positions,
+            self.q_norm,
+            self.k_norm,
+            self.rotary_emb,
+            self.q_size,
+            self.kv_size,
+            self.head_dim,
+        )
+        if fused is not None:
+            q, k, v = fused
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = self.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_by_head = self.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
+            q, k = self.rotary_emb(positions, q, k)
     attn_output = self.attn(q, k, v)
     output, _ = self.o_proj(attn_output)
     return output

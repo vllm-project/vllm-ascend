@@ -941,12 +941,14 @@
 #   3. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
 #      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
 #    Why:
-#       support triton_split_qkv_rmsnorm_mrope fused kernel for Qwen3Attention and Qwen3MoeAttention.
+#       Select fused Q/K normalization and RoPE without model-level compilation,
+#       while retaining the existing MRoPE fused kernel.
 #    How：
-#       override forward method with the triton_split_qkv_rmsnorm_mrope fused kernel,
-#       when using mrope.
+#       Override forward to use the MRoPE kernel when applicable and call the
+#       shared Q/K Norm + RoPE helper for standard rotary embedding.
 #    Future Plan:
-#       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+#       Remove this patch when upstream vLLM provides a model-level fusion hook
+#       usable by Ascend for both MRoPE and standard RoPE.
 #
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
