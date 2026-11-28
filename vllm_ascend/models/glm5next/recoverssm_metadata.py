@@ -6,6 +6,12 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 import torch
+
+from vllm_ascend.utils import get_mamba_cache_mode, vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.model_executor.layers.mamba.abstract import get_mamba_num_speculative_blocks
+
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
@@ -52,15 +58,19 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         m, num_decode_draft_tokens_cpu = self._normalize_graph_padding(
             common_attn_metadata, num_actual_reqs, num_decode_draft_tokens_cpu
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
-            # MRV2's CUDA builder requires precomputed physical state IDs.
-            # Reuse the device-independent path used by Ascend's GDN builder;
-            # the upstream KDA fallback and multi-group helper require CUDA.
-            self.mamba_aligned_state_indices = mamba_get_block_table_tensor(
-                m.block_table_tensor[: m.num_reqs],
-                m.seq_lens[: m.num_reqs],
-                self.kv_cache_spec,
-                "align",
+        if get_mamba_cache_mode(self.vllm_config.cache_config) == "align":
+            self.mamba_aligned_state_indices = (
+                mamba_get_block_table_tensor(
+                    m.block_table_tensor[: m.num_reqs], m.seq_lens[: m.num_reqs], self.kv_cache_spec, "align"
+                )
+                if vllm_version_is("0.34.0")
+                else mamba_get_block_table_tensor(
+                    m.block_table_tensor[: m.num_reqs],
+                    m.seq_lens[: m.num_reqs],
+                    self.kv_cache_spec,
+                    True,
+                    get_mamba_num_speculative_blocks(self.vllm_config),
+                )
             )
         with _disable_upstream_graph_staging(self):
             metadata = super().build(

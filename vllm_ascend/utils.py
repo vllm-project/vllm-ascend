@@ -48,7 +48,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import CacheConfig, SpeculativeConfig, VllmConfig
 else:
     VllmConfig = None
 
@@ -815,6 +815,25 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def scheduler_collects_stats(scheduler: object) -> bool:
+    """Read the stats flag shared by the scheduler and its KV cache manager."""
+    name = "log_stats" if vllm_version_is("0.34.0") else "collect_stats"
+    return bool(getattr(scheduler, name))
+
+
+def speculator_uses_target_hidden_states(config: SpeculativeConfig) -> bool:
+    if vllm_version_is("0.34.0"):
+        return config.use_eagle()
+    return config.uses_target_hidden_states
+
+
+def get_mamba_cache_mode(cache_config: CacheConfig) -> str:
+    """Expose the legacy mode to Ascend layout consumers."""
+    if vllm_version_is("0.34.0"):
+        return cache_config.mamba_cache_mode
+    return "align" if cache_config.enable_prefix_caching else "none"
 
 
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
@@ -1914,7 +1933,9 @@ def get_compressed_pos_and_indices(
     req_indices_compressed_list = []
     num_scheduled_tokens_compressed_list = []
 
-    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+    from vllm_ascend.core.kv_cache_compat import (
+        UniformTypeKVCacheSpecs,
+    )
 
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens

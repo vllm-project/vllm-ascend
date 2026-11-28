@@ -6,6 +6,7 @@ from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.utils import assert_valid_generation_outputs
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("cache_mode", ["none", "align"])
@@ -22,7 +23,7 @@ def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(cache_mode):
             tensor_parallel_size=4,
             dtype="bfloat16",
             mamba_ssm_cache_dtype="float32",
-            mamba_cache_mode=cache_mode,
+            **({"mamba_cache_mode": cache_mode} if vllm_version_is("0.34.0") else {}),
             enable_prefix_caching=cache_mode == "align",
             use_replayssm=use_replayssm,
             speculative_config={"method": "mtp", "num_speculative_tokens": 4},

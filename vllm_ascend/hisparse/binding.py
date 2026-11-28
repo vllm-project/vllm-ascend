@@ -8,15 +8,20 @@ from dataclasses import replace
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
+from vllm_ascend.core.kv_cache_compat import get_group_layer_layouts, get_group_layout
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor, AscendSFAIndexerCacheSpec
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+
+    _SYNTHETIC_PAGE_SPECS: tuple[type[KVCacheSpec], ...] = (HiSparseHotSpec, HiSparseResidentSpec)
+else:
+    from vllm.v1.kv_cache_interface import HiSparsePageSpec
+
+    _SYNTHETIC_PAGE_SPECS = (HiSparsePageSpec,)
 
 
 def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> list[AlignedKVCacheTensor]:
@@ -25,7 +30,7 @@ def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[s
     reserved = [t for t in device_tensors if isinstance(t, AlignedKVCacheTensor)]
     if not reserved:
         if any(
-            getattr(g.kv_cache_spec, "requires_aligned_device_slab", False) for g in kv_cache_config.kv_cache_groups
+            getattr(get_group_layout(g), "requires_aligned_device_slab", False) for g in kv_cache_config.kv_cache_groups
         ):
             raise RuntimeError("HiSparse AscendStore device views require a slab alignment reservation.")
         return []
@@ -101,7 +106,7 @@ def align_hisparse_indexer_specs(
                 alignment = math.lcm(alignment, spec.head_size, torch.float32.itemsize)
             else:
                 alignment = math.lcm(alignment, spec.page_size_bytes)
-        elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
+        elif packed_row_bytes is not None and isinstance(spec, _SYNTHETIC_PAGE_SPECS):
             # Core derives these synthetic specs without the source row alignment.
             # Declare it before shared-slab sizing, never round runtime addresses.
             alignment = math.lcm(alignment, packed_row_bytes)
@@ -117,10 +122,7 @@ def get_hisparse_indexer_specs(
     """Collect the Ascend indexer specs keyed by layer."""
     indexer_specs = {}
     for group in kv_cache_config.kv_cache_groups:
-        for name in group.layer_names:
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[name]
+        for name, spec in get_group_layer_layouts(group).items():
             if isinstance(spec, AscendSFAIndexerCacheSpec):
                 indexer_specs[name] = spec
 

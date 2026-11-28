@@ -8,6 +8,7 @@ import pytest
 import torch
 from vllm.v1.worker.utils import AttentionGroup
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
@@ -17,7 +18,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.platform import _validate_sfa_dcp_kv_sp
-from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer
+from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer, vllm_version_is
 
 
 def _config(max_len, interleave):
@@ -38,7 +39,11 @@ def _config(max_len, interleave):
 def _create_attention_group(spec, config, indexer):
     # Exercise the real upstream factory, including its kernel-size spec copy.
     cls = AscendSFAIndexerMetadataBuilder if indexer else AscendSFADCPMetadataBuilder
-    backend = SimpleNamespace(get_builder_cls=lambda: cls, get_supported_kernel_block_sizes=lambda _spec: [128])
+    backend = SimpleNamespace(
+        get_builder_cls=lambda: cls,
+        get_supported_kernel_block_sizes=lambda _spec: [128],
+        get_supported_kernel_block_sizes_for_layers=lambda _spec, _names: [128],
+    )
     group = AttentionGroup(backend=backend, layer_names=["layer"], kv_cache_spec=spec, kv_cache_group_id=0)
 
     def init_base(self, *args, **kwargs):
@@ -55,7 +60,12 @@ def _create_attention_group(spec, config, indexer):
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
     ):
-        group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
+        kwargs = {}
+        if not vllm_version_is("0.34.0"):
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            kwargs["kv_cache_group"] = KVCacheGroup.from_layers(make_layer_cache_configs({"layer": spec}))
+        group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128, **kwargs)
     return group
 
 

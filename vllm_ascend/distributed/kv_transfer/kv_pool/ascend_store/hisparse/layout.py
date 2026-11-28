@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_compat import get_group_layer_layouts
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
     DEVICE_BUFFER_ALIGNMENT,
@@ -36,7 +37,8 @@ def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
         return False
     host_blocks = getattr(config, "hisparse_host_num_blocks", None)
     return (isinstance(host_blocks, int) and not isinstance(host_blocks, bool)) or any(
-        getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+        getattr(group, "host_resident", False) is True or getattr(group, "role", None) == "hisparse_source"
+        for group in getattr(config, "kv_cache_groups", ())
     )
 
 
@@ -201,10 +203,7 @@ def _hisparse_page_geometry(kv_cache_config: KVCacheConfig, dcp_size: int, trans
         if not group.enable_kv_transfer:
             continue
         group_layers = []
-        for name in sorted(group.layer_names):
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[name]
+        for name, spec in sorted(get_group_layer_layouts(group).items()):
             group_layers.append(
                 (
                     name,

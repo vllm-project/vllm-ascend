@@ -73,10 +73,14 @@ def prepare_draft_fia_lengths(
     return result
 
 
-def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool, bool]:
+def detect_draft_attn_architecture(
+    attn_groups: Any, *, inspect_mla_builders: bool = True
+) -> tuple[str | None, bool, bool]:
     """Return the draft architecture and whether all MLA groups use FlashMLA or the A3 sink."""
     backend = _get_graph_update_backend(attn_groups)
     if issubclass(backend, AscendMLABackend):
+        if not inspect_mla_builders:
+            return "MLA", False, False
         builders = [
             group.get_metadata_builder(0)
             for groups in attn_groups
@@ -354,6 +358,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         block_tables: Any,
         target_input_buffers: Any,
         target_attn_groups: Any,
+        kernel_block_sizes: list[int] | None = None,
     ) -> None:
         super().set_attn(
             model_state,
@@ -361,6 +366,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            *((kernel_block_sizes,) if kernel_block_sizes is not None else ()),
         )
         self._context_slot_mappings = torch.zeros(
             len(self.draft_kv_cache_group_ids),

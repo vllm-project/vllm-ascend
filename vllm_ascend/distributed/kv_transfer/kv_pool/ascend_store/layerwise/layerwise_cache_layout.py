@@ -18,9 +18,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
 SpecReuseRules = Mapping[type[KVCacheSpec], bool | Callable[[KVCacheSpec], bool]]
@@ -292,7 +295,7 @@ def get_layerwise_kv_cache_specs(
     """Expand group specs into a cache spec for every logical layer."""
     layer_specs: dict[str, KVCacheSpec] = {}
     for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
+        group_spec = get_group_layout(group)
         for layer_name in group.layer_names:
             if isinstance(group_spec, UniformTypeKVCacheSpecs):
                 layer_specs[layer_name] = group_spec.kv_cache_specs[layer_name]

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("vllm.v1.core.kv_cache_config_builder", reason="the KV cache builder is main-only")
 pytest.importorskip("vllm.v1.hisparse.coordinator")
 
 import torch
@@ -16,10 +15,9 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
-from vllm.v1.core.single_type_kv_cache_manager import HiSparseResidentManager, register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, HiSparseResidentManager
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -28,9 +26,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
+from vllm_ascend.core.kv_cache_compat import get_group_layout, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import aligned_hisparse_allocation_config
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
+from vllm_ascend.utils import vllm_version_is
 
 BLOCK_SIZE = 16
 
@@ -91,6 +91,7 @@ def _cache_configs(
             head_size=576,
             dtype=torch.bfloat16,
             is_index_group_leader=True,
+            cache_role=SparseCacheRole.SPARSE,
         )
         for index in range(hot_units)
     }
@@ -102,7 +103,12 @@ def _cache_configs(
         cache_role=SparseCacheRole.INDEXER,
     )
     builder = AscendKVCacheConfigBuilder()
-    groups = builder.get_kv_cache_groups(config, specs)
+    if vllm_version_is("0.34.0"):
+        groups = builder.get_kv_cache_groups(config, specs)
+    else:
+        groups = builder.get_kv_cache_groups(
+            config, {name: FullAttentionManager.layer_config(spec) for name, spec in specs.items()}
+        )
     cache = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=device_blocks)
     if host_blocks is not None:
         # Model the number of usable Host pages left after other requests.
@@ -111,7 +117,7 @@ def _cache_configs(
 
 
 def _cache_manager(config, cache):
-    block_size = cache.kv_cache_groups[0].kv_cache_spec.block_size
+    block_size = get_group_layout(cache.kv_cache_groups[0]).block_size
     return KVCacheManager(
         generate_scheduler_kv_cache_config([cache]),
         max_model_len=config.model_config.max_model_len,
@@ -133,17 +139,20 @@ def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, s
     assert len(managers) == hot_units
     for manager in managers:
         assert type(manager) is AscendStoreHiSparseResidentManager
-        spec = manager.kv_cache_spec
-        assert manager.max_admission_blocks_per_request == spec.max_admission_blocks_per_request(
-            config.max_in_flight_tokens, config.model_config.max_model_len
-        )
+        if vllm_version_is("0.34.0"):
+            spec = manager.kv_cache_spec
+            assert manager.max_admission_blocks_per_request == spec.max_admission_blocks_per_request(
+                config.max_in_flight_tokens, config.model_config.max_model_len
+            )
+            assert spec.max_memory_usage_bytes(config) == sizing_pages * spec.page_size_bytes
+        else:
+            group = cache.kv_cache_groups[manager.kv_cache_group_id]
+            assert manager.max_admission_blocks_per_request == manager.max_admission_blocks(
+                group.manager_config, group.block_size, config.max_in_flight_tokens, config.model_config.max_model_len
+            )
+            assert group.max_memory_usage_bytes(config) == sizing_pages * group.page_size_bytes
         assert manager.max_admission_blocks_per_request == min(window, 8)
-        assert spec.max_memory_usage_bytes(config) == sizing_pages * spec.page_size_bytes
-    assert not any(
-        group.enable_kv_transfer
-        for group in cache.kv_cache_groups
-        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
-    )
+    assert not any(group.enable_kv_transfer for group in cache.kv_cache_groups if group.role == "hisparse_resident")
 
 
 @pytest.mark.parametrize(("window", "expected"), [(0, 0), (2, 2)])

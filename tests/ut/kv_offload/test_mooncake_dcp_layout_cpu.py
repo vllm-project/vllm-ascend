@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from vllm_ascend.utils import get_mamba_cache_mode
+
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py"
 
 
@@ -314,7 +316,11 @@ def test_scheduler_prompt_truncation_uses_each_groups_dcp_size(dcp_size):
     info = next(n for n in tree.body if getattr(n, "name", None) == "GroupTransferInfo")
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakeConnectorScheduler")
     cls.body = [n for n in cls.body if getattr(n, "name", None) == "_get_transfer_block_ids"]
-    scope: dict[str, Any] = {"dataclass": dataclass, "cdiv": lambda a, b: (a + b - 1) // b}
+    scope: dict[str, Any] = {
+        "dataclass": dataclass,
+        "cdiv": lambda a, b: (a + b - 1) // b,
+        "get_mamba_cache_mode": get_mamba_cache_mode,
+    }
     exec(
         compile(
             "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[info, cls], type_ignores=[])),
@@ -325,7 +331,9 @@ def test_scheduler_prompt_truncation_uses_each_groups_dcp_size(dcp_size):
     )
     scheduler = scope["MooncakeConnectorScheduler"]()
     scheduler.dcp_size = dcp_size
-    scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    scheduler.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="align", enable_prefix_caching=True)
+    )
     info_cls = scope["GroupTransferInfo"]
     scheduler.group_transfer_info = [
         info_cls(128, 0, False, True),

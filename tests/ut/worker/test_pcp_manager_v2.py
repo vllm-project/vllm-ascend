@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from contextlib import nullcontext
+from dataclasses import fields
 from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -51,6 +52,10 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import AutoR
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
 )
+
+
+def _input_batch_fields(batch):
+    return {field.name: getattr(batch, field.name) for field in fields(InputBatch)}
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -174,7 +179,7 @@ def _make_policy_batch(counts, prefilling):
     batch.seq_lens_cpu_upper_bound = torch.from_numpy(counts + 10)
     batch.input_ids.copy_(torch.arange(batch.num_tokens, dtype=torch.int32) + 100)
     batch.positions.copy_(torch.from_numpy(np.concatenate([np.arange(n) + 10 for n in counts])))
-    return AscendInputBatch(**batch.__dict__, seq_lens_np=counts + 10, attn_state="global-state")
+    return AscendInputBatch(**_input_batch_fields(batch), seq_lens_np=counts + 10, attn_state="global-state")
 
 
 @pytest.mark.parametrize("pcp_size", [2, 4])
@@ -601,7 +606,7 @@ def _make_local_pcp_batch():
     base_batch.is_padding.fill_(False)
 
     return AscendInputBatch(
-        **base_batch.__dict__,
+        **_input_batch_fields(base_batch),
         seq_lens_np=np.array([101, 102], dtype=np.int32),
         attn_state="global-attn-state",
     )
@@ -637,7 +642,7 @@ def _make_global_pcp_batch():
     base_batch.is_padding.fill_(False)
 
     return AscendInputBatch(
-        **base_batch.__dict__,
+        **_input_batch_fields(base_batch),
         seq_lens_np=np.array([18], dtype=np.int32),
         attn_state="global-attn-state",
     )
@@ -818,7 +823,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded(req
         max_query_len=1,
     )
     local_batch = AscendInputBatch(
-        **base_batch.__dict__,
+        **_input_batch_fields(base_batch),
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
         attn_state="local-attn-state",
     )
@@ -845,7 +850,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded(req
         max_query_len=1,
     )
     global_batch = AscendInputBatch(
-        **global_base_batch.__dict__,
+        **_input_batch_fields(global_base_batch),
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
         attn_state="global-attn-state",
     )
@@ -1396,7 +1401,7 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     config.scheduler_config = SimpleNamespace(enable_chunked_prefill=False)
     buffers = AscendInputBuffers(2, 5, torch.device("cpu"))
     base = InputBatch.make_dummy(2, 5, buffers, max_query_len=3)
-    global_batch = AscendInputBatch(**base.__dict__, seq_lens_np=np.array([12, 23], dtype=np.int32))
+    global_batch = AscendInputBatch(**_input_batch_fields(base), seq_lens_np=np.array([12, 23], dtype=np.int32))
     global_batch.is_dummy = False
     global_batch.req_ids = ["spec-a", "spec-b"]
     global_batch.input_ids.copy_(torch.tensor([101, 102, 201, 202, 203], dtype=torch.int32))

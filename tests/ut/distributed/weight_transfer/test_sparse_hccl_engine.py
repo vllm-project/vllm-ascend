@@ -65,6 +65,10 @@ def make_patch(**kwargs):
 
 @pytest.mark.parametrize("empty_only", [False, True])
 def test_upstream_broadcast_filters_empty_patches_and_syncs_npu(empty_only):
+    from vllm.distributed.weight_transfer import sparse_nccl_engine
+
+    from vllm_ascend.utils import vllm_version_is
+
     engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock())
     engine.model_update_group = MagicMock(device=torch.device("cpu"))
     empty = make_patch(indices=torch.empty(0, dtype=torch.int32), values=torch.empty(0))
@@ -85,9 +89,10 @@ def test_upstream_broadcast_filters_empty_patches_and_syncs_npu(empty_only):
         stream.synchronize.assert_not_called()
     else:
         wrapper.assert_called_once()
-        engine.client.update_weights.assert_called_once_with(
-            dict(names=[full.name], dtype_names=["float32"], shapes=[[4, 4]], num_updates_list=[2])
-        )
+        update = dict(names=[full.name], dtype_names=["float32"], shapes=[[4, 4]], num_updates_list=[2])
+        if not vllm_version_is("0.34.0"):
+            update["wire_batch_bytes"] = sparse_nccl_engine._WIRE_BATCH_BYTES
+        engine.client.update_weights.assert_called_once_with(update)
         assert engine.model_update_group.broadcast.call_count == 2
         stream.synchronize.assert_called_once()
 

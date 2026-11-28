@@ -19,16 +19,18 @@ from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (

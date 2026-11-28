@@ -174,9 +174,10 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     class RecordingAttnGroup:
         # Both supported vLLM lanes (#56723) call the group's build_metadata.
         layer_names = ["draft.layer"]
+        metadata_builders = [RecordingBuilder()]
 
         def get_metadata_builder(self, ubatch_idx=0):
-            return RecordingBuilder()
+            return self.metadata_builders[ubatch_idx]
 
         def build_metadata(self, common_attn_metadata, ubatch_idx=0, **kwargs):
             return self.get_metadata_builder(ubatch_idx).build(0, common_attn_metadata)

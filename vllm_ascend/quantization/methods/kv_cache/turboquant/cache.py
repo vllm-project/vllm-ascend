@@ -14,9 +14,12 @@ from vllm.utils.torch_utils import get_dtype_size
 
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+)
+
+from vllm_ascend.core.kv_cache_compat import (
+    KVCacheGroupSpec,
     UniformTypeKVCacheSpecs,
 )
 

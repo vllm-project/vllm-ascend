@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -26,11 +28,12 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     # TODO: FP16 KV cache with RecoverSSM has not been validated.
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("GLM RecoverSSM does not support stochastic rounding")
-    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
-    if cache.mamba_cache_mode != expected_cache_mode:
-        raise ValueError(
-            f"GLM RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
-        )
+    if vllm_version_is("0.34.0"):
+        expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+        if cache.mamba_cache_mode != expected_cache_mode:
+            raise ValueError(
+                f"GLM RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+            )
     parallel = vllm_config.parallel_config
     if parallel.pipeline_parallel_size != 1:
         raise ValueError("GLM RecoverSSM currently requires PP=1")

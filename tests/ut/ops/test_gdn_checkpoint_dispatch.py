@@ -9,6 +9,7 @@ import torch
 
 from vllm_ascend.ops import gdn_checkpoint
 from vllm_ascend.ops.triton.fla import chunk
+from vllm_ascend.utils import vllm_version_is
 
 
 def chunk_metadata():
@@ -111,7 +112,9 @@ def test_boundary_policy(transfer, drop, lookahead, expected):
         speculative_config=None if drop is None else SimpleNamespace(use_eagle_block_drop=lambda: drop),
         num_hash_lookahead_tokens=lookahead,
     )
-    assert gdn_checkpoint._supports_checkpoint_boundary_policy(config) is expected
+    assert gdn_checkpoint._supports_checkpoint_boundary_policy(config) is (
+        expected if vllm_version_is("0.34.0") else not transfer
+    )
 
 
 def test_workspace_sharing_and_fallback():

@@ -47,15 +47,11 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
@@ -77,6 +73,14 @@ from vllm_ascend.attention.utils import (
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
     use_component_major_mla_pd_layout,
+)
+from vllm_ascend.core.kv_cache_compat import (
+    EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layer_layouts,
+    get_group_layout,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -115,6 +119,7 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -124,6 +129,13 @@ from vllm_ascend.worker.utils import (
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+    from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+    from vllm.v1.worker.utils import customize_layer_config
+
+    from vllm_ascend.core.kv_cache_compat import bridge_attention_layout
 
 QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
 
@@ -187,7 +199,19 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
+    return _collect_cache_layouts(vllm_config)[0]
+
+
+if not vllm_version_is("0.34.0"):
+
+    def get_kv_cache_layer_configs(vllm_config: VllmConfig) -> dict[str, KVCacheLayerConfig]:
+        layouts, configs = _collect_cache_layouts(vllm_config)
+        return {name: replace(configs[name], spec=spec) for name, spec in layouts.items()}
+
+
+def _collect_cache_layouts(vllm_config: VllmConfig):
     kv_cache_spec: dict[str, KVCacheSpec] = {}
+    configs: dict[str, Any] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
@@ -196,11 +220,20 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
 
-        spec = attn_module.get_kv_cache_spec(vllm_config)
+        if vllm_version_is("0.34.0"):
+            spec = attn_module.get_kv_cache_spec(vllm_config)
+            sliding = isinstance(spec, SlidingWindowSpec)
+        else:
+            config = attn_module.get_kv_cache_config(vllm_config)
+            if config is None:
+                continue
+            spec = config.spec
+            sliding = issubclass(config.manager_cls, SlidingWindowManager)
         if (
             isinstance(attn_module, Attention)
             and attn_module.is_draft_layer
-            and isinstance(spec, SlidingWindowSpec)
+            and sliding
+            and spec is not None
             and spec.page_size_padded is not None
             and spec.page_size_padded < spec.real_page_size_bytes
         ):
@@ -208,14 +241,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             layer_config = copy(vllm_config)
             layer_config.cache_config = copy(vllm_config.cache_config)
             layer_config.cache_config.skip_page_size_padded = None
-            spec = attn_module.get_kv_cache_spec(layer_config)
+            if vllm_version_is("0.34.0"):
+                spec = attn_module.get_kv_cache_spec(layer_config)
+            else:
+                config = attn_module.get_kv_cache_config(layer_config)
+                assert config is not None
+                spec = config.spec
         if spec is None:
             continue
 
         # Speculator.load_model marks draft modules before cache planning.
         # Apply the upstream ownership tag before Ascend rebuilds MLA specs.
-        if attn_module.is_draft_layer:
-            spec = replace(spec, is_draft=True)
+        if vllm_version_is("0.34.0"):
+            if attn_module.is_draft_layer:
+                spec = replace(spec, is_draft=True)
+        else:
+            configs[layer_name] = replace(config, is_draft=config.is_draft or attn_module.is_draft_layer)
 
         if isinstance(spec, MambaSpec):
             # Keep Mamba groups after attention groups. Ascend graph parameter
@@ -236,9 +277,21 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
         if isinstance(spec, AttentionSpec):
             # Match upstream customization, including kernel-block stride alignment.
-            spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
-        if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+            if vllm_version_is("0.34.0"):
+                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
+            else:
+                config = customize_layer_config(attn_module.get_attn_backend(), configs[layer_name], layer_name)
+                configs[layer_name] = config
+                spec = config.spec
+        full_attention = (
+            type(spec) is FullAttentionSpec
+            if vllm_version_is("0.34.0")
+            else type(spec) is AttentionSpec and config.manager_cls is FullAttentionManager
+        )
+        if full_attention and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
+        if not vllm_version_is("0.34.0"):
+            spec = bridge_attention_layout(replace(configs[layer_name], spec=spec))
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -249,7 +302,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # K3.1 recurrent padding is settled by NPUPlatform before the
             # layers construct their specs. Keep indexer/draft pages native.
             kv_cache_spec.update(mamba_specs)
-            return kv_cache_spec
+            return kv_cache_spec, configs
         # QSA/CSA hybrid models (descriptor-native cache owners) need
         # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
@@ -293,10 +346,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
             packed_row_bytes = C8_ROW_BYTES
-        return align_hisparse_indexer_specs(
-            resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
-        )
-    return kv_cache_spec
+        if vllm_version_is("0.34.0"):
+            kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
+        else:
+            configs = resolve_hisparse_specs(
+                vllm_config,
+                {name: replace(configs[name], spec=spec) for name, spec in kv_cache_spec.items()},
+                attn_layers,
+            )
+            kv_cache_spec = {name: config.spec for name, config in configs.items()}
+        kv_cache_spec = align_hisparse_indexer_specs(kv_cache_spec, packed_row_bytes=packed_row_bytes)
+    return kv_cache_spec, configs
 
 
 def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup]]) -> ParallelConfig | None:
@@ -463,12 +523,8 @@ def build_attn_metadata(
                 # so metadata preparation does not add an H2D copy on every step.
                 block_sizes = torch.tensor(
                     [
-                        (
-                            group.kv_cache_spec.first_spec
-                            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-                            else group.kv_cache_spec
-                        ).num_states
-                        for group in kv_cache_groups
+                        (layout.first_spec if isinstance(layout, UniformTypeKVCacheSpecs) else layout).num_states
+                        for layout in map(get_group_layout, kv_cache_groups)
                     ],
                     dtype=slot_mappings.dtype,
                     device=slot_mappings.device,
@@ -674,15 +730,9 @@ def build_attn_state(
 
 
 def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
-    for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
-        group_spec = group_kv_cache_spec.kv_cache_spec
-        for layer_name in group_kv_cache_spec.layer_names:
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
-            else:
-                layer_kv_cache_spec[layer_name] = group_spec
-    return layer_kv_cache_spec
+    return {
+        name: spec for group in kv_cache_config.kv_cache_groups for name, spec in get_group_layer_layouts(group).items()
+    }
 
 
 def _get_attention_kv_cache_dims(
@@ -950,15 +1000,7 @@ def allocate_shared_attention_kv_cache(
     upstream permits alignment padding that this K/V split cannot consume.
     """
     descriptors = kv_cache_config.kv_cache_tensors
-    specs = {
-        name: (
-            group.kv_cache_spec.kv_cache_specs[name]
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-            else group.kv_cache_spec
-        )
-        for group in kv_cache_config.kv_cache_groups
-        for name in group.layer_names
-    }
+    specs = _get_layer_kv_cache_specs(kv_cache_config)
     sizes = {descriptor.size for descriptor in descriptors}
     if len(sizes) != 1 or kv_cache_config.num_blocks <= 0:
         raise ValueError("Shared attention KV cache requires one nonempty backing allocation.")
@@ -1360,13 +1402,8 @@ def _get_cache_attention_groups(
     for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
         group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
         group_order: list[tuple[str, KVCacheSpec, int]] = []
-        for layer_name in kv_cache_group.layer_names:
-            if layer_name in shared_layers:
-                continue
+        for layer_name, layer_spec in get_group_layer_layouts(kv_cache_group, excluded_layers=shared_layers).items():
             layer = attn_layers[layer_name]
-            layer_spec = kv_cache_group.kv_cache_spec
-            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-                layer_spec = layer_spec.kv_cache_specs[layer_name]
             if isinstance(layer_spec, EncoderOnlyAttentionSpec):
                 continue
             backend = layer.get_attn_backend()
@@ -1386,7 +1423,12 @@ def _get_cache_attention_groups(
                     # Match create_metadata_builders() without rebuilding its
                     # metadata buffers. Each backend can use smaller pages than
                     # the common view size of its KV cache group.
-                    kernel_block_size = select_common_block_size(kernel_block_sizes[group_id], [backend], [layer_spec])
+                    kernel_block_size = select_common_block_size(
+                        kernel_block_sizes[group_id],
+                        [backend],
+                        [layer_spec],
+                        **({} if vllm_version_is("0.34.0") else {"layer_names": [[layer_name]]}),
+                    )
                     if kernel_block_size != layer_spec.block_size:
                         attn_group.kernel_block_size = kernel_block_size
                 group_map[key] = attn_group
@@ -2008,12 +2050,13 @@ def _reshape_kv_cache_v2(
             num_blocks = total_bytes // page_stride_bytes
             num_blocks_per_kv_block = kv_cache_spec.num_states // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+            is_draft = getattr(kv_cache_spec, "is_draft", False)
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto") if kv_cache_spec.is_draft else cache_dtype,
+                (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto") if is_draft else cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (

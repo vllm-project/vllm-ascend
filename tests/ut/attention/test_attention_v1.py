@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -23,6 +22,7 @@ from vllm_ascend.attention.utils import (
     requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE

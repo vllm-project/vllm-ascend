@@ -9,6 +9,7 @@ from vllm.config import CacheConfig
 
 from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
 from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM, Glm5NextForConditionalGeneration
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
@@ -16,7 +17,8 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
         mamba_cache_dtype=conv_dtype,
         mamba_ssm_cache_dtype=ssm_dtype,
         mamba_block_size=512,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
+        **({"mamba_cache_mode": "align"} if vllm_version_is("0.34.0") else {}),
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next")),
@@ -47,7 +49,10 @@ def test_kda_state_dtype_matches_model_and_cache_spec(ssm_dtype, conv_dtype, exp
     assert layer.get_state_dtype() == want
     assert Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config) == want
     assert Glm5NextForConditionalGeneration.get_mamba_state_dtype_from_config(config) == want
-    spec = layer.get_kv_cache_spec(config)
+    if vllm_version_is("0.34.0"):
+        spec = layer.get_kv_cache_spec(config)
+    else:
+        spec = layer.get_kv_cache_config(config).spec
     assert spec.dtypes == want
     state_bytes = 64 * 128 * 128 * torch.empty((), dtype=expected).element_size()
     conv_bytes = 3 * 64 * 128 * (3 + 5) * torch.empty((), dtype=expected_conv).element_size()

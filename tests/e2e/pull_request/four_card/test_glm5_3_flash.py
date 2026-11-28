@@ -21,6 +21,7 @@ from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 NUM_LAYERS = 9
 NUM_MTP_LAYERS = 1
@@ -165,7 +166,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         block_size=128,
         enable_chunked_prefill=True,
         enable_prefix_caching=prefix_caching,
-        mamba_cache_mode="align" if prefix_caching else "none",
+        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.34.0") else {}),
         gpu_memory_utilization=0.8,
         seed=1024,
         enforce_eager=enforce_eager,

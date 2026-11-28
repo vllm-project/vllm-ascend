@@ -15,8 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Any
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.utils import vllm_version_is
 
 QWEN3_5_PREFIX_MAMBA_PROMPT = (
     "You are reading a compact synthetic operations ledger. "
@@ -38,6 +41,7 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
     outputs: list[tuple[list[int], str]] = []
 
     if enable_prefix_caching:
+        mamba_options: dict[str, Any] = {"mamba_cache_mode": "align"} if vllm_version_is("0.34.0") else {}
         with VllmRunner(
             "Qwen/Qwen3.5-4B",
             tensor_parallel_size=1,
@@ -46,7 +50,7 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
             max_model_len=2048,
             max_num_batched_tokens=2048,
             enable_prefix_caching=True,
-            mamba_cache_mode="align",
+            **mamba_options,
             mamba_ssm_cache_dtype="float16",
         ) as vllm_model:
             for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:

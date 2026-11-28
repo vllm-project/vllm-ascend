@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
@@ -33,9 +34,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_co
     AscendOffloadingConnectorWorker,
     _canonicalize_split_cache,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
+    parallel_kwargs = {} if vllm_version_is("0.34.0") else {"local_world_size": 2}
     return OffloadingConfig(
         groups=(
             OffloadingGroupConfig(
@@ -68,6 +71,7 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
             is_parallelism_agnostic=True,
             data_parallel_size=1,
             data_parallel_rank_local=None,
+            **parallel_kwargs,
         ),
     )
 
@@ -124,6 +128,7 @@ def test_ascend_connector_replaces_worker_with_current_vllm_config(
     kv_cache_config = object()
     spec = SimpleNamespace(
         replicated_layout=False,
+        async_init=False,
         config=SimpleNamespace(parallel=SimpleNamespace(rank=0)),
     )
 

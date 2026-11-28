@@ -58,13 +58,13 @@ touch configs that don't use it, e.g. PD-disaggregated recompute).
 
 import time
 from collections import deque
+from functools import wraps
 from typing import Any
 
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
@@ -73,14 +73,12 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.engine.core import DPEngineCoreProc
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.scheduler_output import make_cached_request_data
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import scheduler_collects_stats, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
@@ -107,27 +105,10 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
 
 
 class BalanceScheduler(Scheduler):
-    def __init__(
-        self,
-        vllm_config,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
-        block_size: int,
-        hash_block_size: int | None = None,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        include_finished_set: bool = False,
-        log_stats: bool = False,
-    ) -> None:
-        super().__init__(
-            vllm_config,
-            kv_cache_config,
-            structured_output_manager,
-            block_size,
-            hash_block_size,
-            mm_registry,
-            include_finished_set,
-            log_stats,
-        )
+    @wraps(Scheduler.__init__)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        vllm_config = self.vllm_config
         short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
             from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
@@ -188,7 +169,7 @@ class BalanceScheduler(Scheduler):
 
         iteration_details = None
         if not vllm_version_is("0.34.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            (scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
@@ -295,7 +276,9 @@ class BalanceScheduler(Scheduler):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                    shift_computed_tokens=(1 if self.use_eagle else 0)
+                    if vllm_version_is("0.34.0")
+                    else self.num_prefill_lookahead,
                 )
 
             if self.need_mamba_block_aligned_split:
@@ -630,7 +613,9 @@ class BalanceScheduler(Scheduler):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                            shift_computed_tokens=(1 if self.use_eagle else 0)
+                            if vllm_version_is("0.34.0")
+                            else self.num_prefill_lookahead,
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
@@ -652,7 +637,9 @@ class BalanceScheduler(Scheduler):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                limit_lookahead_tokens = load_kv_async and self.use_eagle
+                limit_lookahead_tokens = load_kv_async and (
+                    self.use_eagle if vllm_version_is("0.34.0") else self.num_lookahead_tokens > 0
+                )
                 effective_lookahead_tokens = 0 if limit_lookahead_tokens else self.num_lookahead_tokens
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -743,7 +730,7 @@ class BalanceScheduler(Scheduler):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.log_stats:
+                if scheduler_collects_stats(self):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
@@ -859,7 +846,7 @@ class BalanceScheduler(Scheduler):
 
         if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
-            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+            if scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
             schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 

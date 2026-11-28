@@ -6,24 +6,13 @@ from dataclasses import replace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
-
-# vLLM #61183 moved the planner helpers out of kv_cache_utils on main.
-try:
-    from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
-except ModuleNotFoundError as exc:
-    if exc.name != "vllm.v1.core.kv_cache_planning":
-        raise
-    from vllm.v1.core.kv_cache_utils import kv_cache_groups_tp_replicas
 
 
 def _mla_spec():

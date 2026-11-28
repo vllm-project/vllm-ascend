@@ -80,16 +80,17 @@ class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelCol
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
         if padding_size:
-            # Padding lives in the last ``padding_size`` rows of each rank.
-            # v0.34.0's upstream wrapper re-applies the load-completion
-            # attribute after super() returns, so only the mainline lane
-            # tracks the loaders here; zeroing stays idempotent on both.
-            track_loaders = not vllm_version_is("0.34.0")
-            for name in ["weight"] + (["bias"] if self.bias is not None else []):
-                param = getattr(self, name)
-                param.data[-padding_size:].zero_()
-                if track_loaders:
-                    set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
+                if vllm_version_is("0.34.0"):
+                    # The release wrapper records its own load-completion attribute.
+                    param.data[-padding_size:].zero_()
+                else:
+                    self._zero_output_padding(param)
+                    set_weight_attrs(
+                        param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True}
+                    )
 
 
 class HeadParallelRowLinear(RowParallelLinear):

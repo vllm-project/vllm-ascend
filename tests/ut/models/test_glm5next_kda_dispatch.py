@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import vllm_ascend.models.glm5next.kda as model_kda
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("needs_output_buffer", [False, True])
@@ -284,10 +285,17 @@ def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
         mamba_block_size=16,
         mamba_page_size_padded=None,
         mamba_cache_mode="none",
+        enable_prefix_caching=False,
     )
     layer.cache_config = cache
-    spec = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
-    assert spec.num_speculative_blocks == (0 if recover else 5)
+    config = SimpleNamespace(cache_config=cache, num_speculative_tokens=5)
+    if vllm_version_is("0.34.0"):
+        spec = layer.get_kv_cache_spec(config)
+        assert spec.num_speculative_blocks == (0 if recover else 5)
+    else:
+        allocation = layer.get_kv_cache_config(config)
+        spec = allocation.spec
+        assert allocation.manager_config.params.num_speculative_blocks == (0 if recover else 5)
     assert spec.shapes[1] == (2, 128, 128)
     assert len(spec.shapes) == len(spec.dtypes) == 2
     assert spec.dtypes == (torch.bfloat16, torch.float32)

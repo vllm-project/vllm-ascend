@@ -9,6 +9,8 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 
+from vllm_ascend.utils import speculator_uses_target_hidden_states
+
 
 class RopeGlobalState:
     def __init__(self):
@@ -303,7 +305,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
         use_eagle = (
             vllm_config is not None
             and vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.use_eagle()
+            and speculator_uses_target_hidden_states(vllm_config.speculative_config)
         )
         num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens if use_eagle else None
 

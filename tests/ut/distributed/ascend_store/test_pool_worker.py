@@ -36,13 +36,14 @@ from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
     KVCacheGroupSpec,
-    MambaSpec,
+    LegacyMambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,
@@ -161,6 +162,7 @@ def make_worker(
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
+    config.num_hash_lookahead_tokens = 0
     config.model_config.model = "org/llama-7b"
     config.model_config.max_model_len = 1024
     config.model_config.use_mla = use_mla
@@ -247,6 +249,7 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
     worker.hash_block_size = 16
     worker.grouped_block_size = [16]
     worker.kv_cache_group_families = ["mamba"]
+    worker.num_hash_lookahead_tokens = 0
     with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
         coordinator = worker._build_cache_coordinator()
     assert coordinator is coordinator_cls.return_value
@@ -398,7 +401,7 @@ class TestPCPPoolWorker(unittest.TestCase):
                 self.assertEqual(worker._is_layerwise_save_owner(0), expected)
 
     def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
-        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
+        spec = LegacyMambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
         plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
         for tp_size, tp_rank, pcp_size, pcp_rank in ((2, 1, 1, 0), (1, 0, 2, 1)):
             worker = make_worker(
@@ -429,7 +432,7 @@ class TestPCPPoolWorker(unittest.TestCase):
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     ["model.layers.0.attn"],
-                    MambaSpec(
+                    LegacyMambaSpec(
                         block_size=16,
                         shapes=((8,),),
                         dtypes=(torch.float32,),
@@ -704,7 +707,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     ["model.layers.7.attn"],
-                    MambaSpec(
+                    LegacyMambaSpec(
                         block_size=16,
                         shapes=((8,), (8,)),
                         dtypes=(torch.float32, torch.float32),
@@ -728,10 +731,10 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
         self.assertIsNone(save_gate.on_start)
 
     def test_pp_maps_global_mamba_layer_to_local_post_compute_save(self):
-        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+        from vllm_ascend.core.kv_cache_compat import UniformTypeKVCacheSpecs
 
         full_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
-        mamba_spec = MambaSpec(
+        mamba_spec = LegacyMambaSpec(
             block_size=16,
             shapes=((8,), (8,)),
             dtypes=(torch.float32, torch.float32),
@@ -1076,7 +1079,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
                 self.assertTrue(all("@head_or_tp_rank:1" in key for key in keys[2:]))
 
 
-class _SparseSWAHitManager:
+class _SparseSWAHitManager(SlidingWindowManager):
     """SWA manager: right-to-left search for a cached aligned segment tail."""
 
     @classmethod
@@ -1086,12 +1089,14 @@ class _SparseSWAHitManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
+        kv_cache_spec=None,
         drop_eagle_block=False,
         alignment_tokens=16,
+        block_size=None,
         **kwargs,
     ):
-        block_size = kv_cache_spec.block_size
+        if block_size is None:
+            block_size = kv_cache_spec.block_size
         max_num_blocks = max_length // block_size
         for block_idx in range(max_num_blocks - 1, -1, -1):
             cached = block_pool.get_cached_block(block_hashes[block_idx], kv_cache_group_ids)
@@ -1139,7 +1144,9 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
     def test_uses_mamba_kv_cache_inside_uniform_group(self):
         import torch
-        from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        from vllm_ascend.core.kv_cache_compat import UniformTypeKVCacheSpecs
 
         cls = self._make_worker_class()
         # vLLM #53896 now compares page sizes while forming uniform groups.
@@ -1250,23 +1257,27 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
     def _make_sparse_swa_coordinator(self):
         import torch
-        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
 
+        from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, SlidingWindowSpec
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+        from vllm_ascend.utils import vllm_version_is
+
+        spec = SlidingWindowSpec(block_size=128, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=256)
+        if vllm_version_is("0.34.0"):
+            group = KVCacheGroupSpec(["layer.0"], spec)
+        else:
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            group = KVCacheGroup.from_layers(
+                {"layer.0": _SparseSWAHitManager.layer_config(spec, sliding_window=spec.sliding_window)}
+            )
 
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
             return_value=_SparseSWAHitManager,
         ):
             return AscendStoreCoordinator(
-                [
-                    KVCacheGroupSpec(
-                        ["layer.0"],
-                        SlidingWindowSpec(
-                            block_size=128, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=256
-                        ),
-                    )
-                ],
+                [group],
                 scheduler_block_size=256,
                 hash_block_size=128,
                 group_block_sizes=[128],
@@ -1342,7 +1353,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
         import torch
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 
         cls = LayerwiseKVPoolWorker
         worker = object.__new__(cls)

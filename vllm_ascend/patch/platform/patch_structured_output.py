@@ -12,6 +12,8 @@ from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
@@ -117,7 +119,10 @@ def _patch_structured_output_manager() -> None:
 
         initialized_backend = getattr(self, _BACKEND_ATTR, None)
         if initialized_backend is None:
-            initialized_backend = _backend_name_from_instance(getattr(self, "backend", None))
+            if vllm_version_is("0.34.0"):
+                initialized_backend = _backend_name_from_instance(self.backend)
+            else:
+                initialized_backend = next(iter(self.backends), None)
             if initialized_backend is not None:
                 setattr(self, _BACKEND_ATTR, initialized_backend)
 
@@ -125,7 +130,11 @@ def _patch_structured_output_manager() -> None:
             _raise_mixed_backend(initialized_backend, request_backend)
 
         result = original_grammar_init(self, request)
-        if getattr(self, "backend", None) is not None:
+        if vllm_version_is("0.34.0"):
+            initialized = self.backend is not None
+        else:
+            initialized = request_backend in self.backends
+        if initialized:
             setattr(self, _BACKEND_ATTR, request_backend)
         return result
 

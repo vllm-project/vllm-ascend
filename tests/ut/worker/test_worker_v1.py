@@ -8,15 +8,11 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 from vllm.config.attention import AttentionConfig
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
 from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
@@ -223,6 +219,7 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(attention_config=AttentionConfig())
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
+        worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(worker.get_kv_cache_spec())
 
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
@@ -258,6 +255,7 @@ class TestNPUWorker(TestBase):
         )
         worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
+        worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(worker.get_kv_cache_spec())
 
         for supports_standardized_backing, expected_budget in (
             (True, 12345),
@@ -312,6 +310,7 @@ class TestNPUWorker(TestBase):
                 "decoder_attn": spec,
             }
         )
+        worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(worker.get_kv_cache_spec())
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,
             use_sparse=False,
@@ -1051,6 +1050,9 @@ class TestNPUWorker(TestBase):
 
             mock_model_runner.get_model.return_value = mock_model
             mock_model_runner.get_kv_cache_spec.return_value = mock_kv_cache_spec
+            mock_model_runner.get_kv_cache_layer_configs.return_value = {
+                name: SimpleNamespace(spec=spec) for name, spec in mock_kv_cache_spec.items()
+            }
             mock_model_runner.get_supported_pooling_tasks.return_value = mock_pooling_tasks
             mock_model_runner.get_supported_tasks.return_value = mock_supported_tasks
 
@@ -1288,6 +1290,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.model_runner.get_kv_cache_layer_configs.return_value = {}
             worker.model_runner.model_memory_usage = 500
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
@@ -1334,6 +1337,7 @@ class TestNPUWorker(TestBase):
             worker.cache_config.kv_cache_memory_bytes = None
             worker.init_snapshot = MagicMock(free_memory=8 << 30)
             worker.model_runner = MagicMock()
+            worker.model_runner.get_kv_cache_layer_configs.return_value = {}
 
             def apply_plan(target_worker):
                 target_worker.cache_config.kv_cache_memory_bytes = planned_kv_cache_memory
@@ -1394,6 +1398,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
+            worker.model_runner.get_kv_cache_layer_configs.return_value = {}
             worker.model_runner.model_memory_usage = 500
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
@@ -1503,6 +1508,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.model_runner.get_kv_cache_layer_configs.return_value = {}
             worker.model_runner.model_memory_usage = 500
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
@@ -2372,7 +2378,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
                     worker.finish_weight_update()
 
                 refresh.assert_not_called()
-                if mode == "direct" and hasattr(gpu_worker, "direct_reload_enabled"):
+                # vLLM #68041 ends a failed update session in either reload mode.
+                if not vllm_version_is("0.34.0") or (mode == "direct" and hasattr(gpu_worker, "direct_reload_enabled")):
                     self.assertFalse(worker._weight_update_active)
                     self.assertTrue(worker.has_incomplete_weight_update())
                     worker.start_weight_update()
@@ -2464,7 +2471,9 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config()
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs,
+            get_kv_cache_layer_configs=lambda: make_layer_cache_configs(specs),
+            speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)}),
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
@@ -2494,7 +2503,9 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs,
+            get_kv_cache_layer_configs=lambda: make_layer_cache_configs(specs),
+            speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)}),
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))

@@ -86,6 +86,8 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
+    speculator_uses_target_hidden_states,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPDependencyTransport,
@@ -1210,7 +1212,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         needs_mtp_hidden_states = (
             spec_config is not None
             and not spec_config.use_dspark()
-            and (spec_config.use_eagle() or spec_config.uses_draft_model())
+            and (
+                speculator_uses_target_hidden_states(spec_config)
+                or (vllm_version_is("0.34.0") and spec_config.uses_draft_model())
+            )
         )
         self._mtp_hidden_buffer = (
             torch.empty(

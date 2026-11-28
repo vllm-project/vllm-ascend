@@ -50,8 +50,12 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.utils import (
     npu_stream_switch,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -136,6 +140,12 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         compress_ratio: int = 1,
     ):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
+
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            return FullAttentionManager.layer_config(spec)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec

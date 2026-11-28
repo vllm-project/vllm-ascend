@@ -10,6 +10,7 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import packed_broadcast_consumer
+from vllm_ascend.utils import vllm_version_is
 
 _DELAY_MATRIX_SIZE = 4096
 _DELAY_MATMUL_COUNT = 256
@@ -25,6 +26,8 @@ _ALLOCATOR_REUSE_ATTEMPTS = 64
 def test_retained_layer_clone_is_ready_and_alive(lifetime_only, num_buffers):
     torch.npu.set_device(0)
     expected = torch.arange(_RETAINED_WEIGHT_ELEMENTS, dtype=torch.float32, device="npu") + 1
+    # The release flushes after crossing its threshold. Main needs the first tensor to fill a chunk exactly.
+    buffer_size_bytes = 1 if vllm_version_is("0.34.0") else expected.numel() * expected.element_size()
     payloads = iter([expected, torch.ones(1, device="npu")])
     output = torch.zeros_like(expected)
     matrix = torch.ones((_DELAY_MATRIX_SIZE, _DELAY_MATRIX_SIZE), device="npu", dtype=torch.float16)
@@ -83,7 +86,7 @@ def test_retained_layer_clone_is_ready_and_alive(lifetime_only, num_buffers):
             SimpleNamespace(broadcast=receive),
             0,
             load,
-            1,
-            num_buffers,
+            buffer_size_bytes=buffer_size_bytes,
+            num_buffers=num_buffers,
         )
     torch.testing.assert_close(output.cpu(), expected.cpu(), rtol=0, atol=0)

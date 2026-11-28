@@ -17,20 +17,17 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupRole,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupRole
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
 from vllm_ascend.hisparse.binding import _bind_indexer_views
+from vllm_ascend.utils import vllm_version_is
 
 NUM_BLOCKS = 4
 BLOCK_SIZE = 2
@@ -53,12 +50,14 @@ def _group(
     enable_kv_transfer: bool = True,
     spec: object | None = None,
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT,
+    **placement,
 ) -> KVCacheGroupSpec:
     return KVCacheGroupSpec(
         layer_names=[layer_name],
         kv_cache_spec=_attention_spec() if spec is None else spec,
         enable_kv_transfer=enable_kv_transfer,
         role=role,
+        **placement,
     )
 
 
@@ -239,12 +238,15 @@ def test_hisparse_host_pool_registers_only_indexer_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With a HiSparse host pool the offload set is the indexer groups."""
+    source_placement = (
+        {"role": KVCacheGroupRole.HISPARSE_SOURCE} if vllm_version_is("0.34.0") else {"host_resident": True}
+    )
     groups = [
         _group("model.layers.0.self_attn"),
         _group(
             "model.layers.0.hisparse_source",
             enable_kv_transfer=False,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            **source_placement,
         ),
         _group(
             "model.layers.0.hisparse_indexer",

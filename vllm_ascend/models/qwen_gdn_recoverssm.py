@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -86,11 +87,12 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     transfer = config.kv_transfer_config
     if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
         raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
-    if cache.mamba_cache_mode != expected_cache_mode:
-        raise ValueError(
-            f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
-        )
+    if vllm_version_is("0.34.0"):
+        expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+        if cache.mamba_cache_mode != expected_cache_mode:
+            raise ValueError(
+                f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+            )
     hf = config.model_config.hf_text_config
     if (
         hf.linear_num_key_heads % parallel.tensor_parallel_size

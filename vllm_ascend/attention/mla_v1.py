@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -95,6 +95,8 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    speculator_uses_target_hidden_states,
+    vllm_version_is,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0
@@ -179,9 +181,27 @@ class AscendMLAAttention(MLAAttention):
 
     supports_pcp_dcp: ClassVar[bool] = True
 
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            config = super().get_kv_cache_config(vllm_config)
+            spec = self._get_ascend_cache_layout(vllm_config, config.spec, config.is_draft)
+            if isinstance(spec, AscendMLAAttentionSpec):
+                spec = replace(
+                    spec,
+                    is_draft=config.is_draft or self.is_draft_layer,
+                    non_causal_multi_token_decode=self.non_causal_multi_token_decode,
+                )
+            return replace(config, spec=spec, is_draft=config.is_draft or self.is_draft_layer)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
         """Publish the complete cache demand using the selected execution format."""
+        if not vllm_version_is("0.34.0"):
+            return self.get_kv_cache_config(vllm_config).spec
         spec = super().get_kv_cache_spec(vllm_config)
+        return self._get_ascend_cache_layout(vllm_config, spec, spec.is_draft)
+
+    def _get_ascend_cache_layout(self, vllm_config: VllmConfig, spec: MLAAttentionSpec, is_draft: bool):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
@@ -202,7 +222,7 @@ class AscendMLAAttention(MLAAttention):
         speculative_config = getattr(vllm_config, "speculative_config", None)
         draft_config = getattr(speculative_config, "draft_model_config", None)
         if (
-            (spec.is_draft or self.is_draft_layer)
+            (is_draft or self.is_draft_layer)
             and getattr(speculative_config, "method", None) == "dspark"
             and getattr(getattr(draft_config, "hf_config", None), "model_type", None) == "k3_dspark"
             and not (use_sfa_turboquant or use_sfa_c8 or use_sfa_hif8 or getattr(self.impl, "fa_quant_layer", False))
@@ -231,7 +251,7 @@ class AscendMLAAttention(MLAAttention):
                 # device-resident; an MTP head under another method has no
                 # DSPARK_DRAFT_KV path and must ride the host pipeline (the
                 # blanket is_draft exclusion broke non-dspark MTP PD).
-                not ((spec.is_draft or self.is_draft_layer) and uses_sfa_dspark_kv_transfer(vllm_config))
+                not ((is_draft or self.is_draft_layer) and uses_sfa_dspark_kv_transfer(vllm_config))
                 and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,
@@ -1491,7 +1511,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
         if not isinstance(attn_module, MLAAttention):
             return
-        cache_spec = attn_module.get_kv_cache_spec(config)
+        if vllm_version_is("0.34.0"):
+            cache_spec = attn_module.get_kv_cache_spec(config)
+        else:
+            cache_spec = attn_module.get_kv_cache_config(config).spec
         if supports_strided_mla_cache(config, attn_module, cache_spec):
             self._prepare_prolog_v3_weights()
 
@@ -3209,7 +3232,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             assert isinstance(self.layer_name, str)
             is_draft_model = _EXTRA_CTX.is_draft_model
             eagle_spec_multiple = None
-            if not is_draft_model and self.speculative_config is not None and self.speculative_config.use_eagle():
+            if (
+                not is_draft_model
+                and self.speculative_config is not None
+                and speculator_uses_target_hidden_states(self.speculative_config)
+            ):
                 eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
             provider = MLAParamProvider(
                 layer_name=self.layer_name,

@@ -36,6 +36,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.utils import vllm_version_is
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
@@ -83,6 +84,9 @@ class _CudaAlikeEplbPlatformProxy:
 
     def is_cuda_alike(self) -> bool:
         return _is_npu_platform(self._platform) or self._platform.is_cuda_alike()
+
+    def supports_eplb(self) -> bool:
+        return _is_npu_platform(self._platform) or self._platform.supports_eplb()
 
     def __getattr__(self, name):
         return getattr(self._platform, name)
@@ -290,28 +294,38 @@ def _patch_eplb_policy_config() -> None:
     if get_args(policy_field.type) == _ASCEND_EPLB_POLICIES and policy_field.default == "stair":
         return
 
-    decorators = getattr(config_cls, "__pydantic_decorators__", None)
-    validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
-    if validator is None:
-        raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
-    original_validator = validator.func
+    if vllm_version_is("0.34.0"):
+        decorators = getattr(config_cls, "__pydantic_decorators__", None)
+        validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
+        if validator is None:
+            raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
+        original_validator = validator.func
 
-    @wraps(original_validator)
-    def _validate_with_stair(config):
-        if config.policy != "stair":
-            return original_validator(config)
-        config.policy = "default"
-        try:
-            validated = original_validator(config)
-        finally:
-            config.policy = "stair"
-        return validated
+        @wraps(original_validator)
+        def _validate_with_stair(config):
+            if config.policy != "stair":
+                return original_validator(config)
+            config.policy = "default"
+            try:
+                return original_validator(config)
+            finally:
+                config.policy = "stair"
+
+        validator.func = _validate_with_stair
+    else:
+
+        def _validate_async_communicator(config):
+            # Main validates in the platform hook only when EPLB is enabled.
+            # Keep standalone Ascend EPLBConfig validation as well.
+            if config.use_async and config.communicator in ("torch_nccl", "pynccl"):
+                raise ValueError(f"{config.communicator} communicator is incompatible with async EPLB.")
+
+        config_cls.__post_init__ = _validate_async_communicator  # type: ignore[attr-defined]
 
     _parallel_config.EPLBPolicyOption = policy_type  # type: ignore[misc]
     config_cls.__annotations__["policy"] = policy_type
     policy_field.type = policy_type
     policy_field.default = "stair"
-    validator.func = _validate_with_stair
 
 
 def _patch_eplb_communicator_config() -> None:
@@ -812,15 +826,15 @@ def _patch_changed_layer_transfer() -> None:
         _async_worker.transfer_run_periodically = _wrap_async_worker(original_worker)
 
 
-def _wrap_move_to_workspace(original_move):
+def _wrap_move_to_workspace(original_move, model_state_parameter: str = "model_state"):
     move_signature = signature(original_move)
-    if not {"model_state", "ep_rank"}.issubset(move_signature.parameters):
+    if not {model_state_parameter, "ep_rank"}.issubset(move_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: async workspace move signature changed.")
 
     @wraps(original_move)
     def _move_to_workspace(*args, **kwargs):
         bound = move_signature.bind(*args, **kwargs)
-        model_state = bound.arguments["model_state"]
+        model_state = bound.arguments[model_state_parameter]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
         is_last_result = (
@@ -891,9 +905,21 @@ def _wrap_move_to_workspace(original_move):
 
 
 def _patch_async_move_to_workspace() -> None:
-    original_move = _eplb_state._move_to_workspace
-    if not getattr(original_move, _PATCH_MARKER, False):
-        _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+    if vllm_version_is("0.34.0"):
+        original_move = _eplb_state._move_to_workspace
+        if not getattr(original_move, _PATCH_MARKER, False):
+            _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+        return
+
+    base_state = _eplb_state.EplbState.model_state_cls
+    if getattr(base_state._move_to_workspace, _PATCH_MARKER, False):
+        return
+
+    class AscendEplbModelState(_eplb_state.EplbModelState):
+        # Ascend attaches routing and transfer bookkeeping to each model.
+        _move_to_workspace = _wrap_move_to_workspace(base_state._move_to_workspace, model_state_parameter="self")
+
+    _eplb_state.EplbState.model_state_cls = AscendEplbModelState
 
 
 _patch_eplb_policy_config()

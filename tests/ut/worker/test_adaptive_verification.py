@@ -188,10 +188,15 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
 
 @pytest.fixture
 def cpu_manager_resources(monkeypatch):
-    # Only replace CUDA resources; manager construction and budget selection run unchanged.
-    monkeypatch.setattr(torch.cuda, "Stream", Mock())
-    monkeypatch.setattr(torch.cuda, "Event", Mock())
-    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    # Replace only device resources so the real manager and budget logic still run.
+    if vllm_version_is("0.34.0"):
+        monkeypatch.setattr(torch.cuda, "Stream", Mock())
+        monkeypatch.setattr(torch.cuda, "Event", Mock())
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    else:
+        monkeypatch.setattr(adaptive, "new_d2h_stream", Mock())
+        monkeypatch.setattr(torch, "Event", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_stream", Mock())
     monkeypatch.setattr(adaptive, "stream", lambda *args: nullcontext())
     monkeypatch.setattr(adaptive, "CpuGpuBuffer", partial(adaptive.CpuGpuBuffer, pin_memory=False))
 
@@ -200,6 +205,7 @@ def _attn_group(backend, builder):
     return SimpleNamespace(
         backend=backend,
         get_metadata_builder=lambda _: builder,
+        metadata_builders=[builder],
         kv_cache_spec=Mock(),
         layer_names=[backend.__name__],
     )
@@ -216,6 +222,7 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
         prefill_len=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
     )
     config = SimpleNamespace(
+        max_concurrent_batches=2,
         speculative_config=SimpleNamespace(
             method="mtp", num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
         ),
@@ -314,10 +321,20 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
     # Stop after the real manager call, before device cache allocation or graph setup.
     monkeypatch.setattr(upstream, "BlockTables", Mock(side_effect=BeforeCacheAllocation))
     cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=cache_spec, layer_names=["target", "draft"])]
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=cache_spec,
+                layer_names=["target", "draft"],
+                block_size=128,
+                block_table_width=lambda *args: 128,
+                uses_slot_mapping=True,
+                dcp_sharded=False,
+                sliding_window_reach=0,
+            )
+        ]
     )
     with pytest.raises(BeforeCacheAllocation):
-        patch_model_runner.initialize_kv_cache(runner, cache_config)
+        GPUModelRunner.initialize_kv_cache(runner, cache_config)
     manager_call.assert_called_once()
     assert manager_call.call_args.kwargs["enable_adaptive_verification"] is enabled
     assert manager_call.call_args.kwargs["copy_admitted_drafts_to_host"] is False

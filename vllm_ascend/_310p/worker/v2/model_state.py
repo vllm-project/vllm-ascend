@@ -213,7 +213,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         # Skip upstream Mamba GPU scalar fills; mirror their state on CPU.
         super(MambaHybridModelState, self).add_request(req_index, new_req_data)
         self._num_accepted_tokens_cpu[req_index] = 1
-        if not self._align_mode:
+        if not self.mamba_prefix_caching:
             return
         # b2f685834a uses cache_config.block_size as the align page size.
         block_size = self.cache_config.block_size
@@ -292,7 +292,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         )
         self._accepted_tokens_staging_np = self._accepted_tokens_staging.numpy()
         self._mamba_copy_funcs_by_group = None
-        if self._align_mode:
+        if self.mamba_prefix_caching:
             self._mamba_state_idx_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
             self._current_mamba_block_tables_np: tuple[np.ndarray, ...] | None = None
 
@@ -413,7 +413,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
     ) -> None:
         """Plan align transition on CPU; issue only required NPU state copies."""
         del block_tables, num_computed_tokens
-        if not self._align_mode:
+        if not self.mamba_prefix_caching:
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
@@ -472,22 +472,22 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
             recover_num_sampled = (
                 num_sampled if isinstance(num_sampled, int) else num_sampled.to(self.device, non_blocking=True)
             )
-            if self._align_mode:
+            if self.mamba_prefix_caching:
                 self._mamba_state_idx_gpu.copy_(torch.from_numpy(self._mamba_state_idx_cpu), non_blocking=True)
             self.recoverssm.commit_step(
                 recover_num_sampled,
                 recover_idx_mapping,
-                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                state_indices=(self._mamba_state_idx_gpu if self.mamba_prefix_caching else None),
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
             )
             self._num_accepted_tokens_cpu[:] = self.num_accepted_tokens_gpu.cpu().numpy()
-            if self._align_mode:
+            if self.mamba_prefix_caching:
                 self._mamba_state_idx_cpu[:] = self._mamba_state_idx_gpu.cpu().numpy()
 
         if not num_reqs:
             return
 
-        if not self._align_mode or num_computed_tokens is None:
+        if not self.mamba_prefix_caching or num_computed_tokens is None:
             return
         block_tables_np = self._current_mamba_block_tables_np
         if block_tables_np is None:

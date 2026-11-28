@@ -20,6 +20,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbState,
 )
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
@@ -105,7 +106,8 @@ def test_configured_upstream_policy_registration_is_scoped():
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
 
     with eplb_state._configured_upstream_policy("stair", policy):
-        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
+        registered = upstream_eplb_state.EPLB_POLICIES["stair"]
+        assert (registered if vllm_version_is("0.34.0") else registered()) is policy
 
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
 
@@ -464,6 +466,7 @@ def test_from_mapping_requires_release_valid_expert_count(monkeypatch):
 
 def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     parallel_config = MagicMock()
+    parallel_config.eplb_config.policy = "default"
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
     monkeypatch.setattr(upstream_eplb_state, "CpuGpuEvent", MagicMock)
 

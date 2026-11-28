@@ -311,13 +311,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         else:
             shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
-        if shared_output is not None:
-            result = self._combine_shared_and_routed_output(shared_output, fused_output)
+        # A native transform may accumulate the shared output in its epilogue.
+        if shared_output is not None and getattr(self.routed_output_transform, "accumulates_residual", False):
+            result = self.apply_routed_output_transform(fused_output, residual=shared_output)
         else:
-            result = fused_output
+            fused_output = self.apply_routed_output_transform(fused_output)
+            result = (
+                fused_output
+                if shared_output is None
+                else self._combine_shared_and_routed_output(shared_output, fused_output)
+            )
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
 
@@ -487,9 +490,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_input = prepared_input.hidden_states
         return routed_input, shared_input
 
-    def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
+    def apply_routed_output_transform(
+        self, fused_output: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Run the latent up projection before joining the SP shared output."""
-        fused_output = super().apply_routed_output_transform(fused_output)
+        if residual is not None:
+            fused_output = super().apply_routed_output_transform(fused_output, residual=residual)
+        else:
+            fused_output = super().apply_routed_output_transform(fused_output)
         shared_experts = self.ascend_shared_experts
         if self._can_overlap_sp_shared_with(self.routed_output_transform):
             assert shared_experts is not None
