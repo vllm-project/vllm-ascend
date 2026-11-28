@@ -10,6 +10,7 @@ no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
+from copy import copy
 from dataclasses import fields, replace
 
 from vllm.config import VllmConfig
@@ -22,6 +23,7 @@ from vllm.v1.core.kv_cache_planning import (
 )
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups as _upstream_get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -79,6 +81,11 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACH
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 
 
+def _use_upstream_dsv41_layout(config: VllmConfig) -> bool:
+    """Use upstream planning when layout resolution selects block-outer pages."""
+    return getattr(config.cache_config, "kv_cache_layout", None) == "BLHNC"
+
+
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     """Build Ascend cache layouts with vLLM's cross-worker planning flow."""
 
@@ -111,6 +118,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
+            if _use_upstream_dsv41_layout(vllm_config):
+                # P and D can discover the same layers in different orders.
+                return _upstream_get_kv_cache_groups(vllm_config, dict(sorted(kv_cache_spec.items())))
             return make_cache_groups(group_cache_specs(kv_cache_spec))
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
@@ -187,6 +197,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
+            if _use_upstream_dsv41_layout(vllm_config):
+                return _upstream_pool_bytes_per_block(vllm_config, kv_cache_groups)
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
@@ -548,7 +560,18 @@ def get_ascend_kv_cache_config_from_groups(
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
     elif is_deepseek_v41_cache(kv_cache_groups):
-        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
+        if _use_upstream_dsv41_layout(vllm_config):
+            planning_config = vllm_config
+            if vllm_config.cache_config.num_gpu_blocks_override not in (None, num_blocks):
+                # Older vLLM builders reapply the override after Core has sized the pool.
+                planning_config = copy(vllm_config)
+                planning_config.cache_config = copy(vllm_config.cache_config)
+                planning_config.cache_config.num_gpu_blocks_override = None
+            kv_cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+                planning_config, kv_cache_groups, num_blocks
+            )
+        else:
+            kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
     elif (qwen_pool_bytes := get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)) is not None:

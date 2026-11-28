@@ -13,6 +13,7 @@ def test_packed_groups_leave_eagle_annotation_to_upstream():
     """Ascend grouping never tags draft groups; get_kv_cache_configs does."""
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+        cache_config=SimpleNamespace(kv_cache_layout="LBNHC"),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
     specs = {"layer": object()}

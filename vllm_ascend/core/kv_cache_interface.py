@@ -261,6 +261,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
 
     @property
+    def state_content_size_bytes(self) -> int:
+        content_bytes = super().state_content_size_bytes
+        if self.model_version == "deepseek_v41" and self.scale_dim and self.state_content_bytes is None:
+            # Upstream uses this width for the distance between adjacent layers.
+            # The V4.1 index stores both the key and its scales inside each page.
+            return content_bytes + self.scale_dim * get_dtype_size(self.scale_dtype)
+        return content_bytes
+
+    @property
     def real_page_size_bytes(self) -> int:
         return (
             self.num_states

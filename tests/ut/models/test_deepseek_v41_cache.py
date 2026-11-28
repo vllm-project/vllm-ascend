@@ -22,6 +22,7 @@ from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 # vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 from tests.deepseek_v41_utils import (
@@ -229,6 +230,77 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
         assert tensor.offset == offset
         assert tensor.layer_stride == 10 * tensor.block_stride
         offset += tensor.layer_stride
+
+
+@pytest.fixture
+def block_outer_flash(config, runtime):
+    config.head_dim, config.index_head_dim = 512, 128
+    runtime.cache_config.block_size = 128
+    runtime.cache_config.kv_cache_layout = "BLHNC"
+    runtime.cache_config.get_resolved_kv_cache_layout = lambda: KVCacheLayout[runtime.cache_config.kv_cache_layout]
+    runtime.cache_config.enable_extensible_kv_cache = False
+    return runtime
+
+
+@pytest.mark.parametrize("prefix_caching,bounded_replay", [(False, False), (True, False), (True, True)])
+def test_block_outer_flash_packs_history(block_outer_flash, prefix_caching, bounded_replay):
+    runtime = block_outer_flash
+    runtime.cache_config.enable_prefix_caching = prefix_caching
+    runtime.cache_config.swa_bounded_replay = bounded_replay
+    specs = collect_specs(runtime)
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert groups == builder.get_kv_cache_groups(runtime, dict(reversed(specs.items())))
+    assert sorted(len(group.layer_names) for group in groups) == [1] + [2] * 21 + [8]
+    replay_tokens = runtime.model_config.hf_text_config.sliding_window if bounded_replay else 0
+    for group in groups:
+        if group.layer_names[0].endswith(".swa_cache"):
+            assert group.kv_cache_spec.prefix_cacheable == (not bounded_replay)
+            assert group.kv_cache_spec.prefix_replay_tokens == replay_tokens
+    history_bytes = sum(s.unpadded_page_size_bytes for s in specs.values() if isinstance(s, AscendMLAAttentionSpec))
+    assert builder._get_pool_bytes_per_block(runtime, groups) == history_bytes == 369280
+    cache = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    assert cache.num_blocks == 3
+    assert {tensor.size for tensor in cache.kv_cache_tensors} == {3 * history_bytes}
+    backing, views = allocate_cache_views(cache)
+    spans = []
+    for name, spec in specs.items():
+        components = views[name] if isinstance(views[name], tuple) else (views[name],)
+        for view in components:
+            assert view.stride(0) * view.element_size() == history_bytes
+            if isinstance(spec, AscendMLAAttentionSpec):
+                row = view[1]
+                spans.append((row.data_ptr(), row.data_ptr() + row.numel() * row.element_size()))
+    spans.sort()
+    assert spans[0][0] == backing[0].data_ptr() + history_bytes
+    assert spans[-1][1] == backing[0].data_ptr() + 2 * history_bytes
+    assert all(left[1] == right[0] for left, right in zip(spans, spans[1:]))
+
+
+@pytest.mark.parametrize("layout,bytes_per_block", [("LBNHC", 540_928), ("BLHNC", 369_280)])
+def test_flash_layout_materializes_core_block_count(block_outer_flash, layout, bytes_per_block):
+    runtime = block_outer_flash
+    runtime.cache_config.kv_cache_layout = layout
+    runtime.cache_config.num_gpu_blocks_override = 99
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, collect_specs(runtime))
+
+    cache = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+
+    assert cache.num_blocks == 3
+    assert {tensor.size for tensor in cache.kv_cache_tensors} == {3 * bytes_per_block}
+    assert runtime.cache_config.num_gpu_blocks_override == 99
+
+
+@pytest.mark.parametrize("layout", [None, "LBNHC"])
+def test_block_outer_flash_preserves_native_layout(block_outer_flash, layout):
+    runtime = block_outer_flash
+    runtime.cache_config.kv_cache_layout = layout
+    specs = collect_specs(runtime)
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert len(groups) == 12
+    assert groups == make_cache_groups(group_cache_specs(specs))
 
 
 def test_twelve_groups_share_four_layer_slots(config, runtime):
