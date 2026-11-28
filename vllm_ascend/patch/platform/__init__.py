@@ -15,6 +15,7 @@
 # limitations under the License.
 
 
+import vllm_ascend.patch.platform.patch_deepseek_dsml_arg_streaming  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_dp_supervisor  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
