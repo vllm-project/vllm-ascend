@@ -14,6 +14,8 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -302,6 +304,79 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=2)
+    def test_allgather_pcp_mxfp8_pre_quant_and_native_allgather(self, _context, mock_get_pcp_group, mock_quantize):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        hidden_states = torch.ones((1, 64), dtype=torch.bfloat16)
+        value_bytes = torch.arange(128, dtype=torch.uint8).reshape(2, 64)
+        scale_bytes = torch.tensor([[[120, 121]], [[127, 127]]], dtype=torch.uint8)
+        mock_quantize.return_value = (value_bytes.view(torch.float8_e4m3fn), scale_bytes.view(torch.float8_e8m0fnu))
+
+        pre_padded = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+        cases = (
+            ("raw_logits", torch.tensor([[1.0, 2.0]]), torch.tensor([[1.0, 2.0], [0.0, 0.0]])),
+            ("pre_padded_topk", pre_padded, pre_padded),
+        )
+        for name, router_in, local_router in cases:
+            with self.subTest(case=name):
+                mock_quantize.reset_mock()
+                gather = mock_get_pcp_group.return_value.all_gather
+                gather.reset_mock(side_effect=True, return_value=True)
+                expected_val = torch.cat((value_bytes, value_bytes + 1), dim=0)
+                expected_scale = torch.cat((scale_bytes, scale_bytes + 1), dim=0)
+                expected_router = torch.cat((local_router, local_router + 1), dim=0)
+                gather.side_effect = [
+                    expected_val.view(torch.float8_e4m3fn),
+                    expected_router,
+                    expected_scale.view(torch.float8_e8m0fnu),
+                ]
+                out = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+                    hidden_states, router_in, quant_type=QuantType.W4A8MXFP
+                )
+                self.assertEqual(mock_quantize.call_args.kwargs["dst_type"], torch.float8_e4m3fn)
+                self.assertEqual(mock_quantize.call_args.kwargs["scale_alg"], DynamicMXQuantScaleAlg.CEIL)
+                self.assertEqual(gather.call_count, 3)
+                torch.testing.assert_close(gather.call_args_list[0].args[0].view(torch.uint8), value_bytes)
+                torch.testing.assert_close(gather.call_args_list[1].args[0], local_router)
+                torch.testing.assert_close(gather.call_args_list[2].args[0].view(torch.uint8), scale_bytes)
+                self.assertEqual(out.hidden_states.dtype, torch.float8_e4m3fn)
+                self.assertEqual(out.pertoken_scale.dtype, torch.float8_e8m0fnu)
+                torch.testing.assert_close(out.hidden_states.view(torch.uint8), expected_val)
+                torch.testing.assert_close(out.pertoken_scale.view(torch.uint8), expected_scale)
+                torch.testing.assert_close(out.router_logits, expected_router)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    def test_allgather_pcp_mxfp8_skips_ineligible_cases(self, mock_get_pcp_group, mock_quantize):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        hidden_bf16 = torch.ones((2, 64), dtype=torch.bfloat16)
+        logits_zero = torch.zeros((2, 2))
+        cases = (
+            ("empty_batch", 0, None, QuantType.W4A8MXFP, hidden_bf16[:0], logits_zero[:0]),
+            ("lora_active", 2, object(), QuantType.W4A8MXFP, hidden_bf16, logits_zero),
+            ("quant_none", 2, None, QuantType.NONE, hidden_bf16, logits_zero),
+        )
+        for name, max_tokens, lora_context, quant_type, hidden, logits in cases:
+            with (
+                self.subTest(case=name),
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=max_tokens),
+            ):
+                mock_quantize.reset_mock()
+                gather = mock_get_pcp_group.return_value.all_gather
+                gather.reset_mock()
+                gather.side_effect = lambda t, dim: t if t.shape[0] == 0 else torch.cat([t, t], dim=dim)
+                layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+                layer.set_lora_context(lora_context)
+                out = layer.prepare(hidden, logits, quant_type=quant_type)
+                mock_quantize.assert_not_called()
+                self.assertEqual(gather.call_count, 2)
+                self.assertIsNone(out.pertoken_scale)
+                torch.testing.assert_close(out.hidden_states, hidden if max_tokens == 0 else hidden.repeat(2, 1))
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")

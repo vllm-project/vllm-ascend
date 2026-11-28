@@ -2463,7 +2463,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 save_layer_name = get_swa_save_layer_name(layer_name, self.swa_cache_layer.prefix)
         actual_tokens = common_attn_metadata.num_actual_tokens
 
-        o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
         cache_is_prepared, prepared_query = self._prepare_caches_and_query(
@@ -2479,6 +2478,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 # Other OTP ranks may have active tokens and enter these
                 # collectives. Keep the empty rank in the same communication
                 # sequence using its already-zeroed projection input.
+                o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             notify_kv_cache_written(layer_name)
             with attention_transfer_window():
@@ -2487,7 +2487,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return output
 
         req_metadata = _require_req_metadata(common_attn_metadata)
-        o_proj_input[:actual_tokens] = self._forward_attention(
+        o_proj_input = self._forward_attention(
             layer_name,
             hidden_states[:actual_tokens],
             kv_cache,
@@ -2495,6 +2495,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             cache_is_prepared,
             prepared_query=prepared_query,
         )
+        if not (
+            actual_tokens == o_proj_input_shape[0]
+            and o_proj_input.shape == o_proj_input_shape
+            and o_proj_input.dtype == hidden_states.dtype
+            and o_proj_input.is_contiguous()
+        ):
+            padded_o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
+            padded_o_proj_input[:actual_tokens] = o_proj_input
+            o_proj_input = padded_o_proj_input
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 

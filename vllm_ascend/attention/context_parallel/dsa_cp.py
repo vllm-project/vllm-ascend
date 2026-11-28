@@ -622,6 +622,10 @@ class AscendDSAPCPImpl(AscendDSAImpl):
                 hidden_states,
                 pcp_metadata,
             )
+            # Every rank must join the weight gathers, including ranks that return
+            # before local attention. Launch right after hidden_states gather so the
+            # O-proj weight all-gather overlaps with global cache updates and local attention.
+            self._parallel_o_proj.all_gather_weights()
 
             global_dsa_metadata_by_prefix = {}
             for cache_prefix, metadata in attn_metadata.items():
@@ -662,10 +666,6 @@ class AscendDSAPCPImpl(AscendDSAImpl):
                         kv_cache,
                         indexer_metadata,
                     )
-            # Every rank must join the weight gathers, including ranks that return
-            # before local attention. Launch after the cache collectives to overlap
-            # local attention on nonempty ranks.
-            self._parallel_o_proj.all_gather_weights()
         finally:
             if query_streams is not None:
                 current_stream, query_stream = query_streams
