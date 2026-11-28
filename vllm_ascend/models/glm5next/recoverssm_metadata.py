@@ -58,7 +58,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         m, num_decode_draft_tokens_cpu = self._normalize_graph_padding(
             common_attn_metadata, num_actual_reqs, num_decode_draft_tokens_cpu
         )
-        if get_mamba_cache_mode(self.vllm_config.cache_config) == "align":
+        if get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config) == "align":
             self.mamba_aligned_state_indices = (
                 mamba_get_block_table_tensor(
                     m.block_table_tensor[: m.num_reqs], m.seq_lens[: m.num_reqs], self.kv_cache_spec, "align"

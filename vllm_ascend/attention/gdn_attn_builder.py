@@ -947,7 +947,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 else self._get_mamba_block_table(
                     common_attn_metadata.block_table_tensor[:num_reqs],
                     metadata.gdn_seq_lens,
-                    get_mamba_cache_mode(self.vllm_config.cache_config),
+                    get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config),
                 )
             )
             metadata.spec_state_indices_tensor = block_table[:, : self.num_spec + 1]
@@ -1048,7 +1048,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
+        mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config)
         mamba_block_table = m.block_table_tensor
         # Restrict recurrent state lookup to real request rows.
         if mamba_cache_mode != "none" and mamba_block_table.shape[0] != m.seq_lens.shape[0]:
@@ -1351,7 +1351,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         """
         assert self.supports_update_block_table
         m = metadata
-        cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
+        cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config)
         if (
             graph_state_updates is not None
             and self.use_full_cuda_graph
@@ -1673,7 +1673,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         # Request validation and phase classification have already run in build.
         if (
             self._spec_conv_indices is None
-            or get_mamba_cache_mode(self.vllm_config.cache_config) != "align"
+            or get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config) != "align"
             or (num_spec_decodes > 0 and self._num_mamba_speculative_blocks < self.num_spec)
         ):
             return None

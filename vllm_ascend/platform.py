@@ -68,6 +68,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    uses_external_mamba_prefix_cache,
     vllm_version_is,
 )
 
@@ -692,12 +693,16 @@ class NPUPlatform(Platform):
         using_kv_transfer_with_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
-        if (
+        release_external_align = (
             vllm_version_is("0.34.0")
             and not cache_config.enable_prefix_caching
             and using_kv_transfer_with_hybrid
             and cache_config.mamba_cache_mode == "align"
-        ):
+        )
+        main_external_align = getattr(model_config, "is_hybrid", False) and uses_external_mamba_prefix_cache(
+            vllm_config
+        )
+        if release_external_align or main_external_align:
             if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
                 cache_config.mamba_block_size = cache_config.block_size
             else:

@@ -9,6 +9,7 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend.utils import uses_ascend_kv_store as _using_kv_store
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -39,24 +40,6 @@ def _using_sparse_sfa_c8(vllm_config, model_config) -> bool:
     from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
     return model_uses_sfa_sparse(model_config) or model_uses_kpool_indexer(model_config)
-
-
-def _using_kv_store(vllm_config) -> bool:
-    """
-    Check whether AscendStoreConnector is used.
-    In the scenario where only PD separation is used, mamba_cache_mode is not automatically set to align.
-    """
-    if not vllm_config.kv_transfer_config:
-        return False
-    if vllm_config.kv_transfer_config.kv_connector == "AscendStoreConnector":
-        return True
-    if vllm_config.kv_transfer_config.kv_connector == "MultiConnector":
-        kv_connector_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if not kv_connector_extra_config:
-            return False
-        if connectors := kv_connector_extra_config.get("connectors"):
-            return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
-    return False
 
 
 @classmethod

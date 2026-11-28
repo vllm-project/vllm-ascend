@@ -158,7 +158,7 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             if rows is None:
                 raise ValueError("GDN RecoverSSM: spec rows without draft counts")
             request_indices = recoverssm_request_indices(rows, n, m.query_start_loc.device)
-            align = get_mamba_cache_mode(self.vllm_config.cache_config) == "align"
+            align = get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config) == "align"
             commit = AscendGDNRecoverSSMCommitMetadata(
                 state_indices=base["spec_state_indices_tensor"],
                 query_start_loc=meta.spec_query_start_loc,

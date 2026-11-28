@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -38,7 +39,7 @@ from vllm.v1.worker.mamba_utils import (
     validate_mamba_state_copy_funcs,
 )
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import uses_external_mamba_prefix_cache, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.worker.mamba_utils import get_mamba_group_ids, get_mamba_group_params
@@ -128,8 +129,18 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             return self._align_mode
         return self.prefix_caching
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, vllm_config, *args, **kwargs) -> None:
+        if uses_external_mamba_prefix_cache(vllm_config):
+            # The upstream worker uses the local prefix flag to allocate
+            # aligned state buffers. Enable layout only for its initialization.
+            layout_config = copy(vllm_config)
+            layout_config.cache_config = copy(vllm_config.cache_config)
+            layout_config.cache_config.enable_prefix_caching = True
+            super().__init__(layout_config, *args, **kwargs)
+            self.vllm_config = vllm_config
+            self.cache_config = vllm_config.cache_config
+        else:
+            super().__init__(vllm_config, *args, **kwargs)
         if not vllm_version_is("0.34.0"):
             self._mamba_spec: MambaSpec | None = None
             self._mamba_group_ids: list[int] = []

@@ -84,7 +84,7 @@ from vllm_ascend.models.step5.cache_config import (
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import uses_external_mamba_prefix_cache, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
@@ -151,6 +151,15 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         return _apply_hisparse_ascendstore_admission(vllm_config, groups)
 
     def _get_native_groups(self, vllm_config, configs):
+        if uses_external_mamba_prefix_cache(vllm_config):
+            # Core uses the manager's alignment policy to resolve a common
+            # hash stride. The scheduler still disables local prefix reuse.
+            configs = {
+                name: replace(config, manager_config=config.manager_config.replace_params(enable_prefix_caching=True))
+                if isinstance(config.manager_config.params, MambaManager.Params)
+                else config
+                for name, config in configs.items()
+            }
         attention = getattr(vllm_config, "attention_config", None)
         if getattr(attention, "hisparse_config", None) is not None:
             groups = super().get_kv_cache_groups(vllm_config, configs)

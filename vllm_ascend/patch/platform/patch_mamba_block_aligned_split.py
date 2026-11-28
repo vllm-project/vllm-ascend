@@ -39,7 +39,7 @@ import inspect
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import uses_external_mamba_prefix_cache, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.kv_cache_interface import get_reusable_prefix_length
@@ -200,3 +200,14 @@ if current_parameters != _EXPECTED_PARAMETERS:
     )
 
 Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
+
+if not vllm_version_is("0.34.0"):
+    _original_scheduler_init = Scheduler.__init__
+
+    @functools.wraps(_original_scheduler_init)
+    def _init_scheduler_with_external_mamba_cache(self, vllm_config, *args, **kwargs):
+        _original_scheduler_init(self, vllm_config, *args, **kwargs)
+        if self.has_mamba_layers and uses_external_mamba_prefix_cache(vllm_config):
+            self.need_mamba_block_aligned_split = True
+
+    Scheduler.__init__ = _init_scheduler_with_external_mamba_cache

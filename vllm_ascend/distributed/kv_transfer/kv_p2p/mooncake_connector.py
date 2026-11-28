@@ -532,7 +532,7 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
-        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
+        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None
@@ -1864,7 +1864,7 @@ class MooncakeConnectorScheduler:
         transfer_block_ids = []
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             is_aligned_state_group = group_info.is_state_group and (
-                get_mamba_cache_mode(self.vllm_config.cache_config) == "align"
+                get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config) == "align"
             )
             if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)

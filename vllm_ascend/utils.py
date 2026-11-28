@@ -829,11 +829,38 @@ def speculator_uses_target_hidden_states(config: SpeculativeConfig) -> bool:
     return config.uses_target_hidden_states
 
 
-def get_mamba_cache_mode(cache_config: CacheConfig) -> str:
+def uses_ascend_kv_store(vllm_config: VllmConfig) -> bool:
+    transfer = getattr(vllm_config, "kv_transfer_config", None)
+    if transfer is None:
+        return False
+    connector_name = getattr(transfer, "kv_connector", None)
+    if connector_name == "AscendStoreConnector":
+        return True
+    if connector_name == "MultiConnector":
+        connectors = (transfer.kv_connector_extra_config or {}).get("connectors") or ()
+        return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
+    return False
+
+
+def uses_external_mamba_prefix_cache(vllm_config: VllmConfig) -> bool:
+    """Main's AscendStore needs aligned Mamba states even with local reuse off."""
+    if vllm_version_is("0.34.0") or not uses_ascend_kv_store(vllm_config):
+        return False
+    return (
+        not vllm_config.cache_config.enable_prefix_caching
+        and not getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False)
+        and getattr(getattr(vllm_config, "speculative_config", None), "method", None) != "extract_hidden_states"
+    )
+
+
+def get_mamba_cache_mode(cache_config: CacheConfig, vllm_config: VllmConfig | None = None) -> str:
     """Expose the legacy mode to Ascend layout consumers."""
     if vllm_version_is("0.34.0"):
         return cache_config.mamba_cache_mode
-    return "align" if cache_config.enable_prefix_caching else "none"
+    aligned = cache_config.enable_prefix_caching or (
+        vllm_config is not None and uses_external_mamba_prefix_cache(vllm_config)
+    )
+    return "align" if aligned else "none"
 
 
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:

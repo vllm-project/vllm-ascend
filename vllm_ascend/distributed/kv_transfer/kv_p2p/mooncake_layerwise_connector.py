@@ -246,7 +246,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.attn_resharding_group_idx = attn_resharding_group_idx
-        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
+        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config, self.vllm_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None
