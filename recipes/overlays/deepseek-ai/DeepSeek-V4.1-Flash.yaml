@@ -159,7 +159,10 @@ presets:
     hardware: ascend_910b
     strategy: pd_cluster
     variants: [ascend_w4a8]
-    default: false
+    # The only qualified 910B path: Ascend Router + Mooncake (Ascend) are
+    # opt-in through this preset, so selecting ascend_910b + pd_cluster lands
+    # here instead of the Baseline command, which has no Ascend PD wiring.
+    default: true
     select:
       pd_router: ascend
       pd_connector: mooncake_ascend
