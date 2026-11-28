@@ -64,6 +64,7 @@ class _FakeProxyState:
 
     def __init__(self) -> None:
         self.decoders = [self._FakeDecoder()]
+        self.req_to_prefiller: dict[str, str] = {}
 
     async def next_req_id(self) -> str:
         return "req-0"

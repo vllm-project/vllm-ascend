@@ -64,7 +64,7 @@ such as IP addresses according to your actual environment.
     ```bash
     # Execute the following command on each node, replacing x.x.x.x
     # with the target node's NPU card address.
-    for i in {0..7}; do hccn_tool -i $i -ping -g x.x.x.x; done
+    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x; done
     ```
 
 5. Check NPU TLS Configuration:
@@ -185,7 +185,7 @@ The template for the mooncake.json file is as follows:
 | --------------| ------------------------| -----------------------------------|
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
-| master_server_address | 90.90.100.188:50088 (for example) | Master server address|
+| master_server_address | `<your_server_ip>:50088` | Master server address |
 | global_segment_size   | 107374182400    | Size per segment (100GB)      |
 
 ## vLLM Instance Deployment
@@ -255,76 +255,75 @@ configuration.
 
 ## Benchmark
 
-We recommend using the **AISBench** tool to assess performance. The test uses
-**Dataset A**, consisting of fully random data, with the following
-configuration:
+This example uses AISBench 3.1.0 to measure time to first token (TTFT).
+Locate its streaming chat model configuration with
+`ais_bench --models vllm_api_stream_chat --search`.
+Set `path` to the Qwen2.5-72B-Instruct model directory, `model` to `qwen`,
+and `host_ip` and `host_port` to Instance 1. Set `batch_size=25`,
+`max_out_len=10`, and `generation_kwargs=dict(temperature=0, ignore_eos=True)`.
 
-- Input/output tokens: 1024/10
-- Total requests: 100
-- Concurrency: 25
+On the benchmark client, generate two JSONL files once. With the default
+AISBench QA prompt and Qwen2.5-72B-Instruct chat template, 988 random digits
+give 1,024 input tokens including formatting. If you change either template,
+adjust the digit count using the input token count reported by the service.
+Keep `dataset_a.jsonl` for all three measurements so they use identical prompts.
+Run the following block and the replay commands in the same Bash session.
 
-The test procedure consists of three steps:
+```bash
+python - <<'PY'
+import json
+import random
+
+for name, count, seed in [("a", 100, 1), ("b", 200, 2)]:
+    rng = random.Random(seed)
+    with open(f"dataset_{name}.jsonl", "w", encoding="utf-8") as output:
+        for _ in range(count):
+            question = "".join(rng.choices("0123456789", k=988))
+            print(json.dumps({"question": question, "answer": "", "max_tokens": 10}), file=output)
+PY
+
+run_dataset() {
+    ais_bench --models vllm_api_stream_chat --custom-dataset-path "$PWD/$1" \
+        --num-warmups 0 --summarizer default_perf --mode perf
+}
+```
 
 ### Step 1: Baseline (No Cache)
 
-Send Dataset A to Instance 1 on Node 1 and record the Time to First Token
-(TTFT) as **TTFT1**.
+Start with fresh instances and an empty Mooncake store so that A has no entries
+from an earlier run. Keep other traffic off the instances during the benchmark.
+Run `run_dataset dataset_a.jsonl` against Instance 1 and record **TTFT1**.
+Use the same TTFT statistic from the AISBench summary for each run.
 
 ### Preparation for Step 2
 
-Before Step 2, send a fully random Dataset B to Instance 1. Due to the
-unified on-chip memory/DRAM KV Cache with LRU (Least Recently Used) eviction policy,
-Dataset B's cache evicts Dataset A's cache from on-chip memory, leaving Dataset A's
-cache only in Node 1's DRAM.
+Run `run_dataset dataset_b.jsonl` against Instance 1. Size B so that its
+distinct KV blocks fill the device KV cache while the Mooncake store still
+has room for A and B. The 200 requests above are an example. Adjust the count
+using the device KV cache capacity in tokens from the vLLM startup log.
 
-### Step 2: Local DRAM Hit
+### Step 2: Replay on Instance 1 {id="step-2-local-dram-hit"}
 
-Send Dataset A to Instance 1 again to measure the performance when hitting
-the KV Cache in local DRAM. Record the TTFT as **TTFT2**.
+Run `run_dataset dataset_a.jsonl` again against Instance 1 and record **TTFT2**.
+Compare the changes in `vllm:prefix_cache_hits_total` (device) and
+`vllm:external_prefix_cache_hits_total` (Mooncake) on its `/metrics` endpoint
+before and after this replay. Both counters count tokens. External hits should
+account for most of A's cacheable input tokens. If most hits still come from
+the device, repeat from the cold baseline with a larger B. If both counts are
+low, check whether A's blocks were stored and retained in Mooncake.
 
-### Step 3: Cross-Node DRAM Hit
+### Step 3: Replay on Instance 2 {id="step-3-cross-node-dram-hit"}
 
-Send Dataset A to Instance 2. With the Mooncake KV Cache pool, this results
-in a cross-node KV Cache hit from Node 1's DRAM. Record the TTFT as
-**TTFT3**.
-
-**Model Configuration**:
-
-```python
-from ais_bench.benchmark.models import VLLMCustomAPIChatStream
-from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
-
-models = [
-    dict(
-        attr="service",
-        type=VLLMCustomAPIChatStream,
-        abbr='vllm-api-stream-chat',
-        path="<path_to_your_model>/Qwen2.5-72B-Instruct",
-        model="qwen",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "<your_server_ip>",
-        host_port = 8002,
-        max_out_len = 10,
-        batch_size= 25,
-        trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0,
-            ignore_eos = True,
-        ),
-    )
-]
-```
-
-**Performance Benchmarking Commands**:
-
-```shell
-ais_bench --models vllm_api_stream_chat \
-  --datasets gsm8k_gen_0_shot_cot_str_perf \
-  --debug --summarizer default_perf --mode perf
-```
+Set `host_ip` and `host_port` in the AISBench model configuration to Instance 2
+and run `run_dataset dataset_a.jsonl`. Record **TTFT3** and check the external
+prefix cache hit counter before and after this replay on Instance 2. Compare
+the increase with A's cacheable input tokens to see how much was reused
+through the connector. To attribute reads to Node 1's DRAM,
+verify that the Mooncake transfers read A's blocks from segments on Node 1.
 
 ### Test Results
+
+The following TTFT values are from the original benchmark run.
 
 | Requests | Concurrency | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |
 | -------- | ------ | ---------- | ---------- | ---------- |
