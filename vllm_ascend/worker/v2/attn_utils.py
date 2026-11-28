@@ -70,7 +70,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1434,6 +1434,16 @@ def create_cache_component_views(
     return views
 
 
+def _get_hidden_state_cache_shape(spec: AttentionSpec, num_blocks: int) -> tuple[int, int, int, int]:
+    # Upstream basic_cache writes hidden states as [block, head, offset, content].
+    return (
+        num_blocks,
+        spec.num_heads,
+        spec.num_states,
+        spec.state_content_size_bytes // get_dtype_size(spec.dtype),
+    )
+
+
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1453,6 +1463,7 @@ def create_kv_cache_runtime_views(
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
         spec = group.kv_cache_spec
+        is_hidden_state_cache = is_hidden_state_cache_spec(spec)
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
@@ -1460,31 +1471,34 @@ def create_kv_cache_runtime_views(
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
-            shapes = group.backend.get_runtime_shapes(
-                spec,
-                num_blocks,
-                layout,
-                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
-            )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
-            cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-            ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
-            if issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
+            if is_hidden_state_cache:
+                # The upstream cache-only backend has no Ascend runtime-view hook.
+                cache_shapes = (_get_hidden_state_cache_shape(spec, num_blocks),)
+                dtypes = (spec.dtype,)
             else:
-                caches[name] = components
+                cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
+                    spec,
+                    num_blocks,
+                    layout,
+                    kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                )
+
+            block_stride = descriptor.block_stride
+            if cache_shapes and cache_shapes[0][0] != num_blocks:
+                runtime_blocks = cache_shapes[0][0]
+                if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
+                    raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+                blocks_per_page = runtime_blocks // num_blocks
+                if block_stride != spec.page_size_bytes or block_stride % blocks_per_page:
+                    raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+                block_stride //= blocks_per_page
+
+            components = create_cache_component_views(backing[start : start + span], cache_shapes, dtypes, block_stride)
+            if is_hidden_state_cache:
+                (caches[name],) = components
+            else:
+                format_views = getattr(group.backend, "format_runtime_views", None)
+                caches[name] = format_views(spec, components) if format_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1544,7 +1558,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "qwen3_5_text", "qwen3_5_moe_text"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
@@ -1865,14 +1879,7 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                # #51718 removes the backend shape hook and changes
-                # basic_cache writes to [block, :, offset, :].
-                kv_cache_shape = (
-                    num_blocks,
-                    kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
-                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-                )
+                kv_cache_shape = _get_hidden_state_cache_shape(kv_cache_spec, num_blocks)
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
                 page_size_padded = kv_cache_spec.page_size_padded
                 if page_size_padded is not None:

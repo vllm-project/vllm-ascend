@@ -348,6 +348,22 @@ class AscendDSABackend(AttentionBackend):
         return tuple(shapes)
 
     @staticmethod
+    def get_runtime_shapes_and_dtypes(
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> tuple[KVCacheRuntimeShapes, tuple[torch.dtype, ...]]:
+        """Describe the NHD data and optional scale views in storage elements."""
+        prefix = (num_blocks, spec.num_states, spec.num_kv_heads)
+        shapes: KVCacheRuntimeShapes = ((*prefix, spec.head_size),)
+        dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
+        if getattr(spec, "scale_dim", 0):
+            shapes += ((*prefix, spec.scale_dim),)
+            dtypes += (spec.scale_dtype,)
+        return shapes, dtypes
+
+    @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
         return num_blocks, block_size, scale_size
 
