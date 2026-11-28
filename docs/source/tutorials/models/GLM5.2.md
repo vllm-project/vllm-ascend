@@ -2504,7 +2504,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --quantization ascend \
               --enable-auto-tool-choice \
               --tool-call-parser glm47 \
-              --reasoning-parser glm45 \
+              --reasoning-parser glm47 \
               --enable-prefix-caching \
               --async-scheduling \
               --speculative-config '{"num_speculative_tokens": 1,"method": "deepseek_mtp", "enforce_eager":true}' \
@@ -2629,7 +2629,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --quantization ascend \
               --enable-auto-tool-choice \
               --tool-call-parser glm47 \
-              --reasoning-parser glm45 \
+              --reasoning-parser glm47 \
               --enable-prefix-caching \
               --async-scheduling \
               --speculative-config '{"num_speculative_tokens": 1,"method": "deepseek_mtp", "enforce_eager":true}' \
@@ -2747,7 +2747,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --quantization ascend \
               --enable-auto-tool-choice \
               --tool-call-parser glm47 \
-              --reasoning-parser glm45 \
+              --reasoning-parser glm47 \
               --async-scheduling \
               --enable-prefix-caching \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -4847,9 +4847,6 @@ For common environment, installation, and general parameter issues, please refer
 ### Q: How to enable function calling for GLM-5.2 and GLM-5.3?
 
 A: Please add following configurations in vLLM startup command.
-The [GLM-5.3 950DT pooling example](#glm52-53-5-1-4-950dt) uses
-`--reasoning-parser glm45` with its supplied v0.30.0 configuration; keep
-that value when following that example.
 
 ```shell
 --tool-call-parser glm47 \
