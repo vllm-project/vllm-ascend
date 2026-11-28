@@ -302,15 +302,9 @@ def test_c8_fused_non_pa_prefill_receives_contiguous_kv(contiguous):
 def test_graph_provider_preserves_captured_pa_mode(sliding_window, is_draft_model, state, is_non_pa):
     metadata = _make_metadata(state)
     provider = FIAParamProvider("layer", sliding_window, is_draft_model, is_non_pa=is_non_pa)
-    captured_block_table = None if is_non_pa else torch.tensor([[1]], dtype=torch.int32)
 
     params = provider.resolve({"layer": metadata})
 
     assert params["actual_seq_lengths"] is metadata.actual_seq_lengths_q
     assert params["actual_seq_lengths_kv"] is metadata.seq_lens_list
-    runtime_kwargs = {"block_table": captured_block_table, **params}
-    if sliding_window and not is_draft_model:
-        assert "block_table" not in params
-        assert runtime_kwargs["block_table"] is captured_block_table
-    else:
-        assert runtime_kwargs["block_table"] is (None if is_non_pa else metadata.block_tables)
+    assert params["block_table"] is (None if is_non_pa else metadata.block_tables)

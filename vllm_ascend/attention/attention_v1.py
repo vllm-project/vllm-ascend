@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -208,6 +208,7 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
     causal: bool = True
+    diffusion_causal: torch.Tensor | None = None
     # runner_type in model_config.
     model_runner_type: str = ""
     # prefill reshape_and_cache event
@@ -476,21 +477,17 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    diffusion_causal: bool | None = None
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
 
-        if self.is_draft_model or not self.sliding_window:
-            params = {
-                "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
-            }
-        else:
-            params = {
-                "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                "actual_seq_lengths_kv": metadata.seq_lens_list,
-            }
+        # Padding can add a request, so bind the current block table with the sequence lengths.
+        params = {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+            "block_table": None if self.is_non_pa else metadata.block_tables,
+        }
         # Replay-time mask choice (cf. PR #17682 review, issue #16889):
         # FULL graphs are captured with the right-aligned causal mask +
         # sparse_mode=3, which must stay valid for every replay shape.
@@ -652,10 +649,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # updates lengths/block tables), so capture-time parameters must stay
         # valid for every replay shape. The mask is only skipped on the eager
         # path, where the metadata describes the real batch.
+        pre_tokens = self.sliding_window or SWA_INT_MAX
+        is_diffusion = isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor)
+        if self.sliding_window is not None and is_diffusion:
+            pre_tokens = self.sliding_window - 1
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
-            self.sliding_window or SWA_INT_MAX,
+            pre_tokens,
             0 if self.sliding_window else SWA_INT_MAX,
         )
 
@@ -704,8 +705,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value = value.contiguous()
 
         use_max_workspace = self._use_max_workspace_for_fia_graph
+        workspace_key: str | tuple = _FIA_WORKSPACE_KEY
+        is_diffusion = isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor)
+        if is_diffusion:
+            # The graph contains both mask modes and Gemma layers with
+            # different head shapes. FIA's workspace tiling depends on both.
+            workspace_key = (
+                _FIA_WORKSPACE_KEY,
+                attn_metadata.causal,
+                self.sliding_window,
+                tuple(query.shape),
+                tuple(key.shape),
+                tuple(value.shape),
+            )
         workspace = get_capture_resource(
-            _FIA_WORKSPACE_KEY,
+            workspace_key,
             lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
@@ -753,6 +767,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                diffusion_causal=attn_metadata.causal if is_diffusion else None,
             ),
         )
         return output, num_tokens
@@ -1017,11 +1032,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
+                attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1030,9 +1046,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    pre_tokens=self.sliding_window,
-                    next_tokens=0,
-                    sparse_mode=4,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
+                    sparse_mode=sparse_mode,
                 )
             else:
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
@@ -1335,6 +1351,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         with attention_transfer_window():
+            diffusion_causal = getattr(attn_metadata, "diffusion_causal", None)
+            if isinstance(diffusion_causal, torch.Tensor):
+                # KV has already been written once by forward(). Both calls
+                # read the same cache; each has a fixed FIA mask mode even
+                # when request phases change between graph replays.
+                causal = replace(attn_metadata, num_decodes=0)
+                bidirectional = replace(causal, causal=False)
+                alternate = torch.empty_like(output)
+                self.forward_fused_infer_attention(query, key, value, causal, output, kv_cache)
+                self.forward_fused_infer_attention(query, key, value, bidirectional, alternate, kv_cache)
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+                mask = diffusion_causal[:num_tokens].view(-1, 1, 1)
+                output[:num_tokens].copy_(torch.where(mask, output[:num_tokens], alternate[:num_tokens]))
+                return output
+
             num_tokens = query.shape[0]
 
             if (

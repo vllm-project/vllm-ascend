@@ -47,6 +47,7 @@ from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner._is_diffusion_gemma = False
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.attention import Attention, CrossAttention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
@@ -56,6 +57,13 @@ def _resolve_ascend_model_state_cls(
     model: nn.Module,
 ):
     """Pick the Ascend model state class; mirrors upstream ``resolve_model_state_cls``."""
+    if getattr(vllm_config.model_config, "architecture", None) == "DiffusionGemmaForBlockDiffusion":
+        if not is_950():
+            raise ValueError("DiffusionGemma on Ascend requires an Ascend 950DT NPU.")
+        from vllm_ascend.worker.v2.model_states.diffusion_gemma import AscendDiffusionGemmaModelState
+
+        return AscendDiffusionGemmaModelState
+
     # Keep model-provided state overrides ahead of the platform defaults.
     if hasattr(model, "get_model_state_cls"):
         return model.get_model_state_cls()
