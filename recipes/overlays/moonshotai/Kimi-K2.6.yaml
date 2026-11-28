@@ -1,28 +1,24 @@
 # Migrated from https://github.com/vllm-project/recipes/pull/1170
 # Source head: 57f458067d08c8d86a04131f1c6fe3e47f5db109
 meta:
-  date_updated: 2026-11-26
+  date_updated: '2026-11-27'
   hardware:
     ascend_950dt: supported
-    ascend_910c: supported
+    ascend_910c: verified
 hardware_notes:
   ascend_910c:
     title: W4A8 checkpoint required
-    body: >-
-      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
-      by this Ascend recipe. Other inherited variants may remain visible in the
-      current renderer and are not validated for Ascend.
+    body: Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered by this Ascend recipe. Other inherited variants may remain visible in the current renderer and are not validated for
+      Ascend.
   ascend_950dt:
     title: W4A8 checkpoint required
-    body: >-
-      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
-      by this Ascend recipe. Other inherited variants may remain visible in the
-      current renderer and are not validated for Ascend.
+    body: Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered by this Ascend recipe. Other inherited variants may remain visible in the current renderer and are not validated for
+      Ascend.
 hardware_opt_in_features:
   ascend_950dt:
-    - spec_decoding
+  - spec_decoding
   ascend_910c:
-    - spec_decoding
+  - spec_decoding
 variants:
   w4a8_ascend:
     model_id: Eco-Tech/Kimi-K2.6-w4a8
@@ -32,13 +28,13 @@ variants:
     vram_minimum_gb: 714
     description: Ascend W4A8 checkpoint on ModelScope, documented and validated on Atlas 800 A3 (16 x 64 GB NPUs) in the vLLM-Ascend Kimi-K2.6 tutorial. The 714 GB VRAM requirement remains an estimate.
     supported_hardware:
-      - ascend_950dt
-      - ascend_910c
+    - ascend_950dt
+    - ascend_910c
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
     extra_args:
-      - '--quantization'
-      - ascend
+    - --quantization
+    - ascend
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
@@ -46,196 +42,279 @@ variants:
         docker_serve_command: vllm serve
         install:
           pip:
-            note: >-
-              Source installation for 910C (A3). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
-            command: |
-              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+            note: Source installation for 910C (A3). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use
+              a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: '# Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+
               npu-smi info
+
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
               source /usr/local/Ascend/nnal/atb/set_env.sh
+
               export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 
+
               sudo apt-get update
+
               sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+
               python3 -m venv vllm-ascend-env
+
               source vllm-ascend-env/bin/activate
+
               python -m pip install --upgrade pip
 
+
               git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+
               cd vllm
+
               VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
-              cd ..
-              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
-              cd vllm-ascend
-              git submodule update --init --recursive
-              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
               cd ..
 
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+
+              cd vllm-ascend
+
+              git submodule update --init --recursive
+
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+              cd ..
+
+
               pip uninstall -y triton triton-ascend
+
               pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+
               pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a3==26.9.1"
+
               pip check
-              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+
+              python -c ''import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")''
+
+              '
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: vllm serve
         install:
           pip:
-            note: >-
-              Source installation for 950DT (A5). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
-            command: |
-              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+            note: Source installation for 950DT (A5). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use
+              a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: '# Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+
               npu-smi info
+
               source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
               source /usr/local/Ascend/nnal/atb/set_env.sh
+
               export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 
+
               sudo apt-get update
+
               sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+
               python3 -m venv vllm-ascend-env
+
               source vllm-ascend-env/bin/activate
+
               python -m pip install --upgrade pip
 
+
               git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+
               cd vllm
+
               VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
-              cd ..
-              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
-              cd vllm-ascend
-              git submodule update --init --recursive
-              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
               cd ..
 
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+
+              cd vllm-ascend
+
+              git submodule update --init --recursive
+
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+              cd ..
+
+
               pip uninstall -y triton triton-ascend
+
               pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+
               pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a5==26.9.1"
+
               pip check
-              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+
+              python -c ''import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")''
+
+              '
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+  fp8:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+  nvfp4:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+  redhat_nvfp4:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+  ascend_w4a8:
+    model_id: Eco-Tech/Kimi-K2.6-W4A8
+    precision: int4
+    label: W4A8 (ASCEND)
+    vram_minimum_gb: 600
+    supported_hardware:
+    - ascend_910c
+    supported_features:
+    - tool_calling
+    - reasoning
+    - text_only
+    - encoder_parallel
+    tp: 4
+    extra_args:
+    - --quantization
+    - ascend
+    - --data-parallel-size
+    - '4'
+    - --speculative-config
+    - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+    - --no-enable-prefix-caching
+    - --enable-expert-parallel
+    - --max-num-seqs
+    - '4'
+    - --max-model-len
+    - '34816'
+    - --max-num-batched-tokens
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.87'
+    - --seed
+    - '42'
+    - --async-scheduling
+    - --compilation-config
+    - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    - --mm-encoder-tp-mode
+    - data
+    - --additional-config
+    - '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true,"enable_flashcomm1":true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '600'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+          docker: true
+    description: 'ModelSlim W4A8 (weights on ModelScope: Eco-Tech/Kimi-K2.6-W4A8) — 1 Atlas 800 A3 (64G x 16), TP4xDP4 + DFlash; first-party verified 2026-10-28 on a nightly build (release-tag re-verify
+      pending). System-level tuning (cpufreq governor, sysctl) from the companion Ascend recipe is host-side and skipped in unprivileged environments. Single-node values document the first-party verified
+      configuration from the merged companion recipe (vllm-ascend/vllm-ascend-recipes#100); the current tutorial §5.1 example differs (max-model-len 15000, no --async-scheduling).'
 strategy_hardware:
   pd_cluster:
     ascend_950dt: unsupported
+    ascend_910c: supported
   multi_node_tp:
     ascend_950dt: unsupported
+    ascend_910c: unsupported
   multi_node_tp_pp:
     ascend_950dt: unsupported
+    ascend_910c: unsupported
   multi_node_dep:
     ascend_950dt: unsupported
+    ascend_910c: unsupported
   multi_node_tep:
     ascend_950dt: unsupported
+    ascend_910c: unsupported
+  single_node_tep:
+    ascend_910c: unsupported
+  single_node_dep:
+    ascend_910c: unsupported
 guide_sections:
-  ascend: |
-    ### Huawei Ascend 910C
+  ascend: "### Huawei Ascend 910C\n\nThe [official 910C example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)\nuses one Atlas 800 A3 node\
+    \ (16 x 64 GB NPUs) with TP=4, DP=4 and EP.\nSelect **W4A8 (Ascend)** in the builder. Other inherited variants are not\nvalidated for Ascend. Download the W4A8 checkpoint and use its local path if needed.\n\
+    \n- **Ports:** the standalone command below serves on 8000; the DEP builder uses\n  service port 8100 behind a router on 8000.\n- **Spec Decoding:** off by default. On 910C, enabling it selects DFlash;\n\
+    \  confirm draft compatibility first. On 950DT, the contributor tested Eagle3\n  with one speculative token. Replace the draft placeholder\n  `/path/to/kimi-k2.6-w4a8` with the actual Eagle3 draft directory.\n\
+    \  The 950DT result does not validate 910C draft compatibility.\n- **Tuning:** CPU/sysctl tuning and profiling are Guide-only; host tuning\n  requires appropriate permissions. Generated commands were\
+    \ not rerun on NPUs\n  for this update.\n\nWhen using the shared Client Usage example, set `model` to\n`Eco-Tech/Kimi-K2.6-w4a8` to match this recipe's served model name.\n\n#### Launch command\n\n\
+    ```bash\n#!/bin/sh\nexport VLLM_USE_MODELSCOPE=True\nexport HCCL_OP_EXPANSION_MODE=\"AIV\"\nexport PYTORCH_NPU_ALLOC_CONF=expandable_segments:True\nexport OMP_PROC_BIND=false\nexport OMP_NUM_THREADS=1\n\
+    export TASK_QUEUE_ENABLE=1\n\necho performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor\nsysctl -w vm.swappiness=0\nsysctl -w kernel.numa_balancing=0\nsysctl -w kernel.sched_migration_cost_ns=50000\n\
+    \nexport HCCL_BUFFSIZE=600\n\n# Ensure the model path matches the directory recorded during download\nvllm serve Eco-Tech/Kimi-K2.6-w4a8 \\\n    --quantization ascend \\\n    --enable-auto-tool-choice\
+    \ \\\n    --tool-call-parser kimi_k2 \\\n    --reasoning-parser kimi_k2 \\\n    --allowed-local-media-path /data/media \\\n    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \\\n    --trust-remote-code\
+    \ \\\n    --tensor-parallel-size 4 \\\n    --data-parallel-size 4 \\\n    --no-enable-prefix-caching \\\n    --enable-expert-parallel \\\n    --port 8000 \\\n    --max-num-seqs 4 \\\n    --max-model-len\
+    \ 15000 \\\n    --max-num-batched-tokens 16384 \\\n    --gpu-memory-utilization 0.87 \\\n    --seed 42 \\\n    --compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}' \\\n    --profiler-config\
+    \ '{\"profiler\": \"torch\", \"torch_profiler_dir\": \"./vllm_profile\", \"torch_profiler_with_stack\": true}' \\\n    --mm-processor-cache-gb 0 \\\n    --mm-encoder-tp-mode data \\\n    --additional-config\
+    \ '{\"scheduler_config\":{\"enable_balance_scheduling\":false},\"enable_mlapo\":true}'\n```\n#### Ascend PD presets\n\nOn A3 W4A8, the `ascend_pd` preset explicitly enables Ascend Router and\nMooncake\
+    \ (Ascend). It offers 1P1D TP8/DP2, one-node internal-DP, and\ntwo-node-per-role TP4/DP8 adaptations. See the preset runbook for startup\norder and validation limits. These are reference designs; the\
+    \ current\nrenderer cannot represent the tutorial's two independent Prefill pools.\nThe proxy listens on 1999, and native multi-port DP uses health port 8290.\nThe container-local shared-memory setting\
+    \ follows the tutorial's 1g;\nhost IPC is not required by that example and is not enabled here.\n"
+  huawei_prerequisites: '- **Huawei support:** 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C). Official reference environment: vLLM 0.30.0 and vLLM-Ascend 0.30.0; host Ascend HDK 26.1.1.
 
-    The [official 910C example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
-    uses one Atlas 800 A3 node (16 x 64 GB NPUs) with TP=4, DP=4 and EP.
-    Select **W4A8 (Ascend)** in the builder. Other inherited variants are not
-    validated for Ascend. Download the W4A8 checkpoint and use its local path if needed.
+    '
+  ascend_references: '- [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
 
-    - **Ports:** the standalone command below serves on 8000; the DEP builder uses
-      service port 8100 behind a router on 8000.
-    - **Spec Decoding:** off by default. On 910C, enabling it selects DFlash;
-      confirm draft compatibility first. On 950DT, the contributor tested Eagle3
-      with one speculative token. Replace the draft placeholder
-      `/path/to/kimi-k2.6-w4a8` with the actual Eagle3 draft directory.
-      The 950DT result does not validate 910C draft compatibility.
-    - **Tuning:** CPU/sysctl tuning and profiling are Guide-only; host tuning
-      requires appropriate permissions. Generated commands were not rerun on NPUs
-      for this update.
-
-    When using the shared Client Usage example, set `model` to
-    `Eco-Tech/Kimi-K2.6-w4a8` to match this recipe's served model name.
-
-    #### Launch command
-
-    ```bash
-    #!/bin/sh
-    export VLLM_USE_MODELSCOPE=True
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl -w kernel.sched_migration_cost_ns=50000
-
-    export HCCL_BUFFSIZE=600
-
-    # Ensure the model path matches the directory recorded during download
-    vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
-        --quantization ascend \
-        --enable-auto-tool-choice \
-        --tool-call-parser kimi_k2 \
-        --reasoning-parser kimi_k2 \
-        --allowed-local-media-path /data/media \
-        --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
-        --trust-remote-code \
-        --tensor-parallel-size 4 \
-        --data-parallel-size 4 \
-        --no-enable-prefix-caching \
-        --enable-expert-parallel \
-        --port 8000 \
-        --max-num-seqs 4 \
-        --max-model-len 15000 \
-        --max-num-batched-tokens 16384 \
-        --gpu-memory-utilization 0.87 \
-        --seed 42 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
-        --mm-processor-cache-gb 0 \
-        --mm-encoder-tp-mode data \
-        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
-    ```
-    #### Ascend PD presets
-
-    On A3 W4A8, the `ascend_pd` preset explicitly enables Ascend Router and
-    Mooncake (Ascend). It offers 1P1D TP8/DP2, one-node internal-DP, and
-    two-node-per-role TP4/DP8 adaptations. See the preset runbook for startup
-    order and validation limits. These are reference designs; the current
-    renderer cannot represent the tutorial's two independent Prefill pools.
-    The proxy listens on 1999, and native multi-port DP uses health port 8290.
-    The container-local shared-memory setting follows the tutorial's 1g;
-    host IPC is not required by that example and is not enabled here.
-
-  huawei_prerequisites: |
-    - **Huawei support:** 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C). Official reference environment: vLLM 0.30.0 and vLLM-Ascend 0.30.0; host Ascend HDK 26.1.1.
-  ascend_references: |
-    - [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
     - [Eco-Tech Kimi-K2.6-W4A8 on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8)
+
     - [vLLM-Ascend Kimi-K2.6 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html)
 
+    '
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
       ascend_910c:
         extra_args:
-          - '--tensor-parallel-size'
-          - '4'
-          - '--data-parallel-size'
-          - '4'
-          - '--allowed-local-media-path'
-          - /data/media
-          - '--served-model-name'
-          - Eco-Tech/Kimi-K2.6-w4a8
-          - '--no-enable-prefix-caching'
-          - '--max-num-seqs'
-          - '4'
-          - '--max-model-len'
-          - '15000'
-          - '--max-num-batched-tokens'
-          - '16384'
-          - '--gpu-memory-utilization'
-          - '0.87'
-          - '--seed'
-          - '42'
-          - '--compilation-config'
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - '--mm-processor-cache-gb'
-          - '0'
-          - '--additional-config'
-          - '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+        - --tensor-parallel-size
+        - '4'
+        - --data-parallel-size
+        - '4'
+        - --allowed-local-media-path
+        - /data/media
+        - --served-model-name
+        - Eco-Tech/Kimi-K2.6-w4a8
+        - --no-enable-prefix-caching
+        - --max-num-seqs
+        - '4'
+        - --max-model-len
+        - '15000'
+        - --max-num-batched-tokens
+        - '16384'
+        - --gpu-memory-utilization
+        - '0.87'
+        - --seed
+        - '42'
+        - --compilation-config
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - --mm-processor-cache-gb
+        - '0'
+        - --additional-config
+        - '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
         extra_env:
           HCCL_OP_EXPANSION_MODE: AIV
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -248,26 +327,22 @@ features:
     hardware_overrides:
       ascend_950dt:
         args:
-          - '--speculative-config'
-          - '{"method":"eagle3","model":"/path/to/kimi-k2.6-w4a8","num_speculative_tokens":1}'
+        - --speculative-config
+        - '{"method":"eagle3","model":"/path/to/kimi-k2.6-w4a8","num_speculative_tokens":1}'
       ascend_910c:
         args:
-          - '--speculative-config'
-          - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
-
-# Native external DP replaces the tutorial's launch_online_dp.py process launcher.
-# This preset is restricted to the documented A3 W4A8 checkpoint.
+        - --speculative-config
+        - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
 presets:
   ascend_pd:
     label: A3 W4A8 PD (native DP)
     hardware: ascend_910c
     strategy: pd_cluster
-    variants: [w4a8_ascend]
+    variants:
+    - w4a8_ascend
     default: true
-    description: >-
-      Tutorial-derived 1P1D TP8/DP2 baseline plus internal-DP and distributed-pool
-      adaptations. Command generation is checked; native DP on Kimi-K2.6 has
-      not been rerun on NPUs. Reference deployment only, not production guidance.
+    description: Tutorial-derived 1P1D TP8/DP2 baseline plus internal-DP and distributed-pool adaptations. Command generation is checked; native DP on Kimi-K2.6 has not been rerun on NPUs. Reference deployment
+      only, not production guidance.
     source:
       label: Official Kimi-K2.6 tutorial (Sections 5.2 and 9.1)
       href: https://github.com/vllm-project/vllm-ascend/blob/8744aa967ceaefcba563b5d27e39c1f6fe882587/docs/source/tutorials/models/Kimi-K2.6.md
@@ -280,22 +355,21 @@ presets:
       frontend: python
       features:
         spec_decoding: false
-      kv_offload: off
+      kv_offload: false
     args:
-      - --served-model-name
-      - Eco-Tech/Kimi-K2.6-w4a8
-      - --seed
-      - '1024'
-      - --max-model-len
-      - '17000'
-      - --no-enable-prefix-caching
-      - --mm-processor-cache-gb
-      - '0'
-      - --mm-encoder-tp-mode
-      - data
-      # Distinct from Router 1999 and per-rank HTTP / KV / DP RPC ports.
-      - --data-parallel-supervisor-port
-      - '8290'
+    - --served-model-name
+    - Eco-Tech/Kimi-K2.6-w4a8
+    - --seed
+    - '1024'
+    - --max-model-len
+    - '17000'
+    - --no-enable-prefix-caching
+    - --mm-processor-cache-gb
+    - '0'
+    - --mm-encoder-tp-mode
+    - data
+    - --data-parallel-supervisor-port
+    - '8290'
     env:
       HCCL_OP_EXPANSION_MODE: AIV
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -307,7 +381,10 @@ presets:
       HCCL_EXEC_TIMEOUT: '3600'
       HCCL_CONNECT_TIMEOUT: '120'
       LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-    remove_args: [--data-parallel-hybrid-lb, --all2all-backend, --block-size]
+    remove_args:
+    - --data-parallel-hybrid-lb
+    - --all2all-backend
+    - --block-size
     roles:
       prefill:
         nodes: 1
@@ -316,27 +393,31 @@ presets:
         pp: 1
         data_parallel_lb: external
         args:
-          - --max-num-seqs
-          - '1'
-          - --max-num-batched-tokens
-          - '16384'
-          - --gpu-memory-utilization
-          - '0.92'
-          - --enforce-eager
-          - --additional-config
-          - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}'
+        - --max-num-seqs
+        - '1'
+        - --max-num-batched-tokens
+        - '16384'
+        - --gpu-memory-utilization
+        - '0.92'
+        - --enforce-eager
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}'
         env:
           HCCL_IF_IP: $PREFILL_NODE_1
           HCCL_BUFFSIZE: '1536'
-        remove_args: [--speculative-config, --compilation-config]
+        remove_args:
+        - --speculative-config
+        - --compilation-config
         json_args:
           --kv-transfer-config:
             MooncakeConnectorV2:
               kv_connector: MooncakeConnectorV1
               kv_connector_extra_config:
                 use_ascend_direct: true
-                prefill: {pp_size: null}
-                decode: {pp_size: null}
+                prefill:
+                  pp_size: null
+                decode:
+                  pp_size: null
       decode:
         nodes: 1
         parallelism: dep
@@ -344,16 +425,16 @@ presets:
         pp: 1
         data_parallel_lb: external
         args:
-          - --max-num-seqs
-          - '8'
-          - --max-num-batched-tokens
-          - '32'
-          - --gpu-memory-utilization
-          - '0.91'
-          - --compilation-config
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - --additional-config
-          - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+        - --max-num-seqs
+        - '8'
+        - --max-num-batched-tokens
+        - '32'
+        - --gpu-memory-utilization
+        - '0.91'
+        - --compilation-config
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
         env:
           HCCL_IF_IP: $DECODE_NODE_1
           HCCL_BUFFSIZE: '800'
@@ -363,9 +444,10 @@ presets:
               kv_connector: MooncakeConnectorV1
               kv_connector_extra_config:
                 use_ascend_direct: true
-                prefill: {pp_size: null}
-                decode: {pp_size: null}
-          # Only edits an enabled speculative feature; off stays off.
+                prefill:
+                  pp_size: null
+                decode:
+                  pp_size: null
           --speculative-config:
             method: eagle3
             model: lightseekorg/kimi-k2.6-eagle3
@@ -376,58 +458,377 @@ presets:
         default: true
       internal_dp:
         label: 1P1D - internal DP, one HTTP endpoint per node
-        description: >-
-          One dedicated node per role; native internal load balancing replaces
-          the per-rank HTTP endpoints. This is an unvalidated adaptation.
+        description: One dedicated node per role; native internal load balancing replaces the per-rank HTTP endpoints. This is an unvalidated adaptation.
         roles:
-          prefill: {data_parallel_lb: internal}
-          decode: {data_parallel_lb: internal}
+          prefill:
+            data_parallel_lb: internal
+          decode:
+            data_parallel_lb: internal
       distributed_dp:
         label: Two-node pools - TP4 / global DP8 per role
-        description: >-
-          Four A3 nodes total: one two-node Prefill pool and one two-node Decode
-          pool, each TP4/local DP4/global DP8. Unlike the tutorial's independent
-          Prefill replicas, all Prefill ranks here join one DP group. This
-          topology adaptation requires separate end-to-end validation.
+        description: 'Four A3 nodes total: one two-node Prefill pool and one two-node Decode pool, each TP4/local DP4/global DP8. Unlike the tutorial''s independent Prefill replicas, all Prefill ranks here
+          join one DP group. This topology adaptation requires separate end-to-end validation.'
         roles:
-          prefill: {nodes: 2, tp: 4, data_parallel_lb: external}
-          decode: {nodes: 2, tp: 4, data_parallel_lb: external}
-    runbook: |
-      ## Scope and prerequisites
+          prefill:
+            nodes: 2
+            tp: 4
+            data_parallel_lb: external
+          decode:
+            nodes: 2
+            tp: 4
+            data_parallel_lb: external
+    runbook: "## Scope and prerequisites\n\nReference design only. The official tutorial recommends MindIE Motor\nplus vLLM-Ascend for production. Its 1P1D tuning example uses TP8/DP2 on\neach 16-NPU A3\
+      \ node. Native external/internal DP and the distributed-pool\npoint are adaptations, not Kimi-K2.6 runtime-validation claims.\n\nUse dedicated Prefill and Decode hosts, the W4A8 checkpoint, matching\n\
+      vLLM/vLLM-Ascend 0.30.0 environments, Mooncake and the proxy script from\nthat same runtime. Check `vllm serve --help` for the multi-port and\nsupervisor flags. Configure each node's NIC variables\
+      \ (GLOO_SOCKET_IFNAME,\nTP_SOCKET_IFNAME and HCCL_SOCKET_IFNAME) for its own interconnect.\n\n## Start workers, then the proxy\n\n1. Fill the generated node addresses and DP RPC / worker ports; use\
+      \ each\n   node's distinct exported command, including start ranks 0 and 4 for\n   the two-node pools. Do not repeat the first node's command everywhere.\n2. Run the native `vllm serve` commands on\
+      \ every node. No\n   `launch_online_dp.py` or `run_dp_template.sh` is needed. External local\n   DP>1 uses `--data-parallel-multi-port-external-lb`; each local rank\n   listens on base_port + local_rank.\
+      \ Internal DP uses one HTTP endpoint\n   per role and is offered only for the one-node pools.\n3. Keep supervisor health port 8290 free on each host. Multi-port mode\n   starts it automatically; it\
+      \ is not a model-serving port. Keep it\n   distinct from worker HTTP, DP RPC and KV ports. Dedicated hosts allow\n   the same supervisor port on different nodes.\n4. Once every worker/rank is healthy,\
+      \ start the generated Ascend Router\n   command. Its preset port is 1999; send client, verification and\n   benchmark requests through that port, not through the supervisor.\n5. Verify /v1/models\
+      \ and an actual completion through the Router, then\n   confirm Mooncake KV transfer in logs. Repeat for each topology before\n   declaring it verified. No accuracy or performance result is implied.\n\
+      \nSpeculative decoding is off by default. If enabled, Prefill remains\nnon-speculative and Decode uses the tutorial's Eagle3 draft with three\ntokens; download that separate draft checkpoint first.\
+      \ That path also\nneeds a compatible runtime and Kimi-K2.6 validation.\n"
+  ascend_a3_w4a8_pd:
+    label: W4A8 PD (2P1D)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+    - ascend_w4a8
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    remove_args:
+    - --async-scheduling
+    - --data-parallel-hybrid-lb
+    workload: Prefill/decode separation (2P1D), 4 nodes x 16-die Atlas 800 A3, Mooncake
+    source:
+      label: Kimi-K2.6 tutorial, section 5.2
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html
+      key: k26-a3-w4a8-pd-2p1d
+      revision: '2026-11-26'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      model_revision: master
+    runbook: "## Evidence and versions\n\n- Source: tutorial §5.2 (Multi-Node PD Separation Deployment),\n  transcribed value-by-value\n- Image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3\n- Checkpoint: Eco-Tech/Kimi-K2.6-W4A8\
+      \ (ModelScope, master)\n- Validation status: not validated end-to-end; rendering verified\n  against the official builder (DP8 prefill pool / DP8 decode pool)\n\n## Transcription notes\n\nTranscribed\
+      \ from tutorial §5.2 (Multi-Node PD Separation Deployment):\n2P1D on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill nodes and one\ndecode instance spanning 2 nodes. 2P1D is recommended over 1P1D\
+      \ (2\nnodes) because 1P1D lacks the NPU memory to serve high concurrency.\nThe tutorial orchestrates per-node DP ranks with launch_online_dp.py /\nrun_dp_template.sh and forwards requests through\
+      \ proxy.sh on the\nprefill master node; Mooncake is a prerequisite. Host-side tuning\n(cpufreq governor, sysctl) is applied outside the container. Two\nsimplifications against the tutorial scripts:\
+      \ the builder renders one\nprefill pool and one decode pool where the tutorial runs the prefill\nnodes as independent replica groups (each starting at DP rank 0), and\nper-node KV ports are folded\
+      \ to their first values (prefill 30000,\ndecode 30200; the tutorial also uses 30100/30300).\n"
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+        - --max-model-len
+        - '133120'
+        - --max-num-batched-tokens
+        - '16384'
+        - --max-num-seqs
+        - '1'
+        - --gpu-memory-utilization
+        - '0.92'
+        - --enable-auto-tool-choice
+        - --tool-call-parser
+        - kimi_k2
+        - --reasoning-parser
+        - kimi_k2
+        - --enforce-eager
+        - --seed
+        - '1024'
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+        remove_args:
+        - --speculative-config
+        - --compilation-config
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '1536'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+        - --max-model-len
+        - '133120'
+        - --max-num-batched-tokens
+        - '32'
+        - --max-num-seqs
+        - '8'
+        - --gpu-memory-utilization
+        - '0.91'
+        - --enable-auto-tool-choice
+        - --tool-call-parser
+        - kimi_k2
+        - --reasoning-parser
+        - kimi_k2
+        - --seed
+        - '1024'
+        - --compilation-config
+        - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+        - --speculative-config
+        - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}'
+        remove_args:
+        - --mm-encoder-tp-mode
+        - --all2all-backend
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '800'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_consumer
+            kv_port: '30200'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+  ascend_a3_w4a8_pd_dflash:
+    label: W4A8 PD (2P1D, DFlash decode)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+    - ascend_w4a8
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    remove_args:
+    - --async-scheduling
+    - --data-parallel-hybrid-lb
+    workload: Prefill/decode separation (2P1D), 4 nodes x 16-die Atlas 800 A3, Mooncake
+    source:
+      label: Kimi-K2.6 tutorial, section 5.2
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html
+      key: k26-a3-w4a8-pd-2p1d-dflash
+      revision: '2026-11-27'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      model_revision: master
+    runbook: "## Evidence and versions\n\n- Source: tutorial §5.2 (Multi-Node PD Separation Deployment),\n  transcribed value-by-value\n- Image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3\n- Checkpoint: Eco-Tech/Kimi-K2.6-W4A8\
+      \ (ModelScope, master)\n- Validation status: not validated end-to-end; rendering verified\n  against the official builder (DP8 prefill pool / DP8 decode pool)\n- Decode-side speculative decoding:\
+      \ DFlash (`z-lab/Kimi-K2.5-DFlash`,\n  15 tokens), taken from the co-located single-node configuration\n  (tutorial §5.1 / vllm-ascend-recipes#100). This PD combination is\n  not in the tutorial and\
+      \ is not validated end-to-end; every other\n  value is identical to the `ascend_a3_w4a8_pd` preset so the two\n  decode methods can be compared fairly. Whether DFlash composes\n  with `FULL_DECODE_ONLY`\
+      \ cudagraphs at this pool width is untested —\n  the single-node lane runs it under `--enforce-eager`.\n\n## Transcription notes\n\nTranscribed from tutorial §5.2 (Multi-Node PD Separation Deployment):\n\
+      2P1D on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill nodes and one\ndecode instance spanning 2 nodes. 2P1D is recommended over 1P1D (2\nnodes) because 1P1D lacks the NPU memory to serve high concurrency.\n\
+      The tutorial orchestrates per-node DP ranks with launch_online_dp.py /\nrun_dp_template.sh and forwards requests through proxy.sh on the\nprefill master node; Mooncake is a prerequisite. Host-side\
+      \ tuning\n(cpufreq governor, sysctl) is applied outside the container. Two\nsimplifications against the tutorial scripts: the builder renders one\nprefill pool and one decode pool where the tutorial\
+      \ runs the prefill\nnodes as independent replica groups (each starting at DP rank 0), and\nper-node KV ports are folded to their first values (prefill 30000,\ndecode 30200; the tutorial also uses\
+      \ 30100/30300).\n"
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+        - --max-model-len
+        - '133120'
+        - --max-num-batched-tokens
+        - '16384'
+        - --max-num-seqs
+        - '1'
+        - --gpu-memory-utilization
+        - '0.92'
+        - --enable-auto-tool-choice
+        - --tool-call-parser
+        - kimi_k2
+        - --reasoning-parser
+        - kimi_k2
+        - --enforce-eager
+        - --seed
+        - '1024'
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+        remove_args:
+        - --speculative-config
+        - --compilation-config
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '1536'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+        - --max-model-len
+        - '133120'
+        - --max-num-batched-tokens
+        - '32'
+        - --max-num-seqs
+        - '8'
+        - --gpu-memory-utilization
+        - '0.91'
+        - --enable-auto-tool-choice
+        - --tool-call-parser
+        - kimi_k2
+        - --reasoning-parser
+        - kimi_k2
+        - --seed
+        - '1024'
+        - --compilation-config
+        - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        - --additional-config
+        - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+        - --speculative-config
+        - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+        remove_args:
+        - --mm-encoder-tp-mode
+        - --all2all-backend
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '800'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_consumer
+            kv_port: '30200'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 4
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 4
+strategy_min_gpus:
+  ascend_910c:
+    pd_cluster: 64
+notes:
+- title: 'Ascend 910C: use the W4A8 (ASCEND) variant'
+  when:
+    hardware:
+    - ascend_910c
+  body: 'The `default` / `fp8` / `nvfp4` / `redhat_nvfp4` checkpoints above are
 
-      Reference design only. The official tutorial recommends MindIE Motor
-      plus vLLM-Ascend for production. Its 1P1D tuning example uses TP8/DP2 on
-      each 16-NPU A3 node. Native external/internal DP and the distributed-pool
-      point are adaptations, not Kimi-K2.6 runtime-validation claims.
+    pinned to an Ascend image so the commands are runnable, but these
 
-      Use dedicated Prefill and Decode hosts, the W4A8 checkpoint, matching
-      vLLM/vLLM-Ascend 0.30.0 environments, Mooncake and the proxy script from
-      that same runtime. Check `vllm serve --help` for the multi-port and
-      supervisor flags. Configure each node's NIC variables (GLOO_SOCKET_IFNAME,
-      TP_SOCKET_IFNAME and HCCL_SOCKET_IFNAME) for its own interconnect.
+    checkpoints are not validated on Ascend 910C. The first-party verified
 
-      ## Start workers, then the proxy
+    deployment on one Atlas 800 A3 is the **W4A8 (ASCEND)** variant
 
-      1. Fill the generated node addresses and DP RPC / worker ports; use each
-         node's distinct exported command, including start ranks 0 and 4 for
-         the two-node pools. Do not repeat the first node's command everywhere.
-      2. Run the native `vllm serve` commands on every node. No
-         `launch_online_dp.py` or `run_dp_template.sh` is needed. External local
-         DP>1 uses `--data-parallel-multi-port-external-lb`; each local rank
-         listens on base_port + local_rank. Internal DP uses one HTTP endpoint
-         per role and is offered only for the one-node pools.
-      3. Keep supervisor health port 8290 free on each host. Multi-port mode
-         starts it automatically; it is not a model-serving port. Keep it
-         distinct from worker HTTP, DP RPC and KV ports. Dedicated hosts allow
-         the same supervisor port on different nodes.
-      4. Once every worker/rank is healthy, start the generated Ascend Router
-         command. Its preset port is 1999; send client, verification and
-         benchmark requests through that port, not through the supervisor.
-      5. Verify /v1/models and an actual completion through the Router, then
-         confirm Mooncake KV transfer in logs. Repeat for each topology before
-         declaring it verified. No accuracy or performance result is implied.
+    (TP4×DP4 + DFlash).
 
-      Speculative decoding is off by default. If enabled, Prefill remains
-      non-speculative and Decode uses the tutorial's Eagle3 draft with three
-      tokens; download that separate draft checkpoint first. That path also
-      needs a compatible runtime and Kimi-K2.6 validation.
+    '
+- title: Prefill/decode separation on Ascend 910C
+  when:
+    hardware:
+    - ascend_910c
+  body: 'PD separation is offered as the opt-in **W4A8 PD (2P1D)** preset:
+
+    four Atlas 800 A3 nodes (2 prefill + 1 decode instance spanning 2
+
+    nodes) with Mooncake, per tutorial §5.2 — 2P1D is recommended over
+
+    1P1D there. The preset decodes with eagle3 (3 tokens), matching the
+
+    tutorial''s decode lane. **Select a preset when deploying PD**:
+
+    without one, the plain `pd_cluster` pool renders the base recipe''s
+
+    generic topology — NixlConnector KV transfer, the flashinfer
+
+    all-to-all backend, and DFlash speculative decoding on a DP16 pool.
+
+    (That DFlash mention describes what the builder emits **without a
+
+    preset**; it is not the tutorial''s decode lane, and neither preset
+
+    uses the plain pool.) A second preset, **W4A8 PD (2P1D, DFlash
+
+    decode)**, swaps the decode speculative config for the co-located
+
+    DFlash setup (tutorial §5.1 / vllm-ascend-recipes#100) with an
+
+    identical pool topology for a head-to-head decode comparison; that
+
+    combination is not validated end-to-end. Both
+
+    presets transcribe the tutorial lane, which additionally uses
+
+    per-node launcher scripts (launch_online_dp.py / run_dp_template.sh)
+
+    and a request proxy on the prefill master.
+
+    '
