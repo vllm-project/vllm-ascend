@@ -1,0 +1,9 @@
+pr: 17715
+entries:
+  - category: feature
+    text: >-
+      The PD example proxy forwards Anthropic Messages and synchronous OpenAI Responses
+      for evaluation, with Responses history supplied explicitly. Text generation can
+      continue on another prefill/decode pair when the backend reports recomputation.
+      Responses requires stop_reason="recomputed" to continue and can hit vLLM #64009
+      if its one-token prefill allows EOS.
