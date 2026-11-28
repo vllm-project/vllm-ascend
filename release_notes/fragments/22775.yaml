@@ -1,0 +1,8 @@
+pr: 22775
+entries:
+  - category: performance
+    hardware: [A3]
+    text: >-
+      Reduced Triton Q RMSNorm device latency on Ascend A3 for small batches.
+      For a BF16 query tensor with 4 tokens, 64 heads and head size 512,
+      operator latency dropped from 5.48 to 4.14 microseconds.

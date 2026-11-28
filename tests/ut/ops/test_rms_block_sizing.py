@@ -17,8 +17,8 @@
 ``BLOCK_M`` is a Triton constexpr, so every distinct value is one JIT
 compile. ``_rms_block_m`` derives the per-core row budget adaptively from the
 runtime Unified Buffer (UB) size, the hidden ``dim`` and the element width
-(``dtype``), then floors ``BLOCK_M`` to a power of two; leftover rows stay
-masked either way.
+(``dtype``). Round the per-core row target up to a power of two, bounded
+by the largest power of two that fits the UB budget.
 """
 
 from unittest.mock import patch
@@ -26,7 +26,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.rms_norm import _rms_block_m
+from vllm_ascend.ops.triton.rms_norm import _rms_block_m, _vector_cores
 
 # 192 KB, matching ``get_ub_size_bytes()``'s documented fallback for 910B/A3.
 _UB_FALLBACK_BYTES = 192 * 1024
@@ -81,17 +81,17 @@ def test_block_m_caps_at_adaptive_row_block_size(dim, dtype, row_block_size, exp
         (8, 8, 1),
         (9, 8, 2),
         (16, 8, 2),
-        (24, 8, 2),
+        (24, 8, 4),
         (32, 8, 4),
-        (48, 8, 4),
+        (48, 8, 8),
         (64, 8, 8),
         (128, 8, 16),
         (4096, 8, 64),
-        (3, 1, 2),
+        (3, 1, 4),
         (16, 1, 16),
     ],
 )
-def test_block_m_floors_to_power_of_two(total_batch, num_vectorcore, expected):
+def test_block_m_rounds_up_within_ub_limit(total_batch, num_vectorcore, expected):
     # dim=128 / bf16 gives row_block_size=106, so the cap is 64.
     assert _block_m(total_batch, num_vectorcore, 128, torch.bfloat16) == expected
 
@@ -118,3 +118,12 @@ def test_block_m_scales_down_for_large_dim():
     """Larger hidden dims must shrink the tile to stay within UB."""
     assert _row_block_size(128, torch.bfloat16) > _row_block_size(2048, torch.bfloat16)
     assert _block_m(10**6, 1, 128, torch.bfloat16) > _block_m(10**6, 1, 2048, torch.bfloat16)
+
+
+@pytest.mark.parametrize("properties", [{}, {"num_vectorcore": 0}, {"num_vectorcore": -1}])
+def test_invalid_vector_core_count(properties):
+    device = torch.device("cpu")
+    with patch("vllm_ascend.ops.triton.rms_norm.triton") as triton:
+        triton.runtime.driver.active.utils.get_device_properties.return_value = properties
+        with pytest.raises(RuntimeError, match="Invalid num_vectorcore"):
+            _vector_cores(device)

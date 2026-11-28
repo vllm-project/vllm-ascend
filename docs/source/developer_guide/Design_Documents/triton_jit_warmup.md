@@ -72,9 +72,9 @@ Ordinary component registration does not require adding the operator to a centra
 
 The existing [Q-RMS implementation](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/rms_norm.py) shows the complete wrapper and runtime call:
 
-1. `TritonQRmsKernel.CompileKey` contains `dim`, `block_m` and `dtype`.
-2. `get_warmup_keys` enumerates reachable power-of-two `block_m` values up to the UB-derived bound.
-3. `warmup_inputs` supplies tensor metadata and all launcher arguments, including `num_vectorcore`.
+1. `TritonQRmsKernel.CompileKey` contains `dim`, `block_m`, `dtype` and `grouped`.
+2. `get_warmup_keys` enumerates power-of-two tile heights for the single-tile path and adds the grouped variant at the largest height that fits in UB.
+3. `warmup_inputs` supplies tensor metadata and all launcher arguments, including the grid size (`num_programs`) and the `GROUPED` specialization.
 4. `triton_q_rms` calculates the runtime tile, allocates the output and calls `_TRITON_Q_RMS_KERNEL`.
 
 [AscendDSAMetadataBuilder](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/attention/dsa_v1.py) registers that instance during construction:
