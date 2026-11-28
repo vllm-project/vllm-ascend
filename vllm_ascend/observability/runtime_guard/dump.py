@@ -699,6 +699,11 @@ def _iter_kv_tensors(
 def _slice_blocks(tensor: torch.Tensor, block_ids: list[int]) -> tuple[torch.Tensor, list[int]] | None:
     """Select blocks along dim0, keeping ``[n_sel_blocks, block_size, ...]``.
 
+    Copies each selected block to host with scalar indexing so dump never
+    materializes a device-side gather via advanced indexing (``tensor[list]``).
+    That gather can OOM when free HBM is tight even though the source pages
+    already live in the KV pool.
+
     Returns ``None`` when ``block_ids`` is empty so callers refuse a full-cache
     copy (empty ids must not mean "dump everything"). Returns the payload
     together with the block ids actually used: out-of-range ids are dropped so
@@ -713,9 +718,46 @@ def _slice_blocks(tensor: torch.Tensor, block_ids: list[int]) -> tuple[torch.Ten
     valid = [int(b) for b in block_ids if 0 <= int(b) <= max_block]
     if not valid:
         return None
-    # Advanced index keeps [n_sel_blocks, block_size, ...] (same rank as dump_all).
-    sliced = tensor[valid]
-    return sliced.detach().cpu(), valid
+    # Per-block D2H into a CPU buffer. ``tensor[b]`` is a view into the existing
+    # page; stacking / allocation happens on host only (avoids device gather OOM).
+    # Prefer pinned + non_blocking copies then one device sync so the dump path
+    # does not force a host sync per block on the inference thread.
+    prototype = tensor[valid[0]]
+    device_type = tensor.device.type
+    on_accel = device_type in ("npu", "cuda")
+    pin_memory = False
+    if on_accel:
+        try:
+            out = torch.empty(
+                (len(valid),) + tuple(prototype.shape),
+                dtype=tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pin_memory = True
+        except RuntimeError:
+            out = torch.empty(
+                (len(valid),) + tuple(prototype.shape),
+                dtype=tensor.dtype,
+                device="cpu",
+            )
+    else:
+        out = torch.empty(
+            (len(valid),) + tuple(prototype.shape),
+            dtype=tensor.dtype,
+            device="cpu",
+        )
+    for i, block_id in enumerate(valid):
+        out[i].copy_(tensor[block_id], non_blocking=pin_memory)
+    if pin_memory:
+        # Sync the source tensor's device (not the process current device):
+        # copies run on ``tensor.device``; argument-free synchronize waits on
+        # whatever is current and can return before the D2H finishes.
+        if device_type == "npu":
+            torch.npu.synchronize(tensor.device)
+        else:
+            torch.cuda.synchronize(tensor.device)
+    return out, valid
 
 
 def _block_payload_bytes(tensor: torch.Tensor, block_ids: list[int]) -> int:
