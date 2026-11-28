@@ -122,7 +122,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W4A8
     act_quant_type: torch.dtype = torch.int8
-    fused_activations = frozenset({"silu"})
+    fused_activations = frozenset({"silu", "situ"})
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -502,9 +502,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             linear_beta=linear_beta,
         )
 
-    def supports_fused_activation(self, activation: MoEActivation) -> bool:
-        if activation == MoEActivation.SITU:
-            return get_current_hardware_profile().supports(HardwareCapability.GMM1_SITU_QUANT_MSD)
+    def supports_fused_activation(self, activation: MoEActivation | str) -> bool:
+        if activation in (MoEActivation.SITU, MoEActivation.SITU.value) and not get_current_hardware_profile().supports(
+            HardwareCapability.GMM1_SITU_QUANT_MSD
+        ):
+            return False
         return super().supports_fused_activation(activation)
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
@@ -515,7 +517,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
-        if mlp_compute_input.activation == MoEActivation.SITU:
+        if mlp_compute_input.activation in (MoEActivation.SITU, MoEActivation.SITU.value):
             hidden_states, out_scale = self._apply_gmm1_situ_quant(
                 x=hidden_states,
                 weight=w1 if self.use_expert_weight_list else w1[0],
