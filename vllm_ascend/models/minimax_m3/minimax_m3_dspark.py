@@ -18,7 +18,6 @@ target-model leftovers.
 import json
 from pathlib import Path
 
-import regex as re
 import torch.nn.functional as F
 from torch import nn
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
@@ -29,6 +28,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     _resolve_layer_attention,
 )
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkModel
+from vllm.models.minimax_m3.common.dspark import MiniMaxM3DSparkForCausalLM
 
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3MLP
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
@@ -49,16 +49,6 @@ _MXFP8_PROJECTIONS = (
     "mlp.gate_up_proj",
     "mlp.down_proj",
 )
-
-
-def map_weight_name(name):
-    if not name.startswith(PREFIX):
-        raise ValueError(f"Unexpected tensor outside standalone DSpark: {name}")
-    name = name[len(PREFIX) :]
-    name = re.sub(r"^(layers\.\d+)\.decoder_layer\.", r"\1.", name)
-    if name.startswith("final_norm."):
-        name = "norm." + name[len("final_norm.") :]
-    return name
 
 
 def expected_shapes(config):
@@ -102,10 +92,15 @@ def expected_shapes(config):
 def validate_header(header, config):
     expected = expected_shapes(config)
     mapped = {}
+    entries = {}
     for name, info in header.items():
         if name == "__metadata__":
             continue
-        mapped_name = map_weight_name(name)
+        if not name.startswith(PREFIX):
+            raise ValueError(f"Unexpected tensor outside standalone DSpark: {name}")
+        entries[name] = info
+    # Use the same upstream mapping for header validation and tensor loading.
+    for mapped_name, info in MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights(entries.items()):
         if mapped_name in mapped:
             raise ValueError(f"Duplicate mapped tensor: {mapped_name}")
         mapped[mapped_name] = info
@@ -113,7 +108,7 @@ def validate_header(header, config):
     quantized = {name: shape for name, shape in expected.items() if name.startswith("layers.") and len(shape) == 2}
     scales = (
         {
-            name.removesuffix("weight") + "weight_scale_inv": [
+            name.removesuffix("weight") + "weight_scale": [
                 shape[0],
                 (shape[1] + MXFP8_GROUP_SIZE - 1) // MXFP8_GROUP_SIZE,
             ]
@@ -153,8 +148,7 @@ def iter_draft_weights(weights, config):
             ),
         }
     validate_header(header, config)
-    for name, value in tensors.items():
-        yield map_weight_name(name).replace("weight_scale_inv", "weight_scale"), value
+    yield from MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights(tensors.items())
 
 
 def read_draft_header(model_root):

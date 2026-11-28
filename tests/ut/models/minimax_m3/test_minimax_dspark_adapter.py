@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""CPU checks for the integrated BF16 DSpark path, without importing vLLM."""
+"""CPU checks for the DSpark adapter using the upstream weight renamer."""
 
 import importlib
 import importlib.util
@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.models.minimax_m3.common.dspark import MiniMaxM3DSparkForCausalLM
 
 
 def test_hf_parser_sentinel_does_not_require_checkpoint_metadata(adapter_modules):
@@ -155,7 +156,7 @@ def test_native_bf16_loading_preserves_tensor_identity_and_values(adapter_module
         is tensors["language_model.model.dspark.layers.0.decoder_layer.self_attn.q_proj.weight"]
     )
     for name, tensor in tensors.items():
-        normalized = adapter_modules.weights.map_weight_name(name)
+        normalized = next(MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights([(name, tensor)]))[0]
         assert loaded[normalized] is tensor
         assert loaded[normalized].data_ptr() == tensor.data_ptr()
         torch.testing.assert_close(tensor, snapshots[name], rtol=0, atol=0)
@@ -177,7 +178,8 @@ def test_model_loader_passes_bf16_weights_to_the_existing_dspark_loader(
     loaded = model.load_weights(iter(tensors.items()))
     assert len(loaded) == 62
     for name, tensor in tensors.items():
-        assert model.received[adapter_modules.weights.map_weight_name(name)] is tensor
+        normalized = next(MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights([(name, tensor)]))[0]
+        assert model.received[normalized] is tensor
 
 
 def test_mxfp8_context_kv_uses_native_quantized_projection(adapter_model_module, monkeypatch):
@@ -248,8 +250,10 @@ def test_mxfp8_loading_preserves_packed_weights_and_scale_bytes(adapter_modules,
             )
     loaded = dict(adapter_modules.weights.iter_draft_weights(tensors.items(), config))
     assert len(loaded) == 97
+    scale = "language_model.model.dspark.layers.0.decoder_layer.self_attn.q_proj.weight_scale_inv"
+    assert loaded["layers.0.self_attn.q_proj.weight_scale"] is tensors[scale]
     for name, tensor in tensors.items():
-        normalized = adapter_modules.weights.map_weight_name(name).replace("weight_scale_inv", "weight_scale")
+        normalized = next(MiniMaxM3DSparkForCausalLM._rename_checkpoint_weights([(name, tensor)]))[0]
         assert loaded[normalized] is tensor
         assert loaded[normalized].dtype == tensor.dtype
 
@@ -288,3 +292,12 @@ def test_native_architecture_is_registered_by_the_standard_plugin(adapter_module
     registry.register_model.assert_any_call(
         "DSparkMiniMaxDraftModel", "vllm_ascend.models.minimax_m3.minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
     )
+
+
+def test_mxfp8_scale_alias_collision_is_rejected(adapter_modules, checkpoint):
+    config, tensors = checkpoint
+    header = _mxfp8_header(_header(tensors))
+    name = "language_model.model.dspark.layers.0.decoder_layer.self_attn.q_proj.weight_scale_inv"
+    header[name.removesuffix("_inv")] = header[name]
+    with pytest.raises(ValueError, match="Duplicate mapped tensor"):
+        adapter_modules.weights.validate_header(header, config)
