@@ -113,7 +113,7 @@ def _group_worker(rank, rendezvous, directory, log_path, mode):
                 raise RuntimeError("injected view failure")
             return object(), object()
 
-        monkeypatch.setattr(module, "_codes_view", view)
+        monkeypatch.setattr(module, "mapped_table_view", view)
         group = types.SimpleNamespace(rank_in_group=rank, cpu_group=dist.group.WORLD, world_size=2)
         try:
             if mode.startswith("missing"):

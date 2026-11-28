@@ -26,7 +26,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from vllm.config import DeviceConfig, KVTransferConfig
+import pytest
+from vllm.config import DeviceConfig, KVTransferConfig, SpeculativeConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 
@@ -60,7 +61,6 @@ from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabl
 
 
 def test_shared_engram_config_schema():
-    import pytest
     from pydantic import TypeAdapter
 
     config = SharedEngramConfig(backend="a3", endpoint="owner:29500")
@@ -74,6 +74,32 @@ def test_shared_engram_config_schema():
     ):
         with pytest.raises(ValueError):
             TypeAdapter(SharedEngramConfig).validate_python(values)
+
+
+@pytest.mark.parametrize("method", ["dspark", "ngram", "ngram_gpu"])
+def test_input_embedding_host_vmm_allows_colocated_speculation_with_tensor_parallelism(method):
+    config = AscendConfig(input_embedding_host_vmm=True)
+    spec = SpeculativeConfig.__new__(SpeculativeConfig)
+    spec.method = method
+    vc = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="deepseek_v41"), enable_sleep_mode=False
+        ),
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        speculative_config=spec,
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0), prefetch=SimpleNamespace(offload_group_size=0)
+        ),
+        lora_config=None,
+        weight_transfer_config=None,
+        load_config=SimpleNamespace(load_format="auto"),
+    )
+    with patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+    ):
+        config._validate_input_embedding_host_vmm(vc)
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:

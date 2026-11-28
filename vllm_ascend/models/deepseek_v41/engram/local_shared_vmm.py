@@ -44,6 +44,10 @@ def _library(path: Path):
     return lib
 
 
+def load_vmm_library():
+    return _library(Path(__file__).resolve().parents[3] / "libengram_host_vmm.so")
+
+
 def retry_pending_rollbacks(*, lib):
     if lib.host_vmm_retry_rollbacks():
         raise EngramReleaseError(f"Engram VMM rollback: {lib.host_shared_last_error().decode()}")
@@ -57,8 +61,8 @@ class MappedHostBuffer:
     """
 
     def __init__(self, path, rows, width, dtype, *, owner, device, lib):
-        if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32):
-            raise ValueError("Host VMM requires positive INT8/FP32 dimensions")
+        if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32, torch.bfloat16):
+            raise ValueError("Host VMM requires positive INT8/FP32/BF16 dimensions")
         path = Path(path)
         parent = path.parent.stat()
         if parent.st_uid != os.getuid() or parent.st_mode & 0o077:
@@ -173,7 +177,8 @@ class LocalSharedVmmScaleView:
         )
 
 
-def _codes_view(mapping, shape, dtype, device):
+def mapped_table_view(mapping, shape, dtype, device):
+    """Describe a host-backed table and provide one device pointer per row chunk."""
     tensor = torch.empty(shape, dtype=dtype, device="meta")
     ptrs = torch.tensor(
         [mapping.allocation.device_ptr + row * mapping.row_bytes for row in range(0, shape[0], CHUNK_ROWS)],
@@ -201,8 +206,7 @@ class LocalSharedVmmBuffer:
         self.lib = None
         library_error = None
         try:
-            library_path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
-            self.lib = _library(library_path)
+            self.lib = load_vmm_library()
         except Exception as exc:  # noqa: BLE001 - synchronize library failures
             library_error = f"{type(exc).__name__}: {exc}"
         allocation_shape = shape
@@ -257,7 +261,7 @@ class LocalSharedVmmBuffer:
                         lib=self.lib,
                     )
                 assert self.mapping is not None
-                self.tensor, self.ptrs = _codes_view(self.mapping, shape, dtype, device)
+                self.tensor, self.ptrs = mapped_table_view(self.mapping, shape, dtype, device)
                 if scales_shape is not None:
                     self.scales = LocalSharedVmmScaleView(self, scales_shape, scale_dtype, scale_offset, device)
             except Exception as exc:  # noqa: BLE001 - propagate to all ranks

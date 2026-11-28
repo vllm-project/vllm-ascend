@@ -520,6 +520,7 @@ class AscendConfig:
         {
             "refresh": false,
             "enable_cpu_binding": true,
+            "input_embedding_host_vmm": false,
             "multistream_dsv4_dsa_overlap": true,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
@@ -647,6 +648,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    input_embedding_host_vmm: bool = False
     shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
@@ -792,6 +794,8 @@ class AscendConfig:
 
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.input_embedding_host_vmm:
+            self._validate_input_embedding_host_vmm(vc)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -1067,6 +1071,31 @@ class AscendConfig:
         return bool(
             getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
         )
+
+    def _validate_input_embedding_host_vmm(self, vllm_config: VllmConfig) -> None:
+        model = vllm_config.model_config
+        if (
+            not vllm_config.use_v2_model_runner
+            or not get_current_hardware_profile().supports(HardwareCapability.ENGRAM_LOCAL_HOST_VMM)
+            or model.hf_text_config.model_type not in ("deepseek_v41", "deepseek_v41_text")
+        ):
+            raise ValueError("input_embedding_host_vmm requires DeepSeek V4.1 on A3 with Model Runner V2")
+        spec = vllm_config.speculative_config
+        if spec is not None and not (spec.use_dspark() or spec.use_ngram()):
+            raise ValueError("input_embedding_host_vmm supports DSpark and n-gram speculative decoding")
+        offload = vllm_config.offload_config
+        if (
+            model.enable_sleep_mode
+            or vllm_config.lora_config is not None
+            or vllm_config.weight_transfer_config is not None
+            or offload.uva.cpu_offload_gb
+            or offload.prefetch.offload_group_size
+            or vllm_config.load_config.load_format not in ("auto", "safetensors")
+        ):
+            raise ValueError(
+                "input_embedding_host_vmm requires immutable weights and the auto or safetensors loader. "
+                "Sleep, LoRA, weight transfer and parameter offload are unsupported."
+            )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile

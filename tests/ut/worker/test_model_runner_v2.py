@@ -15,6 +15,7 @@ from vllm.config.attention import AttentionConfig
 from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
 from vllm.model_executor.offloader.base import create_offloader as create_vllm_offloader
 from vllm.sequence import IntermediateTensors
@@ -51,6 +52,7 @@ def _make_runner(*args, **kwargs):
         scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
+        input_embedding_host_vmm=False,
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
@@ -894,6 +896,50 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
 
     start_nz.assert_called_once_with("thread")
     join_nz.assert_called_once_with()
+
+
+def test_input_embedding_host_vmm_skips_memory_accounting_on_empty_pipeline_stage():
+    runner = _make_runner()
+    runner.ascend_config.input_embedding_host_vmm = True
+    runner.model = SimpleNamespace(model=SimpleNamespace(embed_tokens=PPMissingLayer()))
+    runner.speculator = None
+
+    with patch("vllm_ascend.worker.v2.model_runner.DeviceMemoryProfiler") as profiler:
+        runner._offload_input_embeddings()
+
+    profiler.assert_not_called()
+    with pytest.raises(RuntimeError, match="Restart the worker"):
+        runner.reload_weights()
+
+
+@pytest.mark.parametrize("memory_delta", [-64, 0, 64])
+def test_input_embedding_host_vmm_keeps_installed_mappings(memory_delta):
+    from vllm_ascend.models.deepseek_v41 import input_embedding
+    from vllm_ascend.models.host_offload import register_host_offload_owner
+
+    runner = _make_runner()
+    runner.device = torch.device("cpu")
+    runner.model = torch.nn.Module()
+    runner.speculator = None
+    runner.model_memory_usage = 1024
+    owner = Mock()
+
+    def install(_layers):
+        register_host_offload_owner(owner)
+        return [owner]
+
+    with (
+        patch.object(input_embedding, "get_input_embedding_layers", return_value=[runner.model]),
+        patch.object(input_embedding, "offload_input_embeddings", side_effect=install),
+        patch("vllm_ascend.worker.v2.model_runner.DeviceMemoryProfiler") as profiler,
+        patch("torch.npu.empty_cache"),
+    ):
+        profiler.return_value.__enter__.return_value.consumed_memory = memory_delta
+        runner._offload_input_embeddings()
+
+    assert runner.model_memory_usage == 1024 + memory_delta
+    assert runner._input_embedding_host_vmm_owners == [owner]
+    owner.close_host_offload.assert_not_called()
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
@@ -3087,6 +3133,22 @@ def test_shutdown_releases_uva_owner_without_shared_pool_client():
     with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
         runner.shutdown()
     assert calls == ["parent", "release"]
+
+
+def test_shutdown_releases_shared_engram_after_input_embedding_release_fails():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    rank_local = Mock(local_vmm=False)
+    rank_local.close_host_offload.side_effect = RuntimeError("input embedding unmap failed")
+    collective = Mock(local_vmm=True)
+    runner._input_embedding_host_vmm_owners = [rank_local]
+    runner.model = Mock()
+    runner.model.modules.return_value = [collective]
+
+    with patch.object(GPUModelRunner, "shutdown"), pytest.raises(RuntimeError, match="input embedding unmap failed"):
+        runner.shutdown()
+
+    collective.close_host_offload.assert_called_once_with()
+    assert runner._shared_engram_shutdown_pending == [rank_local]
 
 
 @pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])

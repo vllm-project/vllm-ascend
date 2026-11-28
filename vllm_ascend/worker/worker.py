@@ -1387,6 +1387,16 @@ class NPUWorker(GPUWorker):
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
 
+    def compute_weight_checksums(self) -> dict[str, str]:
+        if get_ascend_config().input_embedding_host_vmm:
+            raise RuntimeError("Weight checksums are unavailable with Host VMM input embeddings")
+        return super().compute_weight_checksums()
+
+    def reset_weights(self) -> None:
+        if get_ascend_config().input_embedding_host_vmm:
+            raise RuntimeError("Weight reset is unavailable with Host VMM input embeddings")
+        super().reset_weights()
+
     def check_health(self) -> None:
         import subprocess
 
