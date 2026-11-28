@@ -281,16 +281,22 @@ class _LayerWeightLayout:
     specs: list[_PayloadSpec]
 
 
+def resolve_slot_count(local_experts: int) -> int:
+    """Return the per-rank Slot count shared by the Buffer and weight layout."""
+    configured = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
+    slots = int(local_experts if configured is None else configured)
+    if not 1 <= slots <= local_experts:
+        raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {local_experts}], got {slots}")
+    return slots
+
+
 def _layer_weight_layout(layer, E: int, H: int) -> _LayerWeightLayout:
     """Describe loaded payloads without allocating Slot or cache storage."""
     if not hasattr(layer, "w13_weight") or not hasattr(layer, "w2_weight"):
         raise NotImplementedError("MoonEP Slot requires unsplit expert weight tensors after loading")
     w13 = layer.w13_weight
     epn = int(w13.shape[0])
-    configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
-    B = int(epn if configured_slot_count is None else configured_slot_count)
-    if B < 1 or B > epn:  # noqa: SIM300 - retain the original Slot-bound check
-        raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {B}")
+    B = resolve_slot_count(epn)
     F = _infer_F(layer, H)
     return _LayerWeightLayout(E, H, F, epn, B, _payload_specs(layer, H, F))
 

@@ -5,11 +5,10 @@
 The integration branch `moonep_main` replays the six MoonEP commits through
 `moonep_v0.30.0` (`8d173bb61238`) on vllm-ascend main (`4e11513255d8`).
 Its verified vLLM revision is `ba15685ab7f4` (main2main 1106).
-The working directory is `/mnt/share/x00893896/vllm_ascend_moonep_integration_main`.
 Model Runner V2 initializes MoonEP after weight loading. The companion
 `ascend-moonep` checkout is `92f06ff4304d`.
 
-Historical smoke runs on A5-118 with `xzx_moonep_main` exercised Qwen3.6-35B-A3B
+Historical smoke runs on Ascend A5 exercised Qwen3.6-35B-A3B
 with BF16 dispatch at EP2 and DeepSeek-V4-Flash with MXFP8 dispatch at EP8. Each
 run completed all 16 GSM8K requests and matched 15 reference answers. These
 results describe the tested integration revisions.
@@ -28,13 +27,10 @@ header-layout compatibility commit `5a312f186bc6bf197df223f67d2cd4f7c9b1274d`.
 The original migration changed vllm-ascend source only. The SHMEM compatibility
 fix described below additionally requires rebuilding the SDK's SHMEM library.
 
-The workspace used for that migration was
-`/mnt/share/x00893896/vllm_ascend_moonep_integration_latest`.
 The previous workspace and source branch remain separate baselines.
 
-**Status: CPU regression and fresh-process native-loader checks pass.** On A5-118
-in `xzx_moonep_latest`, two-rank SHMEM initialization/finalization passes in both
-memfabric/SHMEM load orders. Eight-rank eager model smoke tests pass for
+**Status: CPU regression and fresh-process native-loader checks pass.** On Ascend A5,
+two-rank SHMEM initialization/finalization passes in both memfabric/SHMEM load orders. Eight-rank eager model smoke tests pass for
 Qwen3-30B-A3B-Instruct-2507 with MoonEP BF16 transport, and DeepSeek-V4-Flash
 with MoonEP MXFP8 transport and auto/BF16 attention KV. Each model configuration
 completes 11 short-decode, long-prefill, concurrent-completion and chat requests,
@@ -142,7 +138,7 @@ patches and keep memfabric normally importable.
 
 ## Previous v0.30.0 validation environment
 
-Validation uses host 118, container `xzx_moonep_latest`, with Python 3.12.13,
+The validation container uses Python 3.12.13,
 torch 2.10.0 and torch-npu 2.10.0.post7. Fresh-process checks resolve vLLM,
 vllm-ascend and ascend-moonep to the selected latest workspace. The Python 3.12
 aarch64 SDK extension and unified MXFP8/publish library ABI load successfully.

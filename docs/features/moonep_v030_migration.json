@@ -1,6 +1,6 @@
 {
   "status": "semantic_repair_cpu_and_loader_verified_device_validation_pending",
-  "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration_latest",
+  "workspace": "<integration-workspace>",
   "branch": "moonep_v0.30.0",
   "source_commit": "73d2f9e4e21e911ec86682684bc46d862674a595",
   "target_base": "56279e424b0636afe936d011ff65b9c4e6a6c82e",
@@ -215,9 +215,9 @@
   ],
   "record_type": "pre_commit_source_validation_snapshot",
   "validation_environment": {
-    "host": "141.61.45.118",
-    "container": "xzx_moonep_latest",
-    "python": "/usr/local/python3.12.13/bin/python",
+    "host": "<validation-host>",
+    "container": "<validation-container>",
+    "python": "<python-executable>",
     "python_version": "3.12.13",
     "torch": "2.10.0+cpu",
     "torch_npu": "2.10.0.post7",

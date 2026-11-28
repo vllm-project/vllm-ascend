@@ -45,8 +45,7 @@ def test_moonep_dispatch_metadata(monkeypatch, use_mxfp8, capabilities, weight_o
     monkeypatch.setattr(moonep_comm, "_EXTRA_CTX", SimpleNamespace(capturing=False))
     monkeypatch.setattr(moonep_comm, "_moonep_dispatch_transport", lambda *_: "mxfp8" if use_mxfp8 else "bf16")
     monkeypatch.setattr(moonep_comm, "get_moonep_tokens_capacity", lambda: 4)
-    monkeypatch.setattr(moonep_comm, "_select_buffer_for_step", lambda *_: (buffer, 4))
-    monkeypatch.setattr(moonep_comm, "_pads_for", lambda *_: pads)
+    monkeypatch.setattr(moonep_comm, "_select_buffer_for_step", lambda *_: (buffer, 4, pads))
     ep_group = Mock(return_value=SimpleNamespace(world_size=2, rank_in_group=1))
     monkeypatch.setattr(moonep_comm, "get_ep_group", ep_group)
 

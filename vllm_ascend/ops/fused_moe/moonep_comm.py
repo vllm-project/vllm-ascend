@@ -185,15 +185,6 @@ def _step_token_count(tokens: int):
     return max(int(max_across_dp), tokens)
 
 
-def _moonep_slot_count(epn: int) -> int:
-    """Per-rank redundant expert slots; unset defaults to epn = E/R."""
-    configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
-    b = int(epn if configured_slot_count is None else configured_slot_count)
-    if b < 1 or b > epn:
-        raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {b}")
-    return b
-
-
 def register_moonep_layer(*, E: int, K: int, H: int, nle: int, layer=None) -> None:
     """Record one MoE layer for MoonEP. Cheap; only called when enabled."""
     with _registry_lock:
@@ -325,6 +316,8 @@ class _MoonEPRuntime:
         # configurations where MoonEP is never selected.
         from ascend_moonep import Buffer, ShmemRuntime
 
+        from vllm_ascend.ops.fused_moe.moonep_weight_manager import _build_slot_states, resolve_slot_count
+
         if ShmemRuntime.is_initialized():
             raise RuntimeError("MoonEP: ascend_moonep ShmemRuntime already initialized outside the MoonEP runtime.")
         ep_group = get_ep_group()
@@ -371,7 +364,7 @@ class _MoonEPRuntime:
                     E,
                     R,
                     token_padding=1,
-                    B=_moonep_slot_count(E // R),
+                    B=resolve_slot_count(E // R),
                     group=group,
                     explicitly_destroy=True,
                     # Keep the SDK's num_sms default. Planning selects its own
@@ -397,8 +390,6 @@ class _MoonEPRuntime:
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
                 "combine_route": torch.zeros(capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
-        from vllm_ascend.ops.fused_moe.moonep_weight_manager import _build_slot_states
-
         dev = int(torch.npu.current_device())
         ep_grp = get_ep_group()
         rank = ep_grp.rank_in_group
@@ -618,9 +609,10 @@ def _local_counts_from_cu(cu: torch.Tensor, sc: dict, E: int) -> torch.Tensor:
 
 
 def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
-    """Smallest pooled capacity that fits this step -> ``(buffer, capacity)``."""
+    """Return the selected Buffer, its capacity, and the workspace shared by its pool."""
     _MOONEP_RUNTIME._ensure_initialized()
-    pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
+    pool_key = (E, K, H)
+    pool = _MOONEP_RUNTIME._buffers[pool_key]
     geo = _geometry(E, K, H)
     s_max = geo["s_max"]
     step_tokens = _step_token_count(tokens)
@@ -633,12 +625,7 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
         capacity = next((c for c in geo["caps"] if c >= need), s_max)
     if capacity < tokens:
         raise RuntimeError(f"MoonEP: step has {tokens} tokens but the selected capacity is {capacity} (s_max={s_max}).")
-    return pool[capacity], capacity
-
-
-def _pads_for(E: int, K: int, H: int):
-    _MOONEP_RUNTIME._ensure_initialized()
-    return _MOONEP_RUNTIME._pads[(E, K, H)]
+    return pool[capacity], capacity, _MOONEP_RUNTIME._pads[pool_key]
 
 
 # ---------------------------------------------------------------------------
@@ -718,8 +705,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Every EP rank picks the same pooled capacity (see _step_token_count).
         # Kernels bound their row loops by the real T (num_valid_tokens), so
         # planning, balancing and computation exclude the unused capacity.
-        buffer, capacity = _select_buffer_for_step(E, K, H, T)
-        pads = _pads_for(E, K, H)
+        buffer, capacity, pads = _select_buffer_for_step(E, K, H, T)
         hidden_c = pads["hidden"][:capacity]
         topk_c = pads["topk"][:capacity]
         route_c = None
@@ -788,18 +774,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         local_counts = getattr(plan, "local_counts", None)
         if local_counts is None:
             local_counts = _local_counts_from_cu(cu, sc, E)
-        # Keep the row count on the device. The MLP takes the full [NvS, H]
-        # shard plus the count-mode `group_list`; grouped matmul walks exactly
-        # sum(group_list) rows. Combine masks the untouched tail on the device.
-        # This avoids the per-layer row-count `.item()` and host-side slicing;
-        # it does not replace communication barriers or stream event waits.
-        #
-        # Return a disposable view: dispose_tensor() calls Tensor.set_, which
-        # must not mutate the SDK's cached dispatch output tensor object.
-        hidden_trim = h_nvs[:]
+        # group_list bounds GMM work within the full dispatch shard. Give the MLP
+        # a separate view because dispose_tensor() can repoint its Tensor object.
+        dispatched_view = h_nvs[:]
         return MoETokenDispatchOutput(
-            hidden_states=hidden_trim,
-            dynamic_scale=dispatch_scale[: hidden_trim.shape[0]] if dispatch_scale is not None else None,
+            hidden_states=dispatched_view,
+            dynamic_scale=dispatch_scale[: dispatched_view.shape[0]] if dispatch_scale is not None else None,
             group_list=local_counts,
             group_list_type=1,  # count mode
             combine_metadata=MoonEPCombineMetadata(
@@ -825,7 +805,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         row_counts = combine_metadata.group_list
         if row_counts is None:
             raise ValueError("Fused publish requires counts for a masked tail")
-        # MoonEP plans gather only rows in the published prefix.
+        # Prefix-capable SDKs publish only valid rows. The plan gathers from that prefix.
         publish_options = {}
         if getattr(buffer, "supports_prefix_publish", False):
             publish_options["clear_publish_tail"] = False
