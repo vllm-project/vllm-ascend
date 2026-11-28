@@ -99,4 +99,6 @@ def _worker(rank, port):
 
 @pytest.mark.skipif(get_ascend_device_type() == AscendDeviceType._310P, reason="310P uses a separate MoE path")
 def test_pcp_quantization_matches_dispatch_after_gather():
+    if torch.npu.device_count() < 2:
+        pytest.skip("requires two visible NPUs for PCP AllGather")
     mp.spawn(_worker, args=(get_open_port(),), nprocs=2)

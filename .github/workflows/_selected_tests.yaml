@@ -305,8 +305,11 @@ jobs:
           uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}==26.11.0.dev20261126"
           python3 -c "import fla_npu.ops.ascendc"
 
-      - name: Build MemFabric AccOffload for sparse KV lifecycle test
-        if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
+      - name: Build MemFabric AccOffload for selected offload tests
+        if: >-
+          ${{ matrix.group.npu_type == 'a3' &&
+              (contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') ||
+               contains(matrix.group.tests, 'test_hisparse_arch22_ops.py')) }}
         timeout-minutes: 15
         env:
           TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
