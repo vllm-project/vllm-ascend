@@ -200,10 +200,12 @@ class BaseDeviceAdaptor:
     @staticmethod
     def host_register_flags() -> int:
         """ACL host registration flags for the standard runtime ABI."""
-        # PINNED prevents paging while MAPPED exposes the host allocation to
-        # NPU kernels. Both flags are required by the standard runtime path.
-        # TODO: unify flags when supported CANN runtimes accept the same ABI.
-        return ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
+        # MAPPED exposes the host allocation to NPU kernels. PINNED is a
+        # redundant hint here because aclrtMallocHost already returns locked
+        # memory, and some runtimes reject the combination with rc=107000
+        # (ACL_ERROR_RT_PARAM_INVALID). Keep this aligned with A5 so private
+        # host allocations and shared mappings register with the same flags.
+        return ACL_HOST_REG_MAPPED
 
     @staticmethod
     def rms_norm_cast(x, weight, epsilon):
