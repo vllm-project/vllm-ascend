@@ -1,0 +1,28 @@
+pr: 16145
+entries:
+  - category: feature
+    text: >-
+      Added Ascend NPU support for the fault-tolerance framework via
+      `--enable-fault-tolerance` (off by default). A device fault now surfaces
+      through the engine's fault-tolerance status instead of hanging the
+      surviving ranks or crashing the worker; an external orchestrator drives
+      recovery through `POST /v1/fault_tolerance/apply` and observes it with
+      `GET /v1/fault_tolerance/status`. See the
+      [fault-tolerance guide](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/#fault-tolerance-and-scale-down-recovery).
+  - category: feature
+    text: >-
+      Added retry recovery for transient faults: a coordinated retry resets the
+      faulted worker's device, rebuilds the DP process groups, and resumes
+      serving without restarting the cluster.
+  - category: feature
+    text: >-
+      Added scale-down recovery: a permanently dead DP rank can be removed from
+      the group and its experts redistributed onto the surviving ranks, so the
+      deployment keeps serving without a full restart. Only supported MC2 kernel.
+  - category: config
+    text: >-
+      Added `additional_config.npu_op_timeout` for
+      `--enable-fault-tolerance` runs. It sets the NPU operator timeout and
+      exports `HCCL_EXEC_TIMEOUT=T` / `HCCL_EVENT_TIMEOUT=T+1`, overriding
+      values already present in the environment, so a hung collective aborts
+      instead of hanging.
