@@ -2375,7 +2375,7 @@ Select the tab for the target hardware.
     ##### 5.3.2.4 Startup and Verification
 
     Start the components in this order: Memcache MetaService, standalone Memcache
-    on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
+    on both Prefill and Decode nodes, Prefill engines, Decode engines, and then the
     PD proxy.
 
     Wait until both standalone Memcache processes report successful initialization

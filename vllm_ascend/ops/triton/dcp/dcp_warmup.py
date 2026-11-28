@@ -20,7 +20,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     end_a3_static_warmup,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    _fused_dcp_lse_combine_batched_kernel,
+    _fused_dcp_lse_combine_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
@@ -47,7 +47,7 @@ _DCP_KERNELS = (
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_kernel, ("num_heads", "num_tokens")),
     DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_static_kernel),
-    DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
+    DcpJitKernel(_fused_dcp_lse_combine_head_scatter_kernel),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
     DcpJitKernel(_pack_token_peer_tiled, ("tokens",)),
@@ -64,7 +64,7 @@ class _Tensor(TritonWarmupTensor):
         return len(self.shape)
 
 
-def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores):
+def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores, dcp_size):
     """Sample all scalar-specialization residues within each dispatch interval.
 
     Every varying stride/size is an integer multiple of T. Between dispatch
@@ -72,16 +72,13 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
     pointer-alignment keys. No capture-size list or Cartesian stride product is
     needed. Include integer-width boundaries for large configured capacities.
     """
-    ranks = heads // local_heads
-    rank_min_rows = max(triton.cdiv(2 * vector_cores, ranks), ranks)
+    rank_min_rows = max(triton.cdiv(2 * vector_cores, dcp_size), dcp_size)
     cuts = {
         triton.cdiv(rank_min_rows, local_heads),
         1,
         2,
         128,
         triton.cdiv(8 * vector_cores, heads),
-        triton.cdiv(4 * vector_cores, local_heads),
-        triton.cdiv(16 * vector_cores, local_heads),
         _FULL_PACK_VECTOR_ELEMENTS // local_heads + 1,
         max_tokens + 1,
     }
@@ -167,7 +164,18 @@ def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
 
 
 def _record_dcp_layout(
-    dtype, tokens, local_heads, head_dim, scatter_size, pcp_size, from_stats, mla, layout, vector_cores, record
+    dtype,
+    tokens,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    from_stats,
+    mla,
+    layout,
+    vector_cores,
+    record,
+    masked_output=False,
 ):
     """One owner layout, routed through the production launch constructors."""
     heads = local_heads * scatter_size
@@ -188,10 +196,28 @@ def _record_dcp_layout(
     if mla:
         local_output, local_lse = _output_and_lse(dtype, tokens, local_heads, head_dim, layout)
         _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record)
+    if mla and masked_output:
+        # A3 folds empty-row normalization into these same kernels. Register
+        # the masked variants before graph capture as well as the A5 variants.
+        output_mask = _Tensor(torch.bool, shape=(tokens,))
+        _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, 1, vector_cores, record, output_mask)
+        _launch_fused_dcp_lse_combine(
+            recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record, output_mask
+        )
 
 
 def register_dcp_warmup(
-    *, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False, decode_buckets=None
+    *,
+    dtype,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    max_tokens,
+    from_stats,
+    mla=False,
+    decode_buckets=None,
+    masked_output=False,
 ):
     """Register SFA and MLA owners' reachable output-merge layouts.
 
@@ -224,7 +250,7 @@ def register_dcp_warmup(
         begin_a3_static_warmup(static_shapes)
 
     token_list = sorted(
-        set(_token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores))
+        set(_token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores, dcp_size))
         | {key[1] for key in static_shapes}
     )
     layouts = ("token_major", "head_major_lse", "head_major") if mla else ("token_major",)
@@ -243,6 +269,7 @@ def register_dcp_warmup(
                     layout,
                     vector_cores,
                     record,
+                    masked_output=masked_output,
                 )
     finally:
         end_a3_static_warmup()

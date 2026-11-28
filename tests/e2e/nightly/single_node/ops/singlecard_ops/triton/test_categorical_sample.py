@@ -339,15 +339,16 @@ def test_categorical_sample_apply_temperature_matches_prescaled_logits():
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
-    "dtype,per_token_col",
+    "dtype,per_token_col,is_drafting",
     [
-        (torch.float32, False),
-        (torch.float32, True),
-        (torch.float16, False),
-        (torch.bfloat16, True),
+        (torch.float32, False, False),
+        (torch.float32, True, False),
+        (torch.float16, False, False),
+        (torch.bfloat16, True, False),
+        pytest.param(torch.float32, False, True, id="draft-scalar-column"),
     ],
 )
-def test_categorical_sample_logits_cache(per_token_col, dtype):
+def test_categorical_sample_logits_cache(per_token_col, dtype, is_drafting):
     """Cache must store raw pre-temperature logits at mapped slots."""
     torch.manual_seed(4)
     num_tokens = 4
@@ -401,6 +402,7 @@ def test_categorical_sample_logits_cache(per_token_col, dtype):
         seed,
         pos,
         apply_temperature=True,
+        is_drafting=is_drafting,
         logits_cache=logits_cache,
         logits_cache_col=logits_cache_col,
     )

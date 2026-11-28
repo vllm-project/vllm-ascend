@@ -94,20 +94,23 @@ jobs:
           mkdir -p "$destination"
           git -C "$repo" --work-tree="$destination" checkout 'FETCH_HEAD:skills/01.评估标准' -- .
 
-      - uses: actions/checkout@v7
+      - name: Create the PR head worktree
         if: steps.prepare.outputs.review == 'true'
-        with:
-          ref: ${{ steps.prepare.outputs.head }}
-          path: head
-          persist-credentials: false
-          allow-unsafe-pr-checkout: true
+        env:
+          REVIEW_HEAD: ${{ steps.prepare.outputs.head }}
+        run: git worktree add --detach head "$REVIEW_HEAD"
 
-      - uses: actions/checkout@v7
+      - name: Check out the vLLM source pinned by this PR
         if: steps.prepare.outputs.review == 'true'
-        with:
-          ref: ${{ steps.prepare.outputs.base }}
-          path: base
-          persist-credentials: false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VLLM_PIN_FILE: ${{ steps.prepare.outputs.vllm_pin_file }}
+        run: |
+          ref=$(git -C head show "HEAD:.github/$VLLM_PIN_FILE")
+          sha=$(gh api "repos/vllm-project/vllm/commits/$ref" --jq .sha)
+          git init -q vllm
+          git -C vllm fetch --depth=1 https://github.com/vllm-project/vllm.git "$sha"
+          git -C vllm checkout --detach FETCH_HEAD
 
       - name: Review and publish
         if: steps.prepare.outputs.review == 'true'

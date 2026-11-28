@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import assert_dcp_close
-from vllm_ascend.device.device_config import AscendDeviceType
+from vllm_ascend.device.device_config import AscendDeviceType, is_950
 from vllm_ascend.ops.triton.dcp import dcp_a2a
 from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     fused_dcp_lse_combine,
@@ -405,7 +405,7 @@ def test_rank_tiled_combine_fp64_reference(
     )
     rank_tiled_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
     scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
-    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    head_scatter_kernel = dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
     # No static twin is warmed here: A3 must fall back, A5 keeps the dynamic
     # kernel because a runtime rank-row stride still vectorizes there.
     monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
@@ -425,7 +425,7 @@ def test_rank_tiled_combine_fp64_reference(
 
     monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_rank_tiled_kernel", LaunchSpy(rank_tiled_kernel))
     monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_kernel", LaunchSpy(scalar_kernel))
-    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", LaunchSpy(batched_kernel))
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_head_scatter_kernel", LaunchSpy(head_scatter_kernel))
     actual = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
     assert len(launches) == 1
     kernel, grid, args, kwargs = launches[0]
@@ -439,8 +439,10 @@ def test_rank_tiled_combine_fp64_reference(
     # depends on the world size, head dim, row stride and the row minimum.
     rank_tile_common = 8 <= ranks <= 16 and head_dim >= 512 and local_stride == 1 and total_rows >= min_rows
     expected_dynamic = dcp_a2a.is_950() and rank_tile_common and ranks >= 2 * tiles_per_head
-    expected_batched = not expected_dynamic and head_dim <= 512 and total_rows >= 4 * cores and local_stride == 1
-    assert kernel is (rank_tiled_kernel if expected_dynamic else batched_kernel if expected_batched else scalar_kernel)
+    expected_head_scatter = not expected_dynamic and head_dim <= 512 and local_stride == 1
+    assert kernel is (
+        rank_tiled_kernel if expected_dynamic else head_scatter_kernel if expected_head_scatter else scalar_kernel
+    )
     # Check the same dispatched reduction with an FP32 output allocation.
     # Output strides are measured in elements, so they are unchanged here.
     fp32 = torch.empty(actual.shape, device="npu", dtype=torch.float32)
@@ -564,13 +566,13 @@ def test_a3_static_unwarmed_combine_falls_back(monkeypatch):
     static_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel
     dynamic_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
     scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
-    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    head_scatter_kernel = dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
     launches: list[tuple[Any, ...]] = []
     for name, kernel in (
         ("_fused_dcp_lse_combine_rank_tiled_static_kernel", static_kernel),
         ("_fused_dcp_lse_combine_rank_tiled_kernel", dynamic_kernel),
         ("_fused_dcp_lse_combine_kernel", scalar_kernel),
-        ("_fused_dcp_lse_combine_batched_kernel", batched_kernel),
+        ("_fused_dcp_lse_combine_head_scatter_kernel", head_scatter_kernel),
     ):
         monkeypatch.setattr(dcp_a2a, name, _LaunchSpy(kernel, launches))
 
@@ -579,8 +581,7 @@ def test_a3_static_unwarmed_combine_falls_back(monkeypatch):
     for _ in range(2):
         fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
         torch.npu.synchronize()
-    # 64 rows keep the fused loop below the batched threshold.
-    assert [kernel for kernel, *_ in launches] == [scalar_kernel, scalar_kernel]
+    assert [kernel for kernel, *_ in launches] == [head_scatter_kernel, head_scatter_kernel]
     # Decode-sized misses warn once; the second call stays quiet.
     assert logger.warning.call_count == 1
     assert logger.debug.call_count == 0
@@ -591,7 +592,7 @@ def test_a3_static_unwarmed_combine_falls_back(monkeypatch):
     packed, local, local_lse, _, _ = _rank_tiled_inputs(ranks, head_dim, 256, heads)
     fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
     torch.npu.synchronize()
-    assert launches[-1][0] is batched_kernel
+    assert launches[-1][0] is head_scatter_kernel
     assert logger.warning.call_count == 0
     assert logger.debug.call_count == 1
 
@@ -616,13 +617,13 @@ def test_a3_static_warmed_signature_matches_reference(monkeypatch):
     static_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel
     dynamic_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
     scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
-    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    head_scatter_kernel = dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
     launches: list[tuple[Any, ...]] = []
     for name, kernel in (
         ("_fused_dcp_lse_combine_rank_tiled_static_kernel", static_kernel),
         ("_fused_dcp_lse_combine_rank_tiled_kernel", dynamic_kernel),
         ("_fused_dcp_lse_combine_kernel", scalar_kernel),
-        ("_fused_dcp_lse_combine_batched_kernel", batched_kernel),
+        ("_fused_dcp_lse_combine_head_scatter_kernel", head_scatter_kernel),
     ):
         monkeypatch.setattr(dcp_a2a, name, _LaunchSpy(kernel, launches))
 
@@ -653,4 +654,92 @@ def test_a3_static_warmed_signature_matches_reference(monkeypatch):
     _, head_major, head_major_lse, _, _ = _rank_tiled_inputs(ranks, head_dim, tokens, heads, layout="head_major")
     fused_dcp_lse_combine(packed, head_dim, 1, local_output=head_major, local_lse=head_major_lse)
     torch.npu.synchronize()
-    assert [kernel for kernel, *_ in launches] == [scalar_kernel]
+    assert [kernel for kernel, *_ in launches] == [head_scatter_kernel]
+
+
+def _head_scatter_inputs(shape, edge=False):
+    tokens, heads, dim, world, has_local, head_major = shape
+    generator = torch.Generator().manual_seed(20878 + tokens)
+    values = torch.randn(world, tokens, heads, dim, generator=generator).bfloat16()
+    lses = torch.randn(world, tokens, heads, generator=generator) * 4
+    local = torch.randn(tokens, heads, dim, generator=generator).bfloat16()
+    local_lse = torch.randn(tokens, heads, generator=generator) * 4
+    if edge:
+        lses[:, 0, 0] = -torch.inf
+        local_lse[0, 0] = torch.nan
+        values[:, 0, 0] = torch.nan
+        local[0, 0] = torch.inf
+        lses[0, -1, 0] = torch.nan
+        lses[-1, -1, -1] = torch.inf
+        values[0, -1, 0] = torch.nan
+        lses[:, 2, 0], lses[:, 3, 0] = 200000.0, -200000.0
+        local_lse[2, 0], local_lse[3, 0] = 200000.0, -200000.0
+    raw = lses.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    exponent, fraction = (raw >> 23) & 255, raw & 0x7FFFFF
+    finite = exponent < 255
+    significand = fraction | torch.where(exponent == 0, 0, 0x800000)
+    significand = torch.where(finite, significand, 0)
+    code = (torch.maximum(exponent, torch.ones_like(exponent)) + 1).float()
+    code = torch.where(raw >> 31 != 0, -code, code)
+    code = torch.where((raw & 0x7FFFFFFF) == 0, 128.0, code)
+    code = torch.where(finite, code, 0.0)
+    fields = torch.stack(
+        (
+            code,
+            ((significand >> 16) & 255).float(),
+            ((significand >> 8) & 255).float(),
+            (significand & 255).float(),
+        ),
+        -1,
+    ).bfloat16()
+    recv = torch.cat((values, fields), -1).permute(0, 2, 1, 3).contiguous().npu()
+    all_lses = torch.cat((lses, local_lse[None]), 0) if has_local else lses
+    all_values = torch.cat((values, local[None]), 0) if has_local else values
+    valid = torch.isfinite(all_lses)
+    maximum = torch.where(valid, all_lses.double(), -torch.inf).max(0).values
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    weights = torch.where(valid, torch.exp(all_lses.double() - maximum), 0.0)
+    numerator = (torch.where(valid[..., None], all_values.double(), 0.0) * weights[..., None]).sum(0)
+    denominator = weights.sum(0)
+    expected = numerator / torch.where(denominator > 0, denominator, 1.0)[..., None]
+    if head_major:
+        local = local.transpose(0, 1).contiguous().npu().transpose(0, 1)
+    else:
+        local = local.npu()
+    return (
+        recv,
+        local if has_local else None,
+        local_lse.unsqueeze(-1).npu() if has_local else None,
+        expected,
+    )
+
+
+@pytest.mark.parametrize(
+    "shape,edge",
+    [
+        pytest.param((5, 1, 1, 1, False, False), False, id="single-rank-single-feature"),
+        pytest.param((114, 8, 512, 8, False, False), True, id="received-only-invalid-lse"),
+        pytest.param((144, 12, 512, 8, True, False), False, id="token-major-local"),
+        pytest.param((41, 7, 384, 5, True, True), True, id="head-major-local-rank-and-feature-tails"),
+    ],
+)
+@torch.inference_mode()
+def test_head_scatter_combine(shape, edge, monkeypatch):
+    # Rank-tiled dispatch has separate coverage. Exercise the row-weighted
+    # kernel even when this shape is eligible for rank tiling on A5.
+    monkeypatch.setattr(dcp_a2a, "_rank_tiled_mode", lambda: "off")
+    recv, local, local_lse, expected = _head_scatter_inputs(shape, edge)
+    launches = []
+    launch = dcp_a2a._launch_kernel
+
+    def record_launch(fn, *args, **kwargs):
+        launches.append((fn.__name__, kwargs.get("MODE")))
+        return launch(fn, *args, **kwargs)
+
+    monkeypatch.setattr(dcp_a2a, "_launch_kernel", record_launch)
+    actual = dcp_a2a.fused_dcp_lse_combine(recv, shape[2], 1, local_output=local, local_lse=local_lse).cpu()
+    error = (actual.double() - expected).abs()
+    assert torch.isfinite(actual).all()
+    assert (error <= 2e-5 + 0.004 * expected.abs()).double().mean() >= 0.99
+    assert error.max() <= 0.02
+    assert launches == [("_fused_dcp_lse_combine_head_scatter_kernel", int(is_950()))]
