@@ -1028,6 +1028,21 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
+def supports_bailing_v3_kda(config: VllmConfig) -> bool:
+    model = config.model_config
+    return (
+        "BailingMoeV3ForCausalLM" in model.architectures
+        and model.dtype == torch.bfloat16
+        and config.quant_config is None
+        and model.hf_text_config.head_dim == 128
+        and config.parallel_config.prefill_context_parallel_size == 1
+        and config.parallel_config.decode_context_parallel_size == 1
+        and config.speculative_config is None
+        and config.kv_transfer_config is None
+        and get_ascend_device_type() == AscendDeviceType.A3
+    )
+
+
 def register_ascend_fla_customop():
     """Resolve the FLA subclass after selecting a device, before model loading.
 
@@ -1801,6 +1816,8 @@ def check_gdn_layer(vllm_config) -> bool:
         # Most hybrid models expose layer_types. Kimi Linear/K3 instead
         # exposes the equivalent is_linear_attn property.
         layer_types = getattr(config, "layer_types", None) or []
+        if "BailingMoeV3ForCausalLM" in (getattr(config, "architectures", None) or ()):
+            return True
         if "linear_attention" in layer_types or bool(getattr(config, "is_linear_attn", False)):
             return True
 

@@ -82,6 +82,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
+from vllm_ascend.ops.triton.mla_cache_store import scatter_component
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -1111,6 +1112,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
+        self.output_projection_passthrough = kwargs.get("output_projection_passthrough", False)
         self.g_proj = kwargs.get("g_proj")
         # Both supported Kimi AMD implementations can append an output-gate shard.
         # The plain MLA projection also only has the two latent shards, so
@@ -2097,6 +2099,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         Keep CP and non-A5 admission unchanged. A5 scatter supports the
         token-fused views as well as caches with only a padded block stride.
         """
+        if getattr(self, "output_projection_passthrough", False):
+            return (
+                self.q_lora_rank is None
+                and self.num_kv_heads == 1
+                and self.use_mla_rope
+                and self.kv_lora_rank == 512
+                and self.qk_rope_head_dim == 64
+                and not self.enable_kv_nz
+                and not self.fa_quant_layer
+            )
         input_size = getattr(getattr(self, "fused_qkv_a_proj", None), "input_size", None)
         return (
             isinstance(input_size, int)
@@ -2119,14 +2131,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         """Allocate during weight loading, before KV sizing, and retain graph addresses."""
         if not self._uses_strided_kv_adapter() or getattr(self, "_strided_kv_workspace", None) is not None:
             return
-        assert self.fused_qkv_a_proj is not None
         capacity = max(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             max(self.vllm_config.compilation_config.cudagraph_capture_sizes or [0]),
         )
         block_size = self.vllm_config.cache_config.block_size
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
-        device = self.fused_qkv_a_proj.weight.device
+        projection = self.fused_qkv_a_proj if self.fused_qkv_a_proj is not None else self.kv_a_proj_with_mqa
+        device = projection.weight.device
         self._strided_kv_workspace = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=device),
             torch.empty((*shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
@@ -2161,13 +2173,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         current_nope = nope.flatten(0, 1)[:num_tokens]
         current_rope = rope.flatten(0, 1)[:num_tokens]
-        DeviceOperator.reshape_and_cache(
-            key=current_nope,
-            value=current_rope,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        if getattr(self, "output_projection_passthrough", False):
+            scatter_component(current_nope, slots, kv_cache[0])
+            scatter_component(current_rope, slots, kv_cache[1])
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=current_nope,
+                value=current_rope,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
         return current_rope, current_nope
 
     def _exec_quant_flashmla_kv_writer(
@@ -3782,7 +3798,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if gate is not None:
             flash_attention_gate(o_proj_input, gate)
         # O proj
-        output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
+        if getattr(self, "output_projection_passthrough", False):
+            output.copy_(o_proj_input)
+        else:
+            output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

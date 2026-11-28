@@ -19,6 +19,8 @@
 
 ### Generative Models
 
+Ling checkpoints with the `BailingMoeV3ForCausalLM` architecture can use BF16 KDA and MLA on A3. The initial scope is colocated inference with 128-dimensional KDA heads, without quantization, speculative decoding or context parallelism.
+
 #### Core Supported Models
 
 === "950PR&950DT Products"

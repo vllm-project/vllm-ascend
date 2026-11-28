@@ -48,10 +48,13 @@ def _scatter_ssm_states_kernel(
     state_ptr,
     indices_ptr,
     source_ptr,
+    active_rows_ptr,
     stride_state_batch: tl.int64,
     stride_indices,
     stride_source_batch: tl.int64,
+    stride_active_rows,
     row_size: tl.constexpr,
+    HAS_ACTIVE_ROWS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
@@ -59,6 +62,9 @@ def _scatter_ssm_states_kernel(
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < row_size
 
+    if HAS_ACTIVE_ROWS:
+        active = tl.load(active_rows_ptr + batch_idx * stride_active_rows).to(tl.int1)
+        mask = mask & active
     state_idx = tl.load(indices_ptr + batch_idx * stride_indices).to(tl.int64)
     values = tl.load(
         source_ptr + batch_idx * stride_source_batch + offsets,
@@ -171,6 +177,8 @@ def scatter_ssm_states_(
     state: torch.Tensor,
     indices: torch.Tensor,
     source: torch.Tensor,
+    *,
+    active_rows: torch.Tensor | None = None,
 ) -> None:
     """Write dense state rows into selected slots of a padded state cache.
 
@@ -178,8 +186,13 @@ def scatter_ssm_states_(
     contiguous and padding is represented by ``state.stride(0)``. ``indices``
     select physical rows and may be unsorted or non-contiguous. ``source``
     must have the logical state shape and contiguous inner dimensions.
+    When provided, `active_rows` masks writes for padding and inactive slots.
     """
     _validate_scatter_inputs(state, indices, source)
+    if active_rows is not None and (
+        active_rows.shape != indices.shape or active_rows.dtype != torch.bool or active_rows.device != state.device
+    ):
+        raise ValueError("active_rows must be a boolean tensor matching indices on the state device")
     if indices.numel() == 0:
         return
 
@@ -189,10 +202,13 @@ def scatter_ssm_states_(
         state,
         indices,
         source,
+        active_rows if active_rows is not None else indices,
         state.stride(0),
         indices.stride(0),
         source.stride(0),
+        active_rows.stride(0) if active_rows is not None else 0,
         row_size=row_size,
+        HAS_ACTIVE_ROWS=active_rows is not None,
         BLOCK_SIZE=STATE_IO_BLOCK_SIZE,
         num_warps=8,
     )

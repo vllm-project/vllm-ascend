@@ -121,6 +121,7 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
     shared_expert_tp_enable,
+    supports_bailing_v3_kda,
 )
 
 if TYPE_CHECKING:
@@ -670,6 +671,9 @@ class NPUWorker(GPUWorker):
         # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
         # versions fix import-time NPU init and general registration is restored.
         register_ascend_fla_customop()
+        if supports_bailing_v3_kda(self.vllm_config):
+            # Importing upstream Bailing imports FLA and must follow device selection.
+            from vllm_ascend.ops import bailing_moe_v3_kda  # noqa: F401
 
         self._init_workspace_and_model_runner()
 

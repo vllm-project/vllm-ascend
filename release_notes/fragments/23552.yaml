@@ -1,0 +1,6 @@
+pr: 23552
+entries:
+  - category: feature
+    text: Added BF16 Ling (BailingMoE V3) hybrid KDA and MLA inference support on Ascend A3 for colocated deployments.
+    model: Ling
+    hardware: [A3]
