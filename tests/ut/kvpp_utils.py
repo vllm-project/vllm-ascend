@@ -10,6 +10,14 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.utils import vllm_version_is
+
+
+def release_pcp_kwargs(**kwargs: bool) -> dict[str, Any]:
+    """Supply version-specific cache keywords supported by v0.34.0."""
+    if vllm_version_is("0.34.0"):
+        return {"pcp_world_size": 1, **kwargs}
+    return {}
 
 
 def layer_name(index):

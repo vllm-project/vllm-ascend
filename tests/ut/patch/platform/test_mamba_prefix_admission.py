@@ -8,6 +8,7 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from tests.ut.kvpp_utils import release_pcp_kwargs
 from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -44,7 +45,7 @@ def make_coordinator():
     return AscendHybridKVCacheCoordinator(
         config,
         max_model_len=16384,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -134,7 +135,7 @@ def test_dcp8_prefix_reuses_checkpoint_and_copies_partial_attention_tail():
     coordinator = AscendHybridKVCacheCoordinator(
         config,
         max_model_len=262144,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=8,

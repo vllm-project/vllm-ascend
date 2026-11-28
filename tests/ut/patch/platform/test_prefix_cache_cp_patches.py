@@ -19,7 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from tests.ut.kvpp_utils import make_layer_cache_configs
+from tests.ut.kvpp_utils import make_layer_cache_configs, release_pcp_kwargs
 from vllm_ascend.core import kv_cache_config_builder
 from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
@@ -285,7 +285,7 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -351,7 +351,7 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=131072,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=dcp,
@@ -387,7 +387,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -419,7 +419,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         kv_cache_group_ids=[2],
         block_pool=coordinator.block_pool,
         **cache_lookup_params(specs[2]),
-        **({"drop_eagle_block": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(drop_eagle_block=False),
         alignment_tokens=16,
         dcp_world_size=1,
     )
@@ -1460,7 +1460,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
         single_group_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1488,7 +1488,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=False,
         enable_kv_cache_events=False,
         dcp_world_size=2,
@@ -1527,7 +1527,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1721,7 +1721,7 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
             **cache_lookup_params(mamba_spec),
             alignment_tokens=16,
             dcp_world_size=8,
-            **({"drop_eagle_block": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+            **release_pcp_kwargs(drop_eagle_block=False),
         )
 
     assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1

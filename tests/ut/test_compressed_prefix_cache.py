@@ -20,6 +20,7 @@ from vllm.v1.request import Request
 
 # vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
 # the v0.34.0 lane still ships it in `kv_cache_utils`.
+from tests.ut.kvpp_utils import release_pcp_kwargs
 from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -271,7 +272,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         ),
         max_model_len=logical_block_size,
         max_in_flight_tokens=logical_block_size,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -348,7 +349,7 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         ),
         max_model_len=8192,
         max_in_flight_tokens=8192,
-        **({"use_eagle": False, "pcp_world_size": 1} if vllm_version_is("0.34.0") else {}),
+        **release_pcp_kwargs(use_eagle=False),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
