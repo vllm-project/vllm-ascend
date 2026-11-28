@@ -1057,6 +1057,9 @@ class AscendConfig:
 
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility(is_hif8_c8_kv_quant(vllm_config))
+        from vllm_ascend.hisparse.prefill_pipeline import validate_hisparse_prefill_config
+
+        validate_hisparse_prefill_config(vllm_config)
         if fallback_for_swiglu_limits:
             # Keep the derived flags until the mode-3 hardware and model checks have run.
             self._megamoe_supported = False
@@ -2089,6 +2092,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "recompute_scheduler_enable",
         "short_request_first_config",
         "batch_job_sched_config",
+        "hisparse_prefill_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())

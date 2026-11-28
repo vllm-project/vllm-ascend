@@ -120,9 +120,27 @@ def build_hisparse_prefill_staging_plan(
     )
 
 
-@dataclass
 class AscendHiSparsePrefillMetadata:
-    host_staging_plan: AscendHiSparsePrefillStagingPlan
+    def __init__(
+        self,
+        host_staging_plan: AscendHiSparsePrefillStagingPlan | None = None,
+        *,
+        plan_args: tuple[torch.Tensor, torch.Tensor, int, int] | None = None,
+    ) -> None:
+        self._host_staging_plan = host_staging_plan
+        self._plan_args = plan_args
+
+    @property
+    def host_staging_plan(self) -> AscendHiSparsePrefillStagingPlan:
+        if self._host_staging_plan is None:
+            if self._plan_args is None:
+                raise RuntimeError("HiSparse prefill staging plan was initialized without plan arguments")
+            self._host_staging_plan = build_hisparse_prefill_staging_plan(*self._plan_args)
+        return self._host_staging_plan
+
+    @host_staging_plan.setter
+    def host_staging_plan(self, value: AscendHiSparsePrefillStagingPlan) -> None:
+        self._host_staging_plan = value
 
 
 @dataclass
@@ -198,14 +216,18 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
                 raise RuntimeError("HiSparse prefill requires scheduler sequence-length bounds on CPU")
             prefill_lens = seq_lens_cpu[metadata.num_decodes :]
             capacity = int(((prefill_lens + metadata.block_size - 1) // metadata.block_size).sum())
-            metadata.prefill = AscendHiSparsePrefillMetadata(
-                build_hisparse_prefill_staging_plan(
-                    metadata.block_table[metadata.num_decodes :],
-                    metadata.seq_lens[metadata.num_decodes :],
-                    metadata.block_size,
-                    capacity,
-                )
+            from vllm_ascend.hisparse.prefill_pipeline import is_hisparse_prefill_enabled
+
+            plan_args = (
+                metadata.block_table[metadata.num_decodes :],
+                metadata.seq_lens[metadata.num_decodes :],
+                metadata.block_size,
+                capacity,
             )
+            if is_hisparse_prefill_enabled(getattr(self, "vllm_config", None)):
+                metadata.prefill = AscendHiSparsePrefillMetadata(plan_args=plan_args)
+            else:
+                metadata.prefill = AscendHiSparsePrefillMetadata(build_hisparse_prefill_staging_plan(*plan_args))
         return metadata
 
 
@@ -650,8 +672,10 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         view = cache.view
         state_indices = cache.runtime.request_state_indices
+        from vllm_ascend.hisparse.prefill_pipeline import all_prefill_pages_resident
+
         if (
-            not cache.all_context_pages_resident
+            not all_prefill_pages_resident(cache)
             or cache.dummy_batch
             or cache.draft_layer
             or view is None
@@ -663,7 +687,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         ):
             return None
         if (
-            get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
             or torch.npu.is_current_stream_capturing()
         ):
             return None
@@ -680,7 +704,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or storage.size(0) <= (view.cache.size(0) - 1) * page_stride
         ):
             return None
-        table = cache.block_table.index_select(0, state_indices[num_decodes : metadata.num_reqs].to(torch.long))
+        state_rows = state_indices[num_decodes : metadata.num_reqs].clamp_min(0).to(torch.long)
+        table = cache.block_table.index_select(0, state_rows)
         table.clamp_min_(0).mul_(page_stride)
         if num_decodes:
             query_ends = query_ends[num_decodes:] - num_decode_tokens
@@ -749,18 +774,22 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 )
             )
         if metadata.num_prefills:
+            from vllm_ascend.hisparse.prefill_pipeline import try_execute_hisparse_prefill
+
             query = ql_nope[num_decode:]
             query_rope = q_pe[num_decode:] if q_pe is not None else None
+            selected = logical[num_decode:]
             prefill_output = self._try_c8_resident_prefill(
-                query, query_rope, logical[num_decode:], metadata, actual_seq_lengths_query, actual_seq_lengths_key
+                query, query_rope, selected, metadata, actual_seq_lengths_query, actual_seq_lengths_key
             )
+            if prefill_output is None:
+                prefill_output = try_execute_hisparse_prefill(self, query, query_rope, selected, metadata)
             if prefill_output is None:
                 host = cache.runtime.host_cache
                 host = host.view(-1, metadata.prefill.host_staging_plan.block_size, host.shape[-1])
                 staged, staged_table, req_ids = self.index_group.stage_prefill_rows(
                     self.index_group_index, host, metadata
                 )
-                selected = logical[num_decode:]
                 nonnegative = selected.clamp_min(0)
                 block_ids = nonnegative.to(torch.int64) // metadata.block_size
                 request_tables = staged_table[req_ids.to(torch.int64)]

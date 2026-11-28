@@ -21,8 +21,10 @@ if TYPE_CHECKING:
 
 
 def initialize_worker_dma(worker) -> None:
+    from vllm_ascend.hisparse.prefill_pipeline import bind_worker_prefill_executor, install_hisparse_prefill_hooks
     from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
 
+    install_hisparse_prefill_hooks()
     if worker.is_host_writer:
         # Core stages int64 slots; the Ascend slot producer uses int32.
         staging = worker._slot_mapping_staging
@@ -31,6 +33,7 @@ def initialize_worker_dma(worker) -> None:
             if slots.dtype == torch.int32:
                 staging.slots = torch.empty(staging.slots.shape, dtype=slots.dtype, device="cpu", pin_memory=True)
     worker._ascend_recycled_invalidator = RecycledGroupInvalidator.bind(worker)
+    bind_worker_prefill_executor(worker)
 
 
 def _allocate_resolver_workspace(runtime: HiSparseRuntime):
@@ -81,6 +84,9 @@ def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
             group._ascend_profiled_resolver = workspace
         if not hasattr(runtime, "_ascend_profiled_cache_ops"):
             runtime._ascend_profiled_cache_ops = workspace, _allocate_attention_lengths(runtime)
+    from vllm_ascend.hisparse.prefill_pipeline import prepare_hisparse_prefill_workspace
+
+    prepare_hisparse_prefill_workspace(forward_context)
 
 
 class AscendHiSparseBackend(HiSparseBackend):
@@ -129,6 +135,9 @@ class AscendHiSparseBackend(HiSparseBackend):
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         _load_resolver()
+        from vllm_ascend.hisparse.prefill_pipeline import install_hisparse_prefill_hooks
+
+        install_hisparse_prefill_hooks()
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.host_pool import MappedHostTensor

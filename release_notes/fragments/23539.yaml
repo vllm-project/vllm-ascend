@@ -1,0 +1,5 @@
+pr: 23539
+entries:
+  - category: feature
+    text: Added an opt-in heterogeneous prefill pipeline (`hisparse_prefill_config`) for packed C8 `HiSparseConnector`, combining a persistent `staging_pool` with 32-AIV Top-K row gather for long-context sparse prefill, coalesced SDMA for dense prefill, and post-SFA cross-layer prefetching (up to 5.70x faster TTFT on 256K+4x256 GLM-5.2 C8 across 16 A3 dies).
+    hardware: [A3]
