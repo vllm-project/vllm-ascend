@@ -202,6 +202,7 @@ jobs:
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
               uv pip install --no-deps mhc==0.5.5
+              uv pip install "smg-grpc-servicer==0.16.0"
 
           - name: Install FLA NPU for A2 upstream tests
             run: |

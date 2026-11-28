@@ -21,11 +21,13 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -47,7 +49,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -750,15 +751,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default. Feature validation is
-        # left to upstream.
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default runner selection.
-        apply_v2_model_runner_config_patch()
-
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
@@ -2123,17 +2115,6 @@ def _uses_minimax_fa3(config) -> bool:
     architectures = config.model_config.hf_config.architectures or ()
     spec = config.speculative_config
     if getattr(backends, "model_tag", None) == "dspark_head" and spec is not None:
-        from importlib.metadata import PackageNotFoundError, version
-
-        from packaging.version import InvalidVersion, Version
-
-        # Older binaries can copy device lengths to the host in long-context
-        # graph capture. Keep the existing backend until this path is supported.
-        try:
-            if Version(version("flash_attn_npu")) < Version("0.5.1.post1"):
-                return False
-        except (PackageNotFoundError, InvalidVersion):
-            return False
         # DSpark's loader retains the target ModelConfig in VllmConfig and
         # passes the draft ModelConfig separately to get_model().
         draft = spec.draft_model_config
@@ -2146,12 +2127,18 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3DSparkModel",
         "Qwen3OmniDSparkModel",
     }
-    return (
+    if not (
         FlashAttentionNpu3Model.MINIMAX in get_current_hardware_profile().flash_attn_npu_3_models
         and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
-    )
+    ):
+        return False
+    # Both loader layouts need device-only long-context capture support.
+    try:
+        return Version(version("flash_attn_npu")) >= Version("0.5.1.post1")
+    except (PackageNotFoundError, InvalidVersion):
+        return False
 
 
 def _uses_qwen_fa3(config: VllmConfig) -> bool:

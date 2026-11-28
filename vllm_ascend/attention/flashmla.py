@@ -469,12 +469,27 @@ class FlashMLACurrent:
     """Replicated current chunk, independent of persistent KV and prefix pages."""
 
     adapter: Any
-    query: torch.Tensor
-    schedule: torch.Tensor
-    cache: torch.Tensor
+    query: torch.Tensor | None
+    schedule: torch.Tensor | None
+    cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     block_table: torch.Tensor
     slots: torch.Tensor
-    attn_mask: torch.Tensor
+    attn_mask: torch.Tensor | None
+    output_mask: torch.Tensor | None = None
+
+    @classmethod
+    def allocate_split(cls, adapter, tokens, rows, columns, device):
+        adapter = adapter.for_capacity(columns, tokens)
+        return cls(
+            adapter=adapter,
+            query=None,
+            schedule=None,
+            cache=adapter.allocate_cache(columns + rows, device=device),
+            block_table=torch.zeros((rows, columns), dtype=torch.int32, device=device),
+            slots=torch.full((tokens,), -1, dtype=torch.int64, device=device),
+            attn_mask=None,
+            output_mask=torch.empty(tokens, dtype=torch.bool, device=device),
+        )
 
 
 @dataclass
@@ -648,6 +663,11 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
+            if flash.query is None:
+                flash.current = FlashMLACurrent.allocate_split(
+                    self.current_adapter, tokens, rows, block_columns, self.device
+                )
+                return flash
             current_schedule = self.current_adapter.build_metadata(
                 torch.empty_like(used, device="meta"),
                 torch.empty_like(cu, device="meta"),
@@ -758,13 +778,23 @@ class FlashMLAMetadataBuilder:
             flash.slots.fill_(-1)
             slots = common.slot_mapping[:num_decode_tokens]
             flash.slots[: slots.numel()].copy_(slots)
-            assert flash.live_boundaries is not None and flash.token_live is not None
-            flash.live_boundaries.zero_()
-            live = (flash.used_q > 0).to(torch.int32)
-            flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
-            flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
-            flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
-            flash.slots.masked_fill_(~flash.token_live, -1)
+            current = flash.current
+            if current is not None and current.output_mask is not None:
+                indices = torch.arange(tokens, device=self.device, dtype=torch.int32)
+                requests = torch.searchsorted(flash.cu[1:], indices, right=True)
+                # Empty local history and an empty replicated query are independent.
+                torch.le(flash.cache_lens[requests], 0, out=flash.output_mask)
+                padding = current.output_mask
+                torch.eq(flash.used_q[requests], 0, out=padding)
+            else:
+                assert flash.live_boundaries is not None and flash.token_live is not None
+                flash.live_boundaries.zero_()
+                live = (flash.used_q > 0).to(torch.int32)
+                flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
+                flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
+                flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+                padding = ~flash.token_live
+            flash.slots.masked_fill_(padding, -1)
             flash.positions.zero_()
             positions = common.positions[:num_decode_tokens]
             flash.positions[: positions.numel()].copy_(positions)
@@ -784,15 +814,18 @@ class FlashMLAMetadataBuilder:
                 columns = torch.arange(current.block_table.shape[1], device=self.device)
                 current.block_table.copy_(page_starts[:, None] + columns)
                 current.block_table.masked_fill_(columns >= page_counts[:, None], 0)
-                indices = torch.arange(tokens, device=self.device)
-                requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
+                if current.output_mask is None:
+                    indices = torch.arange(tokens, device=self.device)
+                    requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
-                current.slots.masked_fill_(~flash.token_live, -1)
-                current.schedule.copy_(
-                    current.adapter.build_metadata(
-                        flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(current=True)
-                    )
+                current.slots.masked_fill_(padding, -1)
+                schedule = current.adapter.build_metadata(
+                    flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(current=True)
                 )
+                if current.schedule is None:
+                    current.schedule = schedule
+                else:
+                    current.schedule.copy_(schedule)
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.

@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from packaging.version import InvalidVersion, Version
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -146,6 +147,10 @@ def selection(monkeypatch, profiles):
     monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="backbone")))
     namespace = {
         "torch": torch,
+        "PackageNotFoundError": importlib.metadata.PackageNotFoundError,
+        "version": importlib.metadata.version,
+        "InvalidVersion": InvalidVersion,
+        "Version": Version,
         "HardwareCapability": profiles.HardwareCapability,
         "AttentionBackendFamily": profiles.AttentionBackendFamily,
         "FlashAttentionNpu3Model": profiles.FlashAttentionNpu3Model,
@@ -216,14 +221,20 @@ def test_dspark_loader_retains_target_config(selection, monkeypatch, device, tag
     assert ("flash_attention_v3" in r.select()) == (tag == "dspark_head")
 
 
+@pytest.mark.parametrize("loader", ["retained_target", "draft_config"])
 @pytest.mark.parametrize(
     "version,supported",
     [("0.5.0", False), ("0.5.1", False), ("0.5.1.post1", True), ("0.6.0", True), ("unknown", False), (None, False)],
 )
-def test_dspark_fa3_requires_long_context_graph_support(selection, monkeypatch, version, supported):
+def test_dspark_fa3_requires_long_context_graph_support(selection, monkeypatch, loader, version, supported):
     selection.package_version = version
-    selection.config.model_config = selection.config.speculative_config.target_model_config
-    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="dspark_head")))
+    if loader == "retained_target":
+        selection.config.model_config = selection.config.speculative_config.target_model_config
+        tag = "dspark_head"
+    else:
+        selection.config.model_config = NS(hf_config=selection.config.speculative_config.draft_model_config)
+        tag = "backbone"
+    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag=tag)))
     assert ("flash_attention_v3" in selection.select()) is supported
 
 

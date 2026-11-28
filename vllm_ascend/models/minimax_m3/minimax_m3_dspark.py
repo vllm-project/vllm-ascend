@@ -349,12 +349,7 @@ class MiniMaxFlashDSparkForCausalLM(AscendQwen3DSparkForCausalLM):
 
     def __init__(self, *, vllm_config, prefix=""):
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        # Transformers represents the pointwise fallback as silu; the MiniMax
-        # MLP still implements the SwiGLU-OAI gate through its layer dispatch.
-        uses_oai_gate = config.hidden_act == "swigluoai" or (
-            config.hidden_act == "silu" and getattr(config, "mlp_layer_types", None) is not None
-        )
-        if not config.use_gemma_norm or not uses_oai_gate:
+        if not config.use_gemma_norm or config.hidden_act != "swigluoai":
             raise ValueError("Unexpected MiniMax draft decoder semantics")
         if getattr(config, "dspark_hybrid_context_fusion", False):
             raise ValueError("Hybrid context fusion is not implemented by this adapter")

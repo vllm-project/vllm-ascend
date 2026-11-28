@@ -44,9 +44,6 @@ from vllm_ascend.worker.v2.spec_decode.dflash import speculator as ascend_dflash
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as ascend_dspark
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
-# isort: split
-from vllm_ascend.worker.v2.dspark_decode_inputs import DSparkDecodeIndexCache, DSparkTargetAttention
-
 
 def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -1257,49 +1254,6 @@ def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, p
     assert build.call_args.kwargs["max_query_len"] == expected
 
 
-@pytest.mark.parametrize("fallback", ["none", "capture", "dummy", "profile", "prefill", "eager", "replaced"])
-def test_dspark_target_metadata_keeps_capture_and_prefill_groups(monkeypatch, fallback):
-    from vllm_ascend.worker.v2.model_states import default
-
-    target = SimpleNamespace(kv_cache_spec=SimpleNamespace(is_draft=False))
-    draft = SimpleNamespace(kv_cache_spec=SimpleNamespace(is_draft=True))
-    groups = [[draft], [target]]
-    state = default.AscendModelState.__new__(default.AscendModelState)
-    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    state.model_config = SimpleNamespace(max_model_len=2048)
-    state.kvpp_runtime = None
-    state.decoder_replay = None
-    state.kvpp_is_dummy_run = fallback == "profile"
-    state.dspark_target_attention = DSparkTargetAttention(groups)
-    if fallback == "replaced":
-        groups = [[draft], [target]]
-    batch = SimpleNamespace(
-        num_reqs=1,
-        num_reqs_after_padding=1,
-        num_tokens=8,
-        num_tokens_after_padding=8,
-        query_start_loc_np=np.array([0, 8], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 8]),
-        num_scheduled_tokens=torch.tensor([8]),
-        max_query_len=8,
-        is_prefilling_np=np.array([fallback == "prefill"]),
-        is_dummy=fallback == "dummy",
-        seq_lens=torch.tensor([128]),
-        seq_lens_np=np.array([128]),
-        dcp_local_seq_lens=None,
-        positions=torch.arange(8),
-        attn_state=None,
-    )
-    build = Mock(return_value={})
-    monkeypatch.setattr(default, "build_attn_metadata", build)
-    monkeypatch.setattr(default, "get_ascend_config", lambda: SimpleNamespace(xlite_graph_config=None))
-    mode = CUDAGraphMode.NONE if fallback == "eager" else CUDAGraphMode.FULL
-    state.prepare_attn(batch, mode, (), torch.empty(0), groups, None, for_capture=fallback == "capture")
-    selected = build.call_args.kwargs["attn_groups"]
-    assert selected == ([[], [target]] if fallback == "none" else groups)
-    assert groups[0] == [draft]
-
-
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
@@ -1681,7 +1635,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
-        speculative_config=None,
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
@@ -1745,41 +1698,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
-@pytest.mark.parametrize("reuse", [False, True])
-@pytest.mark.parametrize("sync", [False, True])
-def test_dspark_cpu_lengths_preserve_completed_snapshot_fence(reuse, sync):
-    runner = _make_runner()
-    runner._dspark_decode_indices = object() if reuse else None
-    runner.speculator = object()
-    runner.sync_spec_pp_cpu_counts = False
-    runner._can_skip_spec_cpu_length_sync = lambda: not sync
-    runner.req_states = SimpleNamespace(
-        req_id_to_index={"a": 0, "b": 1, "c": 2, "d": 3},
-        num_computed_tokens_cpu=torch.tensor([100, 200, 300, 400], dtype=torch.int32),
-    )
-    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.full((4,), -1, dtype=torch.int32))
-    runner.num_computed_tokens_cpu = torch.full((4,), -99, dtype=torch.int32)
-
-    def complete_copy():
-        runner.num_computed_tokens_cpu.copy_(torch.tensor([101, 201, 301, 401], dtype=torch.int32))
-
-    runner.num_computed_tokens_event = SimpleNamespace(synchronize=Mock(side_effect=complete_copy))
-    scheduler = SimpleNamespace(
-        num_scheduled_tokens={"d": 8, "b": 5, "a": 1},
-        scheduled_cached_reqs=SimpleNamespace(req_ids=["a", "d"]),
-    )
-    runner._update_seq_lens_cpu(scheduler, ["d", "b", "a"])
-    runner.num_computed_tokens_event.synchronize.assert_called_once() if sync else (
-        runner.num_computed_tokens_event.synchronize.assert_not_called()
-    )
-    expected = [409, 205, 102, -1] if sync else [408, 205, 101, -1]
-    torch.testing.assert_close(runner.input_buffers.seq_lens_cpu, torch.tensor(expected, dtype=torch.int32))
-    expected_counts = [101, 200, 300, 401] if sync else [100, 200, 300, 400]
-    torch.testing.assert_close(
-        runner.req_states.num_computed_tokens_cpu, torch.tensor(expected_counts, dtype=torch.int32)
-    )
-
-
 def test_initialize_kv_cache_forwards_allocation_context():
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
@@ -1789,7 +1707,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
-        speculative_config=None,
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = None
@@ -2083,30 +2000,6 @@ def _run_prepare_inputs(
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
         assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
         return prepared, batch
-
-
-@pytest.mark.parametrize("fallback", ["none", "prefill", "eager", "width", "missing_draft", "partial_draft"])
-def test_dspark_index_cache_requires_uniform_full_decode(fallback):
-    runner, output, state, desc = _prepare_inputs_runner(draft=True, full_cg=True)
-    runner._dspark_decode_indices = DSparkDecodeIndexCache()
-    values = np.array([2, 0], dtype=np.int32)
-    copy = Mock(side_effect=lambda array: torch.from_numpy(array.copy()))
-    previous = runner._dspark_decode_indices.copy("indices", values, copy)
-    runner.decode_query_len = 8
-    state.has_prefill = fallback == "prefill"
-    desc.uniform_token_count = 8 if fallback != "width" else 4
-    if fallback == "eager":
-        desc.cg_mode = CUDAGraphMode.NONE
-    output.scheduled_spec_decode_tokens = {req: [0] * 7 for req in state.req_ids}
-    if fallback == "missing_draft":
-        output.scheduled_spec_decode_tokens = {}
-    if fallback == "partial_draft":
-        output.scheduled_spec_decode_tokens[state.req_ids[0]] = [0] * 3
-    result = runner._get_dspark_decode_index_cache(output, state, desc)
-    assert (result is runner._dspark_decode_indices) == (fallback == "none")
-    current = runner._dspark_decode_indices.copy("indices", values, copy)
-    assert (current is previous) == (fallback == "none")
-    torch.testing.assert_close(previous, torch.from_numpy(values))
 
 
 def test_prepare_inputs_common_path():

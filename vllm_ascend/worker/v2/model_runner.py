@@ -22,7 +22,6 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -139,17 +138,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
-from vllm_ascend.worker.v2.dspark_decode_inputs import (
-    DSparkDecodeIndexCache,
-    DSparkTargetAttention,
-    supports_dspark_decode_reuse,
-    update_dspark_cpu_seq_lens,
-)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
-from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -183,7 +175,6 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
-    _dspark_decode_indices: DSparkDecodeIndexCache | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -614,14 +605,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.initialize_spec_cpu_length_sync()
 
-        self._dspark_decode_indices = None
-        if isinstance(self.model_state, AscendModelState):
-            self.model_state.dspark_target_attention = None
-        if supports_dspark_decode_reuse(self.vllm_config, sparse_offload_enabled=sparse_cfg.enabled):
-            self._dspark_decode_indices = DSparkDecodeIndexCache()
-            if isinstance(self.model_state, AscendModelState):
-                self.model_state.dspark_target_attention = DSparkTargetAttention(self.attn_groups)
-
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -965,27 +948,6 @@ class NPUModelRunner(GPUModelRunner):
         mask[num_tokens:].fill_(True)
         return mask
 
-    def _get_dspark_decode_index_cache(
-        self,
-        scheduler_output: SchedulerOutput,
-        batch_req_state: BatchReqState,
-        batch_desc: BatchExecutionDescriptor,
-    ) -> DSparkDecodeIndexCache | None:
-        cache = self._dspark_decode_indices
-        if cache is None:
-            return None
-        drafts = scheduler_output.scheduled_spec_decode_tokens
-        if (
-            not batch_req_state.has_prefill
-            and batch_desc.cg_mode == CUDAGraphMode.FULL
-            and batch_desc.uniform_token_count == self.decode_query_len
-            and drafts
-            and all(len(drafts.get(req_id, ())) == self.decode_query_len - 1 for req_id in batch_req_state.req_ids)
-        ):
-            return cache
-        cache.clear()
-        return None
-
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -1015,13 +977,7 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        index_cache = self._get_dspark_decode_index_cache(scheduler_output, batch_req_state, batch_desc)
-        copy_indices = partial(async_copy_to_gpu, device=self.device)
-        idx_mapping = (
-            index_cache.copy("indices", idx_mapping_np, copy_indices)
-            if index_cache is not None
-            else copy_indices(idx_mapping_np)
-        )
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -1066,11 +1022,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = (
-                index_cache.copy("logits", cu_num_logits_np, copy_indices)
-                if index_cache is not None
-                else copy_indices(cu_num_logits_np)
-            )
+            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -1152,14 +1104,9 @@ class NPUModelRunner(GPUModelRunner):
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if draft_tokens:
-            if index_cache is not None:
-                expanded_idx_mapping, expanded_local_pos = index_cache.expand(
-                    idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len, expand_idx_mapping
-                )
-            else:
-                expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                    idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
-                )
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
+            )
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
@@ -1456,16 +1403,6 @@ class NPUModelRunner(GPUModelRunner):
             for backend in draft_backends
         )
 
-        if self._skip_fa3_cpu_length_sync and self.model_config.hf_text_config.model_type == "minimax_m3_text":
-            # Sparse offload and mixed FIA targets consume exact CPU counts.
-            self._skip_fa3_cpu_length_sync = not self.ascend_config.sparse_kv_offload_config.enabled and all(
-                group.backend in draft_backends
-                or group.backend is AscendFlashAttentionBackend
-                or group.backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
-                for groups in self.attn_groups
-                for group in groups
-            )
-
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
@@ -1489,21 +1426,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
-        if getattr(self, "_skip_fa3_cpu_length_sync", False):
-            architecture = getattr(self.model_config, "architecture", None)
-            if architecture in QWEN_FA3_TARGETS:
-                # Only this Qwen hybrid has been validated without the runner's CPU length snapshot.
-                return (
-                    architecture == "Qwen3_5ForConditionalGeneration"
-                    and spec is not None
-                    and spec.method == "dflash"
-                    and spec.draft_model_config is not None
-                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
-                    and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
-                    and self.vllm_config.kv_transfer_config is None
-                )
-            return True
-
         if (
             spec is not None
             and self.speculator is not None
@@ -1522,6 +1444,21 @@ class NPUModelRunner(GPUModelRunner):
                 or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
                 for backend in backends
             )
+
+        if getattr(self, "_skip_fa3_cpu_length_sync", False):
+            architecture = getattr(self.model_config, "architecture", None)
+            if architecture in QWEN_FA3_TARGETS:
+                # Only this Qwen hybrid has been validated without the runner's CPU length snapshot.
+                return (
+                    architecture == "Qwen3_5ForConditionalGeneration"
+                    and spec is not None
+                    and spec.method == "dflash"
+                    and spec.draft_model_config is not None
+                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+                    and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
+                    and self.vllm_config.kv_transfer_config is None
+                )
+            return True
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
@@ -1652,26 +1589,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
-        sync_counts = (
-            self.speculator is not None or self.sync_spec_pp_cpu_counts
-        ) and not self._can_skip_spec_cpu_length_sync()
-        if sync_counts:
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
-
-        if self._dspark_decode_indices is not None:
-            update_dspark_cpu_seq_lens(
-                req_ids,
-                self.req_states.req_id_to_index,
-                num_scheduled_tokens,
-                self.req_states.num_computed_tokens_cpu.numpy(),
-                self.input_buffers.seq_lens_cpu.numpy(),
-                scheduler_output.scheduled_cached_reqs.req_ids if sync_counts else (),
-                self.num_computed_tokens_cpu.numpy() if sync_counts else None,
-            )
-            return
-
-        if sync_counts:
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]

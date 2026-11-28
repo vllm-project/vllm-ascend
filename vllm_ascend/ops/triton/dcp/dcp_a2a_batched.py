@@ -67,6 +67,8 @@ def _pack_dcp_output_lse_batched_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     OUTPUT_HEAD_MAJOR: tl.constexpr = False,
+    output_mask_ptr=None,
+    HAS_OUTPUT_MASK: tl.constexpr = False,
 ):
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -110,6 +112,9 @@ def _pack_dcp_output_lse_batched_kernel(
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = (d_offsets < head_dim) & row_mask
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
+        if HAS_OUTPUT_MASK:
+            invalid = tl.load(output_mask_ptr + token_idx, mask=row_mask, other=True).to(tl.int1)
+            output = tl.where(invalid, 0.0, output)
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
         lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h, mask=row_mask, other=0.0).to(
@@ -120,6 +125,8 @@ def _pack_dcp_output_lse_batched_kernel(
                 tl.float32
             )
             lse = lse + tl.log(total)
+        if HAS_OUTPUT_MASK:
+            lse = tl.where(invalid, -float("inf"), lse)
         if LSE_PACK_DIM == 1:
             tl.store(send_ptr + send_base + head_dim * send_stride_d, lse.to(send_ptr.dtype.element_ty), mask=row_mask)
         else:
@@ -177,6 +184,8 @@ def _fused_dcp_lse_combine_head_scatter_kernel(
     BLOCK_D: tl.constexpr,
     MODE: tl.constexpr,
     HAS_LOCAL: tl.constexpr = True,
+    local_output_mask_ptr=None,
+    HAS_LOCAL_OUTPUT_MASK: tl.constexpr = False,
 ):
     # A3 avoids scalarized multirow loads. A5 streams eight rows per tile for higher memory throughput.
     BLOCK_ROWS: tl.constexpr = 1 if MODE == _SINGLE_ROW else 8
@@ -240,6 +249,12 @@ def _fused_dcp_lse_combine_head_scatter_kernel(
             else:
                 local_lse = tl.load(lse_ptr, row_mask, 0.0).to(tl.float32)[:, None]
             local_valid = (local_lse == local_lse) & (tl.abs(local_lse) != float("inf"))
+            if HAS_LOCAL_OUTPUT_MASK:
+                if MODE == _SINGLE_ROW:
+                    invalid = tl.load(local_output_mask_ptr + tokens).to(tl.int1)
+                else:
+                    invalid = tl.load(local_output_mask_ptr + tokens, row_mask, other=True).to(tl.int1)[:, None]
+                local_valid = local_valid & ~invalid
             lses = tl.where(rank_ids == DCP_SIZE, local_lse, lses)
             valid = tl.where(rank_ids == DCP_SIZE, local_valid, valid)
         maximum = tl.max(tl.where(valid, lses, -float("inf")), -1)
