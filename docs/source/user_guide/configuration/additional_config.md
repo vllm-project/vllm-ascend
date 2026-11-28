@@ -403,9 +403,3 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
-
-### Vision Q/K packing
-
-| Key | Type | Default | Behavior |
-| --- | --- | --- | --- |
-| `ascend_fusion_config.enable_vision_qk_pack` | bool | false | Enable experimental fused Q/K slice and transpose on the batch-one Qwen BF16 vision path with head dimension 72. Both settings use the existing rotary embedding. |
