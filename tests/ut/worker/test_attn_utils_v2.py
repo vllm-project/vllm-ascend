@@ -29,7 +29,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
-from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackend,
+    mxfp_cache_spec,
+    mxfp_paged_cache_views,
+)
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -853,7 +857,7 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
     runner.attn_groups = [[group]]
     runner.kernel_block_sizes = [4]
     runner.compilation_config = SimpleNamespace(static_forward_context={})
-    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2, kv_cache_groups=[])
     runner.cache_config = SimpleNamespace(cache_dtype="auto")
     monkeypatch.setattr(v2_model_runner, "AscendV2KVBlockZeroer", RecordingZeroer)
 
@@ -2943,11 +2947,11 @@ def _plain_full_attention_spec(head_size_v: int = 64) -> FullAttentionSpec:
     )
 
 
-def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
+def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec, backend=AscendAttentionBackend) -> dict:
     attn_module = SimpleNamespace(
         is_draft_layer=False,
         get_kv_cache_spec=lambda _cfg: spec,
-        get_attn_backend=lambda: AscendAttentionBackend,
+        get_attn_backend=lambda: backend,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
     return attn_utils.get_kv_cache_spec(vllm_config)
@@ -2955,7 +2959,12 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
 
 @pytest.mark.parametrize("head_size_v", [64, 128])
 def test_get_kv_cache_spec_rewrites_c8_mxfp_spec(monkeypatch, head_size_v):
-    spec = _run_get_kv_cache_spec(monkeypatch, _c8_mxfp_vllm_config(), _plain_full_attention_spec(head_size_v))["attn"]
+    spec = _run_get_kv_cache_spec(
+        monkeypatch,
+        _c8_mxfp_vllm_config(),
+        _plain_full_attention_spec(head_size_v),
+        backend=AscendC8MXFPAttentionBackend,
+    )["attn"]
 
     assert spec.dtype == torch.float8_e4m3fn
     # Scales are budgeted through state_content_bytes: K + V + E8M0 groups.
@@ -2964,13 +2973,142 @@ def test_get_kv_cache_spec_rewrites_c8_mxfp_spec(monkeypatch, head_size_v):
     assert spec.block_size == 512
 
 
-def test_get_kv_cache_spec_keeps_plain_spec_without_mxfp8(monkeypatch):
-    spec = _run_get_kv_cache_spec(monkeypatch, _c8_mxfp_vllm_config(cache_dtype="auto"), _plain_full_attention_spec())[
-        "attn"
-    ]
+@pytest.mark.parametrize("cache_dtype", ["auto", "mxfp8"])
+def test_non_mxfp_backend_stays_plain_across_spec_and_reshape(monkeypatch, cache_dtype):
+    vllm_config = _c8_mxfp_vllm_config(cache_dtype=cache_dtype)
+    spec = _run_get_kv_cache_spec(
+        monkeypatch,
+        vllm_config,
+        _plain_full_attention_spec(),
+        backend=AscendAttentionBackend,
+    )["attn"]
 
     assert spec.dtype == torch.bfloat16
     assert spec.state_content_bytes is None
+
+    num_blocks = 2
+    raw = torch.zeros((num_blocks * spec.page_size_bytes,), dtype=torch.int8)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), ["attn"], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendAttentionBackend,
+                layer_names=["attn"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kv_cache_raw_tensors={"attn": raw},
+        cache_dtype=cache_dtype,
+        kernel_block_sizes=[512],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    k, v = reshaped["attn"]
+    assert k.dtype == v.dtype == torch.bfloat16
+
+
+def test_mixed_mxfp_and_plain_skip_layers_in_one_config_stay_isolated(monkeypatch):
+    """Within one cache_dtype='mxfp8' config, MXFP and skip layers stay isolated across spec, alloc, and reshape."""
+    vllm_config = _c8_mxfp_vllm_config(cache_dtype="mxfp8")
+    vllm_config.additional_config = {}
+    vllm_config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    mxfp_layer = SimpleNamespace(
+        is_draft_layer=False,
+        get_kv_cache_spec=lambda _cfg: _plain_full_attention_spec(64),
+        get_attn_backend=lambda: AscendC8MXFPAttentionBackend,
+    )
+    skip_layer = SimpleNamespace(
+        is_draft_layer=False,
+        get_kv_cache_spec=lambda _cfg: _plain_full_attention_spec(64),
+        get_attn_backend=lambda: AscendAttentionBackend,
+    )
+    layers = {"mxfp_attn": mxfp_layer, "skip_attn": skip_layer}
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: layers)
+
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+    mxfp_spec = specs["mxfp_attn"]
+    skip_spec = specs["skip_attn"]
+    assert mxfp_spec.dtype == torch.float8_e4m3fn
+    assert mxfp_spec.state_content_bytes == 64 + 64 + (64 + 64) // 32
+    assert skip_spec.dtype == torch.bfloat16
+    assert skip_spec.state_content_bytes is None
+
+    num_blocks = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(num_blocks * mxfp_spec.page_size_bytes, ["mxfp_attn"], mxfp_spec.page_size_bytes),
+            _make_kv_cache_tensor(num_blocks * skip_spec.page_size_bytes, ["skip_attn"], skip_spec.page_size_bytes),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["mxfp_attn"], kv_cache_spec=mxfp_spec),
+            KVCacheGroupSpec(layer_names=["skip_attn"], kv_cache_spec=skip_spec),
+        ],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda layer, _cfg, _spec: layer is skip_layer)
+
+    raw_tensors = attn_utils._allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
+    # MXFP layer gets a single packet-backed int8 tensor; contiguous skip layer gets separate (K, V) tensors.
+    assert isinstance(raw_tensors["mxfp_attn"], torch.Tensor)
+    assert raw_tensors["mxfp_attn"].dtype == torch.int8
+    assert isinstance(raw_tensors["skip_attn"], tuple) and len(raw_tensors["skip_attn"]) == 2
+
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendC8MXFPAttentionBackend,
+                layer_names=["mxfp_attn"],
+                kv_cache_spec=mxfp_spec,
+                kv_cache_group_id=0,
+            ),
+            AttentionGroup(
+                backend=AscendAttentionBackend,
+                layer_names=["skip_attn"],
+                kv_cache_spec=skip_spec,
+                kv_cache_group_id=1,
+            ),
+        ],
+        kv_cache_raw_tensors=raw_tensors,
+        cache_dtype="mxfp8",
+        kernel_block_sizes=[512, 512],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    assert len(reshaped["mxfp_attn"]) == 4
+    assert reshaped["mxfp_attn"][0].dtype == torch.float8_e4m3fn
+    assert reshaped["mxfp_attn"][2].dtype == torch.uint8
+    assert len(reshaped["skip_attn"]) == 2
+    assert reshaped["skip_attn"][0].dtype == reshaped["skip_attn"][1].dtype == torch.bfloat16
+
+
+def test_non_mxfp_backend_rejects_unquantized_mxfp8_spec(monkeypatch):
+    """Under cache_dtype='mxfp8', an Attention layer not converted to MXFP (and not skipped) fails fast."""
+    fp8_custom_spec = FullAttentionSpec(
+        block_size=512,
+        num_kv_heads=2,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.CUSTOM,
+    )
+    with pytest.raises(ValueError, match="requires AscendC8MXFPAttentionBackend"):
+        _run_get_kv_cache_spec(
+            monkeypatch,
+            _c8_mxfp_vllm_config(cache_dtype="mxfp8"),
+            fp8_custom_spec,
+            backend=AscendAttentionBackend,
+        )
 
 
 @pytest.mark.parametrize("head_size_v", [64, 128])
@@ -3007,6 +3145,57 @@ def test_reshape_kv_cache_v2_builds_c8_mxfp_views(monkeypatch, head_size_v):
     assert k.shape == (num_blocks, 2, 64 // 32, 512, 32)
     assert v.shape == (num_blocks, 2, head_size_v // 32, 512, 32)
     assert k.dtype == v.dtype == torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize("head_size_v", [64, 128])
+def test_c8_mxfp_dense_end_to_end_spec_and_views_characterization(monkeypatch, head_size_v):
+    """Pin pure C8-MXFP dense spec, page size, and reshaped view geometry."""
+    vllm_config = _c8_mxfp_vllm_config()
+    attn_module = SimpleNamespace(
+        is_draft_layer=False,
+        get_kv_cache_spec=lambda _cfg: _plain_full_attention_spec(head_size_v),
+        get_attn_backend=lambda: AscendC8MXFPAttentionBackend,
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["attn"]
+
+    expected_state_bytes = 64 + head_size_v + (64 + head_size_v) // 32
+    assert type(spec) is FullAttentionSpec
+    assert spec.dtype == torch.float8_e4m3fn
+    assert spec.state_content_bytes == expected_state_bytes
+    assert spec.page_size_bytes == 2 * 512 * expected_state_bytes
+    assert spec.block_size == 512
+
+    num_blocks = 2
+    raw = torch.zeros((num_blocks * spec.page_size_bytes,), dtype=torch.int8)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), ["attn"], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendC8MXFPAttentionBackend,
+                layer_names=["attn"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kv_cache_raw_tensors={"attn": raw},
+        cache_dtype="mxfp8",
+        kernel_block_sizes=[512],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    k, v, k_scale, v_scale = reshaped["attn"]
+    assert k.shape == (num_blocks, 2, 64 // 32, 512, 32)
+    assert v.shape == (num_blocks, 2, head_size_v // 32, 512, 32)
+    assert k.dtype == v.dtype == torch.float8_e4m3fn
+    assert k_scale.dtype == v_scale.dtype == torch.uint8
     # One kernel block per page: the dim-0 stride is the packet pitch.
     assert k.stride(0) == spec.page_size_bytes
     assert k_scale.shape == (num_blocks, 2, 512 // 16, 64 // 64, 16, 2)

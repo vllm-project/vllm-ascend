@@ -36,6 +36,7 @@ from vllm.config import (
     get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_rank
 from vllm.logger import logger
@@ -64,7 +65,7 @@ from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec, selec
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_c8_mxfp import (
-    mxfp_cache_spec,
+    is_mxfp_cache_spec,
     mxfp_cache_views_for_spec,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -112,7 +113,6 @@ from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
     get_kv_cache_tensor_layers,
-    is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
 )
@@ -236,9 +236,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
         if isinstance(spec, AttentionSpec):
             # Match upstream customization, including kernel-block stride alignment.
-            spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
-        if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
-            spec = mxfp_cache_spec(spec)
+            with set_current_vllm_config(vllm_config):
+                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -1294,7 +1293,7 @@ def _allocate_kv_cache(
                 if type(layer_spec) is not FullAttentionSpec:
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
-                if is_c8_mxfp_kv_quant(vllm_config):
+                if is_mxfp_cache_spec(layer_spec):
                     # One packet-backed allocation holds K, V and both scales.
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
@@ -1648,7 +1647,7 @@ def _reshape_kv_cache_v2(
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
-            if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+            if is_mxfp_cache_spec(kv_cache_spec):
                 raw_cache = kv_cache_raw_tensors[layer_name]
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
