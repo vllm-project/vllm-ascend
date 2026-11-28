@@ -2872,7 +2872,7 @@ curl -sS -w '\nHTTP %{http_code}\n' "$SERVICE_URL/v1/chat/completions" \
       ]
     }],
     \"temperature\": 0,
-    \"max_completion_tokens\": 102
+    \"max_completion_tokens\": -102
   }"
 ```
 
