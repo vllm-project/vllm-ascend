@@ -27,6 +27,24 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
+    @pytest.mark.parametrize("dtype", [None, torch.int32])
+    def test_reduce_sum_writes_indexer_lengths_in_place(self, dtype):
+        selected = torch.tensor([[3, -1, 1], [-1, 4, -1]], dtype=torch.int32)
+        lengths = torch.full((2, 1), -1, dtype=torch.int32)
+        result = batch_invariant.reduce_sum(selected >= 0, dim=-1, keepdim=True, dtype=dtype, out=lengths)
+        assert result is lengths
+        torch.testing.assert_close(lengths, torch.tensor([[2], [1]], dtype=torch.int32))
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    def test_reduce_sum_does_not_fall_back_for_floating_point_out(self, dtype):
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = dtype
+        out = torch.zeros(2, dtype=dtype)
+        with patch.object(batch_invariant, "torch_sum") as native_sum, pytest.raises(TypeError):
+            batch_invariant.reduce_sum(x, dim=-1, out=out)
+        native_sum.assert_not_called()
+
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])

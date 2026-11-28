@@ -1,0 +1,4 @@
+pr: 23055
+entries:
+  - category: bugfix
+    text: "DeepSeek-V4.1 index postprocessing can update its preallocated lengths buffer in batch-invariant mode for larger token batches."
