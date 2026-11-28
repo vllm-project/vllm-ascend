@@ -60,6 +60,9 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
+void sgmv_expand_inplace_meta(const at::Tensor &, const at::Tensor &, const at::Tensor &, const at::Tensor &,
+                              at::Tensor &, int64_t, int64_t) {}
+
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
@@ -1890,6 +1893,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
+    ops.impl("sgmv_expand_inplace", &vllm_ascend::meta::sgmv_expand_inplace_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
 #endif
