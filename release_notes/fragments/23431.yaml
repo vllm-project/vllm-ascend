@@ -1,0 +1,5 @@
+pr: 23431
+entries:
+  - category: bugfix
+    text: Fixed a startup failure during image profiling on GLM-5.3-Flash decode nodes
+      when fine-grained MLP tensor parallelism is enabled.

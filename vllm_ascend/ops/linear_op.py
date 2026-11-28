@@ -432,10 +432,14 @@ def _is_shared_expert_layer(prefix: str) -> bool:
     return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
 
 
+def _use_finegrained_mlp_tp(prefix: str) -> bool:
+    return mlp_tp_enable() and "visual" not in prefix.split(".") and not is_moe_layer(prefix)
+
+
 def _get_column_parallel_op(prefix, layer) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | None:
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)
-    if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
+    if "gate_up_proj" in prefix and _use_finegrained_mlp_tp(prefix):
         return MLPColumnParallelOp(layer)
     return None
 
@@ -443,7 +447,7 @@ def _get_column_parallel_op(prefix, layer) -> MLPColumnParallelOp | DSV4OProjCol
 def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
-    if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
+    if "down_proj" in prefix and _use_finegrained_mlp_tp(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
