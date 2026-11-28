@@ -14,6 +14,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
@@ -80,7 +81,7 @@ class StairPlan:
     imbalance_ratios: np.ndarray | None = None
 
 
-_RankChoice = tuple[float, int, float, float, float]  # risk, rank, mean, variance, variance scale
+_RankChoice = tuple[float, int, int, float, float, float]  # risk, incoming, rank, mean, variance, scale
 _PlacementUndoState = tuple[int, int, tuple[float, float, float]]  # rank, slot, previous rank statistics
 
 
@@ -872,6 +873,36 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 source_slot_ids[dst_rank, dst_slot] = source_slots[0]
         return source_slot_ids
 
+    @staticmethod
+    def _preserve_placement_affinity(
+        current_placement: np.ndarray,
+        target_placement: np.ndarray,
+        rank_node_ids: np.ndarray,
+        cross_node_transfer_limit: int,
+    ) -> np.ndarray:
+        """Assign equivalent target rows to the ranks already holding their experts."""
+        if cross_node_transfer_limit == -1:
+            rank_groups = [np.arange(current_placement.shape[0])]
+        else:
+            rank_groups = [np.flatnonzero(rank_node_ids == node) for node in np.unique(rank_node_ids)]
+
+        aligned = np.empty_like(target_placement)
+        for ranks in rank_groups:
+            current_group = current_placement[ranks]
+            target_group = target_placement[ranks]
+            group_size = len(ranks)
+            num_experts = int(max(current_group.max(), target_group.max())) + 1
+            target_by_expert = np.zeros((group_size, num_experts), dtype=np.int32)
+            target_by_expert[np.arange(group_size)[:, None], target_group] = 1
+            current_by_expert = np.zeros((group_size, num_experts), dtype=np.int32)
+            current_by_expert[np.arange(group_size)[:, None], current_group] = 1
+            overlap = target_by_expert @ current_by_expert.T
+            displacement = np.abs(np.arange(group_size)[:, None] - np.arange(group_size)[None, :])
+            cost = (current_placement.shape[1] - overlap) * (group_size * group_size + 1) + displacement
+            target_rows, destination_ranks = linear_sum_assignment(cost)
+            aligned[ranks[destination_ranks]] = target_group[target_rows]
+        return aligned
+
     @classmethod
     def lpt_placement(
         cls,
@@ -893,17 +924,20 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
         Mean, variance, and replica counts are ``[experts]``; covariance is
         ``[experts, experts]``. Experts are processed by descending per-replica
-        risk. Each replica chooses the legal rank with the lowest updated risk,
-        breaking ties by rank ID. Each partial placement must have a source
+        risk. Each replica chooses the legal rank with the lowest updated risk.
+        With unlimited per-rank transfers, risk ties prefer the expert's current
+        rank and equivalent target rows are assigned for maximum current overlap;
+        other ties use rank ID. Each partial placement must have a source
         assignment within the per-rank and cross-node limits. ``None`` means bounded
         backtracking found no legal placement. The first source-feasible choice
         is free; each accepted alternative choice consumes one backtrack.
         ``rank_node_ids`` contains one non-negative node ID per rank; equal IDs
-        mean that two ranks share a node. Final source assignment first minimizes
-        cross-node transfers, then source rank IDs in target-slot order.
-        Retained experts keep their current slots; incoming experts fill the
-        remaining slots by expert ID. Returned source coordinates align with
-        these final target slots.
+        mean that two ranks share a node. When cross-node transfers are limited,
+        row assignment stays within each node so its expert sets remain unchanged.
+        Final source assignment first minimizes cross-node transfers, then source
+        rank IDs in target-slot order. Retained experts keep their current slots;
+        incoming experts fill the remaining slots by expert ID. Returned source
+        coordinates align with these final target slots.
         """
         means = np.asarray(expert_means, dtype=np.float64)
         variances = np.asarray(expert_variances, dtype=np.float64)
@@ -1041,6 +1075,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 rank_choices = sorted(
                     (
                         float(risk),
+                        int(rank_transfer_limit == -1 and not current_has_expert[rank_id, expert]),
                         int(rank_id),
                         float(updated_mean),
                         float(updated_variance),
@@ -1055,7 +1090,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             decision = decisions[replica_index]
             advanced = False
             while decision.next_choice < len(decision.choices):
-                _, rank_id, updated_mean, updated_variance, updated_scale = decision.choices[decision.next_choice]
+                _, _, rank_id, updated_mean, updated_variance, updated_scale = decision.choices[decision.next_choice]
                 decision.next_choice += 1
                 slot = rank_sizes[rank_id]
                 previous_state = rank_means[rank_id], rank_variances[rank_id], rank_variance_scales[rank_id]
@@ -1112,6 +1147,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
             rank_id, slot, previous_state = undo_state
             undo_placement(rank_id, slot, previous_state)
 
+        if rank_transfer_limit == -1:
+            placement = cls._preserve_placement_affinity(
+                current_placement, placement, node_ids, cross_node_transfer_limit
+            )
         placement = cls._align_target_slots(current_placement, placement)
         sources = migration_sources(
             current_placement,

@@ -1,0 +1,4 @@
+pr: 23209
+entries:
+  - category: performance
+    text: Reduced unnecessary cross-rank expert transfers during STAIR replanning when `rank_transfer_limit=-1`, while preserving planned rank loads and respecting cross-node transfer limits.
