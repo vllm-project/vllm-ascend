@@ -3,7 +3,7 @@
 """Unit tests for the Ascend sleep-mode backend."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
@@ -75,3 +75,44 @@ def test_factory_creates_camem_backend():
     backend = SleepModeBackendFactory.create_backend(model_config)
 
     assert isinstance(backend, CaMemBackend)
+
+
+def test_graph_resume_waits_for_model_tags(allocator):
+    backend = CaMemBackend()
+    reuse = MagicMock(reusing=True)
+    reuse.complete_after.side_effect = [False, True]
+    backend.resume(["weights"], graph_reuse=reuse)
+    allocator.wake_up.assert_called_once_with(["weights"], defer_cudagraph=True)
+    assert backend.state() == "RESUMING"
+    backend.resume(["kv_cache"], graph_reuse=reuse)
+    assert allocator.wake_up.call_args_list[-2:] == [
+        call(["kv_cache"], defer_cudagraph=True),
+        call(["cudagraph"]),
+    ]
+    assert backend.state() == "RESUMING"
+    backend.finish_graph_recovery()
+    assert backend.state() == "RUNNING"
+
+
+def test_graph_resume_reports_recoverable_graph_failure(allocator):
+    backend = CaMemBackend()
+    allocator.wake_up.side_effect = [None, RuntimeError("restore failed")]
+    reuse = MagicMock(reusing=True)
+    backend.resume(None, graph_reuse=reuse)
+    assert reuse.reason == "graph_pool_restore_failed"
+    assert reuse.signature is None
+    assert backend.state() == "RESUMING"
+    allocator.pointer_to_data = {1: SimpleNamespace(is_asleep=True)}
+    with pytest.raises(RuntimeError, match="asleep allocations"):
+        backend.finish_graph_recovery()
+    allocator.pointer_to_data = {}
+    backend.finish_graph_recovery()
+    assert backend.state() == "RUNNING"
+
+
+def test_graph_resume_rejects_indeterminate_native_state(allocator):
+    backend = CaMemBackend()
+    allocator.wake_up.side_effect = [None, RuntimeError("restore failed")]
+    allocator._check_memory_state.side_effect = RuntimeError("restart the worker")
+    with pytest.raises(RuntimeError, match="restart the worker"):
+        backend.resume(None, graph_reuse=MagicMock(reusing=True))

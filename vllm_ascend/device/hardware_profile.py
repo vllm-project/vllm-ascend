@@ -74,6 +74,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
+    # Public graph-pool VA remapping validated for sleepable MRV2 graphs.
+    SLEEP_GRAPH_REUSE = auto()
     # Fuse the shared expert into the MegaMoe operator (enable_fused_mc2=3).
     # The capability states that the platform can run the shared expert inside
     # the operator; which weight/scale family that payload uses is a property of
@@ -519,6 +521,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
+                    HardwareCapability.SLEEP_GRAPH_REUSE,
                     HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.FLASH_ATTN_NPU_3,
