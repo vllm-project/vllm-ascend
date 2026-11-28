@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
@@ -801,7 +802,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 gvas_array,
                 addr_array,
                 size_array,
-                0,
+                MmcDirect.COPY_L2G.value,
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
@@ -857,6 +858,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        *,
+        max_g2l_transfer_addrs: int = 0,
     ):
         super().__init__(
             m_store,
@@ -867,6 +870,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheStoreLayerRecvingThread",
+            max_g2l_transfer_addrs=max_g2l_transfer_addrs,
         )
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
@@ -1132,7 +1136,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             gvas_array,
             addr_array,
             size_array,
-            1,
+            MmcDirect.COPY_G2L.value,
             self.max_transfer_blocks,
             self.max_transfer_bytes,
         )

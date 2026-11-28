@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     get_attention_load_gate,
     reset_attention_gates,
@@ -31,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    MemcacheBackend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
@@ -510,6 +514,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         if self._transfer_threads_started:
             return
+        max_g2l_transfer_addrs = (
+            get_ascend_config().kv_pool_memcache_g2l_max_transfer_addrs
+            if isinstance(self.m_store, MemcacheBackend)
+            else 0
+        )
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
@@ -563,6 +572,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             invalid_block_ids=self._invalid_block_ids,
             invalid_block_ids_lock=self._invalid_block_ids_lock,
             load_abort_event=self._layer_load_aborted,
+            max_g2l_transfer_addrs=max_g2l_transfer_addrs,
         )
         self.kv_recv_thread.save_disabled = self._save_disabled
         if self.kv_send_thread is not None:

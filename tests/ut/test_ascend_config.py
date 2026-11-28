@@ -1902,6 +1902,19 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_memcache_g2l_max_transfer_addrs(self, mock_fix):
+        self.assertEqual(init_ascend_config(VllmConfig()).kv_pool_memcache_g2l_max_transfer_addrs, 0)
+        vc = VllmConfig(additional_config={"kv_pool_memcache_g2l_max_transfer_addrs": 128})
+        self.assertEqual(init_ascend_config(vc).kv_pool_memcache_g2l_max_transfer_addrs, 128)
+
+        for invalid_value in (-1, 1.5, True, "128"):
+            with self.subTest(value=invalid_value):
+                vc = VllmConfig(additional_config={"kv_pool_memcache_g2l_max_transfer_addrs": invalid_value})
+                with self.assertRaises(ValueError):
+                    init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_cpu_binding_string_false_disables(self, mock_fix):
         # Core regression: bool("false") is True in Python, so
         # {"enable_cpu_binding": "false"} previously left CPU binding enabled.
