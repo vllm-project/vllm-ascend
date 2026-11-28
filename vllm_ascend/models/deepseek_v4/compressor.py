@@ -222,4 +222,17 @@ class Compressor(nn.Module):
             rotary_mode=2,
             cache_mode=1,
         )
+        # Block 0 is the null block: padding rows point at it and readers
+        # assume its contents are benign. Dummy batches can still resolve
+        # compressed slots inside that block, and -1 is the only invalid
+        # marker the KV writers skip, so mask those slots here instead of
+        # storing compressed KV -- which can be non-finite -- into a page
+        # that padding rows and sliding-window-masked tiles read back.
+        # The cached mapping is shared by every layer of the cache group, so
+        # rewrite a copy and leave the input untouched.
+        if slot_mapping.ndim == 1:
+            in_null_block = (slot_mapping >= 0) & (slot_mapping < compressor_metadata.storage_block_size)
+        else:
+            in_null_block = slot_mapping[:, :1] == 0
+        slot_mapping = torch.where(in_null_block, -1, slot_mapping)
         return compressed_kv, slot_mapping
