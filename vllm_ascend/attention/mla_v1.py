@@ -50,6 +50,7 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.mla_projections import MLAProjectionMixin
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -1057,7 +1058,7 @@ class MLAParamProvider:
         return params
 
 
-class AscendMLAImpl(MLAAttentionImpl):
+class AscendMLAImpl(MLAProjectionMixin, MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1105,13 +1106,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
         self.rotary_emb = kwargs["rotary_emb"]
-        self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
-        self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self._init_projections(kwargs)
         self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
         self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
         self.kv_b_proj = kwargs["kv_b_proj"]
-        self.o_proj = kwargs["o_proj"]
-        self.g_proj = kwargs.get("g_proj")
         # Both supported Kimi AMD implementations can append an output-gate shard.
         # The plain MLA projection also only has the two latent shards, so
         # the shard count identifies the fused layout without importing the
@@ -1132,7 +1130,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
-        self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads

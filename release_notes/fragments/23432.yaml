@@ -1,0 +1,6 @@
+pr: 23432
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect outputs when LoRA adapters target existing query or output
+      projections in unfused MLA and sparse-attention inference on Ascend.
