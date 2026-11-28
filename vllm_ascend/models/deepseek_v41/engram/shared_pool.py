@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+import regex as re
 import torch
 
 from .shared_host import MappedHostBuffer, MappingCleanupError, MemfabricRuntime
@@ -44,11 +45,31 @@ def _close_all(items):
         raise first_error
 
 
-def checkpoint_identity(root):
-    """Hash config and index, not tensor payloads; use with an immutable model ref."""
+def checkpoint_identity(root, *, revision=None):
+    """Hash metadata, optionally bound to an immutable checkpoint revision.
+
+    Omitting ``revision`` preserves the legacy shared-pool identity. Passing it
+    requires a full commit SHA or release digest; local files must belong to
+    that declared immutable release. Tensor payloads are not read here.
+    """
     root = Path(root)
     digest = hashlib.sha256()
-    for name in ("config.json", "quant_model_weights.safetensors.index.json"):
+    index_files: tuple[str, ...] = ("quant_model_weights.safetensors.index.json",)
+    if revision is not None:
+        # ResolvedRevision is a str whose value can still be a mutable branch.
+        revision = getattr(revision, "resolved", revision)
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision) is None:
+            raise ValueError(
+                "MemFabric Engram offload requires an immutable checkpoint revision: "
+                "set --revision to the full commit SHA or trusted release digest, "
+                "including for local checkpoint directories"
+            )
+        digest.update(b"checkpoint_revision\0")
+        digest.update(revision.lower().encode())
+        index_files = tuple(name for name in (*index_files, "model.safetensors.index.json") if (root / name).is_file())
+        if not index_files:
+            raise ValueError("MemFabric Engram offload requires an indexed safetensors checkpoint")
+    for name in ("config.json", *index_files):
         digest.update(name.encode())
         digest.update((root / name).read_bytes())
     return digest.hexdigest()

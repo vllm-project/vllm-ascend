@@ -73,10 +73,133 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
+| `engram_offload`                   | dict | `None`  | Optional MemFabric-backed Host DRAM pools for DeepSeek-V4.1 Engram tables. See <a href="#engram_offload">engram_offload</a> for membership, contributor ranks, replication, and endpoint requirements. Mutually exclusive with `shared_engram`. |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
+
+<span id="engram_offload"></span>**engram_offload**
+
+Enable MemFabric-backed Engram storage for DeepSeek-V4.1 by setting
+`engram_offload` in `--additional-config`. Contributor ranks allocate Host DRAM
+for the table; other pool members contribute zero capacity and read from the
+contributors. On A2, lookup uses native `entry_gather` with AICPU-driven RDMA.
+On A5, native `entry_gather` uses AICPU-driven URMA.
+On A3, lookup fuses mapped reads and dequantization when the installed MemFabric
+build exposes mapped pool addresses; otherwise, it retains native `entry_gather`.
+
+Install MemFabric and the kernels required by the selected backend in every
+worker environment. Also enable `--engram-config '{"cpu_offload":true}'` and use
+`--pipeline-parallel-size 1`. All pool members must use the same checkpoint
+revision, table layout, and `engram_offload` settings, except for `rank_offset`
+when separate engines occupy different rank ranges. Do not combine
+`engram_offload` with `shared_engram`.
+For real weights, use indexed safetensors checkpoints with `--load-format auto` or `safetensors`
+and the default lazy loading strategy (`--safetensors-load-strategy lazy`).
+Eager loading and sleep mode are not supported by this pool backend.
+
+The pool also checks the immutable checkpoint revision before allocating table
+storage. A resolved Hub revision uses its commit SHA. If the revision is not
+resolved automatically, including when using a local checkpoint directory,
+set vLLM's existing `--revision` to the full 40-character commit SHA or a trusted
+64-character release digest on every pool member. A branch name such as `main`
+or a mutable tag is not accepted. For local files, this is a deployment
+assertion: each directory must contain the declared immutable release. The
+startup check hashes configuration and index metadata, not tensor contents;
+it does not verify local file integrity. `dummy` loads use a separate identity
+and cannot join a pool loading real weights.
+
+With `cpu_offload` enabled, leaving both `engram_offload` and `shared_engram`
+unset uses HostRegister UVA storage, including when local DP/PCP memory sharing
+is enabled. Mapped pool storage requires an explicitly configured backend.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `store_url` | str | Required | Pool bootstrap endpoint in `tcp://host:port` form. The port must be in `[1, 65534]`; `port + 1` is also used for framework layout checks and load readiness. |
+| `world_size` | int | Required | Total number of pool members, including contributors and zero-capacity readers across all participating engines. Must be positive. |
+| `local_world_size` | int | Required | Number of participating ranks per host. Must be at least two and divide `world_size`; all hosts must have the same local count. Count worker ranks, including local DP replicas, rather than physical cards alone. |
+| `owner_ranks` | list[int] | Required | Nonempty, sorted, unique pool ranks that contribute DRAM. Each value must be in `[0, world_size)`. These ranks divide one complete table. |
+| `rank_offset` | int | `0` | Starting pool-rank offset for this engine. A worker's pool rank is `rank_offset + get_global_rank(parallel_config)`, where the worker rank includes DP. The engine's entire worker range must fit in `world_size`. |
+| `timeout_seconds` | int | `1800` | Positive timeout in seconds for the framework TCP Store used by layout checks and load-readiness synchronization. Does not configure MemFabric's native group-join timeout; see the shared-pool startup guidance below. |
+
+**Rank layout and endpoints**
+
+Pool ranks must cover `[0, world_size)` without overlap or gaps. Ranks belonging
+to one host must occupy a contiguous block of `local_world_size` ranks, because
+the pool derives the host index as `pool_rank // local_world_size`. A2 readers
+on the same host must use distinct NPUs for the peer-endpoint read path.
+
+Both TCP endpoints, `store_url` and its `port + 1`, are served by pool rank 0
+and must be reachable by every pool member. Rank 0 may be a zero-capacity
+consumer; it need not contribute table storage. Reserve both ports for this
+pool and use different endpoints for independent pools on the same host. These
+bootstrap ports do not replace the backend's NPU/RDMA network configuration.
+
+For example, two independent engines with eight workers each can share a
+16-rank pool. Each engine's worker ranks start at zero; the second engine adds
+an offset of eight:
+
+| Engine / host | Pool ranks | `rank_offset` | Contributors |
+| ------------- | ---------- | ------------- | ------------ |
+| A | `0` through `7` | `0` | None; reads the table from B. |
+| B | `8` through `15` | `8` | All eight ranks; together store one complete table. |
+
+Enable Engram CPU offload on both engines, for example with
+`--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`, and merge this
+object into engine A's existing `--additional-config`:
+
+```json
+{
+  "engram_offload": {
+    "store_url": "tcp://192.0.2.10:18500",
+    "world_size": 16,
+    "local_world_size": 8,
+    "owner_ranks": [8, 9, 10, 11, 12, 13, 14, 15],
+    "rank_offset": 0,
+    "timeout_seconds": 2400
+  }
+}
+```
+
+Replace the example address with the reachable address of engine A's rank-0
+host. Engine B uses the same configuration with `rank_offset` set to `8`.
+Allow access to ports `18500` and `18501` on that host. If one vLLM engine spans
+both hosts instead, use its existing global worker ranks and do not add a
+second offset for the second host.
+
+For independent per-host engines, keep a complete table on each host by
+initializing an independent pool per host.
+Use host-local `world_size`, `local_world_size`, and `owner_ranks`, with
+`rank_offset` set to `0`. Give each pool its own bootstrap endpoint.
+
+Initialization and table-load readiness wait for all `world_size` members.
+Start participating engines concurrently rather than waiting for one engine
+to become ready before launching the other. For a P/D shared pool, configure
+both timeout layers on every participating engine:
+
+```bash
+# Seconds; export in both the P and D service environments before startup.
+export MF_GROUP_JOIN_MAX_TIMEOUT=2400
+```
+
+`MF_GROUP_JOIN_MAX_TIMEOUT` controls MemFabric Offload's native group join and
+barrier waits. Its fallback default in this path is **120 seconds**, which can
+be too short for staggered P/D startup. The example uses 2400 seconds (40 minutes)
+for both this environment variable and `engram_offload.timeout_seconds`.
+The latter controls the separate framework TCP Store and defaults to 1800 seconds
+(30 minutes). Increasing either setting does not increase the other.
+
+Choose both values to cover rank startup skew and time to reach the relevant
+synchronization point. Each setting applies to its own waits, not a single
+deadline for the whole P/D service startup; a 40-minute setting does not
+guarantee that launching the second service 40 minutes later will succeed.
+Late ranks must reach the synchronization point before the corresponding wait
+expires. Backend connection and framework startup timeouts remain independent.
+
+Membership is fixed for the pool
+lifetime; independent late joining and arbitrary P/D restarts are not provided
+by this configuration. P/D KV transfer remains a separate framework setting.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

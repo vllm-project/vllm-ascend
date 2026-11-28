@@ -101,6 +101,10 @@ class EngramSharedLoadError(RuntimeError):
     """A checkpoint error has been propagated to the entire sharing group."""
 
 
+if TYPE_CHECKING:
+    from .offload import EngramOffloadPool
+
+
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
 
@@ -119,7 +123,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         shared_pool_endpoint: str | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
+        offload_pool: "EngramOffloadPool | None" = None,
     ) -> None:
+        if offload_pool is not None and (local_vmm or remote_reader is not None or shared_pool_endpoint):
+            raise ValueError("MemFabric Engram cannot be combined with another host storage backend")
         if local_vmm and (remote_reader is not None or shared_pool_endpoint):
             raise ValueError("Local Engram VMM cannot be combined with an external shared table")
         self._remote_reader = remote_reader
@@ -145,14 +152,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             raise ValueError("Local Engram VMM requires shared CPU offload with INT8/FP32 storage")
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
+        self._offload_pool = offload_pool
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
         group = get_engram_dp_group()
-        if group is not None and not all(in_the_same_node_as(group.cpu_group)):
+        if offload_pool is None and group is not None and not all(in_the_same_node_as(group.cpu_group)):
             raise ValueError(
                 "Ascend Engram requires all DP replicas to share the same node and shared-memory namespace"
             )
-        if dp_shared_memory:
+        if offload_pool is not None:
+            self.dp_size = 1
+        elif dp_shared_memory:
             if group is None or group.world_size <= 1:
                 raise ValueError("dp_shared_memory needs a node-local sharing group with more than one rank")
             self._shared_group = group
@@ -187,6 +197,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[: self.head_start + self.part_n_hash_cols])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
+        self.storage_start_idx, self.storage_end_idx = (
+            offload_pool.owner_range(layer_hash_index)
+            if offload_pool is not None
+            else (self.vocab_start_idx, self.vocab_end_idx)
+        )
         weight, scales = self._allocate_weights()
         try:
             self.weight = nn.Parameter(weight, requires_grad=False)
@@ -231,6 +246,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self._offload_pool is not None:
+            return self._offload_pool.weights(self.layer_hash_index)
         codes_shape = (self.part_num_embeddings, self.dim)
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
@@ -410,6 +427,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if key != expected:
                 raise ValueError("Shared Engram checkpoint key mismatch")
             return  # The external owner has already loaded and published these rows.
+        if self._offload_pool is not None:
+            error = None
+            try:
+                self._load_into_storage(model_path, key, chunk_rows)
+            except Exception as exc:  # noqa: BLE001 - report owner load failures to P and D readers
+                error = f"{type(exc).__name__}: {exc}"
+            self._offload_pool.finish_load(self.layer_hash_index, error)
+            return
         if self._shared_group is None:
             self._load_into_storage(model_path, key, chunk_rows)
             return
@@ -464,10 +489,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             parameter.data[offset : offset + len(source)].copy_(source)
 
     def _load_into_storage(self, model_path, key, chunk_rows) -> None:
+        start, end = self.storage_start_idx, self.storage_end_idx
+        if start == end:
+            return
         root = Path(model_path)
         scale_key = key.removesuffix(".weight") + ".scale"
         index = self._checkpoint_index(root, key)
-        start, end = (self.vocab_start_idx, self.vocab_end_idx)
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
             source_dtype = tensor.get_dtype()
@@ -500,7 +527,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
                         stop = min(chunk_start + chunk_rows, end)
-                        offset = chunk_start - self.vocab_start_idx
+                        offset = chunk_start - start
                         self._store_rows(
                             self.weight, getattr(self, "_codes_uva", None), offset, tensor[chunk_start:stop]
                         )
@@ -515,7 +542,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
                         stop = min(chunk_start + chunk_rows, end)
-                        offset = chunk_start - self.vocab_start_idx
+                        offset = chunk_start - start
                         values = tensor[chunk_start:stop].float()
                         group_scales = scale[chunk_start:stop].float()
                         values = (values.unflatten(-1, (-1, self.block_size)) * group_scales.unsqueeze(-1)).flatten(-2)
@@ -525,7 +552,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             else:
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
-                    offset = chunk_start - self.vocab_start_idx
+                    offset = chunk_start - start
                     codes, scales = quantize_engram_rows(tensor[chunk_start:stop].to(torch.float32))
                     self._store_rows(self.weight, getattr(self, "_codes_uva", None), offset, codes)
                     self._store_rows(self.weight_scale_inv, getattr(self, "_scales_uva", None), offset, scales)
@@ -579,7 +606,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         EDP0's ids instead of its own window.
         """
         num_tokens = indices.shape[0]
-        gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
+        gathered = gather_engram_hashes(
+            indices, dp_shared_memory=self._shared_group is not None or self._offload_pool is not None
+        )
         return self.embed_gathered(gathered, num_tokens)
 
     def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False, *, cpu_ids=None) -> None:
@@ -589,6 +618,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         """
         tokens = indices.shape[0]
         if tokens == 0 or self.part_n_hash_cols == 0:
+            return
+        if self._offload_pool is not None:
+            self._offload_pool.lookup(
+                self.layer_hash_index,
+                indices,
+                out,
+                self.head_start,
+                self.part_n_hash_cols,
+                self.vocab_start_idx,
+                self.vocab_end_idx,
+            )
             return
         reader = getattr(self, "_remote_reader", None)
         if reader is not None:

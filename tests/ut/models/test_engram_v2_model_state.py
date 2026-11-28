@@ -9,6 +9,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.device import device_config
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
 from vllm_ascend.ops.triton import engram_lookback
@@ -568,8 +569,15 @@ def test_graph_producer_device_count_masks_padding_and_idle_ranks(runtime, monke
     assert state.call_args.args[3].tolist() == [not value for value in expected]
 
 
-def test_graph_producer_capability_excludes_slot_cache_and_collectives(runtime, monkeypatch):
+@pytest.mark.parametrize("device_type", ["A2", "A3", "A5"])
+def test_graph_producer_capability_excludes_slot_cache_and_collectives(runtime, monkeypatch, device_type):
+    monkeypatch.setattr(
+        device_config,
+        "get_device_config",
+        lambda: device_config.DeviceConfig(_device_type=getattr(device_config.AscendDeviceType, device_type)),
+    )
     model = make_model()
+    model.engram_offload_pool = None
     model.use_sequence_parallel = False
     model.engram_hash = SimpleNamespace(use_slot_cache=False)
     group = SimpleNamespace(world_size=1)
@@ -593,6 +601,16 @@ def test_graph_producer_capability_excludes_slot_cache_and_collectives(runtime, 
         setattr(owner, field, disabled_value)
         assert not model.can_capture_engram_producer(), field
         setattr(owner, field, old)
+    model.engram_offload_pool = object()
+    model.layers[1].engram.embed_tokens.tp_size = 4
+    assert model.can_capture_engram_producer()
+    model.engram_offload_pool = None
+    for layer in model.layers:
+        layer.engram.embed_tokens.tp_size = 4
+        layer.engram.embed_tokens._codes_uva = object()
+    assert not model.can_capture_engram_producer()
+    model.layers[1].engram.embed_tokens._codes_uva = None
+    assert not model.can_capture_engram_producer()
 
 
 def test_mask_wait_is_delayed_past_early_layer_compute(runtime):
