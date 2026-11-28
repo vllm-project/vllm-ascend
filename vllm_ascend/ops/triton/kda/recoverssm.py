@@ -125,7 +125,8 @@ def _kda_recoverssm_verify_kernel(
     HAS_REPLAY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
-    UNROLL_REPLAY: tl.constexpr,
+    REPLAY_TILES: tl.constexpr,
+    REPLAY_TILE: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -226,36 +227,96 @@ def _kda_recoverssm_verify_kernel(
                 final_correction = tl.zeros([BV, BK], tl.float32)
                 boundary_decay = tl.full([BK], 1.0, tl.float32)
                 boundary_correction = tl.zeros([BV, BK], tl.float32)
-                # A5 unrolls the replay so the per-token dependency chain and the
-                # dynamic loop bound drop out, matching the commit kernel's
-                # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
-                if UNROLL_REPLAY:
-                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-                        if reverse_offset < commit_len:
-                            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                                replay_correction_ptr,
-                                replay_kg_ptr,
-                                commit_len - reverse_offset - 1,
-                                offs_k,
-                                offs_v,
-                                mask_k,
-                                mask_v,
-                                stride_correction_pos,
-                                stride_correction_dim,
-                                stride_kg_pos,
-                                stride_kg_dim,
-                                A,
-                                dt_bias,
-                                lower_bound,
-                                boundary_recovery_len,
-                                final_decay,
-                                final_correction,
-                                boundary_decay,
-                                boundary_correction,
-                                K,
-                                USE_LOWER_BOUND,
-                                ALIGN_MODE,
-                            )
+                # A5 folds the replay through tiles: the records load as
+                # [T, K] and [T, V] tiles with clamped row indices (no
+                # runtime load predication), the decay prefix products
+                # collapse into a cumsum, and the per-token outer products
+                # contract into a single dot instead of one serialized tile
+                # FMA per accepted token. Token rows past the commit length
+                # cull to zero in registers, so padding lanes cost nothing
+                # and skipped slots run no arithmetic. A3 keeps the runtime
+                # loop to bound UB use.
+                if REPLAY_TILES:
+                    offs_t = tl.arange(0, REPLAY_TILE)
+                    # Clamped rows keep every tile lane inside the records
+                    # buffer; rows past the window read duplicates that the
+                    # register cull zeroes (the commit length never exceeds
+                    # the window).
+                    load_t = tl.minimum(offs_t, SPEC_QUERY_LEN - 1)
+                    commit_bound = tl.minimum(commit_len, SPEC_QUERY_LEN)
+                    valid_t = (offs_t < commit_bound)[:, None]
+                    kg_base = replay_kg_ptr + load_t[:, None] * stride_kg_pos
+                    ct_ptrs = (
+                        replay_correction_ptr
+                        + load_t[:, None] * stride_correction_pos
+                        + offs_v[None, :] * stride_correction_dim
+                    )
+                    if K == BK:
+                        kt = tl.load(
+                            kg_base + offs_k[None, :] * stride_kg_dim
+                        ).to(tl.float32)
+                        gt = tl.load(
+                            kg_base + (K + offs_k[None, :]) * stride_kg_dim
+                        ).to(tl.float32)
+                    else:
+                        kt = tl.load(
+                            kg_base + offs_k[None, :] * stride_kg_dim,
+                            mask=(offs_k < K)[None, :],
+                            other=0.0,
+                        ).to(tl.float32)
+                        gt = tl.load(
+                            kg_base + (K + offs_k[None, :]) * stride_kg_dim,
+                            mask=(offs_k < K)[None, :],
+                            other=0.0,
+                        ).to(tl.float32)
+                    if V % BV == 0:
+                        ct = tl.load(ct_ptrs).to(tl.float32)
+                    else:
+                        ct = tl.load(
+                            ct_ptrs, mask=(offs_v < V)[None, :], other=0.0
+                        ).to(tl.float32)
+                    ct = tl.where(valid_t, ct, 0.0)
+                    # Per-token math over the whole tile; a culled row's zero
+                    # key normalizes to zero, matching the per-token path.
+                    norm_square = tl.sum(kt * kt, axis=1)
+                    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+                    normalized_kt = tl.where(
+                        (norm_square > 0.0)[:, None],
+                        kt * tl.rsqrt(norm_input)[:, None],
+                        0.0,
+                    )
+                    gate = _kda_gate(
+                        gt, dt_bias[None, :], A, lower_bound, USE_LOWER_BOUND
+                    )
+                    tl.static_assert(gate.dtype == tl.float32)
+                    replay_gate = tl.where(valid_t, gate, 0.0)
+                    total_gate = tl.sum(replay_gate, axis=0)
+                    inclusive_gate = tl.cumsum(replay_gate, axis=0)
+                    final_decay = tl.exp(total_gate)
+                    # w_j = exp(sum_{i>j} gate_i) = prod_{i>j} decay_i: the
+                    # reverse exclusive prefix product of the token decays.
+                    weighted_kt = normalized_kt * tl.exp(
+                        total_gate[None, :] - inclusive_gate
+                    )
+                    final_correction = tl.dot(
+                        tl.trans(ct), weighted_kt, allow_tf32=False
+                    )
+                    if ALIGN_MODE:
+                        boundary_valid = (
+                            offs_t < tl.minimum(boundary_recovery_len, SPEC_QUERY_LEN)
+                        )[:, None]
+                        boundary_gate = tl.where(boundary_valid & valid_t, gate, 0.0)
+                        boundary_total = tl.sum(boundary_gate, axis=0)
+                        boundary_csum = tl.cumsum(boundary_gate, axis=0)
+                        boundary_decay = tl.exp(boundary_total)
+                        boundary_weighted_kt = normalized_kt * tl.exp(
+                            boundary_total[None, :] - boundary_csum
+                        )
+                        boundary_correction = tl.dot(
+                            tl.trans(tl.where(boundary_valid, ct, 0.0)),
+                            boundary_weighted_kt,
+                            allow_tf32=False,
+                        )
                 else:
                     for reverse_offset in range(0, tl.minimum(commit_len, SPEC_QUERY_LEN)):
                         final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
@@ -1276,6 +1337,9 @@ def kda_recoverssm_verify(
         large_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE_LARGE)
         if batch * num_heads * triton.cdiv(value_dim, large_v) >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
             block_v = large_v
+    # The tiled replay's token tile: the window padded to the dot's minimum
+    # contraction dimension, so the cumsum and dot stay compile-time shaped.
+    replay_tile = max(triton.next_power_of_2(spec_query_len), 16)
     grid = (triton.cdiv(value_dim, block_v), num_heads, batch)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -1325,7 +1389,8 @@ def kda_recoverssm_verify(
         USE_LOWER_BOUND=lower_bound is not None,
         ALIGN_MODE=replay_align,
         SPEC_QUERY_LEN=spec_query_len,
-        UNROLL_REPLAY=is_a5,
+        REPLAY_TILES=is_a5,
+        REPLAY_TILE=replay_tile,
         num_warps=4,
         num_stages=2,
     )
