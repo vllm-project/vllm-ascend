@@ -150,7 +150,9 @@ def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, s
             assert manager.max_admission_blocks_per_request == manager.max_admission_blocks(
                 group.manager_config, group.block_size, config.max_in_flight_tokens, config.model_config.max_model_len
             )
-            assert group.max_memory_usage_bytes(config) == sizing_pages * group.page_size_bytes
+            assert group.max_allocated_blocks_per_request(config) * group.page_size_bytes == (
+                sizing_pages * group.page_size_bytes
+            )
         assert manager.max_admission_blocks_per_request == min(window, 8)
     assert not any(group.enable_kv_transfer for group in cache.kv_cache_groups if group.role == "hisparse_resident")
 
