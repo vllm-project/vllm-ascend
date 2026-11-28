@@ -18,6 +18,21 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    # `synchronize` is deliberately absent: pushing a new commit does not start
+    # E2E, so intermediate commits no longer occupy the NPU runner pool. A
+    # commit is tested on opened/reopened, when a label is added, or when a
+    # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
+    # `ci-gate` is a required check, so a commit that was never tested stays
+    # blocked rather than being merged untested.
+    types:
+      - opened
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -44,7 +59,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -55,7 +70,10 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          # pull_request does not set workflow_dispatch inputs, so the old
+          # fallback checked out main and missed files that exist only on the PR.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.vllm_ascend_ref || 'main' }}
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
 
       - name: Checkout coverage helper from main
@@ -124,7 +142,15 @@ jobs:
               env = os.environ.copy()
               env["GITHUB_OUTPUT"] = output_path
               script = os.path.join(root, ".github/workflows/scripts/select_tests.py")
-              subprocess.run([sys.executable, script, "--all-tests"], cwd=root, env=env, check=True)
+              # Coverage collects every operator case under this directory,
+              # including nested triton tests.
+              ops_tests = "tests/e2e/pull_request/two_card/ops"
+              subprocess.run(
+                  [sys.executable, script, "--explicit-e2e-tests", ops_tests],
+                  cwd=root,
+                  env=env,
+                  check=True,
+              )
               parsed = {}
               for line in open(output_path, encoding="utf-8"):
                   if "=" not in line:
@@ -140,7 +166,13 @@ jobs:
                   base_sha = git(root, "rev-parse", "HEAD")
                   suffix = helper.coverage_file_suffix(branch_name)
               else:
-                  git(root, "fetch", "origin", "main")
+                  # The PR checkout's origin is the fork. Its main is not the
+                  # upstream base, so pin the workflow repository's main instead.
+                  base_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+                  if base_repo:
+                      git(root, "fetch", f"https://github.com/{base_repo}.git", "main")
+                  else:
+                      git(root, "fetch", "origin", "main")
                   base_ref = "main"
                   base_sha = git(root, "rev-parse", "FETCH_HEAD")
                   suffix = ""
@@ -167,7 +199,18 @@ jobs:
               if requested == "latest":
                   listing = git(workspace, "ls-remote", "--heads", "origin", "refs/heads/releases/v*")
                   names = [line.split()[1].removeprefix("refs/heads/") for line in listing.splitlines() if line.strip()]
-                  return helper.resolve_latest_release_branch(os.environ["GITHUB_REPOSITORY"], names, os.environ["GITHUB_TOKEN"])
+                  if not names:
+                      print("No releases/v* branches; skip extra coverage branch", file=sys.stderr)
+                      return ""
+                  try:
+                      return helper.resolve_latest_release_branch(
+                          os.environ["GITHUB_REPOSITORY"],
+                          names,
+                          os.environ["GITHUB_TOKEN"],
+                      )
+                  except ValueError as exc:
+                      print(f"Skip extra coverage branch: {exc}", file=sys.stderr)
+                      return ""
               if release_branch.fullmatch(requested):
                   return requested
               raise SystemExit(f"::error::COVERAGE_BRANCH must be latest, none, or a releases/v* branch: {requested}")
