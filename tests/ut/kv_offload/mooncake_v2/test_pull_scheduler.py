@@ -712,12 +712,13 @@ def test_request_finished_does_not_ack_prefill_already_queued_for_workers() -> N
     assert scheduler._reqs_need_recv["request-d"][3] == 16
 
 
-def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED])
+def test_request_finished_delays_blocks_and_builds_remote_params(status: RequestStatus) -> None:
     scheduler = make_pull_scheduler()
     scheduler._sending_thread = MagicMock()
     request = make_request(
         request_id="request-p",
-        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        status=status,
         kv_transfer_params={"do_remote_decode": True},
         output_token_ids=[123],
     )
@@ -730,7 +731,19 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_request_id"] == "request-p"
     assert params["remote_kv_lease_duration"] == scheduler._kv_lease_duration
     assert params["last_token_id"] == 123
-    scheduler._sending_thread.add_delayed_request.assert_called_once()
+    assert "request-p" in scheduler._reqs_need_send
+    scheduler._sending_thread.add_delayed_request.assert_called_once_with("request-p")
+
+
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
+def test_request_finished_failed_producer_does_not_build_remote_params(status: RequestStatus) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = MagicMock()
+    request = make_request(status=status, kv_transfer_params={"do_remote_decode": True}, output_token_ids=[])
+
+    assert scheduler.request_finished(request, ([10, 11, 12],)) == (False, None)
+    assert not scheduler._reqs_need_send
+    scheduler._sending_thread.add_delayed_request.assert_not_called()
 
 
 @pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
