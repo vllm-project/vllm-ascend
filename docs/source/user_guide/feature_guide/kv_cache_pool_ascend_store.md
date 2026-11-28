@@ -82,6 +82,36 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
+### Boundary-State Offload Stride
+
+Hybrid models (for example Qwen3.8-27B) write recurrent boundary-state
+checkpoints for each turn. In multi-turn workloads where a turn adds only a
+small number of tokens, offloading every checkpoint causes repeated near-identical
+writes and Store eviction churn.
+
+Set `boundary_state_offload_stride` (default `0`, disabled) to accept a
+boundary-state offload only when it crosses a new `stride`-token bucket
+(`boundary_tokens // stride > last_boundary_state_tokens // stride`):
+
+```json
+{
+    "kv_connector_extra_config": {
+        "boundary_state_offload_stride": 4096
+    }
+}
+```
+
+- Local GPU prefix caching is unchanged; only external Store boundary-state
+  writes are throttled.
+- All Mamba/GDN groups sharing a checkpoint boundary are accepted or skipped
+  together, and accepted Mamba puts drive the paired non-Mamba partial-tail
+  writes.
+- The watermark is seeded from the existing Store lookup hit length when
+  `enable_lookup=true`, so the next turn self-heals a missing or evicted
+  Store checkpoint without extra RPCs.
+- Worst-case external-reload recompute is bounded by `< stride` tokens.
+- `0` (default) preserves existing behavior; non-hybrid models are unaffected.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
@@ -1594,6 +1624,7 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks on a consumer. Prefill writes are skipped until Decode saving starts, when missing Prefill ancestors can be filled. Supports blockwise and layerwise transfer. |
+| `boundary_state_offload_stride` | int | 0 | No | Non-negative integer | Token stride for throttling external recurrent/Mamba boundary-state offloads. `0` disables throttling. Only affects bulk (non-layerwise) hybrid paths. |
 | `enable_lookup` | bool | true on `kv_producer` and `kv_both`; false on `kv_consumer` | No | true / false | Whether this node queries KV Pool for reusable KV. |
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Decode saving requires `save_decode_cache=true`. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |

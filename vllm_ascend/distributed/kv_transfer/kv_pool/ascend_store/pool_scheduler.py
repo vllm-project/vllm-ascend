@@ -94,6 +94,22 @@ class BaseKVPoolScheduler(ABC):
             "save_decode_cache", False
         )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
+        raw_stride = extra_config.get("boundary_state_offload_stride", 0)
+        if isinstance(raw_stride, bool) or not isinstance(raw_stride, int) or raw_stride < 0:
+            raise ValueError(
+                "boundary_state_offload_stride must be a non-negative integer, "
+                f"got {raw_stride!r}"
+            )
+        self.boundary_state_offload_stride = raw_stride
+        if self.boundary_state_offload_stride > 0:
+            logger.info(
+                "AscendStore boundary_state_offload_stride=%d",
+                self.boundary_state_offload_stride,
+            )
+        # Observed Store prefix hit per request from lookup, used to seed
+        # stride-based boundary-state watermarks when local cache is ahead
+        # of (or a rank missed) the Store.
+        self._store_hit_tokens: dict[str, int] = {}
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -212,6 +228,32 @@ class BaseKVPoolScheduler(ABC):
             self._request_trackers[req_id] = tracker
         return tracker
 
+    def _pop_store_hit_tokens(self, req_id: str) -> int | None:
+        store_hit_tokens = getattr(self, "_store_hit_tokens", None)
+        if store_hit_tokens is None:
+            return None
+        return store_hit_tokens.pop(req_id, None)
+
+    def _should_offload_boundary_state(
+        self,
+        last_boundary_tokens: int,
+        boundary_tokens: int,
+    ) -> bool:
+        """Return whether a boundary-state offload crosses a new stride bucket."""
+        stride = getattr(self, "boundary_state_offload_stride", 0)
+        if stride <= 0:
+            return True
+        return (boundary_tokens // stride) > (last_boundary_tokens // stride)
+
+    def _save_partial_tail(self) -> bool:
+        # When stride throttling is active on a hybrid model, let accepted
+        # Mamba boundary puts drive _partial_tail_non_mamba_puts so skipped
+        # boundary states never emit orphaned non-Mamba partial-tail blocks.
+        if self.use_layerwise or getattr(self, "boundary_state_offload_stride", 0) <= 0:
+            return self.enable_partial_hash_hits
+        coord = self.cache_coordinator
+        return self.enable_partial_hash_hits and not (coord is not None and coord.mamba_group_ids)
+
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
         if self.kv_cache_config is None or not self.use_hybrid:
@@ -281,6 +323,8 @@ class BaseKVPoolScheduler(ABC):
         if lookup_result is None or not lookup_result.hit_length:
             return 0, False
         num_external_hit_tokens = lookup_result.hit_length
+        if getattr(self, "boundary_state_offload_stride", 0) > 0:
+            self._store_hit_tokens[request.request_id] = num_external_hit_tokens
 
         store_skip_tokens = num_external_hit_tokens
         if self.use_eagle and not self.enable_partial_hash_hits:
@@ -459,6 +503,7 @@ class BaseKVPoolScheduler(ABC):
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            save_partial_tail=self._save_partial_tail(),
         )
 
     def _process_new_request(
@@ -483,6 +528,13 @@ class BaseKVPoolScheduler(ABC):
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
         previous_tracker = self._request_trackers.get(request.req_id)
         prefill_tokens = _new_req_prefill_tokens(request)
+        store_hit_tokens = self._pop_store_hit_tokens(request.req_id)
+        if store_hit_tokens is not None:
+            resume_tokens = store_hit_tokens
+        else:
+            resume_tokens = getattr(request, "num_computed_tokens", 0)
+            if load_spec is not None and load_spec.can_load:
+                resume_tokens = max(resume_tokens, load_spec.kvpool_cached_tokens)
         request_tracker = RequestTracker(
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
@@ -495,6 +547,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            last_boundary_state_tokens=resume_tokens,
         )
         self._request_trackers[request.req_id] = request_tracker
         return self._build_req_meta(
@@ -525,6 +578,13 @@ class BaseKVPoolScheduler(ABC):
         request_real = request_tuple[0]
         num_tokens_to_compute = request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
         previous_tracker = self._request_trackers.get(req_id)
+        store_hit_tokens = self._pop_store_hit_tokens(req_id)
+        if store_hit_tokens is not None:
+            resume_tokens = store_hit_tokens
+        else:
+            resume_tokens = request_real.num_computed_tokens
+            if load_spec is not None and load_spec.can_load:
+                resume_tokens = max(resume_tokens, load_spec.kvpool_cached_tokens)
         request_tracker = RequestTracker(
             req_id=req_id,
             token_len=num_tokens_to_compute,
@@ -537,6 +597,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            last_boundary_state_tokens=resume_tokens,
         )
         self._request_trackers[req_id] = request_tracker
         return self._build_req_meta(
@@ -622,6 +683,12 @@ class BaseKVPoolScheduler(ABC):
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
+        store_hit_tokens = self._pop_store_hit_tokens(request_id)
+        resume_tokens = (
+            store_hit_tokens
+            if store_hit_tokens is not None
+            else max(num_tokens_to_compute, load_spec.kvpool_cached_tokens)
+        )
         request_tracker = RequestTracker(
             req_id=request_id,
             token_len=num_tokens_to_compute,
@@ -633,6 +700,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            last_boundary_state_tokens=resume_tokens,
         )
         self._request_trackers[request_id] = request_tracker
         return ReqMeta.from_request_tracker(
@@ -645,6 +713,7 @@ class BaseKVPoolScheduler(ABC):
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
             hash_block_size=self.hash_block_size,
+            save_partial_tail=self._save_partial_tail(),
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
@@ -663,12 +732,14 @@ class BaseKVPoolScheduler(ABC):
                 # Core is waiting for receive completion once it hands us the
                 # destination pages. A spec still present here was never sent.
                 cancelled_load_req_ids.add(finished_req_id)
+            self._pop_store_hit_tokens(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
+            self._pop_store_hit_tokens(req_id)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
             self._async_loading_req_ids.discard(req_id)
@@ -774,13 +845,41 @@ class BaseKVPoolScheduler(ABC):
             request = self._unfinished_requests.get(req_id)
             if tracker is None or request is None or not self.can_put:
                 continue
-            accepted = [
+            eligible = [
                 BoundaryPut(group, block, boundary)
                 for group, block, boundary in entries
                 if group in coord.mamba_group_ids
                 and block > 0
                 and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
             ]
+            if not eligible:
+                continue
+            if getattr(self, "boundary_state_offload_stride", 0) > 0:
+                accepted: list[BoundaryPut] = []
+                # Group by ascending boundary so every boundary-state group
+                # sharing a checkpoint position is accepted or skipped together.
+                by_boundary: dict[int, list[BoundaryPut]] = {}
+                for put in eligible:
+                    by_boundary.setdefault(put.num_tokens, []).append(put)
+                last_boundary_tokens = getattr(tracker, "last_boundary_state_tokens", 0)
+                skipped = 0
+                for boundary_tokens in sorted(by_boundary):
+                    if not self._should_offload_boundary_state(last_boundary_tokens, boundary_tokens):
+                        skipped += len(by_boundary[boundary_tokens])
+                        continue
+                    accepted.extend(by_boundary[boundary_tokens])
+                    last_boundary_tokens = max(last_boundary_tokens, boundary_tokens)
+                tracker.last_boundary_state_tokens = last_boundary_tokens
+                if accepted or skipped:
+                    logger.debug(
+                        "AscendStore boundary stride req=%s accepted=%d skipped=%d watermark=%d",
+                        req_id,
+                        len(accepted),
+                        skipped,
+                        last_boundary_tokens,
+                    )
+            else:
+                accepted = eligible
             if not accepted:
                 continue
             req_meta = save_metas.get(req_id)
@@ -820,6 +919,8 @@ class BaseKVPoolScheduler(ABC):
         """Update requests whose external loads have finished."""
         if connector_output.finished_recving:
             self._async_loading_req_ids.difference_update(connector_output.finished_recving)
+        for req_id in connector_output.failed_recving:
+            self._pop_store_hit_tokens(req_id)
 
     def request_finished(
         self,
@@ -1016,6 +1117,16 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         assert tracker.prefill_end_tokens is not None
         if boundary_tokens > tracker.prefill_end_tokens:
             return False
+        if not self._should_offload_boundary_state(
+            getattr(tracker, "last_boundary_state_tokens", 0), boundary_tokens
+        ):
+            logger.debug(
+                "AscendStore boundary stride skip finished tail req=%s boundary=%d watermark=%d",
+                request.request_id,
+                boundary_tokens,
+                getattr(tracker, "last_boundary_state_tokens", 0),
+            )
+            return False
 
         coord = self.cache_coordinator
         assert coord is not None
@@ -1027,6 +1138,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             if block_id == NULL_BLOCK_ID:
                 return False
             mamba_puts.append(BoundaryPut(group_id, block_id, boundary))
+        tracker.last_boundary_state_tokens = max(
+            getattr(tracker, "last_boundary_state_tokens", 0), boundary_tokens
+        )
         req_meta = ReqMeta(
             req_id=request.request_id,
             token_len_chunk=0,
