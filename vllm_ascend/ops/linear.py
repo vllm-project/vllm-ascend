@@ -28,6 +28,7 @@ AscendRowParallelLinear and AscendColumnParallelLinear.
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
+from vllm import envs as vllm_envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.linear import (  # noqa
@@ -47,7 +48,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import is_internal_npu_format, maybe_trans_nz, vllm_version_is
+from vllm_ascend.utils import _should_trans_nz, is_internal_npu_format, maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -116,9 +117,13 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # a subsequent contiguous() would otherwise materialize ND again.
         # This also covers dummy loading, where weight_loader never runs.
         if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
+            grouped = layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            if getattr(vllm_envs, "VLLM_RELOAD_MODE", None) == "direct" and not _should_trans_nz(grouped):
+                # Direct reload restores a 2D checkpoint view on graph-owned storage.
+                # Write the grouped values back into those bytes before graph replay.
+                replace_parameter(layer, "weight", grouped)
+            else:
+                layer.weight.data = grouped
 
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)

@@ -14,6 +14,7 @@ from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
 from vllm_ascend.ops.head_parallel import HeadParallelMergedColumnLinear
 from vllm_ascend.ops.linear import (
+    AscendColumnParallelLinear,
     AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,
     AscendQKVParallelLinear,
@@ -192,6 +193,83 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         self.assertFalse(
             self._reshape_decision("model.layers.0.self_attn.o_proj", torch.bfloat16, mx_quant_fusion=True)
         )
+
+    @unittest.skipUnless(hasattr(linear.vllm_envs, "VLLM_RELOAD_MODE"), "requires vLLM direct reload")
+    def test_direct_reload_keeps_grouped_weight_visible_to_captured_graph(self):
+        from vllm.model_executor.model_loader.reload.direct import begin_direct_reload, finish_direct_reload
+        from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests
+
+        from vllm_ascend.device.hardware_profile import WeightLayoutPolicy
+
+        # Flash uses eight output groups, so TP8 leaves one group on each rank.
+        # Use small matrices with distinct values across ranks and checkpoints.
+        tp_size, o_lora_rank, input_size = 8, 4, 6
+        output_size = tp_size * o_lora_rank
+        checkpoint_a = torch.arange(1, output_size * input_size + 1, dtype=torch.bfloat16)
+        checkpoint_a = checkpoint_a.reshape(output_size, input_size)
+        checkpoint_b = -checkpoint_a
+        config = SimpleNamespace(
+            hf_text_config=SimpleNamespace(o_groups=tp_size, o_lora_rank=o_lora_rank),
+            word_embeddings_untied_by_checkpoint=False,
+            quantization=None,
+        )
+        profile = SimpleNamespace(supports=lambda _: True, weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE)
+        device = torch.device("cpu")
+
+        def cold_load(checkpoint):
+            layer = AscendColumnParallelLinear(
+                input_size=input_size,
+                output_size=output_size,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                prefix="model.layers.0.self_attn.wo_a",
+            )
+            layer.weight.weight_loader(layer.weight, checkpoint)
+            process_weights_after_loading(layer, config, device)
+            return layer
+
+        with (
+            patch.object(linear.vllm_envs, "VLLM_RELOAD_MODE", "direct"),
+            patch.object(linear.UnquantizedLinearMethod, "process_weights_after_loading"),
+            patch.object(linear, "get_current_vllm_config", return_value=SimpleNamespace(model_config=config)),
+            patch.object(linear, "get_current_hardware_profile", return_value=profile),
+            patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=0)),
+            patch("vllm_ascend.utils.get_current_hardware_profile", return_value=profile),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp_size),
+        ):
+            for rank in range(tp_size):
+                with (
+                    self.subTest(rank=rank),
+                    patch.object(linear, "get_parallel_op", return_value=(None, rank, tp_size)),
+                    patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=rank),
+                ):
+                    layer = cold_load(checkpoint_a)
+                    parameter = layer.weight
+                    # Retain the original storage as a captured graph would.
+                    captured = parameter.detach()
+                    cold_b = cold_load(checkpoint_b)
+                    digest_a = compute_tensor_digests(layer)
+                    digest_b = compute_tensor_digests(cold_b)
+                    self.assertNotEqual(digest_a, digest_b)
+                    expected_shape = (1, input_size, o_lora_rank)
+                    self.assertEqual(tuple(captured.shape), expected_shape)
+                    for checkpoint, expected_digest in (
+                        (checkpoint_b, digest_b),
+                        (checkpoint_a, digest_a),
+                        (checkpoint_b, digest_b),
+                    ):
+                        begin_direct_reload(layer)
+                        self.assertEqual(tuple(layer.weight.shape), (o_lora_rank, input_size))
+                        layer.weight.weight_loader(layer.weight, checkpoint)
+                        finish_direct_reload(layer, config, device)
+
+                        expected = checkpoint.narrow(0, rank * o_lora_rank, o_lora_rank).T.unsqueeze(0)
+                        self.assertIs(layer.weight, parameter)
+                        self.assertEqual(layer.weight.data_ptr(), captured.data_ptr())
+                        self.assertEqual(tuple(layer.weight.shape), expected_shape)
+                        self.assertEqual(layer.weight.stride(), captured.stride())
+                        self.assertEqual(compute_tensor_digests(layer), expected_digest)
+                        torch.testing.assert_close(captured, expected, rtol=0, atol=0)
 
     def test_nz_conversion_receives_final_grouped_layout(self):
         """Both checkpoint and dummy weights reach NZ conversion after reshape."""
