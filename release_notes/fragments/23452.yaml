@@ -1,0 +1,4 @@
+pr: 23452
+entries:
+  - category: performance
+    text: Wide-vocabulary MRV2 logprob and token-rank calculation now has lower operator latency on Ascend 950PR.

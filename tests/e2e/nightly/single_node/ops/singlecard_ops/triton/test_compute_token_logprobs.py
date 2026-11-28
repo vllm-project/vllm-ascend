@@ -37,15 +37,16 @@ def torch_compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) 
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("layout", ["broadcast", "strided"])
-def test_prompt_scoring_token_id_row_stride(layout):
+@pytest.mark.parametrize("vocab_size", [32000, 151937])
+def test_prompt_scoring_token_id_row_stride(layout, vocab_size):
     """Fixed-token prompt scoring expands one ID row across multiple logits."""
     torch.manual_seed(42)
-    logits = torch.randn((4, 32000), dtype=torch.float32, device="npu")
+    logits = torch.randn((4, vocab_size), dtype=torch.float32, device="npu")
     if layout == "broadcast":
-        token_ids = torch.tensor([[1, 17, 123, 4095, 31999]], dtype=torch.int64, device="npu").expand(4, -1)
+        token_ids = torch.tensor([[1, 17, 123, 4095, vocab_size - 1]], dtype=torch.int64, device="npu").expand(4, -1)
         assert token_ids.stride(0) == 0
     else:
-        token_ids = torch.randint(0, 32000, (4, 8), dtype=torch.int64, device="npu")[:, :5]
+        token_ids = torch.randint(0, vocab_size, (4, 8), dtype=torch.int64, device="npu")[:, :5]
         assert token_ids.stride(0) == 8
     actual = compute_token_logprobs(logits, token_ids)
     expected = torch_compute_token_logprobs(logits, token_ids)

@@ -4,7 +4,7 @@ import torch
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
+from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs, compute_topk_scores
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
@@ -98,3 +98,66 @@ def test_selected_token_rank_is_one_based():
     assert ranks[1] == 2, f"the runner-up must rank 2, got {ranks[1]}"
     assert ranks[2] == 2, f"each of a two-way top tie must report 2, got {ranks[2]}"
     assert all(rank >= 1 for rank in ranks), f"ranks must be 1-based, got {ranks}"
+
+
+@pytest.mark.parametrize("vocab_size", [65535, 65536, 151937])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_wide_vocab_with_a_fully_masked_tile(vocab_size, dtype):
+    """Compare sampled logprobs and tied ranks at the vocabulary dispatch boundary."""
+    init_device_properties_triton()
+    logits = torch.full((2, vocab_size), float("-inf"), dtype=dtype, device="npu")
+    logits[0, 0] = 4
+    logits[0, -1] = 4
+    logits[1, 0] = 4
+    logits[1, -1] = 3
+    sampled_ids = torch.tensor([vocab_size - 1, 0], dtype=torch.int64, device="npu")
+
+    result = compute_topk_logprobs(logits, 1, sampled_ids)
+
+    expected_logprobs = torch.log_softmax(logits.float(), dim=1).gather(1, result.logprob_token_ids)
+    torch.testing.assert_close(result.logprobs, expected_logprobs, atol=1e-5, rtol=0)
+    assert result.selected_token_ranks.tolist() == [2, 1]
+
+    scores = compute_topk_scores(logits, 0, sampled_ids, cu_num_logits=[0, 1, 2])
+    torch.testing.assert_close(scores.logprobs, expected_logprobs[:, :1], atol=1e-5, rtol=0)
+    assert scores.selected_token_ranks.tolist() == [2, 1]
+    assert scores.cu_num_generated_tokens == [0, 1, 2]
+
+
+def test_online_rank_matches_upstream_padding():
+    vocab_size = 151937
+    logits = torch.zeros((1, vocab_size), device="npu", dtype=torch.float32)
+    logits[0, -1] = float("-inf")
+    sampled_ids = torch.tensor([vocab_size - 1], device="npu", dtype=torch.int64)
+
+    result = compute_topk_logprobs(logits, 0, sampled_ids)
+    assert result.logprobs.tolist() == [[float("-inf")]]
+    assert result.selected_token_ranks.tolist() == [((vocab_size + 8191) // 8192) * 8192]
+
+
+@pytest.mark.parametrize("vocab_size,num_logprobs", [(2049, 1024), (151937, 1023), (151937, 1024), (151937, 151937)])
+def test_compute_topk_scores_wide_output(vocab_size, num_logprobs):
+    init_device_properties_triton()
+    logits = torch.linspace(-2, 2, vocab_size, device="npu", dtype=torch.float32).unsqueeze(0)
+    sampled_ids = torch.tensor([vocab_size // 2], device="npu", dtype=torch.int64)
+
+    result = compute_topk_scores(logits, num_logprobs, sampled_ids)
+
+    expected_ids = torch.cat((sampled_ids[:, None], logits.topk(num_logprobs, dim=-1).indices), dim=1)
+    expected_logprobs = logits.log_softmax(dim=-1).gather(1, expected_ids)
+    expected_ranks = (logits >= logits.gather(1, sampled_ids[:, None])).sum(dim=1)
+    torch.testing.assert_close(result.logprob_token_ids, expected_ids, atol=0, rtol=0)
+    torch.testing.assert_close(result.logprobs, expected_logprobs, atol=1e-5, rtol=0)
+    torch.testing.assert_close(result.selected_token_ranks, expected_ranks, atol=0, rtol=0)
+
+
+def test_empty_logprob_requests():
+    logits = torch.empty((0, 151936), device="npu")
+    sampled_ids = torch.empty(0, dtype=torch.int64, device="npu")
+    result = compute_topk_logprobs(logits, 5, sampled_ids)
+    assert result.logprobs.shape == result.logprob_token_ids.shape == (0, 6)
+    assert result.selected_token_ranks.numel() == 0
+
+    logits = torch.empty((3, 151936), device="npu")
+    token_ids = torch.empty((3, 0), dtype=torch.int64, device="npu")
+    assert compute_token_logprobs(logits, token_ids).shape == (3, 0)
