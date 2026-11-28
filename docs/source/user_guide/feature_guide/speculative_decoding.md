@@ -15,7 +15,7 @@ vLLM Ascend follows upstream vLLM's **speculator-verifier** architecture for spe
 
 | `method` | Draft source or purpose |
 | --- | --- |
-| [`ngram_gpu`](#n-gram) | Prompt n-gram matches on the NPU |
+| [`ngram`](#n-gram) | Prompt n-gram matches on the NPU |
 | [`eagle`](#eagle) | A matching EAGLE checkpoint |
 | [`eagle3`](#eagle-3) | A matching EAGLE-3 checkpoint |
 | [`mtp`](#mtp) | Multi-Token Prediction weights built into the target or supplied by a matching assistant checkpoint |
@@ -44,7 +44,7 @@ The examples use `K` for the draft length set by `num_speculative_tokens`.
 
 #### N-gram
 
-With `ngram_gpu`, set `prompt_lookup_min` and `prompt_lookup_max` to bound the
+With `ngram`, set `prompt_lookup_min` and `prompt_lookup_max` to bound the
 n-gram lengths to search.
 
 **Offline inference**
@@ -55,7 +55,7 @@ from vllm import LLM, SamplingParams
 llm = LLM(
     model="Qwen/Qwen3-1.7B",
     speculative_config={
-        "method": "ngram_gpu",
+        "method": "ngram",
         "num_speculative_tokens": 3,
         "prompt_lookup_min": 2,
         "prompt_lookup_max": 5,
@@ -70,7 +70,7 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-1.7B \
-  --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
+  --speculative-config '{"method":"ngram","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
 ```
 
 #### EAGLE
