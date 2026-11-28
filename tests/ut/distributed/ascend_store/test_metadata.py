@@ -432,6 +432,76 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[0], 80)  # 160/16*8
         self.assertEqual(size[1], 160)  # 320/16*8
 
+    def test_prepare_value_cached_layout_preserves_segmented_strides(self):
+        # Two physical segments per logical block, with padding between blocks.
+        class CountingSegments(list[tuple[int, int]]):
+            accesses = 0
+
+            def __getitem__(self, key):
+                self.accesses += 1
+                return super().__getitem__(key)
+
+        segments = CountingSegments([(0, 2), (0, 2), (1, 2), (1, 2)])
+        self.db.set_group_buffers(
+            {0: [1000, 2000, 3000, 4000]},
+            {0: [80, 160]},
+            {0: [512, 1024]},
+            group_cache_entry_segments={0: segments},
+        )
+        self.assertEqual(segments.accesses, 4)
+        for block_id in (5, 9, 0):
+            with self.subTest(block_id=block_id):
+                addresses, sizes, actual_id = self.db.prepare_value(32, 48, [], block_id=block_id)
+                self.assertEqual(actual_id, block_id)
+                self.assertEqual(
+                    addresses,
+                    [
+                        1000 + block_id * 512,
+                        2000 + block_id * 1024,
+                        3000 + block_id * 512,
+                        4000 + block_id * 1024,
+                    ],
+                )
+                self.assertEqual(sizes, [80, 160, 80, 160])
+                # Backends may modify their returned lists.
+                addresses.clear()
+                sizes.clear()
+                self.assertEqual(segments.accesses, 4)
+        self.assertEqual(self.db.prepare_value(4, 12, [5]), ([3600, 7200, 5560, 9120], [40, 80, 40, 80], 5))
+        self.assertEqual(segments.accesses, 8)
+        self.assertEqual(self.db.prepare_value(0, 16, [], cache_role="state", block_id=5), ([], [], 5))
+
+    def test_prepare_value_reregister_invalidates_cached_addresses(self):
+        old_result = self.db.prepare_value(0, 16, [5])
+        in_flight_results = []
+        db = self.db
+
+        class InterleavedSegments(list[tuple[int, int]]):
+            def __getitem__(self, key):
+                # Simulate a transfer reading while registration builds the new snapshot.
+                in_flight_results.append(db.prepare_value(0, 16, [5]))
+                return super().__getitem__(key)
+
+        self.db.set_group_buffers(
+            {0: [3000]}, {0: [640]}, {0: [1024]}, group_cache_entry_segments={0: InterleavedSegments([(0, 1)])}
+        )
+        self.assertEqual(in_flight_results, [old_result])
+        for block_id in (5, 7):
+            self.assertEqual(
+                self.db.prepare_value(0, 16, [block_id]),
+                ([3000 + block_id * 1024], [640], block_id),
+            )
+
+    def test_prepare_value_keeps_group_layouts_separate(self):
+        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 64], partitions=None)
+        db.set_group_buffers({0: [1000], 1: [2000]}, {0: [160], 1: [640]})
+        for block_id in (3, 7):
+            for group, block_size, base, length in ((0, 16, 1000, 160), (1, 64, 2000, 640)):
+                self.assertEqual(
+                    db.prepare_value(0, block_size, [block_id], kv_cache_group_id=group),
+                    ([base + block_id * length], [length], block_id),
+                )
+
     def test_prepare_value_uses_block_id_override(self):
         addr, size, block_id = self.db.prepare_value(64, 80, [5], block_id=99)
         self.assertEqual(block_id, 99)

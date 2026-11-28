@@ -366,6 +366,9 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
+        # Immutable descriptors for a whole logical block, independent of its
+        # physical block ID. Shared by the send and receive threads.
+        self._full_block_layouts: dict[int, tuple[tuple[tuple[int, int], ...], tuple[int, ...]]] = {}
         self.cache_coordinator: Any | None = None
 
     def _get_key_prefix(
@@ -468,11 +471,38 @@ class ChunkedTokenDatabase:
             # DSV4 branch stores compressor/indexer states in kv_caches.
             pass
         else:
+            strides_by_group = group_block_stride or {}
+            segments_by_group = group_cache_entry_segments or {}
+            layouts: dict[int, tuple[tuple[tuple[int, int], ...], tuple[int, ...]]] = {}
+            for group_id, addresses in group_kv_caches_base_addr.items():
+                if group_id not in group_block_len:
+                    continue
+                lengths = group_block_len[group_id]
+                strides = strides_by_group.get(group_id) or lengths
+                segments = segments_by_group.get(group_id)
+                group_block_size = self.get_block_size(group_id)
+                descriptors: list[tuple[int, int]] = []
+                sizes: list[int] = []
+                if lengths:
+                    for index, base_addr in enumerate(addresses):
+                        segment_index, segment_count = segments[index] if segments else (0, 1)
+                        segment_tokens = group_block_size // segment_count
+                        segment_start = segment_index * segment_tokens
+                        if segment_tokens <= 0 or not 0 <= segment_start < group_block_size:
+                            continue
+                        entry = index % len(lengths)
+                        overlap = min(segment_tokens, group_block_size - segment_start)
+                        descriptors.append((base_addr, strides[entry]))
+                        sizes.append(lengths[entry] * overlap // segment_tokens)
+                layouts[group_id] = (tuple(descriptors), tuple(sizes))
+
             self.group_kv_caches_base_addr = group_kv_caches_base_addr
             self.group_block_len = group_block_len
-            self.group_block_stride = group_block_stride or {}
+            self.group_block_stride = strides_by_group
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
-            self.group_cache_entry_segments = group_cache_entry_segments or {}
+            self.group_cache_entry_segments = segments_by_group
+            # Publish the completed snapshot once. Transfer threads only read it.
+            self._full_block_layouts = layouts
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -511,14 +541,20 @@ class ChunkedTokenDatabase:
             if block_idx >= len(block_ids):
                 return addr_list, size_list, 0
             block_id = block_ids[block_idx]
+        if cache_role == "state":
+            return addr_list, size_list, block_id
+        block_start = start // group_block_size * group_block_size
+        start_in_block = start - block_start
+        end_in_block = end - block_start
+        if start_in_block == 0 and end_in_block == group_block_size:
+            descriptors, sizes = self._full_block_layouts[kv_cache_group_id]
+            return [base + block_id * stride for base, stride in descriptors], list(sizes), block_id
+
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
             return addr_list, size_list, block_id
         segments = self.group_cache_entry_segments.get(kv_cache_group_id)
-        block_start = start // group_block_size * group_block_size
-        start_in_block = start - block_start
-        end_in_block = end - block_start
         for index, base_addr in enumerate(group_addrs):
             segment_index, segment_count = segments[index] if segments else (0, 1)
             segment_tokens = group_block_size // segment_count
