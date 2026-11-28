@@ -257,7 +257,14 @@ def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
 
 @pytest.mark.parametrize(
     "pad_size,starts,grouped",
-    [(-1, [0, 3, 5], True), (5, [0, 3, 5], False), (-1, [0, 5, 5], False)],
+    [
+        (-1, [0, 3, 5], True),
+        (5, [0, 3, 5], False),
+        (-1, [0, 5, 5], False),
+        (-1, [1, 3, 5], False),
+        (-1, [0, 3, 4], False),
+        (-1, [0, 5], False),
+    ],
 )
 def test_request_page_table_requires_packed_queries(pad_size, starts, grouped):
     builder, _ = load_builder()

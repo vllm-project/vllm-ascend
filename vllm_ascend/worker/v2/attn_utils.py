@@ -619,6 +619,8 @@ def build_attn_metadata(
                         **attn_metadata_extra_kwargs,
                     )
                 else:
+                    if is_qsa_group and not is_qsa_indexer and full_graph_mode:
+                        attn_metadata_extra_kwargs["full_graph_mode"] = True
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                     metadata = attn_group.build_metadata(

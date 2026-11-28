@@ -664,6 +664,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         fast_build: bool = False,
         *,
         for_capture: bool = False,
+        full_graph_mode: bool = False,
     ):
         pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         full_pcp_graph = pcp_context is not None and common_attn_metadata.graph_pad_size >= 0
@@ -690,15 +691,16 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             )
         # A packed query segment is the causal suffix of its request. Graph
         # padding and PCP sharding can break that relationship.
-        elif pcp_context is None and common_attn_metadata.graph_pad_size < 0:
+        elif not full_graph_mode and pcp_context is None and common_attn_metadata.graph_pad_size < 0:
             n = common_attn_metadata.num_reqs
-            starts = common_attn_metadata.query_start_loc_cpu[: n + 1]
+            starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
             if (
                 n > 0
                 and n == metadata.block_table.shape[0]
-                and starts[0].item() == 0
-                and starts[-1].item() == metadata.num_actual_tokens
-                and (starts.diff() > 0).all().item()
+                and len(starts) == n + 1
+                and starts[0] == 0
+                and starts[-1] == metadata.num_actual_tokens
+                and all(end > start for start, end in zip(starts, starts[1:]))
             ):
                 metadata.qsa_request_cu_q = common_attn_metadata.query_start_loc[: n + 1].to(torch.int64)
         return metadata
