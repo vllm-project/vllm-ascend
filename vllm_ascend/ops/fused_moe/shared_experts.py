@@ -50,6 +50,7 @@ from vllm_ascend.ops.linear_op import SharedExpertColumnParallelOp, SharedExpert
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
     npu_stream_switch,
     shared_expert_tp_enable,
@@ -404,10 +405,13 @@ class AscendSharedExperts:
         quant_method.process_weights_after_loading = wrapped_megamoe_collect  # type: ignore
 
     def _collect_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
-        """Rebuild one shared linear into the A5 MegaMoe layout.
+        """Collect one processed shared linear for MegaMoe.
 
-        MegaMoe expects (out, in) tensors while the processed linear buffer is
-        (in, out) ND, so a transpose+contiguous materializes the correct ND
+        On A3, the shared W8A8 linear and MegaMoe both consume an (in, out)
+        INT8 FRACTAL_NZ weight, so they can share its storage.
+
+        On A5, MegaMoe expects (out, in) tensors while the processed linear
+        buffer is (in, out) ND, so a transpose+contiguous materializes the correct ND
         layout; the per-group scale becomes (n, k//2, 2), matching the routed
         per-expert scale shape. Mixed-quantization models may quantize the
         shared expert differently from the routed experts (e.g. W8A8MXFP
@@ -422,7 +426,8 @@ class AscendSharedExperts:
         """
         if self._megamoe_shared_fusion_disabled:
             return
-        weight_dtype = linear.weight.data.dtype
+        weight = linear.weight.data
+        weight_dtype = weight.dtype
         is_int8 = weight_dtype == torch.int8
         self._megamoe_shared_weight_dtype = weight_dtype
         # The routed layer already fixed this machine's MegaMoe payload family:
@@ -548,10 +553,16 @@ class AscendSharedExperts:
                 )
             )
         try:
-            # Aclnn-only firmware cannot clone tensors that carry a FRACTAL_NZ
-            # internal format, so force the ND view before the transpose +
-            # contiguous materialization (2 == ACL_FORMAT_ND).
-            weight = torch_npu.npu_format_cast(linear.weight.data, 2)
+            reuse_int8_weight = (
+                is_int8
+                and weight.device.type == "npu"
+                and weight.is_contiguous()
+                and weight.storage_offset() == 0
+                and int(torch_npu.get_npu_format(weight)) == ACL_FORMAT_FRACTAL_NZ
+            )
+            if not reuse_int8_weight:
+                # Aclnn-only firmware requires ND for contiguous materialization.
+                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_ND)
             if not is_int8:
                 # A5 MXFP descriptors are (out, in); flip them to (in, out). A3
                 # INT8 weights are already (in, out) and must never be transposed
@@ -593,12 +604,11 @@ class AscendSharedExperts:
             # per-expert list of 2-D int8 weights in the (in, out) FRACTAL_NZ
             # layout plus a 1-D per-output-channel scale whose fp32 bits are
             # packed in an int64 (mega_moe_arch22.h: ScaleType =
-            # GemmType<uint64_t, VectorLayout>). ``weight`` already holds the
-            # processed (in, out) buffer, so only the NZ cast is needed; the
-            # int64 container matches the routed fused scale lists
-            # (scale_from_float_to_int64), because a bf16/fp32 scale would be
-            # silently misread.
-            weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+            # GemmType<uint64_t, VectorLayout>). The int64 container matches the
+            # routed fused scale lists (scale_from_float_to_int64), because a
+            # bf16/fp32 scale would be silently misread.
+            if not reuse_int8_weight:
+                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
             base_scale = linear.weight_scale.data
             scale = base_scale.reshape(-1).to(torch.float32).contiguous().view(torch.int32).to(torch.int64)
             # The arch22 epilogue reads one scale per output channel. A
