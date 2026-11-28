@@ -52,7 +52,7 @@ def build_mla_layer(monkeypatch):
         )
 
     monkeypatch.setattr(mla, "AscendMLAAttention", attention_layer)
-    for module in ("Qwen2MLP", "RMSNorm", "DFlashGroupedConv"):
+    for module in ("Qwen3MLP", "RMSNorm", "DFlashGroupedConv"):
         monkeypatch.setattr(dflash2, module, nn.Identity)
 
     def build(layer_idx=0, dflash_config=None, **fields):
