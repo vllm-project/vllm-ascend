@@ -538,6 +538,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 1
         mock_ascend_config.finegrained_tp_config.gproj_tensor_parallel_size = 1
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
+        mock_ascend_config.scheduler_config.max_num_decode_seqs_in_mixed_batch = None
+        mock_ascend_config.scheduler_config.decode_step_after_prefill = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
         mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.enable_fused_mc2 = False
