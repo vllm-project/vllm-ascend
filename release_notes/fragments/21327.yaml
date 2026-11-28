@@ -1,0 +1,7 @@
+pr: 21327
+entries:
+  - category: bugfix
+    text: >-
+      Fixed default rotary-dimension inference for SISO Triton RoPE with separate
+      cosine and sine inputs. Inferred dimensions are now checked and padded
+      before kernel launch.
