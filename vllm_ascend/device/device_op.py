@@ -36,7 +36,7 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import QUANT_DTYPES, resolve_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:
     from vllm_ascend.attention.indexer import QLIMetadataConfig
@@ -1361,7 +1361,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=act_quant_type,
-                scale_alg=get_dynamic_mx_quant_scale_alg(),
+                scale_alg=resolve_dynamic_mx_quant_scale_alg(act_quant_type),
             )
 
         return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)

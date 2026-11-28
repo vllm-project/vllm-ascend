@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
@@ -30,7 +31,8 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.quantization.nz import fp4_packed_nz
+from vllm_ascend.quantization.nz import cast_mxfp4_swiglu_oai_weight, fp4_packed_nz
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
@@ -40,6 +42,13 @@ from ..base import (
     QuantType,
     WeightSwitchGatherSpec,
     require_mx_weight_format,
+)
+from ..gmm_swiglu_oai import (
+    MX_GROUP_SIZE,
+    get_layer_swiglu_oai_attrs,
+    has_gmm_swiglu_oai_mx_quant,
+    supports_gmm_swiglu_oai_attrs,
+    supports_gmm_swiglu_oai_shape,
 )
 from ..registry import register_scheme
 
@@ -227,6 +236,33 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        self._swiglu_oai_fusion_weight_ready = False
+
+    def _can_use_swiglu_oai_fusion(self, layer: torch.nn.Module) -> bool:
+        activation = getattr(layer, "activation", None)
+        if getattr(activation, "value", activation) != MoEActivation.SWIGLUOAI_UNINTERLEAVE.value:
+            return False
+        if self.group_size != MX_GROUP_SIZE or layer.w13_weight.ndim != 3:
+            return False
+        experts, n, packed_k = layer.w13_weight.shape
+        if not supports_gmm_swiglu_oai_shape(experts=experts, n=n, k=2 * packed_k):
+            return False
+        limit, alpha, beta = get_layer_swiglu_oai_attrs(layer)
+        if not supports_gmm_swiglu_oai_attrs(limit=limit, alpha=alpha, beta=beta):
+            return False
+        config = get_current_vllm_config()
+        return (
+            not config.parallel_config.enable_eplb
+            and config.lora_config is None
+            and get_dynamic_mx_quant_scale_alg(config) == DynamicMXQuantScaleAlg.CEIL
+            and has_gmm_swiglu_oai_mx_quant()
+        )
+
+    def supports_fused_activation(self, activation: MoEActivation) -> bool:
+        return super().supports_fused_activation(activation) or (
+            getattr(activation, "value", activation) == MoEActivation.SWIGLUOAI_UNINTERLEAVE.value
+            and self._swiglu_oai_fusion_weight_ready
+        )
 
     @staticmethod
     def get_weight(
@@ -326,6 +362,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         ]
 
     def process_weights_after_loading(self, layer):
+        self._swiglu_oai_fusion_weight_ready = False
         _rename_packed_weight_parameter(layer, "w13_weight")
         _rename_packed_weight_parameter(layer, "w2_weight")
 
@@ -377,12 +414,24 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         else:
             # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
             # transpose stride to interpret packed FP4 weights as logical K.
-            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            if self._can_use_swiglu_oai_fusion(layer):
+                # PR 16147 consumes one batched transposed-B NZ buffer.
+                layer.w13_weight.data = cast_mxfp4_swiglu_oai_weight(layer.w13_weight.data)
+                self._swiglu_oai_fusion_weight_ready = True
+            else:
+                layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+                layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
             layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        if (
+            mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and not self._swiglu_oai_fusion_weight_ready
+        ):
+            raise RuntimeError("MXFP4 SwiGLU OAI fused weights are not prepared.")
         input_hidden_states = mlp_compute_input.hidden_states
         requantized_input = mlp_compute_input.dynamic_scale is None
         hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
@@ -391,8 +440,22 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # before launching GMM1 to avoid inflating the profile-run peak.
         if requantized_input:
             dispose_tensor(input_hidden_states)
-        layer = mlp_compute_input.layer
-        assert layer is not None
+        if mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            out, out_scale = torch.ops._C_ascend.gmm_swiglu_oai_mx_quant(
+                hidden_states,
+                [layer.w13_weight],
+                [layer.w13_weight_scale],
+                pertoken_scale,
+                mlp_compute_input.group_list,
+                mlp_compute_input.group_list_type,
+                mlp_compute_input.swiglu_limit,
+                mlp_compute_input.swiglu_alpha,
+                mlp_compute_input.swiglu_beta,
+            )
+            if not requantized_input:
+                dispose_tensor(input_hidden_states)
+            return out, maybe_normalize_mxfp_scale_layout(out_scale)
+
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
             weight=[layer.w13_weight],

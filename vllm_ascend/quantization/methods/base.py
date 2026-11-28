@@ -28,6 +28,7 @@ from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardwa
 from vllm_ascend.ops.fused_moe.moe_utils import maybe_normalize_mxfp_scale_layout
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import resolve_dynamic_mx_quant_scale_alg
 from vllm_ascend.weight_switch import (
     WeightLoadPartition,
     WeightSwitchConfig,
@@ -382,7 +383,9 @@ class AscendMoEScheme(ABC):
             # When hidden_states haven't been quanted, we need to quant hidden_states.
             if use_mxfp_quant:
                 hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-                    hidden_states, dst_type=self.act_quant_type
+                    hidden_states,
+                    dst_type=self.act_quant_type,
+                    scale_alg=resolve_dynamic_mx_quant_scale_alg(self.act_quant_type),
                 )
                 return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
             return torch_npu.npu_dynamic_quant(hidden_states, dst_type=self.act_quant_type)

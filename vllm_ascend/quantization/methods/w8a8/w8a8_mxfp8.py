@@ -39,6 +39,7 @@ from vllm_ascend.utils import (
     FP8_METHOD,
     _should_trans_nz,
     dispose_tensor,
+    is_internal_npu_format,
     maybe_trans_nz,
     maybe_trans_nz_with_scale,
 )
@@ -50,6 +51,13 @@ from ..base import (
     QuantType,
     WeightSwitchGatherSpec,
     require_mx_weight_format,
+)
+from ..gmm_swiglu_oai import (
+    MIN_FP8_ROWS_PER_EXPERT,
+    MX_GROUP_SIZE,
+    has_gmm_swiglu_oai_mx_quant,
+    supports_gmm_swiglu_oai_attrs,
+    supports_gmm_swiglu_oai_shape,
 )
 from ..registry import register_scheme
 
@@ -380,6 +388,19 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
+    def _is_swiglu_oai_weight_ready(self, layer: torch.nn.Module) -> bool:
+        w13 = layer.w13_weight
+        if w13.ndim != 3:
+            return False
+        experts, k, n = w13.shape
+        return (
+            self.group_size == MX_GROUP_SIZE
+            and self._dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL
+            and is_internal_npu_format(w13)
+            and supports_gmm_swiglu_oai_shape(experts=experts, n=n, k=k)
+            and has_gmm_swiglu_oai_mx_quant()
+        )
+
     def supports_fused_activation(self, activation: MoEActivation) -> bool:
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the
         # fused clipped activation. Keep the scale and activation requirements
@@ -533,6 +554,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         use_mega_moe = use_cann_megamoe(get_current_vllm_config())
         if not use_mega_moe and not self.use_expert_weight_list:
             self._process_batched_weights(layer)
+            layer._swiglu_oai_weight_ready = self._is_swiglu_oai_weight_ready(layer)
             layer._mxfp8_transformed = True
             return
 
@@ -576,6 +598,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             dispose_tensor(parameter)
             delattr(layer, tensor_name)
 
+        layer._swiglu_oai_weight_ready = False
         layer._mxfp8_transformed = True
         torch.npu.empty_cache()
 
@@ -663,6 +686,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             raise RuntimeError(err_msg)
 
         orig_shapes = layer._mxfp8_original_shapes
+        layer._swiglu_oai_weight_ready = False
         if hasattr(layer, "_mxfp8_moe_buffers"):
             for weight_name in ("w13_weight", "w2_weight"):
                 scale_name = f"{weight_name}_scale"
@@ -715,6 +739,36 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        if (
+            mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and getattr(layer, "_swiglu_oai_weight_ready", False)
+            and supports_gmm_swiglu_oai_attrs(
+                limit=mlp_compute_input.swiglu_limit,
+                alpha=mlp_compute_input.swiglu_alpha,
+                beta=mlp_compute_input.swiglu_beta,
+            )
+            # PR 16147 selects TensorAPI only when floor(M/E) exceeds 512.
+            and mlp_compute_input.hidden_states.shape[0] >= MIN_FP8_ROWS_PER_EXPERT * layer.w13_weight.shape[0]
+        ):
+            hidden_states, pertoken_scale = self._quant_hidden_states(
+                mlp_compute_input.hidden_states, mlp_compute_input.dynamic_scale
+            )
+            out, out_scale = torch.ops._C_ascend.gmm_swiglu_oai_mx_quant(
+                hidden_states,
+                [layer.w13_weight],
+                [layer.w13_weight_scale],
+                pertoken_scale,
+                mlp_compute_input.group_list,
+                mlp_compute_input.group_list_type,
+                mlp_compute_input.swiglu_limit,
+                mlp_compute_input.swiglu_alpha,
+                mlp_compute_input.swiglu_beta,
+            )
+            dispose_tensor(mlp_compute_input.hidden_states)
+            return out, maybe_normalize_mxfp_scale_layout(out_scale)
+
         if mlp_compute_input.activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
             # Both modes consume GMM's contiguous [gate | up] BF16 output;
             # mode 1 would instead interpret alternating gate/up elements.
@@ -751,8 +805,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
-        layer = mlp_compute_input.layer
-        assert layer is not None
 
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
