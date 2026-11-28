@@ -1034,6 +1034,8 @@ def test_qsa_compressed_cache_uses_default_backend_without_runner_flag():
 
 
 def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypatch):
+    from vllm.v1.worker.utils import AttentionGroup
+
     from vllm_ascend.models.qwen4_exp import qsa
     from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 
@@ -1063,7 +1065,7 @@ def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypat
     device = torch.device("cpu")
 
     attn_groups = attn_utils_v2._get_cache_attention_groups(config, layers, {})
-    grouped = [[] for _ in config.kv_cache_groups]
+    grouped: list[list[AttentionGroup]] = [[] for _ in config.kv_cache_groups]
     for group in attn_groups:
         grouped[group.kv_cache_group_id].append(group)
     main_group, compressed_group = grouped[0]
