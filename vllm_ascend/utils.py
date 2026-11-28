@@ -159,9 +159,14 @@ def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
 
 def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> int | None:
     """Return local MTP layer index for DSV4 checkpoint weight names."""
-    if weight_name.startswith("mtp."):
-        return int(weight_name.split(".")[1])
-    return None
+    if not weight_name.startswith("mtp."):
+        return None
+    parts = weight_name.split(".")
+    # isdecimal() (not isdigit()): only decimal characters are guaranteed to
+    # be parseable by int(); isdigit() also accepts e.g. superscripts.
+    if len(parts) < 2 or not parts[1].isdecimal():
+        raise ValueError(f"Malformed MTP weight name {weight_name!r}: expected 'mtp.<layer_idx>...'.")
+    return int(parts[1])
 
 
 def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
@@ -1824,6 +1829,8 @@ def get_rope_dim(vllm_config):
 
 
 def calc_split_factor(num_list: list[int]):
+    if not num_list or any(isinstance(num, bool) or not isinstance(num, int) or num <= 0 for num in num_list):
+        raise ValueError(f"calc_split_factor requires a non-empty list of positive integers, got {num_list}.")
     total = sum(num_list)
     return [total / num for num in num_list]
 
