@@ -278,6 +278,46 @@ class TestAscendModelSlimConfig(TestBase):
             return_success=True,
         )
 
+    def test_get_quant_method_resolves_legacy_minimax_numbered_expert(self):
+        prefix = "model.layers.0.block_sparse_moe.experts"
+        config = AscendModelSlimConfig({f"{prefix}.0.{proj}.weight": "W8A8_DYNAMIC" for proj in ("w1", "w2", "w3")})
+        layer = MagicMock(spec=RoutedExperts)
+        layer.moe_config = MagicMock()
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "minimax"
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch("vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer") as create_scheme,
+            patch("vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod") as moe_method,
+        ):
+            method = config.get_quant_method(layer, "model.layers.0.mlp.experts.7")
+
+        create_scheme.assert_called_once_with("W8A8_DYNAMIC", prefix, "moe")
+        moe_method.assert_called_once_with(create_scheme.return_value, layer.moe_config)
+        self.assertIs(method, moe_method.return_value)
+
+    def test_get_quant_method_keeps_numbered_minimax_linear_prefix(self):
+        prefix = "model.layers.0.mlp.experts.7.w1"
+        config = AscendModelSlimConfig({prefix + ".weight": "W8A8_DYNAMIC"})
+        layer = MagicMock(spec=LinearBase)
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "minimax"
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch("vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer") as create_scheme,
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod") as linear_method,
+        ):
+            method = config.get_quant_method(layer, prefix)
+
+        create_scheme.assert_called_once_with("W8A8_DYNAMIC", prefix, "linear")
+        self.assertIs(method, linear_method.return_value)
+
     def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
         layer = RoutedExperts.__new__(RoutedExperts)
         torch.nn.Module.__init__(layer)

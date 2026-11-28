@@ -1,0 +1,6 @@
+pr: 23120
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup error on Ascend 310P when MiniMax-M2 ModelSlim MoE
+      checkpoints store expert metadata under block_sparse_moe.
