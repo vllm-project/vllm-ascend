@@ -218,7 +218,7 @@ def test_qsa_request_page_table_graph_replay(query_width):
 
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.qwen4_exp.input_adapter import Qwen4ExpPreparedInputAdapter
-    from vllm_ascend.models.qwen4_exp.qsa import AscendQSAImpl, AscendQSAMetadataBuilder
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSAImpl, AscendQSAMetadataBuilder, qsa_metadata_build_scope
 
     rows = 3 * query_width
     query = torch.randn(rows, 12, 256, dtype=torch.bfloat16, device="npu")
@@ -268,11 +268,8 @@ def test_qsa_request_page_table_graph_replay(query_width):
             slot_mapping=raw.token_to_req,
             is_prefilling=torch.zeros(3, dtype=torch.bool),
         )
-        meta = (
-            builder.build_for_cudagraph_capture(common)
-            if capture
-            else builder.build(0, common, full_graph_mode=not eager)
-        )
+        with qsa_metadata_build_scope(full_graph=not (capture or eager)):
+            meta = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
         adapter._prepare_gbsa(layer, meta, raw, full_graph=not (capture or eager), prepared_this_step={})
         return meta
 

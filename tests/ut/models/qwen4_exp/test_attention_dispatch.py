@@ -214,6 +214,7 @@ def load_builder():
 
     namespace: dict[str, Any] = dict(
         Any=Any,
+        _qsa_full_graph_replay=SimpleNamespace(get=lambda: False),
         upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
