@@ -144,8 +144,13 @@ def kv_transfer_finished_handler(original_func, connector, *args, **kwargs):
     """
     result = original_func(connector, *args, **kwargs)
 
-    finished_recving = getattr(result, "finished_recving", None)
-    _record_finished(len(finished_recving) if finished_recving else 0, connector)
+    # The poll result is untrusted connector data: a malformed field must
+    # never break the caller, so the extraction stays inside safe_recording.
+    finished_count = 0
+    with safe_recording("kv_transfer"):
+        finished_recving = getattr(result, "finished_recving", None)
+        finished_count = len(finished_recving) if finished_recving else 0
+    _record_finished(finished_count, connector)
     return result
 
 
@@ -160,27 +165,34 @@ def kv_transfer_outcome_handler(original_func, scheduler, connector_output, *arg
     """
     result = original_func(scheduler, connector_output, *args, **kwargs)
 
-    finished = getattr(connector_output, "finished_recving", None)
-    if not finished:
-        return result
+    # Same untrusted-data rule: extract and size both collections inside
+    # safe_recording so a malformed connector output cannot reach inference.
+    finished_count = 0
+    failed_count = 0
+    with safe_recording("kv_transfer"):
+        finished = getattr(connector_output, "finished_recving", None)
+        if finished:
+            finished_count = len(finished)
+            failed = set(getattr(connector_output, "failed_recving", None) or ()) & set(finished)
+            failed_count = len(failed)
     labels = {_CONNECTOR_LABEL: _connector_label(scheduler)}
-    record_observation(
-        _recorders,
-        _KEY,
-        _SPECS,
-        _FINISHED_SPEC,
-        float(len(finished)),
-        labels,
-        "kv_transfer",
-    )
-    failed = set(getattr(connector_output, "failed_recving", None) or ()) & set(finished)
-    if failed:
+    if finished_count:
+        record_observation(
+            _recorders,
+            _KEY,
+            _SPECS,
+            _FINISHED_SPEC,
+            float(finished_count),
+            labels,
+            "kv_transfer",
+        )
+    if failed_count:
         record_observation(
             _recorders,
             _KEY,
             _SPECS,
             _FAILED_SPEC,
-            float(len(failed)),
+            float(failed_count),
             labels,
             "kv_transfer",
         )
@@ -195,7 +207,9 @@ def kv_transfer_invalid_blocks_handler(original_func, connector, *args, **kwargs
     """
     result = original_func(connector, *args, **kwargs)
 
-    failed_blocks = len(result) if result else 0
+    failed_blocks = 0
+    with safe_recording("kv_transfer"):
+        failed_blocks = len(result) if result else 0
     if failed_blocks:
         record_observation(
             _recorders,
