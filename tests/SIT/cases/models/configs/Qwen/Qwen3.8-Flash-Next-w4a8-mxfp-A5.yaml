@@ -11,7 +11,7 @@ test_cases:
       CC: "/usr/bin/g++"
       CXX: "/usr/bin/g++"
       SERVER_PORT: "DEFAULT_PORT"
-      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      VLLM_ENGINE_READY_TIMEOUT_S: "2400"
       VLLM_RPC_TIMEOUT: "6000"
     server_cmd:
       - "--host"
@@ -41,7 +41,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_static_kernel":false,"enable_super_kernel":false}}'
       - "--speculative-config"
       - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
     test_content: []
@@ -60,5 +60,7 @@ test_cases:
         repetition_penalty: 1.0
         # Pooled-PD reference: 178/198, 178/198, 181/198; median 89.90% (PR #3).
         # Colocated accuracy has not been measured; do not use the best PD score as its floor.
+        # Calibration-only floor; this does not check accuracy regression.
+        # After CI: use the colocated baseline, verify_mode: range, threshold: 5.
         verify_mode: ge
         baseline: 0

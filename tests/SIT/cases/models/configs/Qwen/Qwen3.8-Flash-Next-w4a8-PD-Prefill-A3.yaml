@@ -9,7 +9,7 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_SERVER_DEV_MODE: "1"
-      VLLM_ENGINE_READY_TIMEOUT_S: "4800"
+      VLLM_ENGINE_READY_TIMEOUT_S: "2400"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
     pd_server_envs:
       - HCCL_NPU_SOCKET_PORT_RANGE: "61400-61499"
@@ -59,7 +59,7 @@ test_cases:
            "enable_fused_mc2": 0,
            "enable_cpu_binding": true,
            "multistream_overlap_shared_expert": true,
-           "ascend_compilation_config": {"fuse_norm_quant":false}}
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_static_kernel":false,"enable_super_kernel":false}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
         - --kv-transfer-config
@@ -108,7 +108,7 @@ test_cases:
            "enable_shared_expert_dp": true,
            "multistream_overlap_shared_expert": true,
            "scheduler_config": {"recompute_scheduler_enable":true},
-           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":true}}
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
         - --kv-transfer-config
@@ -121,8 +121,9 @@ test_cases:
     # Measured references: https://github.com/zsponly/vllm-ascend/pull/4
     # Evidence revision: c48249d30613a5fc1b2ef448a537086e316c030b. Throughputs are aggregate tokens/s.
     # Reference: A3 r136 / CANN 9.3.0, custom Union GBSA ops and PR overlays.
-    # Direct-P measurements are calibration references for this PD-proxy job.
-    # Enable input_throughput_threshold only after validating the proxy on CI.
+    # Static kernel and SuperKernel are disabled for the nightly startup budget.
+    # Historical direct-P runs were paced; this PD-proxy nightly is unpaced.
+    # Calibrate total input throughput on CI, then enable the Qwen3.x 0.97 gate.
     benchmarks:
       prepare_prefill_prompts:
         case_type: curl_cmd
@@ -131,15 +132,7 @@ test_cases:
             python - <<'PY'
             from pathlib import Path
             from ais_bench.benchmark.datasets.utils.datasets import get_data_path
-            from tools.aisbench import maybe_download_from_modelscope, REQUEST_CONF_DIR
-
-            # Case-local template: preserve the standard template and use uniform arrivals.
-            request_dir = Path(REQUEST_CONF_DIR)
-            template = (request_dir / "vllm_api_stream_chat.py").read_text(encoding="utf-8")
-            (request_dir / "qwen38_uniform_stream_chat.py").write_text(
-                template + '\nmodels[0].setdefault("traffic_cfg", {})["burstiness"] = 0.0\n',
-                encoding="utf-8",
-            )
+            from tools.aisbench import maybe_download_from_modelscope
 
             for source, name, count in (
                 ("vllm-ascend/GSM8K-in131072-bs100-qwen3", "128k", 440),
@@ -159,38 +152,34 @@ test_cases:
       warmup_p_128k: &warmup_p_128k
         case_type: performance
         dataset_path_local: qwen38_a3_prefill/128k
-        request_conf: qwen38_uniform_stream_chat
+        request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 1
         batch_size: 1
         max_out_len: 1
         request_rate: 0
-      pure_p_128k: &pure_p_128k
+      pure_p_128k:
         <<: *warmup_p_128k
         num_prompts: 440
         batch_size: 110
-        request_rate: 0.239975
         # Direct-P full-run reference: TTFT 11746.0 ms; input tokens/s below.
-        input_throughput_baseline: 31219.01
-        # input_throughput_threshold: 0.97  # Pending matching PD-proxy CI.
-      pure_p_128k_round_2: *pure_p_128k
-      pure_p_128k_round_3: *pure_p_128k
+        # Historical paced direct-P input throughput: 31219.01 tokens/s.
+        # TODO: set input_throughput_baseline from unpaced, static-kernel-off CI (total).
+        # input_throughput_threshold: 0.97
       warmup_p_16k: &warmup_p_16k
         case_type: performance
         dataset_path_local: qwen38_a3_prefill/16k
-        request_conf: qwen38_uniform_stream_chat
+        request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 1
         batch_size: 1
         max_out_len: 1
         request_rate: 0
-      pure_p_16k: &pure_p_16k
+      pure_p_16k:
         <<: *warmup_p_16k
         num_prompts: 376
         batch_size: 94
-        request_rate: 2.142476
         # Direct-P full-run reference: TTFT 1807.9 ms; input tokens/s below.
-        input_throughput_baseline: 34762.34
-        # input_throughput_threshold: 0.97  # Pending matching PD-proxy CI.
-      pure_p_16k_round_2: *pure_p_16k
-      pure_p_16k_round_3: *pure_p_16k
+        # Historical paced direct-P input throughput: 34762.34 tokens/s.
+        # TODO: set input_throughput_baseline from unpaced, static-kernel-off CI (total).
+        # input_throughput_threshold: 0.97

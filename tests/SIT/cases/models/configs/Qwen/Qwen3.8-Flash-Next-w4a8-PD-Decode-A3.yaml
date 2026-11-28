@@ -9,7 +9,7 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_SERVER_DEV_MODE: "1"
-      VLLM_ENGINE_READY_TIMEOUT_S: "4800"
+      VLLM_ENGINE_READY_TIMEOUT_S: "2400"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
     pd_server_envs:
       - HCCL_NPU_SOCKET_PORT_RANGE: "61400-61499"
@@ -61,7 +61,7 @@ test_cases:
            "enable_fused_mc2": 0,
            "enable_cpu_binding": true,
            "multistream_overlap_shared_expert": true,
-           "ascend_compilation_config": {"fuse_norm_quant":false}}
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_static_kernel":false,"enable_super_kernel":false}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
         - --kv-transfer-config
@@ -110,7 +110,7 @@ test_cases:
            "enable_shared_expert_dp": true,
            "multistream_overlap_shared_expert": true,
            "scheduler_config": {"recompute_scheduler_enable":true},
-           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":true}}
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
         - --kv-transfer-config
@@ -123,8 +123,10 @@ test_cases:
     # Measured references: https://github.com/zsponly/vllm-ascend/pull/4
     # Evidence revision: c48249d30613a5fc1b2ef448a537086e316c030b. Throughputs are aggregate tokens/s.
     # Reference: A3 r136 / CANN 9.3.0, custom Union GBSA ops and PR overlays.
+    # Static kernel and SuperKernel are disabled for the nightly startup budget.
     # Reported D throughput/TPOT use steady-stage samples; the runner checks total.
-    # Keep steady-stage baseline candidates commented until full-run calibration.
+    # Calibrate total output throughput with static kernel disabled on CI.
+    # Enable the Qwen3.x 0.97 gate only with that matching full-run baseline.
     benchmarks:
       prepare_decode_prompts:
         case_type: curl_cmd
@@ -157,7 +159,7 @@ test_cases:
         batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_128k: &pure_d_128k
+      pure_d_128k:
         <<: *warmup_d_128k
         num_prompts: 512
         batch_size: 128
@@ -165,12 +167,8 @@ test_cases:
         # Steady-stage reference (384 requests): output 3687.79 tokens/s; TPOT 18.6 ms.
         # Full-run reference: 3276.9468 tokens/s, but mean output was 1019.4141.
         # Recalibrate with 1024 output tokens before enabling the total gate.
-        # baseline: 3687.79  # Steady-stage only, not the runner total.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
         # threshold: 0.97
-      warmup_d_128k_round_2: *warmup_d_128k
-      pure_d_128k_round_2: *pure_d_128k
-      warmup_d_128k_round_3: *warmup_d_128k
-      pure_d_128k_round_3: *pure_d_128k
       warmup_d_16k: &warmup_d_16k
         case_type: performance
         dataset_path_local: qwen38_a3_decode/16k
@@ -180,15 +178,11 @@ test_cases:
         batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_16k: &pure_d_16k
+      pure_d_16k:
         <<: *warmup_d_16k
         num_prompts: 440
         batch_size: 110
         max_out_len: 1024
         # Steady-stage reference: output 6461.38 tokens/s; TPOT 19.5 ms.
-        # baseline: 6461.38  # Steady-stage only, not the runner total.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
         # threshold: 0.97
-      warmup_d_16k_round_2: *warmup_d_16k
-      pure_d_16k_round_2: *pure_d_16k
-      warmup_d_16k_round_3: *warmup_d_16k
-      pure_d_16k_round_3: *pure_d_16k

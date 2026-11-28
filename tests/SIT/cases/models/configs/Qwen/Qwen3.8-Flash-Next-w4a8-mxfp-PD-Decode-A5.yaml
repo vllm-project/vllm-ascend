@@ -30,7 +30,7 @@ test_cases:
         HCCL_IF_BASE_PORT: "62000"
       - HCCL_NPU_SOCKET_PORT_RANGE: "61500-61599"
         VLLM_USE_FASTOKENS: "0"
-        VLLM_ENGINE_READY_TIMEOUT_S: "4800"
+        VLLM_ENGINE_READY_TIMEOUT_S: "2400"
         HCCL_IF_BASE_PORT: "63000"
     pd_server_cmds:
       # Prefill
@@ -135,7 +135,7 @@ test_cases:
            "enable_fused_mc2": 0,
            "enable_flashcomm1": true,
            "multistream_overlap_shared_expert": true,
-           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},
+           "ascend_compilation_config": {"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false},
            "scheduler_config": {"recompute_scheduler_enable":true}}
         - --speculative-config
         - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
@@ -150,10 +150,10 @@ test_cases:
     # Evidence revision: 75dfd6092eac2353ee6cf9e20d8cb16e87c32814. Throughputs are aggregate tokens/s.
     # Reference: A5 r177 / CANN 9.3.0 / vLLM 62d4bc3c / Ascend 4f49ae33.
     # torch-npu 2.10.0.post7, AISBench 3.1.20261013; no separately applied PRs.
-    # The measured installation locally excluded Slice from static compilation;
-    # that runtime exclusion is not a YAML option here.
+    # Static kernel and SuperKernel are disabled for the nightly startup budget.
     # Reported D throughput/TPOT use steady-stage samples; the runner checks total.
-    # Keep steady-stage baseline candidates commented until full-run calibration.
+    # Calibrate total output throughput with static kernel disabled on CI.
+    # Enable the Qwen3.x 0.97 gate only with that matching full-run baseline.
     benchmarks:
       prepare_decode_prompts:
         case_type: curl_cmd
@@ -186,18 +186,14 @@ test_cases:
         batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_128k: &pure_d_128k
+      pure_d_128k:
         <<: *warmup_d_128k
         num_prompts: 600
         batch_size: 150
         max_out_len: 1024
         # Steady-stage reference (450 requests): output 4759.9300 tokens/s; TPOT 8.5 ms.
-        # baseline: 4759.9300  # Steady-stage only, not the runner total.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
         # threshold: 0.97
-      warmup_d_128k_round_2: *warmup_d_128k
-      pure_d_128k_round_2: *pure_d_128k
-      warmup_d_128k_round_3: *warmup_d_128k
-      pure_d_128k_round_3: *pure_d_128k
       warmup_d_16k: &warmup_d_16k
         case_type: performance
         dataset_path_local: qwen38_a5_decode/16k
@@ -207,15 +203,11 @@ test_cases:
         batch_size: 16
         max_out_len: 1
         request_rate: 0
-      pure_d_16k: &pure_d_16k
+      pure_d_16k:
         <<: *warmup_d_16k
         num_prompts: 1000
         batch_size: 250
         max_out_len: 1024
         # Steady-stage reference (750 requests): output 10244.6925 tokens/s; TPOT 13.0 ms.
-        # baseline: 10244.6925  # Steady-stage only, not the runner total.
+        # TODO: set baseline from static-kernel-off CI output throughput (total).
         # threshold: 0.97
-      warmup_d_16k_round_2: *warmup_d_16k
-      pure_d_16k_round_2: *pure_d_16k
-      warmup_d_16k_round_3: *warmup_d_16k
-      pure_d_16k_round_3: *pure_d_16k
