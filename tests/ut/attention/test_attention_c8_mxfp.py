@@ -1,10 +1,13 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
 from vllm_ascend.utils import uses_ascend_store_memcache, uses_mooncake_connector
 
 
@@ -103,13 +106,16 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         )
         attn_metadata = SimpleNamespace(
             causal=True,
+            block_tables=None,
             query_start_loc_gpu=torch.tensor(query_start_loc, dtype=torch.int32),
             seq_lens_gpu=torch.ones(len(query_start_loc) - 1, dtype=torch.int32),
             max_query_len=max_query_len,
         )
         seen = {"source_scale": scale}
 
-        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale):
+        def fake_metadata(
+            _self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale, partition
+        ):
             seen["metadata_max_seqlen_q"] = max_seqlen_q
             seen["metadata_mask_mode"] = mask_mode
             seen["metadata_layout"] = layout_q_descale
@@ -379,3 +385,144 @@ class TestC8MXFPQfaMetadataPlan(TestBase):
         # was built for has to be the one the main call then uses.
         _, invocations = self._plans([{"mask_mode": 3}])
         self.assertEqual(invocations[0][1]["mask_mode"], 3)
+
+
+class TestMixedQFASplit(TestBase):
+    def setUp(self):
+        self.impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        self.impl.num_heads = 8
+        self.impl.num_kv_heads = 2
+        self.impl.head_size = 128
+        self.impl.scale = 128**-0.5
+        self.impl.sliding_window = None
+        self.impl.vllm_config = SimpleNamespace(
+            kv_transfer_config=None,
+            model_config=SimpleNamespace(enforce_eager=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+            speculative_config=None,
+        )
+        self.runtime_mode = CUDAGraphMode.NONE
+        self.query = torch.arange(24).view(24, 1, 1).expand(24, 8, 128).to(torch.bfloat16).contiguous()
+        self.scale = torch.arange(24 * 8 * 4, dtype=torch.int32).to(torch.uint8).view(24, 8, 2, 2)
+        self.kv = (torch.empty(1), torch.empty(1), torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.uint8))
+        self.metadata = AscendMetadata(
+            num_decodes=2,
+            num_decode_tokens=2,
+            num_prefills=1,
+            num_actual_tokens=24,
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_query_len=22,
+            actual_seq_lengths_q=[1, 2, 24],
+            query_start_loc_gpu=torch.tensor([0, 1, 2, 24], dtype=torch.int32),
+            seq_lens_gpu=torch.tensor([141, 79, 67], dtype=torch.int32),
+            block_tables=torch.tensor([[8], [1], [4]], dtype=torch.int32),
+            attn_mask=torch.ones(2, 2, dtype=torch.int8),
+        )
+        self.ops = MagicMock()
+        self.ops.quant_flash_attn_metadata.side_effect = lambda *args, **kwargs: object()
+        self.ops.quant_flash_attn.side_effect = self._fake_qfa
+
+    def _fake_qfa(self, query, key, value, query_scale, *_args, **kwargs):
+        # Verify which KV rows, Q scale rows and query offsets belong to
+        # each token. Reconstruct the TND scale before comparing outputs.
+        self.assertIs(key, self.kv[0])
+        self.assertIs(value, self.kv[1])
+        scale = query_scale.view(torch.uint8)
+        if kwargs["layout_q_descale"] == "N2TGD":
+            scale = scale.permute(1, 0, 2, 3, 4).reshape_as(self.scale[: len(query)])
+        lens = kwargs["cu_seqlens_q"].diff().tolist()
+        offsets = kwargs["cu_seqlens_q"].tolist()
+        self.assertEqual((offsets[0], offsets[-1]), (0, len(query)))
+        result = query.float() + scale[:, :, 0, :1].float()
+        for index in range(len(lens)):
+            result[offsets[index] : offsets[index + 1]] += kwargs["seqused_kv"][index] + kwargs["block_table"][index, 0]
+        return result.to(torch.bfloat16), None
+
+    def _forward(self):
+        output = torch.full((26, 8, 128), -1, dtype=torch.bfloat16)
+        with (
+            patch("vllm_ascend.attention.attention_c8_mxfp.record_attention_compute_start"),
+            patch(
+                "vllm_ascend.attention.attention_c8_mxfp.get_forward_context",
+                return_value=SimpleNamespace(cudagraph_runtime_mode=self.runtime_mode),
+            ),
+            patch(
+                "vllm_ascend.attention.attention_c8_mxfp.torch_npu.npu_dynamic_mx_quant",
+                return_value=(self.query, self.scale),
+            ),
+            patch.dict("sys.modules", {"cann_ops_transformer.ops": self.ops}),
+        ):
+            self.assertIs(self.impl.forward(None, self.query, None, None, self.kv, self.metadata, output), output)
+        self.assertTrue((output[24:] == -1).all())
+        return output
+
+    def test_eager_mixed_output_and_plan_reuse(self):
+        self.impl.vllm_config.model_config.enforce_eager = False
+        baseline = self._forward()
+        self.impl.vllm_config.model_config.enforce_eager = True
+        self.ops.reset_mock()
+        for _ in range(2):  # Two layers sharing this step's metadata.
+            torch.testing.assert_close(self._forward(), baseline, rtol=0, atol=0)
+        self.assertEqual(self.ops.quant_flash_attn_metadata.call_count, 2)
+        decode, prefill, next_decode, next_prefill = self.ops.quant_flash_attn.call_args_list
+        self.assertEqual(decode.kwargs["cu_seqlens_q"].tolist(), [0, 1, 2])
+        self.assertEqual(prefill.kwargs["cu_seqlens_q"].tolist(), [0, 22])
+        self.assertEqual((decode.kwargs["mask_mode"], decode.kwargs["layout_q_descale"]), (0, "N2TGD"))
+        self.assertEqual((prefill.kwargs["mask_mode"], prefill.kwargs["layout_q_descale"]), (3, "TND"))
+        self.assertIsNone(decode.kwargs["attn_mask"])
+        self.assertIs(prefill.kwargs["attn_mask"], self.metadata.attn_mask)
+        self.assertIs(decode.kwargs["metadata"], next_decode.kwargs["metadata"])
+        self.assertIs(prefill.kwargs["metadata"], next_prefill.kwargs["metadata"])
+        self.assertIsNot(decode.kwargs["metadata"], prefill.kwargs["metadata"])
+
+    def test_full_decode_only_distinguishes_runtime_modes(self):
+        self.impl.vllm_config.model_config.enforce_eager = False
+        self.impl.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        for mode, expected_calls in ((CUDAGraphMode.FULL, 1), (CUDAGraphMode.PIECEWISE, 1), (CUDAGraphMode.NONE, 2)):
+            with self.subTest(mode=mode):
+                self.runtime_mode = mode
+                self.metadata = replace(self.metadata, qfa_metadata_cache={})
+                self.ops.reset_mock()
+                self._forward()
+                self.assertEqual(self.ops.quant_flash_attn.call_count, expected_calls)
+
+    def test_full_decode_only_keeps_pure_decode_whole(self):
+        self.impl.vllm_config.model_config.enforce_eager = False
+        self.impl.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        self.runtime_mode = CUDAGraphMode.FULL
+        num_reqs = len(self.query)
+        self.metadata = replace(
+            self.metadata,
+            attn_state=AscendAttentionState.DecodeOnly,
+            num_decodes=num_reqs,
+            num_decode_tokens=num_reqs,
+            num_prefills=0,
+            max_query_len=1,
+            actual_seq_lengths_q=list(range(1, num_reqs + 1)),
+            query_start_loc_gpu=torch.arange(num_reqs + 1, dtype=torch.int32),
+            seq_lens_gpu=torch.full((num_reqs,), 32, dtype=torch.int32),
+            block_tables=torch.arange(num_reqs, dtype=torch.int32).reshape(-1, 1),
+        )
+        self._forward()
+        self.assertEqual(self.ops.quant_flash_attn.call_count, 1)
+        self.assertEqual(self.ops.quant_flash_attn.call_args.kwargs["mask_mode"], 0)
+
+    def test_ineligible_steps_keep_one_call(self):
+        base_metadata = self.metadata
+        for overrides, eager, speculative in (
+            ({}, False, None),
+            ({}, True, object()),
+            ({"num_prefills": 0}, True, None),
+            ({"num_decodes": 0}, True, None),
+            ({"num_decode_tokens": 3}, True, None),
+            ({"actual_seq_lengths_q": [1, 2, 24, 24]}, True, None),
+            ({"actual_seq_lengths_q": [1, 23, 24]}, True, None),
+        ):
+            with self.subTest(overrides=overrides, eager=eager, speculative=speculative):
+                self.metadata = replace(self.metadata, **overrides, qfa_metadata_cache={})
+                self.impl.vllm_config.model_config.enforce_eager = eager
+                self.impl.vllm_config.speculative_config = speculative
+                self._forward()
+                self.assertEqual(self.ops.quant_flash_attn.call_count, 1)
+                self.ops.reset_mock()
+                self.metadata = base_metadata
