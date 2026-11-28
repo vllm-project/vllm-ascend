@@ -28,6 +28,7 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
@@ -93,6 +94,11 @@ logger.info_once(
     value,
     scope="process",
 )
+
+if is_torch_equal_or_newer("2.14.0") and not vllm_version_is("0.34.0"):
+    # The bundled Inductor format cannot restore Ascend's compiled pieces.
+    # Retain AOT graph caching and restore pieces through the Ascend compiler.
+    os.environ.setdefault("VLLM_USE_MEGA_AOT_ARTIFACT", "0")
 
 _CUSTOM_OP_REGISTERED = False
 _MINIMAX_M3_ARCHITECTURES = frozenset(
