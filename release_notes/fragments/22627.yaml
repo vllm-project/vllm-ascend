@@ -1,0 +1,4 @@
+pr: 22627
+entries:
+  - category: bugfix
+    text: Fixed an Ascend plugin startup failure with newer vLLM versions that changed the EPLB configuration interface.
