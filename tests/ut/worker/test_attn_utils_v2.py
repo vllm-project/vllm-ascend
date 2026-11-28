@@ -3996,3 +3996,113 @@ def test_kernel_block_table_covers_encoder_manager_columns(initial_rows, initial
 
     attn_utils.initialize_kernel_block_table_buffers([group], 3, manager_widths)
     assert group.kernel_block_table is buffer
+
+
+@pytest.mark.parametrize("use_c8", [False, True])
+@pytest.mark.parametrize("is_leader", [False, True])
+def test_hisparse_get_kv_cache_spec_end_to_end_characterization(monkeypatch, use_c8, is_leader):
+    """Pin HiSparse specs, page sizes, and block_stride_alignment across collection."""
+    import math
+
+    from vllm.config.attention import HiSparseConfig
+    from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX, HISPARSE_RESIDENT_SUFFIX
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, SparseCacheRole
+
+    from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = use_c8
+    impl.c8_cache_dtype = torch.int8
+
+    source_layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(source_layer)
+    source_layer.attn_backend = AscendSFABackend
+    source_layer.kv_cache_dtype = "int8" if use_c8 else "bfloat16"
+    source_layer.head_size = 576
+    source_layer.kv_lora_rank = 512
+    source_layer.qk_rope_head_dim = 64
+    source_layer.num_heads = 16
+    source_layer.sliding_window = None
+    source_layer.non_causal_multi_token_decode = False
+    source_layer.topk_buffer_width = 2048
+    source_layer.indexer = None
+    source_layer.impl = impl
+    source_layer.is_draft_layer = False
+    source_layer.kv_sharing_target_layer_name = None
+    source_layer.hisparse_cache = SimpleNamespace(runtime=SimpleNamespace(is_group_leader=is_leader))
+
+    indexer_spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn if use_c8 else torch.bfloat16,
+        scale_dim=1 if use_c8 else 0,
+        scale_dtype=torch.float32,
+        cache_sparse_li_c8=use_c8,
+        cache_role=SparseCacheRole.INDEXER,
+    )
+    indexer_layer = SimpleNamespace(
+        kv_sharing_target_layer_name=None,
+        is_draft_layer=False,
+        get_kv_cache_spec=lambda _cfg: indexer_spec,
+        get_attn_backend=lambda: AscendHiSparseIndexerBackend,
+    )
+
+    layers = {"layer_0.self_attn": source_layer, "layer_0.indexer": indexer_layer}
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="int8" if use_c8 else "auto", block_size=128),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(model_type="deepseek_v3", kv_lora_rank=512, qk_rope_head_dim=64),
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=AttentionConfig(
+            indexer_kv_dtype="fp8" if use_c8 else "auto",
+            hisparse_config=HiSparseConfig(device_buffer_size=2048),
+        ),
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: layers)
+    fake_ascend_cfg = lambda: SimpleNamespace(enable_sparse_sfa_c8=use_c8)  # noqa: E731
+    monkeypatch.setattr(attn_utils, "get_ascend_config", fake_ascend_cfg)
+    monkeypatch.setattr("vllm_ascend.ascend_config.get_ascend_config", fake_ascend_cfg)
+
+    specs = attn_utils.get_kv_cache_spec(config)
+    hot_name = f"layer_0.self_attn{HISPARSE_HOT_SUFFIX}"
+    resident_name = f"layer_0.self_attn{HISPARSE_RESIDENT_SUFFIX}"
+    assert set(specs) == {"layer_0.self_attn", "layer_0.indexer", hot_name, resident_name}
+
+    src = specs["layer_0.self_attn"]
+    assert type(src) is MLAAttentionSpec
+    assert src.head_size == (C8_ROW_BYTES if use_c8 else 576)
+    assert src.dtype == (torch.int8 if use_c8 else torch.bfloat16)
+    assert src.is_index_group_leader is is_leader
+    assert src.get_block_stride_alignment() == 1
+
+    idx = specs["layer_0.indexer"]
+    assert isinstance(idx, AscendSFAIndexerCacheSpec)
+    if use_c8:
+        assert idx.page_size_padded == 128 * (128 + 4)
+        assert idx.get_block_stride_alignment() == math.lcm(128, 4)
+    else:
+        assert idx.page_size_padded is None
+        assert idx.get_block_stride_alignment() == idx.page_size_bytes
+
+    res = specs[resident_name]
+    hot = specs[hot_name]
+    assert isinstance(res, HiSparseResidentSpec)
+    assert isinstance(hot, HiSparseHotSpec)
+    assert res.page_size == hot.page_size == src.page_size_bytes
+    from vllm_ascend.utils import vllm_version_is
+
+    row_bytes = src.page_size_bytes // 128
+    # vLLM v0.34.0's HiSparseHotSpec returns lcm(page_size, block_stride_alignment),
+    # whereas newer vLLM returns lcm(row_bytes, block_stride_alignment or 1).
+    base_hot_stride = hot.page_size if vllm_version_is("0.34.0") else row_bytes
+    if use_c8:
+        assert res.get_block_stride_alignment() == C8_ROW_BYTES
+        assert hot.get_block_stride_alignment() == math.lcm(base_hot_stride, C8_ROW_BYTES)
+    else:
+        assert res.get_block_stride_alignment() == 1
+        assert hot.get_block_stride_alignment() == base_hot_stride
