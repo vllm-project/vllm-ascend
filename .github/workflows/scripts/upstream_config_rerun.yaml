@@ -1,0 +1,133 @@
+e2e-upstream_pr:
+  - name: tests/v1/worker/test_mamba_utils.py
+    estimated_time: 20
+e2e-upstream_singlecard:
+  - name: tests/basic_correctness/cpu_offload/test_cpu_offload.py
+    estimated_time: 20
+  - name: tests/benchmarks/test_mm_processor_cli.py
+    estimated_time: 20
+  - name: tests/detokenizer/test_stop_reason.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_echo.py
+    estimated_time: 20
+  - name: tests/entrypoints/rl/state_transitions/test_pause_resume.py
+    estimated_time: 20
+  - name: tests/entrypoints/rl/state_transitions/test_weight_checker.py
+    estimated_time: 20
+  - name: tests/entrypoints/rl/weight_transfer/test_offline.py
+    estimated_time: 20
+  - name: tests/entrypoints/serve/instrumentator/test_metrics.py
+    estimated_time: 20
+  - name: tests/kernels/moe/test_fp8_tp_loading.py
+    estimated_time: 20
+  - name: tests/lora/test_qwenvl.py
+    estimated_time: 20
+  - name: tests/model_executor/test_routed_experts_capture.py
+    estimated_time: 20
+  - name: tests/models/multimodal/generation_ppl_test/test_glm.py
+    estimated_time: 20
+  - name: tests/models/test_terratorch.py
+    estimated_time: 20
+  - name: tests/parser/mistral/test_reasoning.py
+    estimated_time: 20
+  - name: tests/parser/mistral/test_tool_calls.py
+    estimated_time: 20
+  - name: tests/utils_/test_spawn_decorator.py
+    estimated_time: 20
+  - name: tests/v1/attention/test_sparse_mla_kv_cache_layout.py
+    estimated_time: 20
+  - name: tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py
+    estimated_time: 20
+  - name: tests/v1/core/test_kv_cache_utils.py
+    estimated_time: 20
+  - name: tests/v1/core/test_prefix_caching.py
+    estimated_time: 20
+  - name: tests/v1/core/test_scheduler.py
+    estimated_time: 20
+  - name: tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_medusa.py
+    estimated_time: 20
+  - name: tests/v1/e2e/spec_decode/acceptance_rates/xpress/test_xpress.py
+    estimated_time: 20
+  - name: tests/v1/engine/test_kv_cache_group_metadata.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_hidden_states_connector.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_remote_prefill_lifecycle.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_dflash2.py
+    estimated_time: 20
+  - name: tests/v1/test_outputs.py
+    estimated_time: 20
+  - name: tests/compile/h100/test_startup.py
+    estimated_time: 20
+  - name: tests/config/test_bailing_mtp_config.py
+    estimated_time: 20
+  - name: tests/config/test_speculative_draft_hf_overrides.py
+    estimated_time: 20
+  - name: tests/entrypoints/anthropic/test_messages.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/tool_parsers/test_granite4_tool_parser.py
+    estimated_time: 20
+  - name: tests/entrypoints/weight_transfer/test_weight_transfer_llm.py
+    estimated_time: 20
+  - name: tests/model_executor/test_eagle_quantization.py
+    estimated_time: 20
+  - name: tests/model_executor/test_mistral_large_3_eagle.py
+    estimated_time: 20
+  - name: tests/model_executor/test_qwen3_omni.py
+    estimated_time: 20
+  - name: tests/models/language/pooling/test_colbert.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_gte.py
+    estimated_time: 20
+  - name: tests/models/multimodal/generation/test_granite_speech.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_siglip.py
+    estimated_time: 20
+  - name: tests/parser/test_streaming.py
+    estimated_time: 20
+  - name: tests/renderers/test_sparse_tensor_concurrent_race.py
+    estimated_time: 20
+  - name: tests/test_logger.py
+    estimated_time: 20
+  - name: tests/transformers_utils/test_processor.py
+    estimated_time: 20
+  - name: tests/utils_/test_argparse_utils.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_mooncake_store_worker.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_speculators_correctness.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_speculators_eagle3.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_utils.py
+    estimated_time: 20
+e2e-upstream_online_1:
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
+  - name: tests/models/language/generation/test_granite.py
+    estimated_time: 20
+  - name: tests/tokenizers_/test_mistral.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+    estimated_time: 20
+  - name: tests/entrypoints/speech_to_text/realtime/test_realtime_validation.py
+    estimated_time: 20
+  - name: tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py
+    estimated_time: 20
+e2e-upstream_a2_2:
+  - name: tests/models/language/generation/test_hybrid.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_qwen3_reranker.py
+    estimated_time: 20
+  - name: tests/models/multimodal/generation/test_moss_audio.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_async_llm_dp.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/extract_hidden_states_integration/test_extraction.py
+    estimated_time: 20
+e2e-upstream_a2_4:
+  - name: tests/lora/test_deepseekv2_tp.py
+    estimated_time: 20
+  - name: tests/lora/test_qwen3moe_tp.py
+    estimated_time: 20
