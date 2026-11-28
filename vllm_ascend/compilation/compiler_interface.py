@@ -33,6 +33,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime
@@ -44,7 +45,13 @@ def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable
 
     if not graph_returns_tuple(graph):
         return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
-    return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
+    backend = aot_autograd(fw_compiler=inner_compile)
+    if is_torch_equal_or_newer("2.14.0"):
+        # The fusion compiler returns an FX graph. PyTorch's outer AOT compilation
+        # forces a cache entry, which requires Inductor OutputCode for each piece.
+        with torch._functorch.config.patch(force_autograd_cache=False):
+            return backend(graph, example_inputs)
+    return backend(graph, example_inputs)
 
 
 def fusion_pass_compile(
