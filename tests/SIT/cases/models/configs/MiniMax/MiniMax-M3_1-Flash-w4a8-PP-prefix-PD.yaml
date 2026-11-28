@@ -52,9 +52,9 @@ env_common: &env_common
 
 env_prefill: &env_prefill
   <<: *env_common
-  VLLM_PP_LAYER_PARTITION: "16,15,15,14"
+  VLLM_PP_LAYER_PARTITION: "17,15,15,13"
   HCCL_IF_BASE_PORT: "51000"
-  HCCL_BUFFSIZE: "1024"
+  HCCL_BUFFSIZE: "2048"
 
 env_decode: &env_decode
   <<: *env_common
@@ -88,24 +88,22 @@ templates:
       - "--max-model-len"
       - "133000"
       - "--max-num-seqs"
-      - "32"
+      - "16"
       - "--max-num-batched-tokens"
-      - "8192"
+      - "32768"
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
       - "--gpu-memory-utilization"
-      - "0.92"
-      - "--limit-mm-per-prompt"
-      - '{"image":1,"video":0}'
+      - "0.86"
       - "--reasoning-parser"
       - "minimax_m3"
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -113,7 +111,7 @@ templates:
         "kv_port":"36000",
         "kv_connector_extra_config":{
             "use_ascend_direct":true,
-            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
 
 
@@ -149,22 +147,20 @@ templates:
       - "--max-model-len"
       - "133000"
       - "--max-num-batched-tokens"
-      - "32768"
+      - "2048"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
       - "--max-num-seqs"
-      - "128"
+      - "16"
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--limit-mm-per-prompt"
-      - '{"image":1,"video":0}'
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -173,7 +169,7 @@ templates:
         "kv_port":"36100",
         "kv_connector_extra_config":{
             "use_ascend_direct":true,
-            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
 
 
@@ -209,22 +205,20 @@ templates:
       - "--max-model-len"
       - "133000"
       - "--max-num-batched-tokens"
-      - "32768"
+      - "2048"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
       - "--max-num-seqs"
-      - "128"
+      - "16"
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--limit-mm-per-prompt"
-      - '{"image":1,"video":0}'
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"/root/.cache/modelscope/hub/models/vllm-ascend/MiniMax-M3___1-Flash-W4A8/dspark", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true, "kv_cache_dtype":"bfloat16"}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -233,7 +227,7 @@ templates:
         "kv_port":"36100",
         "kv_connector_extra_config":{
             "use_ascend_direct":true,
-            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
 
 
