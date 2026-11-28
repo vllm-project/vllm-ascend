@@ -201,7 +201,7 @@ The operator suite covers compact and masked refill, page gaps, padding, changin
 Graph inputs, direct/sorted written-slot invalidation, packed KV write/read,
 Resident BF16-576 and C8-656 rows, and recycled-block bucket boundaries.
 Native resolver/DMA and direct-mirror integration cases remain separately in
-`tests/e2e/pull_request/one_card/test_hisparse_integration.py`; they are not Triton-only
+`tests/e2e/pull_request/a5/test_hisparse_integration.py`; they are not Triton-only
 operator tests.
 
 ```bash
