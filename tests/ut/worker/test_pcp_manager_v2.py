@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from contextlib import nullcontext
+from dataclasses import fields
 from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -45,6 +46,7 @@ from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.dspark.aux_states import ProjectedDraftAuxStates
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import aclgraph as aclgraph_module
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import AutoRegressiveAclGraphManager
@@ -1514,6 +1516,128 @@ def test_sampling_restore_exposes_unpadded_global_view(is_draft_prefill_sharded:
     assert restored_hidden.data_ptr() == hidden_states.data_ptr()
     assert batch.num_tokens_after_padding == 16
     assert batch.query_start_loc.tolist() == [0, 12, 16]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("compact_global_batch", [False, True], ids=["padded", "compact"])
+@pytest.mark.parametrize("num_graph_tokens", [0, 6], ids=["eager", "graph-staging"])
+@pytest.mark.parametrize("base_input_batch", [False, True], ids=["ascend-batch", "base-batch"])
+@pytest.mark.parametrize("target_quantized", [False, True], ids=["float-target", "quantized-target"])
+def test_dspark_pcp_aux_projection_matches_global_projection(
+    monkeypatch,
+    rank: int,
+    compact_global_batch: bool,
+    num_graph_tokens: int,
+    base_input_batch: bool,
+    target_quantized: bool,
+) -> None:
+    # Reuse the sampling fixture, but keep the real parent restoration methods:
+    # only the collective is mocked so row permutations and padding are tested.
+    num_tokens, padded_tokens, hidden_size, num_layers = 4, 6, 2, 3
+    batch = _make_global_pcp_batch()
+    if base_input_batch:
+        batch = InputBatch(**{field.name: getattr(batch, field.name) for field in fields(InputBatch)})
+        assert not hasattr(batch, "is_dummy")
+    batch.num_tokens = num_tokens
+    batch.num_tokens_after_padding = padded_tokens
+    batch.query_start_loc_np = np.array([0, num_tokens, padded_tokens], dtype=np.int32)
+    batch.query_start_loc = torch.from_numpy(batch.query_start_loc_np.copy())
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.pcp_world_size = 2
+    manager.vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dspark"),
+        parallel_config=SimpleNamespace(pcp_shard_decode_requests=compact_global_batch),
+    )
+    manager._global_batch = batch
+    # Rank-local rows are [A, D, padding] and [B, C, padding]. The final
+    # two global graph rows deliberately alias a real row before zeroing.
+    manager._hidden_restore_idx = torch.tensor([0, 3, 4, 1, 0, 0])
+    rows = torch.tensor([[1.0, 2.0], [3.0, -1.0], [-2.0, 4.0], [5.0, 3.0]])
+    global_aux = [rows * (layer + 1) + torch.tensor([layer, -layer]) for layer in range(num_layers)]
+    local_indices = (torch.tensor([0, 3]), torch.tensor([1, 2]))
+    rank_aux = [
+        [
+            torch.cat([states[indices], torch.tensor([[101.0 + layer, -103.0 - layer]])])
+            for layer, states in enumerate(global_aux)
+        ]
+        for indices in local_indices
+    ]
+    rank_hidden = [torch.cat([rows[indices], torch.full((1, hidden_size), -99.0)]) for indices in local_indices]
+    weight = torch.tensor([[1.0, 2.0], [-3.0, 1.0], [2.0, -1.0], [1.0, 4.0], [-2.0, 3.0], [4.0, -2.0]])
+
+    def combine(states):
+        return torch.nn.functional.rms_norm(states @ weight, (hidden_size,), eps=1e-6)
+
+    speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    speculator.vllm_config = SimpleNamespace(
+        quant_config=object() if target_quantized else None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    speculator.draft_attn_layer_names = set()
+    speculator.model = SimpleNamespace(
+        supports_pcp_local_aux_projection=True,
+        model=SimpleNamespace(target_layer_ids=list(range(num_layers))),
+        combine_hidden_states=MagicMock(side_effect=combine),
+    )
+    speculator.hidden_states = torch.full((padded_tokens, hidden_size), float("nan"))
+    speculator._aux_staging = torch.empty(padded_tokens, num_layers * hidden_size)
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.set_current_vllm_config", lambda _: nullcontext()
+    )
+    monkeypatch.setattr("vllm_ascend.worker.v2.pcp_manager.get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+    manager.set_speculator(speculator)
+    assert manager._draft_aux_speculator is speculator
+    assert speculator._aux_staging is None
+
+    def gather_rows(rank_states):
+        def all_gather(value, dim):
+            assert dim == 0
+            assert value.is_contiguous(), "HCCL requires contiguous inputs"
+            torch.testing.assert_close(value, rank_states[rank])
+            return torch.cat(rank_states, dim=dim)
+
+        return all_gather
+
+    # Reference: restore each raw auxiliary layer, then project globally.
+    raw_collectives = [gather_rows([rank_aux[peer][layer] for peer in range(2)]) for layer in range(num_layers)]
+    raw_gather = MagicMock(side_effect=lambda value, dim: raw_collectives.pop(0)(value, dim))
+    monkeypatch.setattr("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(all_gather=raw_gather))
+    restored_raw = [manager.restore_hidden_states(states) for states in rank_aux[rank]]
+    expected = combine(torch.cat(restored_raw, dim=-1))
+    torch.testing.assert_close(expected[:num_tokens], combine(torch.cat(global_aux, dim=-1)))
+    assert raw_gather.call_count == num_layers
+
+    # Optimized: gather main hidden states separately and just one projected aux.
+    projected_ranks = [combine(torch.cat(states, dim=-1)) for states in rank_aux]
+    collectives = [gather_rows(rank_hidden), gather_rows(projected_ranks)]
+    projected_gather = MagicMock(side_effect=lambda value, dim: collectives.pop(0)(value, dim))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(all_gather=projected_gather)
+    )
+    restored_hidden, restored_aux, restored_batch = manager.restore_for_sampling(rank_hidden[rank], rank_aux[rank])
+    assert projected_gather.call_count == 2
+    assert isinstance(restored_aux, ProjectedDraftAuxStates)
+    torch.testing.assert_close(restored_aux.context_states, expected)
+    torch.testing.assert_close(restored_hidden[:num_tokens], rows)
+    assert manager._sampling_global_batch is restored_batch
+    assert restored_batch.num_tokens_after_padding == (num_tokens if compact_global_batch else padded_tokens)
+    if compact_global_batch:
+        assert restored_batch.query_start_loc.tolist() == [0, num_tokens]
+    else:
+        torch.testing.assert_close(restored_aux.context_states[num_tokens:], torch.zeros(2, hidden_size))
+        torch.testing.assert_close(restored_hidden[num_tokens:], torch.zeros(2, hidden_size))
+    assert batch.num_tokens_after_padding == padded_tokens
+    assert batch.query_start_loc.tolist() == [0, num_tokens, padded_tokens]
+    speculator.model.combine_hidden_states.assert_called_once()
+
+    # Feed the exact returned carrier into real draft staging. Neither eager
+    # nor FULL-graph staging may project again; graph padding must not be stale.
+    speculator._store_hidden_states(num_tokens, restored_hidden, restored_aux, num_graph_tokens)
+    torch.testing.assert_close(speculator.hidden_states[:num_tokens], expected[:num_tokens])
+    if num_graph_tokens:
+        torch.testing.assert_close(speculator.hidden_states[num_tokens:num_graph_tokens], torch.zeros(2, hidden_size))
+    speculator.model.combine_hidden_states.assert_called_once()
 
 
 def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:

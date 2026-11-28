@@ -14,6 +14,7 @@ pytest.importorskip(
 )
 
 import torch
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -33,6 +34,49 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41Model,
 )
 from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+
+@pytest.mark.parametrize("method_cls", [UnquantizedLinearMethod, AscendUnquantizedLinearMethod])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("target_quantized", [False, True])
+def test_pcp_aux_projection_checks_loaded_layer_instead_of_target_config(method_cls, dtype, target_quantized):
+    draft = DSparkDeepseekV41ForCausalLM.__new__(DSparkDeepseekV41ForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.vllm_config = SimpleNamespace(quant_config=object() if target_quantized else None)
+    draft.model = SimpleNamespace(
+        main_proj=SimpleNamespace(quant_method=method_cls(), weight=torch.empty(2, 6, dtype=dtype))
+    )
+
+    assert draft.supports_pcp_local_aux_projection
+
+
+@pytest.mark.parametrize(
+    "invalid", ["quantized", "same-name", "int8", "float64", "missing-weight", "missing-method", "missing-projection"]
+)
+def test_pcp_aux_projection_rejects_unsupported_loaded_layers(invalid):
+    draft = DSparkDeepseekV41ForCausalLM.__new__(DSparkDeepseekV41ForCausalLM)
+    torch.nn.Module.__init__(draft)
+    projection = SimpleNamespace(
+        quant_method=AscendUnquantizedLinearMethod(), weight=torch.empty(2, 6, dtype=torch.bfloat16)
+    )
+    if invalid == "quantized":
+        # Packed/dynamic schemes must not be enabled solely because a weight
+        # or scale tensor happens to have a floating dtype.
+        projection.quant_method = object()
+    elif invalid == "same-name":
+        projection.quant_method = type("AscendUnquantizedLinearMethod", (), {})()
+    elif invalid == "int8":
+        projection.weight = torch.empty(2, 6, dtype=torch.int8)
+    elif invalid == "float64":
+        projection.weight = torch.empty(2, 6, dtype=torch.float64)
+    elif invalid == "missing-weight":
+        del projection.weight
+    elif invalid == "missing-method":
+        del projection.quant_method
+    draft.model = SimpleNamespace() if invalid == "missing-projection" else SimpleNamespace(main_proj=projection)
+
+    assert not draft.supports_pcp_local_aux_projection
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
