@@ -50,7 +50,9 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
 
 def normalize_mxfp_v_scale(raw: torch.Tensor) -> None:
     """Map zero-absmax calibration bytes to E8M0 scale one for both cache and reciprocal."""
-    raw.masked_fill_(raw == 0, 127)
+    # Ascend MaskedFill supports signed bytes. Zero and 127 have the same bit patterns.
+    signed = raw.view(torch.int8)
+    signed.masked_fill_(signed == 0, 127)
 
 
 class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
