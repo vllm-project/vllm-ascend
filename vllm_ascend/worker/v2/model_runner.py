@@ -185,6 +185,7 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._target_uses_flashmla = False
+        self._c8_mxfp_v_scale_caches: list[tuple[torch.Tensor, torch.Tensor, int]] = []
         # #56492: inherited dummy runs inspect this even on non-VMM platforms.
         self.extensible_kv_cache = None
         # FusedMoE can be constructed by the parent initializer and reads this
@@ -647,6 +648,11 @@ class NPUModelRunner(GPUModelRunner):
                 kernel_blocks_per_page = value_scale_cache.shape[0] // num_blocks
                 self._c8_mxfp_v_scale_caches.append((layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page))
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
+
+    def restore_kv_cache_static_state(self) -> None:
+        """Refill static kv_cache metadata (e.g. C8_MXFP V scales) after wake-up."""
+        for value_scale, value_scale_cache, _ in self._c8_mxfp_v_scale_caches:
+            fill_mxfp_v_scale_cache(value_scale, value_scale_cache)
 
     def shutdown(self) -> None:
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload

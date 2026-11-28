@@ -2220,6 +2220,32 @@ def test_fill_c8_mxfp_v_scale_caches_skips_non_c8_layers():
     assert not hasattr(runner, "kv_block_zeroer")
 
 
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize(("k_dim", "v_dim"), [(64, 64), (64, 128)])
+def test_restore_kv_cache_static_state_refills_all_pages_after_kv_discard(ratio, k_dim, v_dim):
+    raw, views, layer, runner, pitch = _c8_packet(ratio, k_dim, v_dim)
+    raw[128:-128].fill_(73)
+    expected = raw.clone()
+    expected_views = mxfp_paged_cache_views(
+        expected[128:-128], 2 * ratio, 2, k_dim, v_dim, 512, page_stride_bytes=pitch
+    )
+    fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3])
+
+    runner.restore_kv_cache_static_state()
+
+    assert torch.equal(raw, expected)
+    assert torch.equal(views[3], expected_views[3])
+
+
+def test_restore_kv_cache_static_state_is_noop_without_c8_layers():
+    layer = SimpleNamespace(impl=object(), kv_cache=(MagicMock(), MagicMock()))
+    runner = _c8_mxfp_runner({"plain": layer})
+    runner._fill_c8_mxfp_v_scale_caches()
+
+    runner.restore_kv_cache_static_state()
+    assert runner._c8_mxfp_v_scale_caches == []
+
+
 @pytest.mark.parametrize("ratio", [1, 2, 4])
 @pytest.mark.parametrize(("k_dim", "v_dim"), [(64, 64), (64, 128)])
 def test_zero_block_ids_restores_reassigned_page_v_scales(ratio, k_dim, v_dim):

@@ -418,6 +418,8 @@ class NPUWorker(GPUWorker):
             )
         self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
+            # Refill static kv_cache metadata before re-exposing KV memory.
+            self.model_runner.restore_kv_cache_static_state()
             global_te.reregister_buffer()
 
         rl_config = get_ascend_config().rl_config
