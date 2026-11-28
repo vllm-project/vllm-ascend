@@ -261,5 +261,59 @@ inline at::Tensor npu_fused_sparse_attention_overlap(
         sparse_mode);
 }
 
+inline at::Tensor npu_fused_sparse_attention_overlap_split_query(
+    const at::Tensor &query,
+    const at::Tensor &selection_k_rope,
+    const at::Tensor &selection_kv_cache,
+    const at::Tensor &selection_kv_block_table,
+    const at::Tensor &selection_kv_block_status,
+    const at::Tensor &selection_membership_map,
+    const at::Tensor &selection_topk_indices,
+    const at::Tensor &full_k_rope,
+    const at::Tensor &full_kv_cache,
+    const at::Tensor &full_kv_block_table,
+    const at::Tensor &full_kv_actual_seq,
+    const at::Tensor &full_q_actual_seq,
+    double scale_value,
+    int64_t sparse_block_size,
+    int64_t selection_topk_block_size,
+    const at::Tensor &query_rope,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    const int64_t rank = query.dim();
+    TORCH_CHECK(rank > 0 && query_rope.dim() == rank,
+                "query_rope must have the same positive rank as query");
+    TORCH_CHECK(query_rope.sizes().slice(0, rank - 1) == query.sizes().slice(0, rank - 1),
+                "query_rope leading dimensions must match query");
+    TORCH_CHECK(query_rope.scalar_type() == query.scalar_type() && query_rope.device() == query.device(),
+                "query_rope dtype and device must match query");
+    TORCH_CHECK(full_k_rope.defined() && full_k_rope.numel() > 0 && full_k_rope.dim() > 0 &&
+                    query_rope.size(-1) == full_k_rope.size(-1),
+                "query_rope last dim must match full_k_rope last dim");
+
+    return RunFusedSparseAttentionOverlapSideEffectImpl(
+        query,
+        query_rope,
+        selection_k_rope,
+        selection_kv_cache,
+        selection_kv_block_table,
+        selection_kv_block_status,
+        selection_membership_map,
+        selection_topk_indices,
+        full_k_rope,
+        full_kv_cache,
+        full_kv_block_table,
+        full_kv_actual_seq,
+        full_q_actual_seq,
+        scale_value,
+        sparse_block_size,
+        selection_topk_block_size,
+        std::string(layout_query),
+        std::string(layout_kv),
+        sparse_mode);
+}
+
 } // namespace vllm_ascend
 #endif

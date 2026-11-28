@@ -1,0 +1,6 @@
+pr: 22792
+entries:
+  - category: performance
+    text: >-
+      Fused sparse KV offload decode avoids an intermediate query tensor
+      allocation for compatible NoPE and RoPE query layouts.
