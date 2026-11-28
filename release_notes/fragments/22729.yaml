@@ -1,0 +1,10 @@
+pr: 22729
+entries:
+  - category: performance
+    text: >-
+      Reduced host time spent copying dense KV-cache pages when continuing a
+      partially cached prefix. On A5 with Qwen3.5-35B-A3B BF16 at TP1 and five
+      requests per second, median host copy time dropped from 6.88 ms to
+      5.81 ms compared with per-segment D2D copies.
+    model: Qwen3.5-35B-A3B
+    hardware: [A5]
