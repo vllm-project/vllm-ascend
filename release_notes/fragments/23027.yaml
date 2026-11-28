@@ -1,0 +1,7 @@
+pr: 23027
+entries:
+  - category: performance
+    text: >-
+      HiSparse C8 prefill skips redundant copies of device-resident KV when a
+      decode in the same batch needs host KV and vLLM supplies per-request
+      residency information.

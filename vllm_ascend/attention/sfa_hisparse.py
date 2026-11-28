@@ -651,8 +651,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         view = cache.view
         state_indices = cache.runtime.request_state_indices
         if (
-            not cache.all_context_pages_resident
-            or cache.dummy_batch
+            cache.dummy_batch
             or cache.draft_layer
             or view is None
             or cache.block_table is None
@@ -662,6 +661,16 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or key_lengths.shape != (metadata.num_reqs,)
         ):
             return None
+        if not cache.all_context_pages_resident:
+            # Older Core versions only provide the batch-wide proof.
+            resident = getattr(cache, "resident_prefill_rows", None)
+            if (
+                not isinstance(resident, range)
+                or resident.step != 1
+                or resident.stop != metadata.num_reqs
+                or num_decodes not in resident
+            ):
+                return None
         if (
             get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
             or torch.npu.is_current_stream_capturing()
