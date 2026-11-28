@@ -89,7 +89,8 @@ def main():
     # Preserve the effective child environment even if the native SDK hangs.
     output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     for user in (0, 1):
-        probe = {"user": user, "events": [], "returncode": None, "timeout": False}
+        events: list[dict[str, object]] = []
+        probe = {"user": user, "events": events, "returncode": None, "timeout": False}
         with subprocess.Popen([args.binary, str(user)], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
             probe["pid"] = child.pid
             try:
@@ -99,15 +100,16 @@ def main():
                 stdout, stderr = child.communicate()
                 probe["timeout"] = True
             probe["returncode"] = child.returncode
-        probe["stdout"] = stdout.decode("utf-8", errors="replace")
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        probe["stdout"] = stdout_text
         probe["stderr"] = stderr.decode("utf-8", errors="replace")
-        for line in probe["stdout"].splitlines():
+        for line in stdout_text.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict) and "event" in event:
-                probe["events"].append(event)
+                events.append(event)
         report["probes"].append(probe)
         output.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print("A5_DEVICE_MAPPING " + json.dumps({**report, "probes": [probe]}), flush=True)

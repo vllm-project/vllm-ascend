@@ -121,7 +121,7 @@ class MappingProbeServers(RemotePDServer):
 
 
 def test_a5_pd_device_mapping(tmp_path):
-    packages = {}
+    packages: dict[str, str | None] = {}
     for name in ("torch", "torch-npu", "vllm", "vllm-ascend", "mooncake-transfer-engine-npu"):
         try:
             packages[name] = version(name)
