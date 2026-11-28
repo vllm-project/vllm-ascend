@@ -564,6 +564,15 @@ For `K=3`, add these fields to your existing `speculative_config`.
 }
 ```
 
+To target the same mean acceptance length of `2.8`, use the following configuration.
+
+```json
+{
+  "rejection_sample_method": "synthetic",
+  "synthetic_acceptance_length": 2.8
+}
+```
+
 **Offline inference**
 
 ```python
