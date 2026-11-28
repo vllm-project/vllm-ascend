@@ -56,6 +56,15 @@ on:
         required: false
         default: '["a2","a3","310p","a5"]'
         type: string
+      os:
+        description: "OS variant to build: 'all' builds both ubuntu and openEuler, 'ubuntu' or 'openeuler' builds only that variant (/presmoke --os)."
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - ubuntu
+          - openeuler
       skip_base:
         description: 'If true, skip the base image build and only build the nightly image (base image must already exist).'
         required: false
@@ -88,6 +97,7 @@ jobs:
         id: matrix
         run: |
           CHIPS='${{ inputs.chips || '["a2","a3","310p","a5"]' }}'
+          OS='${{ inputs.os || 'all' }}'
           ALL=$(jq -nc '[
             {target:"a2",   os:"ubuntu",    soc:"910b", dockerfile:"Dockerfile",               suffix:""},
             {target:"a3",   os:"ubuntu",    soc:"a3",   dockerfile:"Dockerfile.a3",             suffix:"a3"},
@@ -98,8 +108,8 @@ jobs:
             {target:"310p", os:"openeuler", soc:"310p", dockerfile:"Dockerfile.310p.openEuler", suffix:"310p-openeuler"},
             {target:"a5",   os:"openeuler", soc:"950",  dockerfile:"Dockerfile.a5.openEuler",   suffix:"a5-openeuler"}
           ]')
-          FILTERED=$(echo "$ALL" | jq -c --argjson chips "$CHIPS" \
-            '[.[] | select(.target as $t | $chips | index($t))]')
+          FILTERED=$(echo "$ALL" | jq -c --argjson chips "$CHIPS" --arg os "$OS" \
+            '[.[] | select((.target as $t | $chips | index($t)) and ($os == "all" or .os == $os))]')
           echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
           if [ "$FILTERED" = "[]" ]; then
             echo "has_matrix=false" >> "$GITHUB_OUTPUT"

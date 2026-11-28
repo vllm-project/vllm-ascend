@@ -30,6 +30,7 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly test1 test2 ...` | Run only the **named** tests |
 | `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
 | `/presmoke <tests>` | Build only the nightly images (no tests) for the chips the test names select, publishing them to the isolated `*-presmoke` repositories |
+| `/presmoke <chips> --os ubuntu\|openeuler` | Build only the selected OS variant instead of both (`all`, the default) |
 | `/nightly <tests> --presmoke` | Run the tests on the images previously published by `/presmoke` instead of the standard nightly images |
 
 !!! note
