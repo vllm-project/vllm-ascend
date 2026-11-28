@@ -1374,6 +1374,7 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
         acks = {ticket: ranks.copy() for ticket, ranks in self.scheduler_read_pin_acks.items()}
-        for ticket, ranks in other.scheduler_read_pin_acks.items():
+        other_acks = getattr(other, "scheduler_read_pin_acks", {})
+        for ticket, ranks in other_acks.items():
             acks.setdefault(ticket, set()).update(ranks)
         return AscendStoreKVConnectorWorkerMetadata(merged, acks)
