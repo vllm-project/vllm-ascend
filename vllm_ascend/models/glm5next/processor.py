@@ -765,11 +765,15 @@ class Glm5NextProcessor(ProcessorMixin):
         GLM-5.3-Flash stores nested image/video configs in
         ``processor_config.json`` and declares a custom processor class. This
         method reads those configs directly and caps only the video token budget.
+        A ``tokenizer`` kwarg is used as-is; otherwise the remaining kwargs are
+        forwarded to ``AutoTokenizer.from_pretrained``.
         """
         from transformers import AutoTokenizer
 
         model_path = pretrained_model_name_or_path
-        tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
 
         def _cap_cfg(cfg: dict, *, is_video: bool) -> dict:
             # Video keeps a serving token cap (the checkpoint's 240k-token
