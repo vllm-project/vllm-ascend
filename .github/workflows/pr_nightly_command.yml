@@ -54,6 +54,7 @@ jobs:
       presmoke_image: ${{ steps.resolve.outputs.presmoke_image }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       source_ref: ${{ steps.resolve.outputs.source_ref }}
+      os_filter: ${{ steps.resolve.outputs.os_filter }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
       vllm_ref: ${{ steps.resolve.outputs.vllm_ref }}
@@ -234,6 +235,8 @@ jobs:
           PROFILE_OPTIONS_JSON='{}'
           IS_A3_560T="false"
           IS_PRESMOKE_IMAGE="false"
+          OS_FILTER="all"
+          NEXT_IS_OS=0
           NEXT_IS_BRANCH=0
           NEXT_IS_DOWNLOAD=0
           DOWNLOAD_PATH=""
@@ -277,6 +280,10 @@ jobs:
             elif [ "$NEXT_IS_DOWNLOAD" = "1" ]; then
               DOWNLOAD_PATH="$WORD"
               NEXT_IS_DOWNLOAD=0
+            elif [ "$NEXT_IS_OS" = "1" ]; then
+              OS_FILTER="$WORD"
+              NEXT_IS_OS=0
+              PENDING_OPTION=""
             elif [ "$PENDING_OPTION" = "--profile-start-after" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c --arg value "$WORD" '.start_after = $value' <<< "$PROFILE_OPTIONS_JSON")
               PENDING_OPTION=""
@@ -333,6 +340,9 @@ jobs:
               IS_A3_560T="true"
             elif [ "$WORD" = "--presmoke" ]; then
               IS_PRESMOKE_IMAGE="true"
+            elif [ "$WORD" = "--os" ]; then
+              NEXT_IS_OS=1
+              PENDING_OPTION="$WORD"
             elif [ "$WORD" = "--profile" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c '.enabled = true' <<< "$PROFILE_OPTIONS_JSON")
             elif [ "$WORD" = "--profile-with-stack" ]; then
@@ -391,6 +401,17 @@ jobs:
             echo "ERROR: --presmoke is supported only by the /nightly command (use /presmoke to build the image)"
             exit 1
           fi
+          case "$OS_FILTER" in
+            all|ubuntu|openeuler) ;;
+            *)
+              echo "ERROR: --os must be one of: ubuntu, openeuler, all"
+              exit 1
+              ;;
+          esac
+          if [ "$OS_FILTER" != "all" ] && [ "$COMMAND" != "presmoke" ]; then
+            echo "ERROR: --os is supported only by the /presmoke command"
+            exit 1
+          fi
 
           if [ -n "$BISECT_GOOD_COMMIT" ] &&
              ! [[ "$BISECT_GOOD_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -447,6 +468,7 @@ jobs:
             echo "aop_enabled=$AOP_ENABLED"
             echo "profile_options_json=$PROFILE_OPTIONS_JSON"
             echo "presmoke_image=$IS_PRESMOKE_IMAGE"
+            echo "os_filter=$OS_FILTER"
             echo "vllm_ref=$VLLM_REF"
             echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
             echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
@@ -635,9 +657,10 @@ jobs:
             presmoke)
               # The /presmoke command lists the chips to build directly; the resolved
               # dispatch_<chip> outputs are the single source of truth. isolated_build
-              # makes the build full-scale (ubuntu+openEuler on amd64+arm64), keeps
-              # the images in the isolated '-presmoke' CI repositories (never
-              # atlas_inference) and skips the quay.io and cn-north-4 syncs.
+              # makes the build full-scale (amd64+arm64) on the OS variants selected
+              # by --os (default both ubuntu and openEuler), keeps the images in the
+              # isolated '-presmoke' CI repositories (never atlas_inference) and skips
+              # the quay.io and cn-north-4 syncs.
               # source_ref makes both layers build from the triggering PR head
               # ('pre-merge'), so the code and Dockerfiles under review are the ones
               # built.
@@ -660,7 +683,7 @@ jobs:
               # Only forward source_ref when set: gh would turn an empty -f value
               # into 'true', which is not a valid ref.
               SOURCE_REF='${{ needs.authorize.outputs.source_ref }}'
-              ARGS=(-f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' -f chips="$CHIPS" -f isolated_build='true')
+              ARGS=(-f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' -f chips="$CHIPS" -f isolated_build='true' -f os='${{ needs.authorize.outputs.os_filter }}')
               if [ -n "$SOURCE_REF" ]; then
                 ARGS+=(-f "source_ref=$SOURCE_REF")
               fi
