@@ -58,7 +58,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Reset the shared extra-test list before the rest of this workflow reads it.
+  # A header-only file is empty of pytest targets, and still non-empty so
+  # later downloads do not treat a 200 response as a missing object.
+  upload-empty-extra-tests:
+    name: Upload empty extra recommended tests
+    runs-on: linux-amd64-cpu-8-hk
+    env:
+      OBS_ACCESS_KEY: 'HPUAYLRPR6DJKAA9EUBT'
+      OBS_SECRET_KEY: 'rQJcALjyJqot784hUYfQb20MQOIPJNaMsf9PTfZY'
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Upload empty extra_recommended_tests.yaml to OBS
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+            echo "::error::OBS credentials are missing"
+            exit 1
+          fi
+          cat > extra_recommended_tests.yaml <<'YAML'
+          # Extra pytest targets appended to coverage-recommended tests.
+          # Each item needs a path.
+          YAML
+          python3 -m pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com',
+          )
+          resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
+          if resp.status >= 300:
+              raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+          print(f'Uploaded empty extra_recommended_tests.yaml -> {obs_path}')
+          print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
+          EOF
+
   pre-commit:
+    needs: upload-empty-extra-tests
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -866,7 +911,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [upload-empty-extra-tests, pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     # The only producer of the required `ci-gate` check. Review events
     # re-evaluate the gate by re-running this job inside the original
     # pull_request run (see pr_refresh_ci_gate.yaml), so the required check
@@ -963,6 +1008,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          UPLOAD_EMPTY_RESULT="${{ needs.upload-empty-extra-tests.result }}"
           # Aggregate EVERY gate problem before deciding: ci-gate is the merge
           # gate's last checkpoint, so one push should surface all its issues
           # at once (lint + UT + missing owner approval + ...) instead of
@@ -992,6 +1038,7 @@ jobs:
           CPU_UT_FILTER="${{ needs.pre-commit.outputs.cpu_ut }}"
 
           echo "=== CI Gate Summary ==="
+          echo "upload-empty-extra-tests: ${UPLOAD_EMPTY_RESULT}"
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "cpu-ut: ${CPU_UT_RESULT}"
           echo "src filter: ${{ needs.pre-commit.outputs.src }}"
@@ -1003,6 +1050,10 @@ jobs:
           echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
+          fi
+
+          if [ "${UPLOAD_EMPTY_RESULT}" != "success" ]; then
+            add "Uploading empty extra_recommended_tests.yaml to OBS did not succeed (result: ${UPLOAD_EMPTY_RESULT}). Open the failed 'upload-empty-extra-tests' job above and check the OBS credentials and upload step."
           fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
