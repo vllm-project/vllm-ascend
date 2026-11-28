@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import fla_npu.ops
 import pytest
 import torch
 from torch import nn
@@ -41,7 +41,8 @@ def fusion_backend(monkeypatch):
     gdn._supports_fused_recurrent_gdn.cache_clear()
     monkeypatch.setattr(gdn, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     backend = SimpleNamespace()
-    monkeypatch.setattr(fla_npu.ops, "ascendc", backend)
+    # CPU mocks register modules without attaching them to their parents.
+    monkeypatch.setattr(import_module("fla_npu.ops"), "ascendc", backend, raising=False)
     yield backend
     gdn._supports_fused_recurrent_gdn.cache_clear()
 
