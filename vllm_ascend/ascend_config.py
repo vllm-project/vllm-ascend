@@ -711,7 +711,7 @@ class AscendConfig:
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
     # NPU operator execution timeout in seconds (default: 60; values below 1 are invalid).
-    ft_communication_abort_timeout: int = 60
+    npu_op_timeout: int = 60
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -1063,11 +1063,8 @@ class AscendConfig:
             self.ascend_compilation_config.enable_npugraph_ex = False
 
         # Reject 0 because HCCL treats it as no timeout.
-        if vc.parallel_config.enable_fault_tolerance and self.ft_communication_abort_timeout < 1:
-            raise ValueError(
-                f"ft_communication_abort_timeout must be an integer of at least 1 second, "
-                f"got {self.ft_communication_abort_timeout}"
-            )
+        if vc.parallel_config.enable_fault_tolerance and self.npu_op_timeout < 1:
+            raise ValueError(f"npu_op_timeout must be an integer of at least 1 second, got {self.npu_op_timeout}")
         return self
 
     @property

@@ -596,23 +596,23 @@ class NPUPlatform(Platform):
             # cannot abort the process during fault-tolerance recovery.
             os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
 
-        abort_timeout = get_ascend_config().ft_communication_abort_timeout
+        npu_op_timeout = get_ascend_config().npu_op_timeout
         env_timeouts = {
             name: os.environ[name] for name in ("HCCL_EXEC_TIMEOUT", "HCCL_EVENT_TIMEOUT") if name in os.environ
         }
         if env_timeouts:
             logger.warning(
                 "Fault tolerance: overriding HCCL timeout environment variables "
-                "%s with ft_communication_abort_timeout=%s s "
+                "%s with npu_op_timeout=%s s "
                 "(HCCL_EXEC_TIMEOUT=%s s, HCCL_EVENT_TIMEOUT=%s s).",
                 env_timeouts,
-                abort_timeout,
-                abort_timeout,
-                abort_timeout + 1,
+                npu_op_timeout,
+                npu_op_timeout,
+                npu_op_timeout + 1,
             )
         # Keep the inner HCCL timeout lower than the outer EVENT_WAIT timeout.
-        os.environ["HCCL_EXEC_TIMEOUT"] = str(abort_timeout)
-        os.environ["HCCL_EVENT_TIMEOUT"] = str(abort_timeout + 1)
+        os.environ["HCCL_EXEC_TIMEOUT"] = str(npu_op_timeout)
+        os.environ["HCCL_EVENT_TIMEOUT"] = str(npu_op_timeout + 1)
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.

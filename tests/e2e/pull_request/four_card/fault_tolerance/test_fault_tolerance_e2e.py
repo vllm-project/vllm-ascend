@@ -31,7 +31,7 @@ DP_SIZE = 4
 # - NPU: HCSP operator timeout detects the dead peer.
 # - Deadline: slowest fallback + margin.
 CPU_DISTRIBUTED_TIMEOUT_S = 15
-FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
+NPU_OP_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
 
 # scale_down re-hosts the dead rank's experts on the survivors and reloads
@@ -151,7 +151,7 @@ def _ft_server_args(
     # Quantized path end to end: --quantization ascend (W8A8); no --dtype,
     # the checkpoint's own config decides. MODEL_NAME must point at a W8A8
     # checkpoint (e.g. vllm-ascend/Qwen3-30B-A3B-W8A8).
-    ascend_config = {"ft_communication_abort_timeout": FT_COMMUNICATION_ABORT_TIMEOUT_S}
+    ascend_config = {"npu_op_timeout": NPU_OP_TIMEOUT_S}
     ascend_config.update(additional_config or {})
     return [
         "--quantization",
