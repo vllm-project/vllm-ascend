@@ -419,7 +419,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # exchange padding so embeddings match the unpadded is_multimodal mask.
         output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
-        if reduce_group is not None and reduce_group.world_size > 1:
+        if num_tokens and reduce_group is not None and reduce_group.world_size > 1:
             # The reduce-scatter covers this TP column only; add the rest.
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
         return output
@@ -446,7 +446,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             return output_parallel
 
         reduce_group = self.output_reduce_group
-        if reduce_group is None or reduce_group.world_size == 1:
+        if output_parallel.numel() == 0 or reduce_group is None or reduce_group.world_size == 1:
             return output_parallel
         # Standard vocabulary parallelism keeps identical token rows on every
         # rank. Sum the vocabulary-shard contributions without scattering the
