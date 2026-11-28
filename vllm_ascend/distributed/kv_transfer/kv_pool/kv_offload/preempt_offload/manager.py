@@ -114,15 +114,13 @@ class PreemptOffloadScheduler:
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             **(
-                {"use_eagle": False}
+                {"use_eagle": False, "pcp_world_size": 1}
                 if vllm_version_is("0.34.0")
                 else {"num_hash_lookahead_tokens": vllm_config.num_hash_lookahead_tokens}
             ),
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            # PCP expands the workers, not each worker's local KV token span.
-            pcp_world_size=1,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )

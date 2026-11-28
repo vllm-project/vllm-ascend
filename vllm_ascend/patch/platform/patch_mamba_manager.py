@@ -68,7 +68,6 @@ class AscendMambaManager(MambaManager):
             manager_config: ManagerConfig,
             alignment_tokens: int,
             dcp_world_size: int = 1,
-            pcp_world_size: int = 1,
             num_request_tokens: int | None = None,
         ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
             # Mamba recurrent states are replicated across DCP ranks, so
@@ -83,7 +82,6 @@ class AscendMambaManager(MambaManager):
                 manager_config=manager_config,
                 alignment_tokens=alignment_tokens,
                 dcp_world_size=1,
-                pcp_world_size=pcp_world_size,
                 num_request_tokens=num_request_tokens,
             )
 
