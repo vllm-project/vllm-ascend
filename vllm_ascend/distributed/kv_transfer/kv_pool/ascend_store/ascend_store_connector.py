@@ -463,11 +463,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-        if layer_name in getattr(worker, "dflash_draft_layer_names", ()):
+        layer = worker._extract_physical_layer_index(layer_name)
+        if layer in getattr(worker, "dflash_draft_layer_indices", ()):
             return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
-        layer = worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
             worker.wait_for_layer_load()
             self._loaded_layer = layer
@@ -508,7 +508,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-        if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
+        layer = worker._extract_physical_layer_index(layer_name)
+        if layer not in getattr(worker, "dflash_draft_layer_indices", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 
     def has_pending_bulk_save(self) -> bool:

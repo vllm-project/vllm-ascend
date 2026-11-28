@@ -1,0 +1,7 @@
+pr: 23540
+entries:
+  - category: bugfix
+    text: >-
+      Fixed memcache lease-tracking errors during chunked prefill with DSpark
+      and AscendStoreConnector configured with use_layerwise=true.
+      No configuration changes are required.
