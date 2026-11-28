@@ -81,12 +81,11 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     packaged_configs = {Path(path).name for path in provider.config_paths}
-    assert {
-        "base_metrics.yaml",
-        "eplb_metrics.yaml",
-        "runtime_guard_metrics.yaml",
-        "schedule_execute_metrics.yaml",
-    } <= packaged_configs
+    # Derive the expectation from the source tree instead of a hardcoded list:
+    # every packaged config exists in the config directory and vice versa, so
+    # provider branches never edit this shared assertion.
+    expected_configs = {path.name for path in (_PACKAGE_ROOT / "config").glob("*.yaml")}
+    assert packaged_configs == expected_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
     # Assert per-file and namespace invariants instead of exact totals: every
@@ -158,17 +157,16 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = [str(_REPOSITORY_ROOT / "vllm_ascend")]
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
-    for module_name in (
+    # Purge the package and every feature submodule (derived from the tree, so
+    # new handler files need no edit here) before importing the package fresh.
+    module_names = [
         "vllm_ascend.observability",
         "vllm_ascend.observability.ms_metrics",
         "vllm_ascend.observability.ms_metrics.provider",
-        "vllm_ascend.observability.ms_metrics.handlers",
-        "vllm_ascend.observability.ms_metrics.handlers.common",
-        "vllm_ascend.observability.ms_metrics.handlers.eplb",
-        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
-        "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
-        "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
-    ):
+        _HANDLER_PACKAGE,
+    ]
+    module_names.extend(f"{_HANDLER_PACKAGE}.{path.stem}" for path in sorted((_PACKAGE_ROOT / "handlers").glob("*.py")))
+    for module_name in module_names:
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(_HANDLER_PACKAGE, fromlist=["__unused__"])
@@ -194,16 +192,22 @@ def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
         assert source_path.is_file(), f"Missing symbol module: {item['symbol']}"
 
         syntax_tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        owner_name, method_name = attribute_path.split(".", 1)
-        owner = next(
-            (node for node in syntax_tree.body if isinstance(node, ast.ClassDef) and node.name == owner_name),
-            None,
-        )
-        assert owner is not None, f"Missing symbol owner: {item['symbol']}"
-        assert any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
-            for node in owner.body
-        ), f"Missing symbol method: {item['symbol']}"
+        if "." in attribute_path:
+            owner_name, method_name = attribute_path.split(".", 1)
+            owner = next(
+                (node for node in syntax_tree.body if isinstance(node, ast.ClassDef) and node.name == owner_name),
+                None,
+            )
+            assert owner is not None, f"Missing symbol owner: {item['symbol']}"
+            assert any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
+                for node in owner.body
+            ), f"Missing symbol method: {item['symbol']}"
+        else:
+            assert any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == attribute_path
+                for node in syntax_tree.body
+            ), f"Missing symbol function: {item['symbol']}"
 
 
 def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(monkeypatch):
@@ -305,6 +309,80 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
     assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
     assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_sp_padding_handler_records_ratio(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_sp_padding_ratio", "parallel")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+    monkeypatch.setattr(handlers, "_tp_size", lambda: 4)
+    hidden_states = type("HiddenStates", (), {"shape": (10, 8)})()
+
+    result = handlers.sp_padding_handler(lambda mask, states: "out", None, hidden_states)
+
+    assert result == "out"
+    metrics.record_metric.assert_called_once_with(
+        "parallel:sp_padding_ratio",
+        value=0.2,
+        labels={},
+    )
+
+    metrics.reset_mock()
+    monkeypatch.setattr(handlers, "_tp_size", lambda: 1)
+    handlers.sp_padding_handler(lambda mask, states: "out", None, hidden_states)
+    metrics.record_metric.assert_not_called()
+
+
+def test_sp_padding_handler_skips_computation_when_level_disabled(monkeypatch):
+    """The level gate runs before the token math and the TP size lookup."""
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_sp_padding_gate_first", "parallel")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    tp_size = Mock()
+    monkeypatch.setattr(handlers, "_tp_size", tp_size)
+    hidden_states = type("HiddenStates", (), {"shape": (10, 8)})()
+
+    assert handlers.sp_padding_handler(lambda mask, states: "out", None, hidden_states) == "out"
+    tp_size.assert_not_called()
+    metrics.record_metric.assert_not_called()
+
+
+def test_moe_comm_selection_handler_labels_comm_type(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_moe_comm_selection", "parallel")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+    allgather = type("MoECommType", (), {"name": "ALLGATHER"})()
+
+    result = handlers.moe_comm_selection_handler(lambda *args, **kwargs: {"moe_comm_type": allgather})
+
+    assert result == {"moe_comm_type": allgather}
+    metrics.record_metric.assert_called_once_with(
+        "parallel:moe_comm_selection_total",
+        value=1.0,
+        labels={"comm": "ALLGATHER"},
+    )
+
+    metrics.reset_mock()
+    handlers.moe_comm_selection_handler(lambda *args, **kwargs: {"moe_comm_type": None})
+    metrics.record_metric.assert_not_called()
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
