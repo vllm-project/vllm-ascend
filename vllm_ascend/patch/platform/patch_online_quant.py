@@ -89,13 +89,13 @@ def _add_ascend_online_names() -> None:
     config Ascend tests; every other vLLM entry is kept, and a recipe Ascend
     cannot execute is rejected by ``online_validate`` rather than removed here.
 
-    A name vLLM does not know yet (not in its ``QuantizationMethods`` Literal)
-    would additionally need ``register_quantization_config(name)(...)``, which
-    appends it to ``QUANTIZATION_METHODS`` and to
-    ``NPUPlatform.supported_quantization``. The recipes here are all names vLLM
-    already ships, so nothing has to be registered.
+    A name vLLM does not know yet (``int8_per_channel`` today) also has to join
+    ``QUANTIZATION_METHODS`` so ``--quantization`` accepts it. The platform
+    whitelist lists it through ``ASCEND_ONLINE_QUANT_METHODS``, and
+    ``get_quantization_config`` resolves its class through the shorthand loop.
     """
     from vllm.config import quantization as vllm_quantization
+    from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
     from vllm_ascend.quantization.methods.online import ONLINE_SHORTHANDS
 
@@ -107,6 +107,9 @@ def _add_ascend_online_names() -> None:
     vllm_quantization._ONLINE_SHORTHANDS.update(ONLINE_SHORTHANDS)
     # The name tuple is derived at import time, so it has to be rebuilt.
     vllm_quantization.ONLINE_QUANT_SHORTHAND_NAMES = (*vllm_quantization._ONLINE_SHORTHANDS, "online")
+    for name in ONLINE_SHORTHANDS:
+        if name not in QUANTIZATION_METHODS:
+            QUANTIZATION_METHODS.append(name)
 
 
 def _patch_unquantized_fallback() -> None:

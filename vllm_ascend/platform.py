@@ -252,11 +252,12 @@ class NPUPlatform(Platform):
         "modelopt_mxfp8",
         "mxfp8",
         # Online (load-time) quantization: a plain bf16 checkpoint quantized
-        # while the weights are loaded. Only the INT8 recipes have an Ascend
-        # execution path. register_quantization_config() cannot add these two
-        # names automatically because they already live in vLLM's
-        # QuantizationMethods Literal, so verify_quantization() needs them here.
-        # patch_online_quant dispatches them to Ascend's method classes, and
+        # while the weights are loaded. `online` is vLLM's generic name and
+        # `int8_per_channel` is Ascend's own recipe (per-channel INT8 weights
+        # with dynamically per-token INT8 activations, dense and routed-expert
+        # layers). Both are listed here because verify_quantization() checks
+        # this list; patch_online_quant adds `int8_per_channel` to vLLM's
+        # method list and dispatches both to Ascend's method classes, while
         # `apply_config_platform_defaults` rejects the online weight keys
         # Ascend has no method for.
         *ASCEND_ONLINE_QUANT_METHODS,

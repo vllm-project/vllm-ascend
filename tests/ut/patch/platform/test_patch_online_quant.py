@@ -48,6 +48,7 @@ from vllm_ascend.quantization.methods.online.int8 import (
     AscendInt8PerChannelOnlineLinearMethod,
     AscendInt8PerChannelOnlineMoEMethod,
 )
+from vllm_ascend.utils import ASCEND_ONLINE_QUANT_METHODS
 
 # vLLM's own online shorthands: Ascend neither removes nor rewrites them, so the
 # checkpoint formats and the deprecated `--quantization fp8` alias keep working.
@@ -184,9 +185,28 @@ class TestOnlineNames(TestBase):
     def test_kept_names_still_resolve_to_the_upstream_online_config(self):
         # No subclass is registered: upstream dispatches the same class the
         # composition path and the v0.34.0 lane instantiate.
-        for name in ("online", "int8_per_channel_weight_only"):
+        for name in ("online", "int8_per_channel"):
             with self.subTest(name=name):
                 self.assertIs(get_quantization_config(name), OnlineQuantizationConfig)
+
+    def test_int8_recipe_covers_dense_and_experts(self):
+        args = ONLINE_SHORTHANDS["int8_per_channel"]
+
+        self.assertEqual(args.linear, QuantSpec(weight=kInt8StaticChannelSym))
+        self.assertEqual(args.moe, QuantSpec(weight=kInt8StaticChannelSym))
+
+    def test_declared_recipes_are_in_the_platform_whitelist(self):
+        # verify_quantization() rejects a --quantization name missing from
+        # NPUPlatform.supported_quantization, which is built from this tuple.
+        for name in ONLINE_SHORTHANDS:
+            with self.subTest(name=name):
+                self.assertIn(name, ASCEND_ONLINE_QUANT_METHODS)
+
+    def test_the_upstream_int8_shorthand_is_not_an_ascend_name(self):
+        # `int8_per_channel_weight_only` is vLLM's experts-only shorthand;
+        # Ascend exposes `int8_per_channel` instead, so the old name must not be
+        # on the platform whitelist.
+        self.assertNotIn("int8_per_channel_weight_only", ASCEND_ONLINE_QUANT_METHODS)
 
     def test_reapplying_the_patch_does_not_change_the_tables(self):
         before = dict(vllm_quantization._ONLINE_SHORTHANDS)

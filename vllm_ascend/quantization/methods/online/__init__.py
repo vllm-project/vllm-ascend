@@ -61,9 +61,13 @@ SUPPORTED_ONLINE_WEIGHT_KEYS: frozenset[QuantKey] = frozenset(ONLINE_METHODS) | 
 # untouched, and a recipe Ascend cannot execute is rejected by
 # ``online_validate`` instead of being removed here.
 ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
-    # Upstream meaning: experts only, matching vLLM's shorthand of the same
-    # name.
-    "int8_per_channel_weight_only": QuantizationConfigArgs(
+    # Ascend's own name: per-channel INT8 weights with dynamically per-token
+    # INT8 activations, for dense linear layers and routed experts. vLLM's
+    # `int8_per_channel_weight_only` does not describe this path (it is
+    # experts-only and its name implies weight-only quantization), so it is not
+    # reused.
+    "int8_per_channel": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kInt8StaticChannelSym),
         moe=QuantSpec(weight=kInt8StaticChannelSym),
     ),
 }

@@ -57,13 +57,15 @@ ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 FP8_METHOD = "fp8"
 # ``--quantization`` names routed to vllm_ascend's online (load-time)
-# quantization config: ``online`` is the explicit form, and
-# ``int8_per_channel_weight_only`` is upstream's shorthand for "INT8 experts,
-# dense layers untouched". Kept here rather than in the online config module
-# because ``vllm_ascend.platform`` reads the names while its class body is being
-# built, and importing the config there would pull the vLLM model-executor and
-# quantization graphs in through ``current_platform`` resolution.
-ASCEND_ONLINE_QUANT_METHODS: tuple[str, ...] = ("online", "int8_per_channel_weight_only")
+# quantization config: ``online`` is vLLM's generic name (the recipe comes from
+# ``--quantization-config``), and ``int8_per_channel`` is Ascend's own recipe
+# name (per-channel INT8 weights with dynamically per-token INT8 activations,
+# for dense linears and routed experts). Kept here rather than in the online
+# config module because ``vllm_ascend.platform`` reads the names while its class
+# body is being built, and importing the config there would pull the vLLM
+# model-executor and quantization graphs in through ``current_platform``
+# resolution.
+ASCEND_ONLINE_QUANT_METHODS: tuple[str, ...] = ("online", "int8_per_channel")
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 

@@ -142,16 +142,16 @@ activations, which is the same kernel used by a ModelSlim `W8A8_DYNAMIC`
 checkpoint:
 
 ```bash
-# Quantize the MoE experts; dense layers keep their original dtype
-vllm serve /path/to/Qwen3-30B-A3B --quantization int8_per_channel_weight_only
+# Dense linear layers and routed experts
+vllm serve /path/to/Qwen3-30B-A3B --quantization int8_per_channel
 
-# Quantize dense linear layers as well
+# Or select the layer kinds yourself
 vllm serve /path/to/Qwen3-8B --quantization online \
     --quantization-config.linear int8_per_channel_static
 ```
 
-`int8_per_channel_weight_only` follows the upstream vLLM meaning: only the
-routed expert weights are quantized. To pick the layer kinds yourself, combine
+`int8_per_channel` is Ascend's name for this recipe and applies it to both dense
+linear layers and routed experts. To pick the layer kinds yourself, combine
 `--quantization online` with `linear` and/or `moe`:
 
 ```bash

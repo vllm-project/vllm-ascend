@@ -1689,10 +1689,11 @@
 #    How:
 #       Write Ascend's `ONLINE_METHODS` / `ONLINE_MOE_METHODS` entries
 #       (`vllm_ascend/quantization/methods/online/__init__.py`) into the two
-#       upstream tables. vLLM's `--quantization` table is left alone, so every
-#       upstream recipe and checkpoint format keeps resolving; an Ascend-only
-#       name would be added on top of it, and a recipe Ascend cannot execute is
-#       rejected explicitly by `vllm_ascend.quantization.online_validate` from
+#       upstream tables, and apply Ascend's own `--quantization` name
+#       (`int8_per_channel`) on top of vLLM's table (it also joins
+#       `QUANTIZATION_METHODS`). vLLM's other recipes and checkpoint formats
+#       keep resolving, and a recipe Ascend cannot execute is rejected
+#       explicitly by `vllm_ascend.quantization.online_validate` from
 #       `NPUPlatform.apply_config_platform_defaults`. No config class is
 #       subclassed or registered and the `_get_quantization_config` funnel is
 #       left alone, so the patch behaves the same whether upstream instantiates
