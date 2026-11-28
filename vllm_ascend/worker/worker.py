@@ -297,9 +297,6 @@ class NPUWorker(GPUWorker):
     def get_compilation_match_table(self) -> dict[str, int]:
         raise NotImplementedError("GPUWorker.get_compilation_match_table is not validated on Ascend.")
 
-    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
-        raise NotImplementedError("GPUWorker.get_encoder_timing_stats is not validated on Ascend.")
-
     def annotate_profile(self, scheduler_output):
         raise NotImplementedError("GPUWorker.annotate_profile is not validated on Ascend.")
 

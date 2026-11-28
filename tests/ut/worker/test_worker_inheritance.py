@@ -22,7 +22,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "_get_cudagraph_capture_context",
     "_set_draft_weight_update_target",
     "get_compilation_match_table",
-    "get_encoder_timing_stats",
     "annotate_profile",
     "randomize_dummy_inputs",
     "save_sharded_state",
@@ -119,6 +118,90 @@ def test_get_draft_model_reports_the_runner_drafter(drafter):
     worker.model_runner = runner
 
     assert worker.get_draft_model() is draft_model
+
+
+@pytest.mark.parametrize("has_encoder_runner", [False, True], ids=["text-only", "multimodal"])
+def test_get_encoder_timing_stats_delegates_to_runner_and_drains_stats(monkeypatch, has_encoder_runner):
+    """This RPC used to raise on Ascend; it now inherits GPUWorker's runner delegation.
+
+    Exercise the real NPUWorker -> NPUModelRunner -> AscendModelState -> EncoderRunner
+    chain so both branches run: a text-only AscendModelState leaves encoder_runner unset
+    and yields {}, while a multimodal AscendModelState constructs the upstream
+    EncoderRunner with enable_timing=True, records per-request stats through
+    timed_encoder_operation(), returns them via NPUWorker, and clears the registry.
+    """
+    import torch
+    from vllm.v1.worker.gpu.mm import encoder_runner as encoder_runner_module
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend._310p.worker_310p import NPUWorker310
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+    from vllm_ascend.worker.v2.model_states import default as ascend_model_state_module
+    from vllm_ascend.worker.v2.model_states.default import AscendModelState
+    from vllm_ascend.worker.worker import NPUWorker
+
+    monkeypatch.setattr(
+        ascend_model_state_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            get_inputs_embeds_size=lambda: 8,
+            dtype=torch.float16,
+            enforce_eager=True,
+            max_model_len=16,
+            enable_prompt_embeds=False,
+            uses_mrope=False,
+            uses_xdrope_dim=0,
+            is_multimodal_model=has_encoder_runner,
+            supports_multimodal_inputs=has_encoder_runner,
+            is_mm_prefix_lm=False,
+            multimodal_config=None,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=8),
+        compilation_config=SimpleNamespace(cudagraph_mm_encoder=False),
+        observability_config=SimpleNamespace(enable_mm_processor_stats=True),
+    )
+    encoder_cache = SimpleNamespace(encoder_outputs={}) if has_encoder_runner else None
+    model_state = AscendModelState(vllm_config, torch.nn.Linear(8, 8), encoder_cache, torch.device("cpu"))
+
+    runner = object.__new__(NPUModelRunner)
+    runner.model_state = model_state
+
+    worker = object.__new__(NPUWorker)
+    worker.model_runner = runner
+
+    if not has_encoder_runner:
+        assert not hasattr(model_state, "encoder_runner")
+        assert worker.get_encoder_timing_stats() == {}
+        assert NPUWorker.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+        assert NPUWorker310.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+        assert NPUModelRunner.get_encoder_timing_stats is GPUModelRunner.get_encoder_timing_stats
+        return
+
+    assert isinstance(model_state.encoder_runner, EncoderRunner)
+    assert model_state.encoder_runner.enable_timing is True
+    sync = Mock()
+    monkeypatch.setattr(encoder_runner_module.torch.accelerator, "synchronize", sync)
+    monkeypatch.setattr(encoder_runner_module.time, "perf_counter", Mock(side_effect=[10.0, 10.6]))
+
+    with model_state.encoder_runner.timed_encoder_operation(["req-1", "req-2"]):
+        pass
+
+    stats = worker.get_encoder_timing_stats()
+    assert NPUWorker.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+    assert NPUWorker310.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+    assert NPUModelRunner.get_encoder_timing_stats is GPUModelRunner.get_encoder_timing_stats
+    assert sync.call_count == 2
+    assert set(stats.keys()) == {"req-1", "req-2"}
+    for req_stats in stats.values():
+        assert req_stats["encoder_forward_secs"] == pytest.approx(0.3)
+        assert req_stats["num_encoder_calls"] == 1
+    # Reading timing stats drains the registry so subsequent polls return empty.
+    assert worker.get_encoder_timing_stats() == {}
 
 
 @pytest.mark.parametrize("configured", [False, True])
