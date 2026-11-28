@@ -55,8 +55,14 @@ def apply_moe_mlp(
     Quant path is dispatched by each FusedMoEMethod with explicit typed kernel flags.
     """
 
-    # When LoRA adapter is used in quantized weight, use individual lora impl.
-    if mlp_compute_input.quant.is_quant and mlp_compute_input.lora_context is not None:
+    # When LoRA adapter is used in quantized weight, use individual lora impl,
+    # unless the quant method applies MoE LoRA directly in its own gmm hooks
+    # (e.g., 310P W8A8_DYNAMIC using npu_quant_grouped_matmul_dequant).
+    if (
+        mlp_compute_input.quant.is_quant
+        and mlp_compute_input.lora_context is not None
+        and getattr(quant_method, "handles_moe_lora_in_gmm_hooks", False) is not True
+    ):
         from vllm_ascend.lora.fused_moe import has_lora
 
         if has_lora(mlp_compute_input.lora_context):
