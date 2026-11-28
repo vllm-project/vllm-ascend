@@ -99,9 +99,7 @@ def capture_runtime(tmp_path, monkeypatch):
         (MoECommType.MC2, False, [5], 1, 0, 0),
     ],
 )
-def test_prepare_router_capture_restores_exact_rows(
-    capture_runtime, comm, sp, counts, tp_size, dp_rank, input_padding
-):
+def test_prepare_router_capture_restores_exact_rows(capture_runtime, comm, sp, counts, tp_size, dp_rank, input_padding):
     """Run real prepare -> router -> upstream capture on every simulated TP rank."""
     runners, capturer, tp_group, dp_group = capture_runtime
     tp_group.world_size = tp_size
