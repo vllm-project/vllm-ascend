@@ -59,6 +59,10 @@ class _Language:
         return _value(np.sum(value, axis=axis, dtype=value.dtype))
 
     @staticmethod
+    def max(value, axis):
+        return _value(np.max(value, axis=axis))
+
+    @staticmethod
     def cumsum(value, axis):
         return _value(np.cumsum(value, axis=axis, dtype=value.dtype))
 
@@ -98,7 +102,7 @@ class _Kernel:
 
 
 def load_cpu_preparation():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/gbsa.py"
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/gbsa_input_preparation.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
     language = _Language()
@@ -130,6 +134,12 @@ def make_inputs(groups, tail, pattern, dtype, rows=7):
     lengths = torch.tensor([groups * 4 + tail, 0, 3, 17], dtype=dtype).repeat_interleave(2)[::2]
     requests = torch.tensor([0, 1, 2, 3, -1, 0, 0], dtype=dtype)[:rows].repeat_interleave(2)[::2]
     positions = (lengths[requests.long()] - 1).repeat_interleave(2)[::2]
+    for row, (position, request) in enumerate(zip(positions.tolist(), requests.tolist())):
+        length = int(lengths[request])
+        visible = min(max(position + 1, 0), length)
+        tail_start = visible // 4 * 4
+        tail = torch.arange(tail_start, visible, dtype=dtype)
+        compact[row, groups : groups + tail.numel()] = tail
     table = torch.randint(0, 100, (4, 86), dtype=dtype, generator=generator)[:, ::2]
     return compact, positions, lengths, requests, table
 

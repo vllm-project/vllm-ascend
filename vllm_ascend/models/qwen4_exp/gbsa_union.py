@@ -37,13 +37,24 @@ def _build_qsa_union_inputs_torch(
         raise ValueError("Union preparation requires one KV head")
     rows, topk = sparse_idx.shape[1:]
     groups = (rows + UNION_SIZE - 1) // UNION_SIZE
-    width = UNION_SIZE * topk
+    width = UNION_SIZE * (topk + 1)
     padded = torch.full((groups * UNION_SIZE, topk), INVALID_KEY, dtype=torch.int32, device=sparse_idx.device)
     columns = torch.arange(topk, device=sparse_idx.device)
     lanes = torch.arange(rows, dtype=torch.int32, device=sparse_idx.device).remainder(UNION_SIZE)
     valid = (columns.unsqueeze(0) < sparse_count[0].unsqueeze(1)) & (sparse_idx[0] >= 0)
     padded[:rows] = torch.where(valid, sparse_idx[0] * UNION_SIZE + lanes.unsqueeze(1), INVALID_KEY)
-    sorted_keys = padded.reshape(groups, width).float().sort(dim=-1).values
+    if rows % UNION_SIZE == 0:
+        padded_visible = visible
+    else:
+        padded_visible = torch.zeros(groups * UNION_SIZE, dtype=visible.dtype, device=visible.device)
+        padded_visible[:rows] = visible
+    visible_rows = padded_visible.reshape(groups, UNION_SIZE)
+    tail_length = visible_rows.remainder(BLOCK_Y)
+    tail_key = visible_rows.div(BLOCK_Y, rounding_mode="floor") * UNION_SIZE + torch.arange(
+        UNION_SIZE, dtype=torch.int32, device=sparse_idx.device
+    )
+    tail_key = torch.where(tail_length > 0, tail_key, INVALID_KEY)
+    sorted_keys = torch.cat((padded.reshape(groups, UNION_SIZE * topk), tail_key), dim=1).float().sort(dim=-1).values
     keys = sorted_keys.to(torch.int32)
     # Scaling the already-FP32 sort keys by a power of two is exact. All keys
     # are nonnegative; conversion to int32 therefore gives floor(key / 8).
@@ -60,13 +71,7 @@ def _build_qsa_union_inputs_torch(
     # only to a discarded sentinel column, never to the last valid union block.
     table.scatter_(1, destinations, torch.where(valid, block_id, -1))
     union_idx = table[:, :width].contiguous().unsqueeze(0)
-    if rows % UNION_SIZE == 0:
-        padded_visible = visible
-    else:
-        padded_visible = torch.zeros(groups * UNION_SIZE, dtype=visible.dtype, device=visible.device)
-        padded_visible[:rows] = visible
     query_lane = keys.remainder(UNION_SIZE)
-    visible_rows = padded_visible.reshape(groups, UNION_SIZE)
     query_lane_long = query_lane.long()
     row_visible = visible_rows.gather(1, query_lane_long)
     unique = valid & (keys != previous)
@@ -86,7 +91,6 @@ def _build_qsa_union_inputs_torch(
     location = torch.searchsorted(keys, tail_key).clamp_max(width - 1)
     found = keys.gather(1, location) == tail_key
     tail_rank = rank.gather(1, location)
-    tail_length = visible_rows.remainder(BLOCK_Y)
     partial = found & (tail_length > 0)
     token = torch.arange(BLOCK_Y, dtype=torch.int32, device=sparse_idx.device)
     allowed_tail = partial.unsqueeze(-1) & (token < tail_length.unsqueeze(-1))

@@ -22,9 +22,8 @@ static ge::graphStatus InferShape4QsaUnionInputs(gert::InferShapeContext* contex
                 OP_LOGE(context, "QsaUnionInputs expects rank-2 inputs"),
                 return ge::GRAPH_FAILED);
     const int64_t input_groups = compact->GetDim(1) - 3;
-    const int64_t topk = input_groups + (input_groups < 512 ? 1 : 0);
     const int64_t groups = row_map->GetDim(0);
-    const int64_t width = 8 * topk;
+    const int64_t width = 8 * (input_groups + 1);
     *union_idx = gert::Shape({1, groups, width});
     *union_count = gert::Shape({1, groups});
     *exact_mask = gert::Shape({1, groups, width * 4});

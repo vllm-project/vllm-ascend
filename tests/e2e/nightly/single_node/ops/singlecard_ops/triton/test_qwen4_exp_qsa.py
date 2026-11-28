@@ -8,7 +8,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
+from vllm_ascend.ops.triton.qwen4_exp.gbsa_input_preparation import prepare_qsa_gbsa_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
@@ -45,7 +45,7 @@ def test_qsa_pack_supports_non_power_of_two_output_width() -> None:
 @torch.inference_mode()
 def test_qsa_gbsa_preparation_ragged_noncontiguous_table() -> None:
     compact = torch.tensor(
-        [[0, 2, -1, 4, -1, -1, -1, -1, 99, 99, 99], [0, 1, 2, 3, 4, 5, 6, 7, 99, 99, 99]],
+        [[0, 2, -1, 4, -1, -1, -1, -1, 16, 17, 18], [0, 1, 2, 3, 4, 5, 6, 7, -1, -1, -1]],
         dtype=torch.int32,
         device="npu",
     )
@@ -61,9 +61,9 @@ def test_qsa_gbsa_preparation_ragged_noncontiguous_table() -> None:
 
     sparse_cpu = sparse.cpu()
     for head in range(2):
-        torch.testing.assert_close(sparse_cpu[head, 0, :3], torch.tensor([0, 2, 4], dtype=torch.int32), rtol=0, atol=0)
+        torch.testing.assert_close(sparse_cpu[head, 0, :2], torch.tensor([0, 2], dtype=torch.int32), rtol=0, atol=0)
         torch.testing.assert_close(sparse_cpu[head, 1, :8], torch.arange(8, dtype=torch.int32), rtol=0, atol=0)
-    torch.testing.assert_close(counts.cpu(), torch.tensor([[3, 8], [3, 8]], dtype=torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(counts.cpu(), torch.tensor([[2, 8], [2, 8]], dtype=torch.int32), rtol=0, atol=0)
     torch.testing.assert_close(visible.cpu(), torch.tensor([19, 32], dtype=torch.int32), rtol=0, atol=0)
     torch.testing.assert_close(cu_query.cpu(), torch.tensor([0, 1, 2], dtype=torch.int64), rtol=0, atol=0)
     torch.testing.assert_close(row_table.cpu(), block_table.cpu(), rtol=0, atol=0)
@@ -89,9 +89,14 @@ GbsaCase = tuple[
 ]
 
 
-def _compact_gbsa_indices() -> torch.Tensor:
+def _compact_gbsa_indices(seq_lens_values: tuple[int, int]) -> torch.Tensor:
     groups = torch.tensor([[0, 1], [0, 1]], dtype=torch.int32, device="npu")
     residual_slots = torch.full((GBSA_ROWS, 3), -1, dtype=torch.int32, device="npu")
+    for row, length in enumerate(seq_lens_values):
+        tail_start = length // 4 * 4
+        tail_count = length - tail_start
+        if tail_count:
+            residual_slots[row, :tail_count] = torch.arange(tail_start, length, dtype=torch.int32, device="npu")
     return torch.cat((groups, residual_slots), dim=1)
 
 
@@ -123,7 +128,7 @@ def _make_gbsa_case(seq_lens_values: tuple[int, int] = (9, 11)) -> GbsaCase:
     query = torch.randn((GBSA_ROWS, GBSA_NUM_Q_HEADS, GBSA_HEAD_DIM), dtype=torch.bfloat16, device="npu")
     key_cache = torch.randn((4, GBSA_PAGE_SIZE, GBSA_NUM_KV_HEADS, GBSA_HEAD_DIM), dtype=torch.bfloat16, device="npu")
     value_cache = torch.randn_like(key_cache)
-    compact_indices = _compact_gbsa_indices()
+    compact_indices = _compact_gbsa_indices(seq_lens_values)
     block_table = torch.tensor([[2], [3]], dtype=torch.int32, device="npu")
     token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="npu")
     seq_lens = torch.tensor(seq_lens_values, dtype=torch.int32, device="npu")
@@ -208,3 +213,23 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
     graph.replay()
     torch.npu.synchronize()
     _assert_gbsa_close(captured_output, expected_replay)
+
+
+@pytest.mark.parametrize("current_visible", (2050, 2051, 2052))
+@torch.inference_mode()
+def test_qsa_gbsa_preparation_reuses_saved_mtp_tail(current_visible: int) -> None:
+    groups = torch.arange(512, dtype=torch.int32, device="npu").unsqueeze(0)
+    saved_tail = torch.tensor([[2048, 2049, -1]], dtype=torch.int32, device="npu")
+    compact = torch.cat((groups, saved_tail), dim=1)
+    positions = torch.tensor([current_visible - 1], dtype=torch.int64, device="npu")
+    lengths = torch.tensor([current_visible], dtype=torch.int32, device="npu")
+    token_to_req = torch.tensor([0], dtype=torch.int32, device="npu")
+    block_table = torch.arange(17, dtype=torch.int32, device="npu").unsqueeze(0)
+
+    sparse, counts, visible, _, _ = prepare_qsa_gbsa_inputs(
+        compact, positions, lengths, token_to_req, block_table, num_kv_heads=1
+    )
+
+    torch.testing.assert_close(sparse[0, 0, :512].cpu(), torch.arange(512, dtype=torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(counts.cpu(), torch.tensor([[512]], dtype=torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(visible.cpu(), torch.tensor([2050], dtype=torch.int32), rtol=0, atol=0)

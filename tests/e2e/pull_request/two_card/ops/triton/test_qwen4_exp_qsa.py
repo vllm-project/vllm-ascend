@@ -4,7 +4,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
+from vllm_ascend.ops.triton.qwen4_exp.gbsa_input_preparation import prepare_qsa_gbsa_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 pytestmark = [
@@ -41,7 +41,7 @@ def test_qsa_pack_supports_non_power_of_two_output_width() -> None:
 @torch.inference_mode()
 def test_qsa_gbsa_preparation_ragged_noncontiguous_table() -> None:
     compact = torch.tensor(
-        [[0, 2, -1, 4, -1, -1, -1, -1, 99, 99, 99], [0, 1, 2, 3, 4, 5, 6, 7, 99, 99, 99]],
+        [[0, 2, -1, 4, -1, -1, -1, -1, 16, 17, 18], [0, 1, 2, 3, 4, 5, 6, 7, 99, 99, 99]],
         dtype=torch.int32,
         device="npu",
     )
@@ -57,9 +57,9 @@ def test_qsa_gbsa_preparation_ragged_noncontiguous_table() -> None:
 
     sparse_cpu = sparse.cpu()
     for head in range(2):
-        torch.testing.assert_close(sparse_cpu[head, 0, :3], torch.tensor([0, 2, 4], dtype=torch.int32), rtol=0, atol=0)
+        torch.testing.assert_close(sparse_cpu[head, 0, :2], torch.tensor([0, 2], dtype=torch.int32), rtol=0, atol=0)
         torch.testing.assert_close(sparse_cpu[head, 1, :8], torch.arange(8, dtype=torch.int32), rtol=0, atol=0)
-    torch.testing.assert_close(counts.cpu(), torch.tensor([[3, 8], [3, 8]], dtype=torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(counts.cpu(), torch.tensor([[2, 8], [2, 8]], dtype=torch.int32), rtol=0, atol=0)
     torch.testing.assert_close(visible.cpu(), torch.tensor([19, 32], dtype=torch.int32), rtol=0, atol=0)
     torch.testing.assert_close(cu_query.cpu(), torch.tensor([0, 1, 2], dtype=torch.int64), rtol=0, atol=0)
     torch.testing.assert_close(row_table.cpu(), block_table.cpu(), rtol=0, atol=0)
