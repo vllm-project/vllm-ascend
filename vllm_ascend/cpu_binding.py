@@ -41,7 +41,13 @@ def is_arm_cpu() -> bool:
     return False
 
 
-def execute_command(cmd: list[str]) -> tuple[str, int]:
+def execute_command(cmd: list[str], timeout: float = 1000) -> tuple[str, int]:
+    """Run ``cmd`` and return (stdout, returncode).
+
+    ``timeout`` is caller-supplied so latency-sensitive callers (the worker
+    health RPC) can bound discovery instead of inheriting the long
+    CPU-binding budget.
+    """
     # Force a C locale so subprocess output remains parseable on localized OSes.
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -49,7 +55,7 @@ def execute_command(cmd: list[str]) -> tuple[str, int]:
     env["LC_MESSAGES"] = "C"
     with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
         try:
-            out, _ = p.communicate(timeout=1000)
+            out, _ = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             p.kill()
             out, _ = p.communicate()
@@ -127,6 +133,48 @@ class DeviceInfo:
                 npu_map_info[npu_id] = {}
             npu_map_info[npu_id][chip_id] = chip_logic_id
         return npu_map_info
+
+    @staticmethod
+    def get_npu_phy_id_to_card_id(timeout: float = 10) -> dict[str, str]:
+        """Return the npu-smi card ID for each chip Phy-ID.
+
+        ``npu-smi info -i`` expects an NPU ID (card ID), while the CANN runtime
+        physical-device lookup returns a chip Phy-ID. The two differ whenever
+        several chips share one card (e.g. chip Phy-IDs 2 and 3 both live on
+        card 1), which is exactly the multi-chip case ``check_health`` got
+        wrong. Map Phy-ID -> NPU ID through the ``Chip Phy-ID`` column of
+        ``npu-smi info -m``.
+
+        Returns an empty dict when the host's npu-smi output predates the
+        ``Chip Phy-ID`` column, letting the caller fall back explicitly.
+
+        ``timeout`` bounds discovery to the caller's remaining time budget.
+        """
+        # Health checks must not inherit the long CPU-binding discovery timeout.
+        npu_info, return_code = execute_command(["npu-smi", "info", "-m"], timeout=timeout)
+        if return_code != 0:
+            raise RuntimeError(f"'npu-smi info -m' failed with exit code {return_code}")
+
+        npu_map = [line.strip() for line in npu_info.splitlines() if line.strip()]
+        if not npu_map:
+            raise RuntimeError("'npu-smi info -m' returned no output")
+
+        header = DeviceInfo.split_npu_smi_header(npu_map[0])
+        if "NPU ID" not in header or "Chip Phy-ID" not in header:
+            return {}
+
+        npu_id_idx = header.index("NPU ID")
+        chip_phy_id_idx = header.index("Chip Phy-ID")
+        max_required_idx = max(npu_id_idx, chip_phy_id_idx)
+        phy_id_to_card_id: dict[str, str] = {}
+        for line in npu_map[1:]:
+            parts = line.split()
+            if len(parts) <= max_required_idx:
+                continue
+            chip_phy_id = parts[chip_phy_id_idx]
+            if chip_phy_id.isdigit():
+                phy_id_to_card_id[chip_phy_id] = parts[npu_id_idx]
+        return phy_id_to_card_id
 
     def resolve_logic_id(self, npu_id: str, chip_id: str | None) -> int:
         chip_map = self.npu_map_info.get(npu_id, {})
