@@ -521,7 +521,7 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
         self.assertEqual(worker.current_layer, 4)
         self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
         # Draft attention hooks must not transfer context KV a second time.
-        for name in worker.dflash_draft_layer_names:
+        for name in worker.kv_cache_config.dflash_draft_layer_names:
             connector.wait_for_layer_load(name)
             connector.save_kv_layer(name, None, None)
         self.assertEqual(worker.current_layer, 4)
@@ -629,9 +629,9 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
 
     def test_dspark_companion_cache_keeps_draft_ownership(self):
         worker = self.make_worker(draft_method="dspark")
+        self.assertEqual(worker.dflash_draft_layer_indices, frozenset({4, 5}))
         worker.configure_dspark_prefix_cache(MagicMock())
         self.assertIsNone(worker._dflash_draft_start_layer)
-        self.assertFalse(worker.dflash_draft_layer_names)
         self.assertFalse(worker.dflash_draft_layer_indices)
         self.assertEqual(worker.num_layers, 4)
 
@@ -653,7 +653,6 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
     def test_dspark_reuse_keeps_draft_outside_ordinary_pool(self):
         worker = self.make_worker(draft_method="dspark", reuse=True)
         self.assertIsNone(worker._dflash_draft_start_layer)
-        self.assertFalse(worker.dflash_draft_layer_names)
         self.assertFalse(worker.dflash_draft_layer_indices)
         self.assertEqual(worker.num_layers, 4)
 

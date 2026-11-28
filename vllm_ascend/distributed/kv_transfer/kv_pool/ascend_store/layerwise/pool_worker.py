@@ -358,7 +358,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _init_dflash_draft_layers(self, draft_names: set[str]) -> None:
         # Only ordinary-pool layers participate; companion caches own the rest.
-        self.dflash_draft_layer_names = frozenset(draft_names)
         # DSpark attention hooks and SWA caches name the same physical layer differently.
         self.dflash_draft_layer_indices = frozenset(self._extract_physical_layer_index(name) for name in draft_names)
         draft_layers = {self._global_to_local_layer[layer] for layer in self.dflash_draft_layer_indices}
