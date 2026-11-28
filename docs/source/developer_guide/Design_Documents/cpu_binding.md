@@ -12,6 +12,30 @@ pages, and NPU IRQs when the host environment allows it. By keeping the main
 worker, ACL, and release threads on dedicated CPU ranges, it **helps reduce
 context-switch overhead from scheduler preemption on busy hosts.**
 
+## Deprecation on A3/A5
+
+The native CPU binding implementation for **A3** and **A5 (950PR&950DT
+Products)** is deprecated and is scheduled for removal in **2027 RP1**. During
+the deprecation period the implementation keeps its current behavior:
+
+- `enable_cpu_binding` still defaults to `True`, and `bind_cpus()` still runs
+  from the worker startup path.
+- Strategy selection is unchanged: A3 keeps `global_slice`, A5 keeps
+  `topo_affinity` with cluster CPU topology, and A2/310P keep `topo_affinity`.
+- The `--numa-bind` conversion in `platform.py` is unchanged.
+
+The only observable change is a one-time notice from `logger.warning_once` in
+`bind_cpus()`, gated by the `HardwareProfile.native_cpu_binding_deprecated`
+lifecycle flag that only the A3 and A5 profiles set. A2 and 310P leave the flag
+unset, so they emit no notice and remain fully supported.
+
+[MindStudio Boost (msboost)](https://gitcode.com/Ascend/msboost) replaces
+host-side CPU affinity and resource coordination for A3/A5. Its host-wide view
+covers processes and container deployments that worker-local binding cannot
+coordinate, including restricted container permissions and multiple services
+sharing a host. Migration progress, deployment requirements, and feedback are
+tracked in [RFC #23266](https://github.com/vllm-project/vllm-ascend/issues/23266).
+
 ## Why CPU Binding?
 
 On multi-socket ARM systems, the Linux scheduler may place worker threads on

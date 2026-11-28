@@ -1,0 +1,12 @@
+pr: 23329
+entries:
+  - category: config
+    text: >-
+      Native CPU binding on Ascend A3 and A5 is deprecated and is scheduled for
+      removal in 2027 RP1. Nothing changes in this release: `enable_cpu_binding`
+      still defaults to `True` and binding behaves as before, but startup now
+      logs a one-time warning when it is active on A3/A5. Before the removal,
+      migrate host-side CPU affinity and CPU resource coordination to MindStudio
+      Boost (msboost, https://gitcode.com/Ascend/msboost); migration progress and
+      feedback are tracked in RFC #23266. A2 and 310P are not affected.
+    hardware: [A3, A5]

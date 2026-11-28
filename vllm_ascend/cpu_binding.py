@@ -27,6 +27,18 @@ ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 TOPO_AFFINITY_MODE = CPUBindingMode.TOPO_AFFINITY.value
 GLOBAL_SLICE_MODE = CPUBindingMode.GLOBAL_SLICE.value
 
+NATIVE_CPU_BINDING_SUNSET_RELEASE = "2027 RP1"
+MSBOOST_DOC_URL = "https://gitcode.com/Ascend/msboost"
+NATIVE_CPU_BINDING_RFC_URL = "https://github.com/vllm-project/vllm-ascend/issues/23266"
+NATIVE_CPU_BINDING_DEPRECATION_MESSAGE = (
+    "Native CPU binding on Ascend A3/A5 is deprecated and is scheduled for removal in "
+    f"{NATIVE_CPU_BINDING_SUNSET_RELEASE}. "
+    "MindStudio Boost (msboost) replaces it for host-side CPU affinity and CPU resource "
+    f"isolation; see the official documentation: {MSBOOST_DOC_URL}. "
+    f"Follow migration progress and share feedback in RFC #23266: {NATIVE_CPU_BINDING_RFC_URL}. "
+    "CPU binding still runs unchanged in this release, and Ascend A2/310P are not affected."
+)
+
 
 def is_arm_cpu() -> bool:
     arch = platform.machine().lower()
@@ -795,9 +807,16 @@ class CpuAlloc:
         self.bind_npu_irq()
 
 
+def _warn_native_cpu_binding_deprecation() -> None:
+    """Emit the A3/A5 sunset notice once per process; binding behavior is unchanged."""
+    if get_current_hardware_profile().native_cpu_binding_deprecated:
+        logger.warning_once(NATIVE_CPU_BINDING_DEPRECATION_MESSAGE)
+
+
 def bind_cpus(rank_id: int, npu_id: int, *, migrate_memory: bool = True) -> None:
     if not is_arm_cpu():
         logger.info("CPU binding skipped: non-ARM CPU detected.")
         return
+    _warn_native_cpu_binding_deprecation()
     binder = CpuAlloc(rank_id, npu_id=npu_id)
     binder.run_all(migrate_memory=migrate_memory)

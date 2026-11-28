@@ -325,6 +325,12 @@ class HardwareProfile:
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
+    # Lifecycle: the native worker CPU-affinity implementation is deprecated on
+    # this family and retires in the 2027 RP1 release, when MindStudio Boost
+    # (msboost) takes over host-side CPU affinity and resource coordination.
+    # Consumers emit a one-time notice; binding behavior itself is unchanged.
+    native_cpu_binding_deprecated: bool = False
+
     # Operator availability alone does not determine which model route to use.
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
 
@@ -452,6 +458,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
+            native_cpu_binding_deprecated=True,
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
@@ -505,6 +512,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
+            native_cpu_binding_deprecated=True,
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
