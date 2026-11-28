@@ -9,7 +9,6 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_SERVER_DEV_MODE: "1"
-      VLLM_ENGINE_READY_TIMEOUT_S: "4800"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
       SOC_VERSION: "ascend950dt_9582"
       CC: /usr/bin/g++
@@ -27,8 +26,11 @@ test_cases:
     pd_server_envs:
       - HCCL_NPU_SOCKET_PORT_RANGE: "61400-61499"
         VLLM_USE_FASTOKENS: "1"
+        VLLM_ENGINE_READY_TIMEOUT_S: "2400"
         HCCL_IF_BASE_PORT: "62000"
       - HCCL_NPU_SOCKET_PORT_RANGE: "61500-61599"
+        VLLM_USE_FASTOKENS: "0"
+        VLLM_ENGINE_READY_TIMEOUT_S: "4800"
         HCCL_IF_BASE_PORT: "63000"
     pd_server_cmds:
       # Prefill
@@ -55,7 +57,7 @@ test_cases:
         - --max-num-seqs
         - "64"
         - --max-num-batched-tokens
-        - "4096"
+        - "8192"
         - --gpu-memory-utilization
         - "0.90"
         - --engram-config
@@ -97,6 +99,8 @@ test_cases:
         - *model
         - --trust-remote-code
         - --enable-force-include-usage
+        - --renderer-num-workers
+        - "4"
         - --quantization
         - ascend
         - --tensor-parallel-size
@@ -110,12 +114,14 @@ test_cases:
         - --max-num-seqs
         - "64"
         - --max-num-batched-tokens
-        - "4096"
+        - "8192"
         - --gpu-memory-utilization
         - "0.90"
         - --engram-config
         - '{"cpu_offload":true,"dp_shared_memory":true}'
         - --no-enable-prefix-caching
+        - --mamba-cache-mode
+        - align
         - --mamba-ssm-cache-dtype
         - bfloat16
         - --async-scheduling
@@ -141,9 +147,11 @@ test_cases:
            "kv_connector_extra_config": {"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
     test_content: []
     # Measured references: https://github.com/zsponly/vllm-ascend/pull/3
-    # Evidence revision: cc2f46db090436ce16d90b9ae64c870e273fdc31. Throughputs are aggregate tokens/s.
-    # Reference: A5 r177 / CANN 9.3.0 / Ascend 4f49ae33, with Slice excluded
-    # from static compilation. That runtime exclusion is not a YAML option here.
+    # Evidence revision: 75dfd6092eac2353ee6cf9e20d8cb16e87c32814. Throughputs are aggregate tokens/s.
+    # Reference: A5 r177 / CANN 9.3.0 / vLLM 62d4bc3c / Ascend 4f49ae33.
+    # torch-npu 2.10.0.post7, AISBench 3.1.20261013; no separately applied PRs.
+    # The measured installation locally excluded Slice from static compilation;
+    # that runtime exclusion is not a YAML option here.
     # Reported D throughput/TPOT use steady-stage samples; the runner checks total.
     # Keep steady-stage baseline candidates commented until full-run calibration.
     benchmarks:
