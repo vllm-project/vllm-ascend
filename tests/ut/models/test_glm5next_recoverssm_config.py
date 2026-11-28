@@ -48,13 +48,28 @@ def test_default_does_not_change_native_cache_contract():
 def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector, prefix_caching):
     config = make_config()
     config.cache_config.enable_prefix_caching = prefix_caching
-    config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
+    config.cache_config.mamba_cache_mode = "align" if prefix_caching or connector == "AscendStoreConnector" else "none"
     if connector is not None:
         config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     assert use_glm_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
     assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
     assert config.cache_config.use_kda_recoverssm
+
+
+def test_multi_connector_store_allows_aligned_mamba_without_prefix_caching():
+    config = make_config()
+    config.cache_config.mamba_cache_mode = "align"
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"},
+                {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer"},
+            ]
+        },
+    )
+    validate_glm_recoverssm(config)
 
 
 def test_initialization_requires_speculative_decoding():

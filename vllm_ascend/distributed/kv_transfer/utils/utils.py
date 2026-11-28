@@ -23,6 +23,29 @@ QOS_KEY = "comm_resource_config.qos"
 PD_QOS_DEFAULT = 1
 QOS_MAX = 4
 
+ASCEND_STORE_CONNECTORS = ("AscendStoreConnector", "MooncakeConnectorStoreV1")
+
+
+def get_ascend_store_extra_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+    """Return direct or nested AscendStore extra config, or None when absent."""
+    if kv_transfer_config is None:
+        return None
+    connector_name = getattr(kv_transfer_config, "kv_connector", None)
+    extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+    if connector_name in ASCEND_STORE_CONNECTORS:
+        return extra_config or {}
+    if connector_name != "MultiConnector" or not isinstance(extra_config, dict):
+        return None
+    for child_config in extra_config.get("connectors") or ():
+        if isinstance(child_config, dict) and child_config.get("kv_connector") in ASCEND_STORE_CONNECTORS:
+            return child_config.get("kv_connector_extra_config") or {}
+    return None
+
+
+def uses_ascend_store(kv_transfer_config: Any) -> bool:
+    """Return whether the direct or MultiConnector configuration includes AscendStore."""
+    return get_ascend_store_extra_config(kv_transfer_config) is not None
+
 
 def truncate_block_hashes_fallback(request: "Request", hash_block_size: int, num_hash_lookahead_tokens: int) -> None:
     """Discard hashes invalidated by P-side truncation on vLLM versions earlier than 0.34."""

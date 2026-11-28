@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vllm_ascend.distributed.kv_transfer.utils.utils import uses_ascend_store
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -26,7 +28,11 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     # TODO: FP16 KV cache with RecoverSSM has not been validated.
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("GLM RecoverSSM does not support stochastic rounding")
-    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+    # AscendStore hybrid caches use aligned Mamba pages even when local prefix
+    # caching is disabled on Decode.
+    expected_cache_mode = (
+        "align" if cache.enable_prefix_caching or uses_ascend_store(vllm_config.kv_transfer_config) else "none"
+    )
     if cache.mamba_cache_mode != expected_cache_mode:
         raise ValueError(
             f"GLM RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"

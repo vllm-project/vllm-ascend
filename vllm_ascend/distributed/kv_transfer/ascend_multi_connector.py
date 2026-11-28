@@ -162,14 +162,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
-        self.requires_mamba_state_copy_after_layer_load = any(
-            getattr(
-                connector,
-                "requires_mamba_state_copy_after_layer_load",
-                False,
-            )
+        self._mamba_state_copy_connectors = [
+            connector
             for connector in self._connectors
-        )
+            if getattr(connector, "requires_mamba_state_copy_after_layer_load", False)
+        ]
+        self.requires_mamba_state_copy_after_layer_load = bool(self._mamba_state_copy_connectors)
 
         self.requires_mamba_state_copy_after_load = any(
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
@@ -288,13 +286,26 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         if (mamba_state := getattr(self, "_mamba_state", None)) is not None:
             mamba_state.do_mamba_copy_for_layer(layer_name)
 
+    def has_pending_layerwise_load(self) -> bool:
+        """Whether a deferring child will run per-layer loads in this step."""
+        for connector in self._mamba_state_copy_connectors:
+            has_pending_load = getattr(connector, "has_pending_layerwise_load", None)
+            if has_pending_load is None:
+                return True
+            if callable(has_pending_load):
+                if has_pending_load():
+                    return True
+            elif has_pending_load:
+                return True
+        return False
+
     def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
         """Take over the mamba align pre-copy for this step.
 
         Returns True when any child connector executes per-layer copies from its
         ``wait_for_layer_load``; see ``AscendStoreConnector.prepare_mamba_state_copy``.
         """
-        if not self.requires_mamba_state_copy_after_layer_load:
+        if not self.requires_mamba_state_copy_after_layer_load or not self.has_pending_layerwise_load():
             return False
         if not hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
             raise TypeError(

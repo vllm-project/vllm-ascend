@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
+from vllm_ascend.distributed.kv_transfer.utils.utils import get_ascend_store_extra_config
 
 from .layerwise_cache_layout import (
     LayerwiseCacheConfig,
@@ -47,20 +48,8 @@ def get_spec_reuse_rules(vllm_config: VllmConfig) -> SpecReuseRules | None:
 
 def get_layerwise_ascend_store_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Return the extra config for layerwise AscendStore."""
-    store_connectors = ("AscendStoreConnector", "MooncakeConnectorStoreV1")
-    connector_name = getattr(kv_transfer_config, "kv_connector", None)
-    extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
-    if connector_name == "MultiConnector":
-        for child_config in extra_config.get("connectors", ()):
-            if isinstance(child_config, dict) and child_config.get("kv_connector") in store_connectors:
-                extra_config = child_config.get("kv_connector_extra_config") or {}
-                break
-        else:
-            return None
-    elif connector_name not in store_connectors:
-        return None
-
-    if not extra_config.get("use_layerwise", False):
+    extra_config = get_ascend_store_extra_config(kv_transfer_config)
+    if extra_config is None or not extra_config.get("use_layerwise", False):
         return None
     if extra_config.get("layerwise_num_shared_buffers") is not None:
         assert getattr(kv_transfer_config, "kv_role", None) == "kv_producer", (
