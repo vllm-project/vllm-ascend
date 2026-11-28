@@ -433,6 +433,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.projection_tp: KDAInputProjectionTP | None = None
         qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
         if qkv_iproj_tp_size > 1:
+            if vllm_config.lora_config is not None:
+                raise NotImplementedError("GLM-5.3 LoRA does not support a separate KDA input-projection TP group.")
             group = get_qkv_iproj_tp_group()
             projection_tp_size = group.world_size
             self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)

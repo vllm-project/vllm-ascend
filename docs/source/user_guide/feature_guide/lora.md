@@ -129,3 +129,80 @@ curl -X POST http://127.0.0.1:8000/v1/unload_lora_adapter \
 ```
 
 A successful load returns `Success: LoRA adapter 'mix-lora' added successfully.` A successful unload returns `Success: LoRA adapter 'mix-lora' removed successfully.` After unload, requests with `"model": "mix-lora"` no longer select that adapter. The base model remains available.
+
+## GLM-5.3-Flash adapter layouts
+
+The GLM-5.3 integration declares mappings for KDA's six fused input projections,
+MLA's fused Q/KV input, the indexer's `wk`/`weights_proj`, dense/shared-expert
+gate/up projections, input embeddings, and the LM head. Routed experts use the
+existing Ascend MoE LoRA implementation. Adapter keys and base revisions must
+match the checkpoint; these mappings do not choose training targets.
+The multimodal language prefix includes the LM head so it shares the text
+adapter mapping. Narrow KDA TP slices use a masked matrix multiply when their
+output width is smaller than the padded LoRA rank. Native shrink calls pack
+non-contiguous projection slices before invoking kernels that require packed rows.
+
+Use the matching upstream revision recorded in `.github/vllm-main-verified.commit`
+or a supported release. Ascend supplies the absorbed MLA adapter and replicated
+KDA slice handling; the LoRA manager must support shared-module alias replacement.
+
+With LoRA enabled, MLA/SFA uses native projection preprocessing so adapters are
+not bypassed by a fused prolog. The absorbed KV projection applies its adapter
+increment to both query and value BMMs. The indexer selects adapter-aware key
+increments only when a current request's
+adapter supplies `wk` factors for that layer. CANN still computes the base
+pooled keys and tail; the adapter adds the difference between adapted and base
+normalized keys before the original cache quantization. This preserves native
+cache values and scales exactly for a zero increment, including long prefills.
+Historical tail keys already carry their increment and are not adapted twice.
+Head-weight-only (`weights_proj`),
+query-only (`wq_b`) and vocabulary-only adapters keep the original CANN key
+compression; their projection increments are applied independently. Key adapters
+use the existing CANN scoring and TP query-row exchange. The FP32
+tail cache keeps its existing storage and page strides.
+
+The current path requires:
+
+- PCP and DCP sizes of one, without a separate KDA input-projection TP group.
+- Fully sharded LoRA and sequence parallelism (`enable_flashcomm1`) disabled.
+- The original indexer cache choices remain available: `auto`/`bf16`, `fp8`,
+  and `int8`. FP8 cache entries use FP32 scales; INT8 entries use FP16 scales.
+  TP query-row sharding remains enabled under its original admission rules.
+  Sharded query projections use the adapter indices for their own row range.
+- For routed-expert adapters, `enable_fused_mc2=0` in the additional config and
+  dynamic EPLB disabled, as required by the existing Ascend MoE LoRA wrappers.
+  The per-expert 2D format requires gate/down/up factors for every expert in a
+  targeted layer. To probe one expert, supply zero factors for the other experts
+  and check the format with the real loader before starting the full model.
+
+Convolution weights, normalization parameters and raw KPool compression parameters
+are not covered by the standard linear A/B mappings. Visual adapters and
+context-parallel layouts require separate acceptance.
+
+Use the following checks in a compatible vLLM/Ascend installation:
+
+```bash
+pytest tests/ut/lora/test_projection_layouts.py tests/ut/lora/test_torch_ops.py \
+    tests/ut/attention/test_mla_lora.py tests/ut/attention/test_mla_lora_cpu.py \
+    tests/ut/lora/test_glm5next_integration.py
+pytest tests/e2e/pull_request/one_card/lora/test_projection_layouts.py \
+    tests/e2e/pull_request/one_card/lora/test_mla_projections.py \
+    tests/e2e/pull_request/one_card/lora/test_glm53_projection_lora.py
+```
+
+The first command checks Python integration and CPU arithmetic. The second
+requires a real NPU and checks unequal fusion slices, absorbed projections, and
+an indexer prefill/decode pool boundary, plus embedding/logit increments and
+per-expert adapter selection. These layer checks do not replace
+full-checkpoint base/zero/nonzero comparisons and adapter unload/reload acceptance.
+
+Run GLM LoRA numerical acceptance with `--max-num-seqs 1`, one prompt per
+request, `n=1`, and one outstanding request. Wait for each response before
+switching adapters. Check base, zero, A, base, B, and A again serially; unload
+and reload adapters in the same manner. A prefill may contain multiple tokens
+from that request, while decode and LM-head sampling each have one token row.
+The projection tests follow the same rule and preserve fused-slice, vocabulary,
+and expert layout coverage. Request count does not change the declared TP/EP
+layout. Compare logprobs against a reference with the same LoRA configuration,
+input, and token history. Record multi-request batch invariance as not tested;
+it is outside this adaptation acceptance.

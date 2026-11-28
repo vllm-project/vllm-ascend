@@ -22,6 +22,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -39,6 +40,10 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.lora.utils import AscendMergedColumnParallelLinearWithLoRA
+
+INDEXER_KEY_SLICE = 0
+INDEXER_HEAD_SLICE = 1
 
 # Below this many query rows per rank, keep every rank scoring the whole
 # batch: short batches spend more on the extra TP gather than the removed
@@ -963,8 +968,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if self._head_weight_f32 is None:
             self.process_weights_after_loading()
         assert self._head_weight_f32 is not None
+        key_projection = self.wk_weights_proj
+        use_lora_keys = use_lora_head = False
+        if isinstance(key_projection, AscendMergedColumnParallelLinearWithLoRA):
+            use_lora_keys = key_projection.has_active_lora(INDEXER_KEY_SLICE)
+            use_lora_head = key_projection.has_active_lora(INDEXER_HEAD_SLICE)
+        project_lora = use_lora_keys or (use_lora_head and compute_topk)
         q_values = None
         weights = None
+        row_start, row_stop = 0, num_tokens
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
@@ -972,17 +984,34 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             # projections is scored; the cache writes below still consume the
             # full batch hidden states.
             row_shard = indexer_metadata.indexer_row_shard
-            row_start, row_stop = 0, num_tokens
             if row_shard is not None:
                 row_start, row_stop = row_shard.start, row_shard.stop
-            q_values = self.wq_b(q_c[row_start:row_stop])[0].view(row_stop - row_start, self.n_head, self.head_dim)
-            weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
-            weights = weights * (self.softmax_scale * self.n_head**-0.5)
+            projected_q = (
+                self._project_queries(q_c, row_start, row_stop)
+                if isinstance(self.wq_b, BaseLinearLayerWithLoRA)
+                else self.wq_b(q_c[row_start:row_stop])[0]
+            )
+            q_values = projected_q.view(row_stop - row_start, self.n_head, self.head_dim)
+            if not use_lora_head:
+                weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
+                weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
         (tail_cache,) = self._bound_caches(self.tail_cache)
         indexer_scale_cache = scale_caches[0] if scale_caches else None
         k_hidden = k_hidden_states[:num_tokens] if isinstance(k_hidden_states, torch.Tensor) else k_hidden_states()
+        key_delta = None
+        if project_lora:
+            if indexer_metadata.write_metadata is not None:
+                raise NotImplementedError("GLM LoRA key projection requires PCP=1.")
+            if k_hidden.shape != hidden.shape:
+                raise ValueError("GLM LoRA key projection requires aligned query and key rows.")
+            key_delta, head_weights = self._project_lora(
+                k_hidden, project_keys=use_lora_keys, head_rows=(row_start, row_stop)
+            )
+            if compute_topk and use_lora_head:
+                weights = head_weights.to(q_values.dtype)
+                weights = weights * (self.softmax_scale * self.n_head**-0.5)
         return self._forward_cann(
             k_hidden,
             q_values,
@@ -993,7 +1022,63 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_metadata,
             compute_topk=compute_topk,
             indexer_scale_cache=indexer_scale_cache,
+            key_delta=key_delta,
         )
+
+    def _project_lora(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        project_keys: bool = True,
+        head_rows: tuple[int, int] | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Return normalized key increments and FP32 head projections."""
+        projection = self.wk_weights_proj
+        base = projection.base_layer if isinstance(projection, BaseLinearLayerWithLoRA) else projection
+        # Compute only the normalized LoRA increment. CANN still computes the
+        # base pool and tail, preserving its fused GEMM/LayerNorm rounding.
+        key = F.linear(hidden_states, base.weight[: self.head_dim]) if project_keys else None
+        base_key = key
+        assert self._head_weight_f32 is not None
+        start, stop = (0, hidden_states.shape[0]) if head_rows is None else head_rows
+        # Keep the original rank-local GEMM shape, including its rounding.
+        weights = F.linear(hidden_states[start:stop].float(), self._head_weight_f32)
+        if isinstance(projection, BaseLinearLayerWithLoRA):
+            # Use the executor contract directly; do not depend on a wrapper's
+            # private apply method or include a rounded BF16 base head output.
+            delta = hidden_states.new_zeros((hidden_states.shape[0], self.head_dim + self.n_head))
+            projection.punica_wrapper.add_lora_linear(
+                delta,
+                hidden_states,
+                projection.lora_a_stacked,
+                projection.lora_b_stacked,
+                1.0,
+                projection.output_slices,
+            )
+            if key is not None:
+                key = key + delta[:, : self.head_dim]
+            weights = weights + delta[start:stop, self.head_dim :].float()
+        key_delta = self.k_norm(key.float()) - self.k_norm(base_key.float()) if key is not None else None
+        return key_delta, weights
+
+    def _project_queries(self, q_c: torch.Tensor, start: int, stop: int) -> torch.Tensor:
+        projection = self.wq_b
+        if not isinstance(projection, BaseLinearLayerWithLoRA) or (start == 0 and stop == q_c.shape[0]):
+            return projection(q_c[start:stop])[0]
+        # Row sharding changes the token range, not the replicated projection's
+        # weight layout. Use explicit row indices without mutating Punica's
+        # full-step metadata, which other projections still consume.
+        inputs = q_c[start:stop]
+        output = projection.base_layer(inputs)[0]
+        if inputs.shape[0] == 0:
+            return output
+        punica = projection.punica_wrapper
+        indices = punica.token_lora_indices[start:stop]
+        a, b = projection.lora_a_stacked[0], projection.lora_b_stacked[0]
+        low_rank = torch.zeros((inputs.shape[0], a.shape[-2]), dtype=torch.float32, device=inputs.device)
+        punica.bgmv_shrink(inputs, a, low_rank, indices, 1.0)
+        punica.bgmv_expand_slice(low_rank, b, output, indices, 0, output.shape[-1], True)
+        return output
 
     def _init_cann_ops(self) -> None:
         try:
@@ -1003,6 +1088,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._gather_retained_hidden = adapters.gather_retained_hidden
             self._pack_keypool_indices = fused.pack_keypool_indices
             self._prepare_keypool_state = adapters.prepare_keypool_state
+            self._apply_keypool_lora = fused.apply_keypool_lora
             self._write_keypool_caches = fused.write_keypool_caches
             self._key_pool = torch.ops.cann_ops_transformer.key_pool
             self._pool_key_indexer = adapters.pool_key_indexer_nonempty
@@ -1033,6 +1119,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         *,
         compute_topk: bool,
         indexer_scale_cache: torch.Tensor | None = None,
+        key_delta: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         cache_metadata = indexer_metadata.write_metadata or indexer_metadata
         num_tokens = q_values.shape[0] if q_values is not None else indexer_metadata.positions.shape[0]
@@ -1094,7 +1181,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # finish reading history. Whole-pool shifts preserve the pooling result.
         # Read parameters at execution time so refits/offloading cannot leave
         # persistent views pointing at replaced parameter storage.
-        key_weight = self.wk_weights_proj.weight[: self.head_dim]
+        projection = self.wk_weights_proj
+        base = projection.base_layer if isinstance(projection, BaseLinearLayerWithLoRA) else projection
+        key_weight = base.weight[: self.head_dim]
         gate_weight = self.index_kpool_compress_gate
         norm_weight, norm_bias = self.k_norm.weight, self.k_norm.bias
         norm_eps = getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6))
@@ -1113,6 +1202,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             cmp_ratio=self.index_kpool,
             norm_eps=norm_eps,
         )
+        if key_delta is not None:
+            gate = F.linear(hidden_states, gate_weight).float()
+            self._apply_keypool_lora(
+                pooled_key, state, key_delta, gate, self.index_kpool_compress_ape, cache_metadata, tail_metadata
+            )
         if int8:
             pooled_key, pooled_scales = self._symmetric_int8(pooled_key)
         else:
@@ -1124,6 +1218,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_key = F.linear(tail_hidden, key_weight).float()
             if norm_weight is not None:
                 tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
+            if key_delta is not None:
+                tail_key = tail_key + self._gather_retained_hidden(
+                    key_delta, tail_metadata.cann_inputs.retained_indices
+                )
             tail_gate = F.linear(tail_hidden, gate_weight).float()
         self._write_keypool_caches(
             tail_cache,

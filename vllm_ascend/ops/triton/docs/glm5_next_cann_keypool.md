@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
+- **Function**: Four Triton kernel types adapt GLM-5.3-Flash metadata, LoRA increments, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
 - **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
 - **FP8 extension**: With an FP8 cache, each pool stores E4M3FN (`float8_e4m3fn`) keys with `scale=max(abs(pooled))/448` (or 1 for a zero vector), and stores one FP32 descale per pool.
 - **INT8 extension**: The backend quantizes each completed pooled key with an FP16 per-vector scale. The cache-write kernel stores INT8 keys and scales in the same transferable page. INT8 selection calls CANN `PoolKeyIndexer` with `quant_mode=2`.
@@ -12,6 +12,55 @@
     3. BF16 and FP8 use the shared `pool_key_indexer_nonempty` adapter to append one sentinel request and clamp empty pooled histories before CANN selection. The GLM backend quantizes FP8 queries after padding. INT8 calls the CANN operator directly and requires a build that supports empty completed-pool history.
     4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
+
+### LoRA key increments
+
+`apply_keypool_lora` runs between native `KeyPool` and the original quantization
+and cache writer, only for a request with an active `wk` target. The backend
+computes `delta = LN(BF16(base_projection + LoRA)) - LN(base_projection)` in
+FP32. For each completed pool the kernel adds
+`sum(BF16(softmax(gate + APE)) * delta)` to the native BF16 result. Historical
+tokens contribute zero here: their adapted keys were already supplied to CANN
+through the tail. Current unfinished-pool keys receive their delta in FP32
+state, while historical keys and all gate values stay unchanged. MTP retained
+keys receive their delta in the backend's existing retained-row projection.
+
+The base stays on CANN's fused GEMM/normalization path. Replacing it with a
+standalone projection changes FP32 accumulation order and can move BF16 rounding
+boundaries, even with zero LoRA factors. Zero increments select the original
+values before contiguous stores, preserving native pooled keys, live tail,
+signed zeros and downstream scales.
+Nonzero increments are checked against an independent numerical reference;
+bitwise equality with a merged-weight GEMM is not expected.
+
+Inputs are native BF16 `pooled[Q,D]` with contiguous columns, contiguous FP32
+`state[1+2R,P,2D]`, `key_delta[T,D]`, `gates[T,D]` and `ape[P,D]`, plus metadata
+and tail inputs described below. Tail write/source indices must have matching
+request strides and contiguous columns; ordinary tails have width `P`. All
+tensors reside on the same NPU. The function mutates completed pooled rows and
+live current-token key state only and returns `None`. Padded pooled rows, gate
+state and older keys are preserved. It does not quantize or change cache formats.
+
+Each program handles one pool or one tail row. Pool/tail programs read historical
+gate state and write key state, so these planes do not race. The kernel uses
+pool/head dimensions and a power-of-two request-vector width as compile-time
+parameters. Token/pool counts, strides and request contents remain runtime
+values; changing a prefill length does not specialize on that count. No warmup
+registration is added. Key targets incur an additional base projection, two
+normalizations, gate projection and this residual kernel; head/query-only
+targets and base requests do not run it.
+
+Single-request tests cover zero preservation, nonzero increments, history,
+partial pools, strided storage, invalid writes, padding, eager execution and
+fixed-shape graph replay. Real projection tests cover BF16/FP8/INT8 cache
+quantization and a 16K-token prefill; FP8 requires Ascend 950. Floating pooled
+values use `atol=3e-3, rtol=3e-2`; zero/native values and integer codecs require
+exact equality. Graph kernel tests do not establish full-model LoRA graph support.
+
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_lora_kpool_cache.py
+pytest -sv tests/e2e/pull_request/one_card/lora/test_glm53_projection_lora.py
+```
 
 ## Parameters
 

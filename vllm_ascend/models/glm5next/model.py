@@ -59,8 +59,10 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -603,6 +605,16 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
+        if vllm_config.lora_config is not None:
+            parallel = vllm_config.parallel_config
+            if vllm_config.lora_config.fully_sharded_loras:
+                raise NotImplementedError("GLM-5.3 KDA LoRA does not support fully sharded adapters.")
+            if parallel.use_sequence_parallel_moe:
+                raise NotImplementedError("GLM-5.3 LoRA requires sequence parallelism (flashcomm1) disabled.")
+            if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
+                raise NotImplementedError(
+                    "GLM-5.3 LoRA requires PCP=DCP=1; context-sharded LoRA mappings are unsupported."
+                )
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -937,7 +949,18 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid, SupportsEagle3):
+class Glm5NextForCausalLM(
+    nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid, SupportsEagle3, SupportsLoRA
+):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvbfg_a": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "wk_weights_proj": ["wk", "weights_proj"],
+        "qkv": ["qkv"],
+    }
+    embedding_modules = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
+
     supports_replayssm: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1047,6 +1070,15 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerState, IsHybrid, SupportsEagle3):
+    packed_modules_mapping = Glm5NextForCausalLM.packed_modules_mapping
+    embedding_modules = Glm5NextForCausalLM.embedding_modules
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        # The CausalLM prefix includes both the decoder and its sibling LM head.
+        return MultiModelKeys.from_string_field(
+            language_model="language_model", connector="visual.merger.", tower_model="visual."
+        )
+
     supports_replayssm: ClassVar[Literal[True]] = True
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
