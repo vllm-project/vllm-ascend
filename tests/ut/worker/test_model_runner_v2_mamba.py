@@ -30,7 +30,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
-    _align_hybrid_attention_page_sizes,
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
@@ -55,8 +54,6 @@ class _MetadataState(SimpleNamespace):
 
 
 class _FakeAttentionBackend:
-    uses_descriptor_cache_view = False
-
     @staticmethod
     def customize_spec(spec):
         return spec
@@ -1075,6 +1072,8 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
 def test_mamba_spec_follows_aligned_attention_spec(
     mock_get_layers,
 ):
+    from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+
     attention_spec = FullAttentionSpec(
         block_size=4,
         num_kv_heads=1,
@@ -1100,25 +1099,31 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
+    mamba_layer.is_draft_layer = False
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
     mock_get_layers.return_value = {
         "linear_attn": mamba_layer,
         "full_attn": FakeAttention(),
     }
 
-    specs = get_kv_cache_spec(_mock_vllm_config())
+    raw_specs = get_kv_cache_spec(_mock_vllm_config())
+    # Collector emits owner specs in model layer order without cross-layer padding.
+    assert list(raw_specs) == ["linear_attn", "full_attn"]
+    assert raw_specs["full_attn"].page_size_padded is None
 
-    assert list(specs) == ["full_attn", "linear_attn"]
-    assert specs["full_attn"].page_size_bytes == 20
-    assert specs["full_attn"].page_size_padded == 20
+    unified = unify_kv_cache_spec_page_size(raw_specs)
+    assert unified["full_attn"].page_size_bytes == 20
+    assert unified["full_attn"].page_size_padded == 20
 
 
 @pytest.mark.parametrize("include_mamba", [False, True])
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
+def test_get_kv_cache_spec_keeps_owner_pages_until_core_unification(
     mock_get_layers,
     include_mamba,
 ):
+    from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+
     small_attention_spec = FullAttentionSpec(
         block_size=4,
         num_kv_heads=1,
@@ -1156,6 +1161,7 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
+    mamba_layer.is_draft_layer = False
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
     mock_get_layers.return_value = {
         "small_attn": FakeAttention(small_attention_spec),
@@ -1163,14 +1169,13 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
         "large_attn": FakeAttention(large_attention_spec),
     }
 
-    if include_mamba:
-        with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages for small_attn"):
-            get_kv_cache_spec(_mock_vllm_config())
-    else:
+    if not include_mamba:
         del mock_get_layers.return_value["linear_attn"]
-        # Non-hybrid allocation does not use the shared Attention/Mamba layout.
-        specs = get_kv_cache_spec(_mock_vllm_config())
-        assert specs == {"small_attn": small_attention_spec, "large_attn": large_attention_spec}
+    specs = get_kv_cache_spec(_mock_vllm_config())
+    assert specs["small_attn"] == small_attention_spec
+    assert specs["large_attn"] == large_attention_spec
+    unified = unify_kv_cache_spec_page_size(specs)
+    assert {s.page_size_bytes for s in unified.values()} == {80}
 
 
 @pytest.mark.parametrize("full_block_size", [128, 512])
@@ -1180,6 +1185,8 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     monkeypatch, full_block_size, draft_num_kv_heads, padded_sliding
 ):
     """Draft writes must not alias another block ID in target attention or GDN."""
+    from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+
     full = FullAttentionSpec(block_size=full_block_size, num_kv_heads=1, head_size=2, dtype=torch.bfloat16)
     padded_page_size = full.real_page_size_bytes + 64
     sliding = SlidingWindowSpec(
@@ -1221,7 +1228,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
-    specs = get_kv_cache_spec(config)
+    specs = unify_kv_cache_spec_page_size(get_kv_cache_spec(config))
     num_blocks = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -1269,30 +1276,11 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
                     torch.testing.assert_close(target_cache[other_blocks], expected[other_blocks])
     assert specs["draft.sliding"].sliding_window == sliding.sliding_window
     assert specs["draft.sliding"].extra_retained_tokens == sliding.extra_retained_tokens
-    assert specs["draft.sliding"].block_size == full_block_size * 2 // draft_num_kv_heads
-    assert specs["draft.full"].block_size == specs["draft.sliding"].block_size
+    assert specs["draft.sliding"].page_size_bytes == padded_page_size
+    assert specs["draft.full"].page_size_bytes == padded_page_size
     assert specs["draft.full"].non_causal is True
     assert specs["target.gdn"] == mamba
     assert sliding.block_size == 128
-
-
-def test_hybrid_attention_alignment_rejects_different_k_v_proportions():
-    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, dtype=torch.float16)
-    # Equal total page sizes still do not make the K and V segments compatible.
-    sliding = SlidingWindowSpec(
-        block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16, sliding_window=4096
-    )
-    assert full.real_page_size_bytes == sliding.real_page_size_bytes
-    with pytest.raises(ValueError, match="matching K/V size ratios"):
-        _align_hybrid_attention_page_sizes({"full": full, "sliding": sliding})
-
-
-def test_hybrid_attention_alignment_preserves_mla_specs():
-    mla = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float16)
-    specs = {"mla": mla, "padded_mla": replace(mla, page_size_padded=4096)}
-    original = specs.copy()
-    _align_hybrid_attention_page_sizes(specs)
-    assert specs == original
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.AscendMambaHybridModelState")
@@ -1553,3 +1541,287 @@ def test_gdn_group_reuse_respects_builder_spec_and_step_hooks():
     # A late hook consumes every layer before the common metadata build returns.
     host.get_metadata_builder(0).prepare_step_metadata = lambda *args: None
     assert mamba_hybrid_module._partition_gdn_groups(groups) == (groups, [])
+
+
+def test_reshape_hybrid_dense_and_step5_summary_characterization(monkeypatch):
+    """Pin current allocate + reshape for matching hybrid dense K/V and Step5 summary caches."""
+    num_blocks = 4
+    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, head_size_v=2, dtype=torch.float16)
+    sliding = SlidingWindowSpec(
+        block_size=128, num_kv_heads=1, head_size=1, head_size_v=1, dtype=torch.float16, sliding_window=4096
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (full.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=full.real_page_size_bytes,
+    )
+    specs = {
+        "target.full": full,
+        "draft.sliding": replace(sliding, block_size=256),
+        "target.gdn": mamba,
+    }
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.float16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: _FakeAttentionBackend) for name in specs}
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [name],
+                spec.page_size_bytes,
+                layer_stride=num_blocks * spec.page_size_bytes,
+            )
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    groups = [
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
+        for i, (name, spec) in enumerate(specs.items())
+    ]
+    raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
+    caches = _reshape_kv_cache_v2(groups, raw_caches, "auto", [128] * len(groups), {}, kv_cache_config)
+    k_full, v_full = caches["target.full"]
+    k_sw, v_sw = caches["draft.sliding"]
+    assert k_full.shape == (4, 128, 1, 2)
+    assert v_full.shape == (4, 128, 1, 2)
+    assert k_sw.shape == (8, 128, 1, 1)
+    assert v_sw.shape == (8, 128, 1, 1)
+
+    # Step5 summary auxiliary cache takes its own tensor-view path without K/V split validation.
+    summary = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+    step_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace(model_type="step5")
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: step_config)
+    step_specs = {"model.layers.0.self_attn": full, "model.layers.0.self_attn.sparse_summary_cache": summary}
+    step_cfg = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * full.page_size_bytes,
+                ["model.layers.0.self_attn"],
+                full.page_size_bytes,
+                layer_stride=num_blocks * full.page_size_bytes,
+            ),
+            _make_kv_cache_tensor(
+                num_blocks * summary.page_size_bytes,
+                ["model.layers.0.self_attn.sparse_summary_cache"],
+                summary.page_size_bytes,
+                layer_stride=num_blocks * summary.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in step_specs.items()],
+    )
+    step_groups = [
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
+        for i, (name, spec) in enumerate(step_specs.items())
+    ]
+    step_raw = _allocate_kv_cache(step_cfg, {}, torch.device("cpu"))
+    step_caches = _reshape_kv_cache_v2(step_groups, step_raw, "auto", [128, 128], {}, step_cfg)
+    assert isinstance(step_caches["model.layers.0.self_attn.sparse_summary_cache"], torch.Tensor)
+
+
+def test_reshape_kv_cache_v2_allows_different_kv_splits_across_pp_stages(monkeypatch):
+    """Scenario (a): PP=2 stages with 2/2 and 1/3 dense ratios keep separate backings and both pass."""
+    num_blocks = 3
+    stage0_full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, head_size_v=2, dtype=torch.float16)
+    stage1_asym = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16)
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (stage0_full.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=stage0_full.real_page_size_bytes,
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.float16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {})
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    for layer_name, spec in (("stage0.attn", stage0_full), ("stage1.attn", stage1_asym)):
+        stage_specs = {layer_name: spec, "stage.gdn": mamba}
+        kv_cfg = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    num_blocks * s.page_size_bytes, [n], s.page_size_bytes, layer_stride=num_blocks * s.page_size_bytes
+                )
+                for n, s in stage_specs.items()
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[n], kv_cache_spec=s) for n, s in stage_specs.items()],
+        )
+        groups = [
+            SimpleNamespace(
+                kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=s, layer_names=[n], backend=backend
+            )
+            for i, (n, s) in enumerate(stage_specs.items())
+        ]
+        raw = _allocate_kv_cache(kv_cfg, {}, torch.device("cpu"))
+        caches = _reshape_kv_cache_v2(groups, raw, "auto", [128, 128], {}, kv_cfg)
+        k_cache, v_cache = caches[layer_name]
+        assert k_cache.shape == (num_blocks, 128, 1, spec.head_size)
+        assert v_cache.shape == (num_blocks, 128, 1, spec.head_size_v)
+        k_cache.fill_(3)
+        assert torch.count_nonzero(v_cache) == 0
+
+
+def test_reshape_kv_cache_v2_rejects_mismatched_kv_splits_on_shared_backing(monkeypatch):
+    """Scenario (b): 2/2 and 1/3 aliasing the same backing tensor must fail in reshape."""
+    num_blocks = 3
+    full_2_2 = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, head_size_v=2, dtype=torch.float16)
+    sw_1_3 = SlidingWindowSpec(
+        block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16, sliding_window=4096
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (full_2_2.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=full_2_2.real_page_size_bytes,
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.float16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {})
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    specs = {"target.full": full_2_2, "target.sw": sw_1_3, "target.gdn": mamba}
+    kv_cfg = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * s.page_size_bytes, [n], s.page_size_bytes, layer_stride=num_blocks * s.page_size_bytes
+            )
+            for n, s in specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[n], kv_cache_spec=s) for n, s in specs.items()],
+    )
+    groups = [
+        SimpleNamespace(kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=s, layer_names=[n], backend=backend)
+        for i, (n, s) in enumerate(specs.items())
+    ]
+    raw = _allocate_kv_cache(kv_cfg, {}, torch.device("cpu"))
+    with pytest.raises(ValueError, match="incompatible K/V split offsets"):
+        _reshape_kv_cache_v2(groups, raw, "auto", [128, 128, 128], {}, kv_cfg)
+
+
+def test_reshape_kv_cache_v2_allows_disjoint_dcp_target_and_replicated_draft_splits(monkeypatch):
+    """Scenario (c): DCP target (2/2) + Mamba and replicated draft (1/3) use disjoint pool spans."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    num_blocks = 3
+    target_2_2 = FullAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=2, head_size_v=2, dtype=torch.float16, dcp_sharded=True
+    )
+    draft_1_3 = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=1,
+        head_size_v=3,
+        dtype=torch.float16,
+        dcp_sharded=False,
+        is_draft=True,
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (target_2_2.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=target_2_2.real_page_size_bytes,
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            num_gpu_blocks_override=num_blocks,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.float16,
+            max_model_len=4096,
+            supports_kv_cache_grouping=False,
+            hf_config=SimpleNamespace(model_type="qwen3_next"),
+            hf_text_config=SimpleNamespace(model_type="qwen3_next"),
+        ),
+        kv_transfer_config=None,
+        speculative_config=None,
+        additional_config={},
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {})
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    specs = {"target.full": target_2_2, "draft.asym": draft_1_3, "target.gdn": mamba}
+    builder = AscendKVCacheConfigBuilder()
+    planned_groups = builder.get_kv_cache_groups(config, specs)
+    kv_cfg = builder.get_kv_cache_config_from_groups(config, planned_groups, num_blocks=num_blocks)
+    groups = [
+        SimpleNamespace(
+            kernel_block_size=None,
+            kv_cache_group_id=i,
+            kv_cache_spec=g.kv_cache_spec,
+            layer_names=g.layer_names,
+            backend=backend,
+        )
+        for i, g in enumerate(planned_groups)
+    ]
+    raw = _allocate_kv_cache(kv_cfg, {}, torch.device("cpu"))
+    caches = _reshape_kv_cache_v2(groups, raw, "auto", [128] * len(groups), {}, kv_cfg)
+    k_draft, v_draft = caches["draft.asym"]
+    assert k_draft.shape == (num_blocks, 128, 1, 1)
+    assert v_draft.shape == (num_blocks, 128, 1, 3)
+    k_draft.fill_(5)
+    assert torch.count_nonzero(v_draft) == 0

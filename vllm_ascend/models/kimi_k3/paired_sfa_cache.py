@@ -58,7 +58,6 @@ def paired_sfa_cache_groups(config, specs):
         return _paired_sfa_target_cache_groups(config, specs)
     target = {name: spec for name, spec in specs.items() if not spec.is_draft}
     groups = _paired_sfa_target_cache_groups(config, target)
-    specs.update(target)
     if any(isinstance(spec, AscendMLAAttentionSpec) and spec.uses_packed_sfa_main_cache for spec in draft.values()):
         raise ValueError("Kimi DSpark draft groups require ordinary attention cache specs.")
     ordered = dict(sorted(draft.items(), key=lambda item: extract_layer_index(item[0])))

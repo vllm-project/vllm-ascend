@@ -38,7 +38,7 @@ from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -71,6 +71,7 @@ from vllm_ascend.ascend_forward_context import (
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
     fill_mxfp_v_scale_cache,
+    is_mxfp_cache_spec,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -121,7 +122,6 @@ from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
     get_pcp_profile_num_tokens,
-    is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
@@ -157,6 +157,15 @@ from vllm_ascend.worker.v2.utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def _has_mxfp_cache_spec(kv_cache_config: KVCacheConfig) -> bool:
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if any(is_mxfp_cache_spec(s) for s in specs):
+            return True
+    return False
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -451,7 +460,7 @@ class NPUModelRunner(GPUModelRunner):
             cache_dtype=self.cache_config.cache_dtype,
             excluded_cache_components=excluded_cache_components,
         )
-        if is_c8_mxfp_kv_quant(self.vllm_config):
+        if _has_mxfp_cache_spec(self.kv_cache_config):
             # The zeroer skips the static V scales (4th tuple component); the
             # wrapper restores them on pages reassigned from Mamba.
             self.kv_block_zeroer = C8KVBlockZeroer(  # type: ignore[assignment]

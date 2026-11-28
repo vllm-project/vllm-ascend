@@ -93,6 +93,25 @@ class AscendAttentionBackend(AttentionBackend):
         return AscendAttentionMetadataBuilder
 
     @classmethod
+    def customize_spec(cls, spec):
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.v1.kv_cache_interface import KVQuantMode
+
+        from vllm_ascend.utils import is_c8_mxfp_kv_quant
+
+        if (
+            spec.dtype == torch.float8_e4m3fn
+            and spec.kv_quant_mode == KVQuantMode.CUSTOM
+            and is_c8_mxfp_kv_quant(get_current_vllm_config_or_none())
+        ):
+            raise ValueError(
+                "KV cache dtype 'mxfp8' requires AscendC8MXFPAttentionBackend "
+                "(ModelSlim MXFP8 KV quantization). Add unquantized layers to "
+                "--kv-cache-dtype-skip-layers or use a supported quantized checkpoint."
+            )
+        return super().customize_spec(spec)
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         # vLLM checks this capability before instance-level PCP dispatch.
         # Enable PCP for this concrete GQA backend only. Subclasses must

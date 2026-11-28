@@ -8,7 +8,7 @@ Physical storage uses standard unpacked KV cache descriptors with two page-size
 classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import lcm
 
 from vllm.config import VllmConfig
@@ -95,8 +95,8 @@ def _is_glm5_next_tail_spec(spec: KVCacheSpec) -> bool:
     )
 
 
-def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
-    """Align GLM-Next specs into two physical page-size classes in-place."""
+def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> dict[str, KVCacheSpec]:
+    """Return a copy of GLM-Next specs aligned to two physical page-size classes."""
 
     main_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_main_spec(spec)]
     indexer_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_indexer_spec(spec)]
@@ -104,7 +104,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
     mamba_specs = [spec for spec in kv_cache_spec.values() if isinstance(spec, MambaSpec)]
 
     if not main_specs and not indexer_specs and not tail_specs:
-        return
+        return dict(kv_cache_spec)
     if not main_specs or not indexer_specs or not tail_specs:
         raise ValueError("GLM-Next cache layout requires main MLA, compressed indexer, and compressor-tail specs.")
 
@@ -131,10 +131,15 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         )
         small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
-    for spec in main_candidates:
-        object.__setattr__(spec, "page_size_padded", main_page_size)
-    for spec in small_candidates:
-        object.__setattr__(spec, "page_size_padded", small_page_size)
+    aligned: dict[str, KVCacheSpec] = {}
+    for name, spec in kv_cache_spec.items():
+        if _is_glm5_next_main_spec(spec) or isinstance(spec, MambaSpec):
+            aligned[name] = replace(spec, page_size_padded=main_page_size)
+        elif _is_glm5_next_indexer_spec(spec) or _is_glm5_next_tail_spec(spec):
+            aligned[name] = replace(spec, page_size_padded=small_page_size)
+        else:
+            aligned[name] = spec
+    return aligned
 
 
 def _create_glm5_next_attention_groups(
@@ -379,16 +384,16 @@ def get_glm5_next_kv_cache_groups(
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
         raise ValueError("GLM-Next's paired MLA/indexer and fixed tail layout requires the hybrid KV cache manager.")
 
-    _align_glm5_next_cache_specs(kv_cache_spec)
-    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
-    attention_specs = {name: spec for name, spec in kv_cache_spec.items() if not isinstance(spec, MambaSpec)}
+    aligned_specs = _align_glm5_next_cache_specs(kv_cache_spec)
+    mamba_specs = {name: spec for name, spec in aligned_specs.items() if isinstance(spec, MambaSpec)}
+    attention_specs = {name: spec for name, spec in aligned_specs.items() if not isinstance(spec, MambaSpec)}
     groups = _create_glm5_next_attention_groups(attention_specs)
     if not mamba_specs:
         # The standalone MTP runner has the same attention/tail pairing but
         # no recurrent groups.
         return groups
 
-    grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
+    grouped_names = _group_glm5_next_mamba_layer_names(aligned_specs, mamba_specs)
     groups.extend(_create_mamba_groups(mamba_specs, grouped_names))
     return groups
 

@@ -696,10 +696,6 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
     # `get_builder_cls` returns the Ascend builder below rather than main's
     # ROCm builder, which only reserves Octave workspace for Octave cache
     # dtypes that Ascend's BF16/FP8 QSA cache never selects.
-    # QSA pages are represented by descriptor-backed views. Consecutive
-    # logical blocks may be separated by other cache owners in the common
-    # vLLM pool, while each individual page remains dense.
-    uses_descriptor_cache_view = True
     uses_qsa_page_major_kv_view = True
 
     @staticmethod
@@ -749,11 +745,6 @@ upstream_qsa.QSAIndexer = AscendQSAIndexer
 upstream_qsa.Qwen4ExpQSAImpl = AscendQSAImpl  # type: ignore[attr-defined]
 upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 
-
-# Indexer-cache descriptors use the same block-outermost layout as main QSA KV.
-# Their physical block stride is honored by the runner, so no compact copy is
-# required before LightningIndexer or the Triton QSA selector consumes them.
-QSAIndexerBackend.uses_descriptor_cache_view = True
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
