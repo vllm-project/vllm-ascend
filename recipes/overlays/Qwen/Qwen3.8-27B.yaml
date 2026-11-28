@@ -133,7 +133,7 @@ presets:
     env:
       VLLM_USE_MODELSCOPE: 'True'
       HCCL_BUFFSIZE: '512'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
     tp: 2
     select:
       frontend: python
@@ -189,7 +189,7 @@ presets:
     env:
       VLLM_USE_MODELSCOPE: 'True'
       HCCL_BUFFSIZE: '512'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
     tp: 2
     select:
       frontend: python
@@ -245,7 +245,7 @@ presets:
     env:
       VLLM_USE_MODELSCOPE: 'True'
       HCCL_BUFFSIZE: '512'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
     tp: 1
     select:
       frontend: python
@@ -330,7 +330,7 @@ presets:
       HCCL_BUFFSIZE: '512'
       ASCEND_BUFFER_POOL: '0:0'
       NETWORK_CARD_NAME: '$SERVICE_NETWORK_INTERFACE'
-      LD_LIBRARY_PATH: '/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}'
+      LD_LIBRARY_PATH: '/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}'
     points:
       prefill_0:
         label: Prefill P0
