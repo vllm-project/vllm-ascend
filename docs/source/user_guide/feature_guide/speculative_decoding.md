@@ -119,7 +119,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -135,7 +134,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{"method":"eagle3","model":"RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
 ```
 
@@ -402,7 +400,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -419,7 +416,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{
     "method": "eagle3",
     "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -446,7 +442,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -463,7 +458,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{
     "method": "eagle3",
     "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -498,7 +492,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -520,7 +513,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{
     "method": "eagle3",
     "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -576,7 +568,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -594,7 +585,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{
     "method": "eagle3",
     "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -713,7 +703,6 @@ llm = LLM(
     mamba_cache_mode="none",
     mamba_ssm_cache_dtype="float32",
     use_replayssm=True,
-    enforce_eager=True,
     speculative_config={
         "method": "mtp",
         "num_speculative_tokens": 4,
@@ -735,7 +724,6 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
   --mamba-cache-mode none \
   --mamba-ssm-cache-dtype float32 \
   --use-replayssm \
-  --enforce-eager \
   --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 ```
 
@@ -766,7 +754,6 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-8B",
-    enforce_eager=True,
     speculative_config={
         "method": "eagle3",
         "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -787,7 +774,6 @@ print(outputs[0].outputs[0].text)
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
   --speculative-config '{
     "method":"eagle3",
     "model":"RedHatAI/Qwen3-8B-speculator.eagle3",
