@@ -700,15 +700,17 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         buffer, capacity, pads = _select_buffer_for_step(E, K, H, T)
         hidden_c = pads["hidden"][:capacity]
         topk_c = pads["topk"][:capacity]
-        route_c = None
-        if (
+        dispatch_route_weights = None
+        # Older SDKs lack the capability flag and require dispatch weights.
+        send_dispatch_weights = (
             not buffer._require_ctx().get("planning_skips_source_dup", False)
             or token_dispatch_input.routing.apply_router_weight_on_input
-        ):
+        )
+        if send_dispatch_weights:
             if "route" not in pads:
                 pads["route"] = torch.zeros_like(pads["topk"], dtype=torch.float32)
-            route_c = pads["route"][:capacity]
-            route_c[:T].copy_(topk_weights)
+            dispatch_route_weights = pads["route"][:capacity]
+            dispatch_route_weights[:T].copy_(topk_weights)
         if hidden_states.dtype != torch.bfloat16:
             hidden_states = hidden_states.to(torch.bfloat16)
         # copy_ casts on the device: no per-call .to() temporaries.
@@ -727,7 +729,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         if use_mxfp8:
             h_nvs, dispatch_scale, _, cu, plan = buffer.dispatch_mxfp8(
                 hidden_states,
-                route_c,
+                dispatch_route_weights,
                 topk_c,
                 tpe,
                 num_tokens=T,
@@ -742,7 +744,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # reading before that copy is enqueued.
             h_nvs, _, cu, plan = buffer.dispatch(
                 hidden_c,
-                route_c,
+                dispatch_route_weights,
                 topk_c,
                 tpe,
                 zero_copy=True,

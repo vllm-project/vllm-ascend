@@ -305,8 +305,9 @@ def _layer_weight_layout(layer, E: int, H: int) -> _LayerWeightLayout:
     return _LayerWeightLayout(E, H, F, epn, B, _payload_specs(layer, H, F))
 
 
-def _slot_pool_key(E: int, H: int, F: int, B: int, rank: int, dev: int, specs: list[_PayloadSpec]) -> tuple:
-    return (E, H, F, B, rank, dev, tuple((spec.name, *spec.carrier) for spec in specs))
+def _slot_pool_key(layout: _LayerWeightLayout, rank: int, dev: int) -> tuple:
+    payloads = tuple((spec.name, *spec.carrier) for spec in layout.specs)
+    return (layout.E, layout.H, layout.F, layout.B, rank, dev, payloads)
 
 
 def _build_slot_states(entries, rank: int, dev: int) -> list:
@@ -318,7 +319,7 @@ def _build_slot_states(entries, rank: int, dev: int) -> list:
             continue
         seen.add(id(layer))
         layout = _layer_weight_layout(layer, int(entry["E"]), int(entry["H"]))
-        key = _slot_pool_key(layout.E, layout.H, layout.F, layout.B, rank, dev, layout.specs)
+        key = _slot_pool_key(layout, rank, dev)
         layers.append((layer, layout, key))
         counts[key] = counts.get(key, 0) + 1
 
@@ -353,12 +354,10 @@ class _SharedSlots:
     _pools: dict[tuple, dict] = {}
 
     @classmethod
-    def get(
-        cls, E: int, H: int, F: int, B: int, rank: int, dev: int, specs: list[_PayloadSpec], *, cache_layers: int
-    ) -> dict:
+    def get(cls, layout: _LayerWeightLayout, rank: int, dev: int, *, cache_layers: int) -> dict:
         if cache_layers < 1:
             raise ValueError("MoonEP Slot cache requires at least one registered layer per pool")
-        key = _slot_pool_key(E, H, F, B, rank, dev, specs)
+        key = _slot_pool_key(layout, rank, dev)
         with cls._lock:
             pool = cls._pools.get(key)
             if pool is not None and pool["cache_layers"] != cache_layers:
@@ -368,16 +367,16 @@ class _SharedSlots:
 
                 # 每个 payload 单独一块槽：四个 payload 的逐专家字节数互不相同。
                 slots = {}
-                for spec in specs:
+                for spec in layout.specs:
                     rows, cols = spec.carrier
-                    slot, _, _ = create_vmm_physical([B, rows, cols], torch.bfloat16, dev)
+                    slot, _, _ = create_vmm_physical([layout.B, rows, cols], torch.bfloat16, dev)
                     slot.zero_()
                     slots[spec.name] = slot
                 # One contiguous cache allocation per payload, sized to the
                 # actual unique registered layers using this exact Slot pool.
                 cache = {}
                 if _CACHED_EXPERT_COUNT > 0:
-                    for spec in specs:
+                    for spec in layout.specs:
                         rows, cols = spec.carrier
                         c, _, _ = create_vmm_physical(
                             [cache_layers, _CACHED_EXPERT_COUNT, rows, cols], torch.bfloat16, dev
@@ -386,7 +385,7 @@ class _SharedSlots:
                         cache[spec.name] = c
                 # full [E+B] projections need home chunks; built per layer, so
                 # keep slot chunks here and let _LayerState build the fulls.
-                pool = {"slots": slots, "cache": cache, "B": B, "cache_layers": cache_layers}
+                pool = {"slots": slots, "cache": cache, "B": layout.B, "cache_layers": cache_layers}
                 cls._pools[key] = pool
         return pool
 
@@ -417,7 +416,7 @@ class _LayerWeightState:
         self.E, self.H, self.F, self.epn, self.B = E, H, F, epn, B
         self._specs = layout.specs
 
-        shared = _SharedSlots.get(E, H, F, B, rank, dev, self._specs, cache_layers=cache_layer_count)
+        shared = _SharedSlots.get(layout, rank, dev, cache_layers=cache_layer_count)
         for spec in self._specs:
             cached = shared["cache"].get(spec.name)
             if _CACHED_EXPERT_COUNT > 0 and (
