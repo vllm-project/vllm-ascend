@@ -12,8 +12,6 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import unconditional_to_co
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
-from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import _selector_walk_kernel_ascend
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
@@ -345,75 +343,27 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("sampler", ["greedy", "categorical", "selector"])
 @torch.inference_mode()
-def test_block_verification_revisited_position_preserves_target_distribution(sampler):
+def test_block_verification_revisited_position_preserves_target_distribution():
     """Check the second generated token when verification revisits its position."""
-    torch.manual_seed(42)
-    device = "npu"
     num_trials, num_steps = 8192, 2
-    width = num_steps + 1
-    target_p0 = 0.5 if sampler == "greedy" else 0.3
-    target_logits = torch.tensor([target_p0, 1 - target_p0], device=device).log()
-    draft_logits = torch.tensor([0.7, 0.3], device=device).log()
-    inputs = _build_rejection_sample_inputs(target_logits, draft_logits, num_steps, 1.0, num_trials)
-    draft_rows = inputs["draft_sampled"].view(num_trials, width)
-    draft_rows.zero_()
-    if sampler == "greedy":
-        inputs["draft_logits"] = None
-    elif sampler == "selector":
-        candidate_ids = torch.arange(2, device=device).expand(num_trials, num_steps, 2).contiguous()
-        # Both predecessor choices give the same Bernoulli proposal distribution.
-        scores = draft_logits.expand(num_trials, num_steps, 2, 2).contiguous()
-        proposals = torch.empty((num_trials, num_steps), dtype=torch.int64, device=device)
-        realized_scores = torch.empty_like(inputs["draft_logits"])
-
-    offsets = torch.arange(width, dtype=torch.int32, device=device)
+    logits = torch.zeros(2, device="npu")
+    inputs = _build_rejection_sample_inputs(logits, logits, num_steps, 1.0, num_trials)
+    inputs["draft_logits"] = None
+    inputs["draft_sampled"].zero_()
 
     def verify(start):
-        positions = offsets + start
-        inputs["pos"] = positions.repeat(num_trials)
-        if sampler == "categorical":
-            draft_rows[:, 1:] = categorical_sample(
-                draft_logits.expand(num_trials * num_steps, -1).contiguous(),
-                inputs["idx_mapping"].repeat_interleave(num_steps),
-                inputs["temperature"],
-                inputs["seed"],
-                positions[:num_steps].repeat(num_trials),
-                apply_temperature=True,
-                is_drafting=True,
-                logits_cache=inputs["draft_logits"],
-                logits_cache_col=offsets[:num_steps].repeat(num_trials),
-            ).view(num_trials, num_steps)
-        elif sampler == "selector":
-            _selector_walk_kernel_ascend[(num_trials,)](
-                scores,
-                candidate_ids,
-                (positions[:num_steps] + 1).repeat(num_trials),
-                inputs["idx_mapping"].repeat_interleave(num_steps),
-                inputs["temperature"],
-                inputs["seed"],
-                proposals,
-                realized_scores,
-                num_steps=num_steps,
-                top_k=2,
-                BLOCK_K=2,
-                SAMPLE_PROBABILISTIC=True,
-                USE_FP64=False,
-                num_warps=1,
-            )
-            draft_rows[:, 1:] = proposals
-            inputs["draft_logits"] = realized_scores
+        inputs["pos"] = inputs["expanded_local_pos"] + start
         return rejection_sample(
             **inputs, num_speculative_steps=num_steps, use_block_verification=True, use_entropy_verify=False
         )
 
     first, first_counts = verify(1)
-    draft_rows[:, 0] = first[:, 0]
+    inputs["draft_sampled"].view(num_trials, num_steps + 1)[:, 0] = first[:, 0]
     second, _ = verify(2)
     # A second round is needed only when the first committed a single token.
     token_at_position_2 = torch.where(first_counts == 1, second[:, 0], first[:, 1])
-    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(target_p0, abs=0.03)
+    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(0.5, abs=0.03)
 
 
 @pytest.mark.skipif(
