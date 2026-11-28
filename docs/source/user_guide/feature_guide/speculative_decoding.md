@@ -229,8 +229,7 @@ vllm serve Qwen/Qwen3.8-27B \
 ```
 
 Full draft ACLGraph capture requires full decode ACLGraphs on the target and a
-draft attention backend that supports full graph capture for uniform decode
-batches. Set `speculative_config.enforce_eager` to `true` to run the draft eagerly.
+draft attention backend that supports full graph capture for uniform decode batches.
 
 ##### LiLiCorr
 
