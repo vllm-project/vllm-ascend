@@ -2,7 +2,7 @@
 
 The AI review agent provides deep, on-demand code review for pull requests. It complements — never replaces — human review: first-pass screening (CODEOWNERS routing, gemini-code-assist comments) and CI run automatically on every PR, while the AI review agent handles the deep rounds that a reviewer explicitly requests. The agent can never approve or merge; its verdict is advisory input for the human reviewer.
 
-The mechanism was proposed in [RFC #21451](https://github.com/vllm-project/vllm-ascend/issues/21451) and is currently in a **gray release** (limited authors, opt-in per PR).
+The mechanism was proposed in [RFC #21451](https://github.com/vllm-project/vllm-ascend/issues/21451) and is currently in a **gray release** (limited reviewers, opt-in per PR).
 
 ## How it works, end to end
 
@@ -10,69 +10,77 @@ The mechanism was proposed in [RFC #21451](https://github.com/vllm-project/vllm-
 reviewer applies "ai-review" label
         │
         ▼
-workflow gate (write permission + label applier in allowlist)
+workflow checks the reviewer's allowlist membership
         │
         ▼
-orchestrator assembles prompt ──► dsh agent (headless) ──► findings
-        │                                                      │
-        ▼                                                      ▼
-state restored from last                  one COMMENT-level review with
-agent comment (signature block)           inline comments on code lines
-        │                                                      │
-        ▼                                                      ▼
-        └────────────── summary comment (verdict + signature) ──┘
+orchestrator reads the previous summary and assembles the prompt
         │
         ▼
-multi-round: author replies with /ai-review ──► next round
-new push ──► ai-review-passed revoked ──► incremental re-review
+dsh agent (headless) ──► new findings posted inline where possible
+        │
+        ▼
+summary comment updated (verdict, findings and saved state)
+        │
+        ▼
+new top-level /ai-review comment ──► next round
+new push ──► ai-review-passed revoked
 ```
 
 ### Triggering and the gray-release gate
 
-- A reviewer with write permission applies the `ai-review` label to a PR.
-- The person applying the label must be listed in `.github/agent-review/allowlist.txt` — the allowlist authorizes operators, not PRs. From anyone else the agent posts a single notice and removes the label. The gray release scales by editing this file; removing lines rolls it back with no code change.
-- During the gray release the agent's PR comments are posted by the maintainer's bot account, with an "AI review" banner marking them as machine output and clarifying that `ai-review-passed` is not an approve.
+- An operator listed in `.github/agent-review/allowlist.txt` can start a review by applying the `ai-review` label to a PR. Applying the label requires permission to manage PR labels on GitHub. If an unlisted person applies it, the bot posts a notice and removes the label.
+- Once enabled, any listed operator can request another review, waive findings, or stop the review by commenting on the PR. The same list applies to PR authors and maintainers. To join the pilot, comment on RFC #21451.
+- During the gray release the agent's PR comments are posted by the maintainer's bot account, with the summary headed **AI review · DeepSeek Harness headless · POC pilot**. The bot appends an Actions link to accepted command comments and explains rejections on the original comment.
 
 ### Review rounds
 
-Each round is one agent invocation. The orchestrator assembles the prompt deterministically:
+Each round is one agent invocation. The prompt includes the following information.
 
-1. the output protocol (finding format, severities, verdict marker),
-2. a working-environment section (where the PR code, docs and guidelines live),
-3. a knowledge-base map — file paths plus rule IDs, not full contents,
-4. the list of knowledge-base domains the PR touches (resolved from `domains.yaml`),
-5. the PR diff, the agent's previous comment, and the author's reply.
+1. The path to the trusted project guidelines, the knowledge-base map and the domains the PR touches.
+2. The PR title and description, target branch tip, merge base, head and `git diff --stat`.
+3. The last published review's head, merge base, coverage status and summary, plus a separate list of unfinished static checks.
+4. Open and resolved findings, waived findings and their reasons, the triggering comment (if any) and the expected review format.
 
-The agent reads the referenced checklist files itself from the checked-out repository and cites only rules it has actually read (every finding must carry a `file:line`, a rule ID and a severity — findings without grounding are invalid).
+The agent runs in a Git worktree at the reviewed head and uses Git to inspect changes from the merge base. It reads applicable checklists from the trusted checkout. After about ten minutes, it is asked to finish with the evidence it has. The workflow stops the agent after twelve minutes.
+
+The review summary explains what the agent checked, what it concluded and which claims still need runtime evidence. A separate list names the static checks left for the next round. A round with unfinished checks cannot pass. An allowlisted operator can comment `/ai-review` to continue those checks and review any new changes. A completed review has an empty list and keeps its summary for the next round.
+
+### Documentation changes
+
+When the current PR diff changes either root README (`README.md` or `README.zh.md`), Markdown in `docs/` or `vllm_ascend/ops/triton/docs/`, or Chinese translations in `docs/source/locale/zh_CN/LC_MESSAGES/`, the agent reviews the documentation against internal standards and reports documentation findings alongside code findings in the same round.
+
+If you withdraw a documentation change, include the reason and finding ID in the next review request. The agent can mark that finding `resolved` after verifying the affected content was withdrawn. If you moved the content and the issue persists, the finding stays open.
 
 ### Multi-round interaction and termination
 
-State is carried in a machine-readable signature block at the end of every agent comment, so nothing needs to be stored outside GitHub:
+The bot updates one PR summary comment. Its hidden `ai-review-state` JSON block records the reviewed commit, published rounds and finding history. A round counts when the bot publishes its result or a notice that the code changed during review. If a run fails before publication, a rerun starts a fresh review from the last published summary.
 
-```text
-<!-- ai-review: state=reviewing | round=2/5 | total=6 | head=abc123 -->
-```
+Waivers, stop commands and discarded results can update the comment. The next review still receives the snapshot, summary and unfinished checks from the last round that published a review result.
 
 | Event | Effect |
 |---|---|
-| Author replies with the `/ai-review` command | next round (plain comments, CI bots and human conversations are ignored) |
-| Author pushes a commit | `ai-review-passed` revoked, round budget reset, incremental re-review of the new diff |
-| Reviewer comments `/ai-review-waive` on a PR comment | ALL open findings waived (marked on the inline comments), one re-evaluation round runs |
-| Reviewer replies `/ai-review-waive` inside one finding's thread | that single finding is waived |
-| Reviewer removes the label or comments `/ai-review-stop` | agent stops; a newer trigger always cancels the in-flight round (latest wins) |
-| All MUST-FIX resolved | agent emits `AI-REVIEW-VERDICT: PASS`; the orchestrator applies `ai-review-passed` |
-| Round cap reached (5 per push) | closing summary, state `waiting-human`, a human decides |
-| Whole-PR budget exhausted (15 rounds) | agent goes silent until a reviewer re-applies the label |
+| Allowlisted operator comments `/ai-review` | Request one review of the current PR. Include explanations for multiple findings in the same top-level comment. |
+| Author pushes a commit | Revoke `ai-review-passed`. The next `/ai-review` reviews all changes together. |
+| Allowlisted operator comments `/ai-review-waive F003 reason` or `/ai-review-waive all reason` | Permanently waive one or all open finding IDs on this PR. Existing inline comments show `[WAIVED by @user]`. The bot updates the verdict without calling the agent. |
+| Someone removes the label on GitHub, or an allowlisted operator comments `/ai-review-stop` | Stop review and remove both labels. Wait for the Stop workflow to finish before reapplying `ai-review`. |
+| Review covers the full diff, no MUST-FIX remains open and no human decision is pending | The orchestrator applies `ai-review-passed`. |
+| Round cap reached (5 per commit) | Push changes and request review again, or ask an allowlisted reviewer to restart the session. |
+| Session budget exhausted (15 published rounds) | An allowlisted reviewer can remove and reapply the label to reset both counts. Existing findings are retained. |
 
-`ai-review-passed` is **not an approve**. The agent posts issue comments and COMMENT-level reviews only — it has no permission to approve, merge or push, and human review remains the merge gate.
+Waived IDs stay archived in the PR summary after a push. Before reporting a new problem, the agent consults the waiver list to avoid repeating a behavior and impact the reviewer already accepted. A distinct defect or an impact outside the waiver can receive a new ID, even on the same line.
+
+When new evidence changes an open or resolved finding's impact, the agent can raise or lower its severity under the same ID. The bot updates the original inline comment and uses the new severity for the verdict. The summary records the evidence.
+
+Each PR allows one running review job and one pending job. When another authorized request enters a full queue, it replaces the pending job.
+
+`ai-review-passed` is **not an approve**. Human review remains the merge gate.
 
 ## For PR authors
 
-1. Ask a reviewer to apply the `ai-review` label (only allowlisted operators can — see below), or become an operator yourself via RFC #21451.
-2. When you want a deep review, ask a reviewer to apply the `ai-review` label to your PR.
-3. The agent posts findings as inline comments on your diff plus one summary comment. To trigger the next round, add a **top-level PR comment** containing `/ai-review` — replies inside an inline finding thread also reach the agent, but a plain comment without the command never does.
-4. Fix what is marked `MUST-FIX` and push. The agent re-reviews the new diff automatically; when nothing blocking remains it applies the `ai-review-passed` label and a human reviewer takes over.
-5. Everything is optional: without the label your PR flow is unchanged.
+1. When you want a deep review, ask an allowlisted reviewer to apply the `ai-review` label to your PR.
+2. Read the summary comment for the verdict and the full list of findings. The agent also posts findings inline when it can attach them to a changed line.
+3. Fix what is marked `MUST-FIX` and push your changes. When ready, ask an allowlisted operator to post a **top-level PR comment** starting with `/ai-review`, or post it yourself if you are on the list. Inline replies do not start a round.
+4. Everything is optional: without the label your PR flow is unchanged.
 
 ## Knowledge base maintenance
 
@@ -81,7 +89,7 @@ The review rules live in `.github/agent-review/` and follow the project's owners
 ```text
 .github/agent-review/
 ├── instructions.md        # output protocol (maintainers)
-├── allowlist.txt          # operators allowed to apply the label (maintainers)
+├── allowlist.txt          # operators who can start reviews and use bot commands
 ├── domains.yaml           # coarse path-glob → domain registry (maintainers)
 ├── L1/checklist.md        # cross-domain global rules (maintainers)
 └── L2/<domain>/           # one directory per domain, owned by that
@@ -100,9 +108,9 @@ During the gray release, maintainer feedback on the agent's inline comments (agr
 | Path | Role |
 |---|---|
 | `.github/workflows/ai_review.yml` | trigger orchestration (label / comment / push), gates, agent job on the self-hosted CPU pool |
-| `.github/workflows/scripts/ai_review.py` | state machine, prompt assembly, finding parsing, inline-review posting |
-| `.github/workflows/dockerfiles/Dockerfile.ai-review` | preinstalled agent image (Node + dsh CLI), rebuilt manually |
-| `.github/workflows/_schedule_ai_review_image_build.yaml` | image build workflow (manual/deliberate, no schedule) |
+| `.github/workflows/scripts/ai_review.py` | state machine, prompt assembly, finding parsing, inline comment posting |
+| `.github/workflows/dockerfiles/Dockerfile.ai-review` | preinstalled agent image (Node + dsh CLI) |
+| `.github/workflows/_schedule_ai_review_image_build.yaml` | image build workflow (Dockerfile changes or manual dispatch) |
 | `.github/agent-review/` | instructions, knowledge base, allowlist, domain registry |
 
 The agent engine is deliberately decoupled: the orchestrator invokes a configurable command (a repository variable), so the underlying engine can be replaced without workflow surgery.

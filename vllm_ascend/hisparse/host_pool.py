@@ -29,6 +29,130 @@ _ACL_HAC_AIV = 3
 _LEGACY_MEMFABRIC_POOL = Lock()
 
 
+# shortcut: TransferEngine has process-lifetime MRs; retain shared owners until worker exit.
+_shared_owners: list[torch.Tensor] = []
+
+
+def validate_hisparse_pd_order(vllm_config) -> None:
+    transfer = vllm_config.kv_transfer_config
+    if transfer is None:
+        return
+    extra = transfer.kv_connector_extra_config or {}
+    children = (
+        extra.get("connectors", [])
+        if transfer.kv_connector == "MultiConnector"
+        else [{"kv_connector": transfer.kv_connector, "kv_connector_extra_config": extra}]
+    )
+    names = [child.get("kv_connector") for child in children]
+    for index, child in enumerate(children):
+        if (
+            names[index] == "MooncakeConnectorV2"
+            and (child.get("kv_connector_extra_config") or {}).get("transfer_backend") == "memfabric"
+        ):
+            if "HiSparseConnector" not in names:
+                raise ValueError("MemFabric requires Ascend's HiSparseConnector")
+            if names.index("HiSparseConnector") > index:
+                raise ValueError("Ascend HiSparseConnector must precede MooncakeConnectorV2 in MultiConnector")
+
+
+class MemFabricSharedHostRegion:
+    """One Offload SHARED contribution, exposed through Core's region contract."""
+
+    def __init__(self, tensor_sizes: list[int], *, group=None) -> None:
+        from memfabric_hybrid import offload
+        from vllm.utils.network_utils import get_open_port
+        from vllm.v1.hisparse.runtime import check_hisparse_host_memory
+
+        self._size = sum(tensor_sizes)
+        if self._size <= 0 or any(size <= 0 for size in tensor_sizes):
+            raise ValueError("Shared HiSparse Host tensors must be nonempty")
+        rank = group.rank_in_group if group is not None else 0
+        leader = rank == 0
+        pool_size = triton.cdiv(self._size, 1024**3) * 1024**3
+        port = error = None
+        if leader:
+            try:
+                # Offload commits the physical pool in initialize(), before empty().
+                check_hisparse_host_memory(pool_size)
+                port = get_open_port()
+            except Exception as exc:
+                error = str(exc)
+        if group is not None:
+            port, error = group.broadcast_object((port, error), src=0)
+        if error is not None:
+            raise RuntimeError(f"MemFabric shared Host allocation failed: {error}")
+        config = offload.OffloadConfig()
+        config.device_id = torch.npu.current_device()
+        config.reserve_size = pool_size
+        config.alloc_size = pool_size if leader else 0
+        config.world_size = group.world_size if group is not None else 1
+        config.rank_id = rank
+        config.scene = offload.Scene.SHARED
+        config.store_url = f"tcp://127.0.0.1:{port}"
+        # The SDK owns both the shared storage and its per-device mappings.
+        try:
+            status = offload.initialize(config)
+            init_error = f"status {status}" if status != 0 else None
+        except Exception as exc:
+            init_error = str(exc)
+        if group is not None:
+            failures = torch.tensor([init_error is not None], dtype=torch.int32)
+            group.cpu_all_reduce_(failures)
+            failed = bool(failures.item())
+        else:
+            failed = init_error is not None
+        if failed:
+            detail = f": {init_error}" if init_error is not None else " on another TP rank"
+            raise RuntimeError(f"MemFabric shared HiSparse Host pool initialization failed{detail}")
+        if group is not None:
+            group.barrier()
+        self._bind_host_pool(offload, pool_size, group, leader=leader)
+
+    def _bind_host_pool(self, offload, pool_size: int, group, *, leader: bool) -> None:
+        result: tuple[int | None, int | None, int, str | None] | None = None
+        owner = None
+        if leader:
+            try:
+                owner = offload.empty([pool_size], dtype=torch.int8, pin_memory=True)
+                if owner.numel() != pool_size or not owner.is_contiguous():
+                    raise RuntimeError("MemFabric returned an invalid shared Host allocation")
+                device_ptr = offload.get_dva(owner.data_ptr())
+                if not device_ptr:
+                    raise RuntimeError("MemFabric did not expose a device address for HiSparse Host Source")
+                mapping = MappedHostTensor(owner, memfabric_device_ptr=device_ptr)
+                result = (owner.data_ptr(), mapping.device_ptr, pool_size, None)
+            except Exception as exc:
+                result = (None, None, pool_size, str(exc))
+        if group is not None:
+            result = group.broadcast_object(result, src=0)
+        assert result is not None
+        address, device_ptr, registered_size, error = result
+        if error is not None:
+            raise RuntimeError(f"MemFabric shared Host allocation failed: {error}")
+        if not address or address % mmap.PAGESIZE:
+            raise RuntimeError("MemFabric shared Host address is null or not page aligned")
+        if registered_size != pool_size or not device_ptr:
+            raise RuntimeError("MemFabric shared Host mapping differs from the initialized pool")
+        if not leader:
+            # Metadata-only view: SDK import supplies device access, not a follower CPU mapping.
+            buffer = (ctypes.c_ubyte * pool_size).from_address(address)
+            owner = torch.frombuffer(buffer, dtype=torch.int8)
+            # Legacy VMM imports expose the common VA; mapped Host pools need a local DVA lookup.
+            local_device_ptr = device_ptr if device_ptr == address else offload.get_dva(address)
+            if not local_device_ptr:
+                raise RuntimeError("MemFabric did not expose a device address for HiSparse Host Source")
+            mapping = MappedHostTensor(owner, memfabric_device_ptr=local_device_ptr)
+        if owner is None:
+            raise RuntimeError("MemFabric shared HiSparse Host allocation is missing")
+        self.base_tensor = owner
+        self.base_tensor._hisparse_registration = mapping
+        _shared_owners.append(owner)
+
+    def cleanup(self) -> None:
+        # TransferEngine MRs retain the backing until process exit.
+        pass
+
+
 class MappedHostTensor:
     """Retain mapped CPU storage until explicit close.
 
@@ -48,6 +172,7 @@ class MappedHostTensor:
         self.device = torch.device("npu", device_index)
         self.closed = False
         self._memfabric_cleanup: ExitStack | None = None
+        self._lib: ctypes.CDLL | None = None
         if memfabric_device_ptr is not None:
             # MemFabric provides AIV host-memory mapping on older HDK releases such as 25.5.1.
             # Reuse the device address from the MemFabric arena's existing mapping.
@@ -103,7 +228,7 @@ class MappedHostTensor:
             return
         if self._memfabric_cleanup is not None:
             self._memfabric_cleanup.close()
-        else:
+        elif self._lib is not None:
             status = self._lib.aclrtHostUnregister(self.host_address)
             if status:
                 raise RuntimeError(f"aclrtHostUnregister for HiSparse failed: {status}")
@@ -119,6 +244,7 @@ def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype, *, memfabri
     allocated_bytes = triton.cdiv(nbytes, mmap.PAGESIZE) * mmap.PAGESIZE
     if memfabric:
         from memfabric_hybrid import offload
+        from vllm.utils.network_utils import get_open_port
 
         config = offload.OffloadConfig()
         config.device_id = torch.npu.current_device()
@@ -126,7 +252,8 @@ def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype, *, memfabri
         config.alloc_size = config.reserve_size
         config.world_size = 1
         config.rank_id = 0
-        config.scene = offload.Scene.LOCAL
+        config.scene = offload.Scene.SHARED
+        config.store_url = f"tcp://127.0.0.1:{get_open_port()}"
         with ExitStack() as cleanup:
             # SDK 1.3.0 exposes only a process-wide allocator.
             if hasattr(offload, "Offload"):
@@ -176,6 +303,41 @@ def _uses_memfabric(transfer: KVTransferConfig | None) -> bool:
     )
 
 
+def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
+    if transfer is None or transfer.kv_connector != "MultiConnector":
+        return False
+    for child in (transfer.kv_connector_extra_config or {}).get("connectors", []):
+        if child.get("kv_connector") != "MooncakeConnectorV2" or child.get("kv_role") not in ("kv_consumer", "kv_both"):
+            continue
+        extra = child.get("kv_connector_extra_config") or {}
+        if extra.get("transfer_backend") == "memfabric" and not extra.get("use_layerwise", False):
+            return True
+    return False
+
+
+class AscendHiSparseOffloadManager:
+    def __init__(self, size: int, *, shared: bool) -> None:
+        from vllm.distributed import get_tp_group
+
+        if size <= 0:
+            raise ValueError("HiSparse Source must be nonempty")
+        group = get_tp_group() if shared else None
+        region = MemFabricSharedHostRegion([size], group=group)
+        self.shared_region = region if group is not None else None
+        self.is_host_writer = group is None or group.rank_in_group == 0
+        self.source = region.base_tensor[:size]
+        self.source._hisparse_registration = region.base_tensor._hisparse_registration
+        self.source._hisparse_registration.offload_manager = self
+
+    @classmethod
+    def from_host_pool(cls, pool):
+        registration = getattr(pool.registered, "_hisparse_registration", None)
+        manager = getattr(registration, "offload_manager", None)
+        if not isinstance(manager, cls):
+            raise RuntimeError("Ascend HiSparse worker requires a manager-owned Source")
+        return manager
+
+
 def install() -> None:
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.hisparse import runtime
@@ -184,12 +346,12 @@ def install() -> None:
     from vllm_ascend import ascend_config
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 
-    original = runtime.allocate_pinned_host_pool
-    if getattr(original, "_ascend_pinned_private_pool", False):
+    original_pinned = runtime.allocate_pinned_host_pool
+    if getattr(original_pinned, "_ascend_pinned_private_pool", False):
         return
 
-    @wraps(original)
-    def allocate(size):
+    @wraps(original_pinned)
+    def allocate_pinned(size):
         backend = get_hisparse_backend()
         if isinstance(backend, AscendHiSparseBackend):
             config = get_current_vllm_config_or_none() or ascend_config._INIT_VLLM_CONFIG
@@ -199,7 +361,33 @@ def install() -> None:
             registered = registration.tensor.view(torch.int8)
             registered._hisparse_registration = registration
             return registered[:size], registered
-        return original(size)
+        return original_pinned(size)
 
-    allocate.__dict__["_ascend_pinned_private_pool"] = True
-    runtime.allocate_pinned_host_pool = allocate
+    allocate_pinned.__dict__["_ascend_pinned_private_pool"] = True
+    runtime.allocate_pinned_host_pool = allocate_pinned
+
+    original = runtime.HiSparseHostPool.allocate
+    if getattr(original, "_ascend_memfabric_host_pool", False):
+        return
+
+    @wraps(original)
+    def allocate(pool, size):
+        shared = pool.kv_cache_config.hisparse_shared_host_pool
+        if (
+            pool.backing is not None
+            or not isinstance(get_hisparse_backend(), AscendHiSparseBackend)
+            or not (shared or uses_memfabric_pd(pool.vllm_config.kv_transfer_config))
+        ):
+            return original(pool, size)
+        manager = AscendHiSparseOffloadManager(size, shared=shared)
+        registration = manager.source._hisparse_registration
+        registered = registration.tensor.view(torch.int8)
+        registered._hisparse_registration = registration
+        pool.registered = registered
+        pool.pinned = [registered]
+        pool.shared_region = manager.shared_region
+        pool.backing = registered[:size]
+        return pool.backing
+
+    allocate.__dict__["_ascend_memfabric_host_pool"] = True
+    runtime.HiSparseHostPool.allocate = allocate  # type: ignore[method-assign, assignment]

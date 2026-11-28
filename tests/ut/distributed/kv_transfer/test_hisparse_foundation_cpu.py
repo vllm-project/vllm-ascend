@@ -5,11 +5,15 @@
 import math
 import mmap
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
+
+from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_registry
 
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
@@ -22,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention import sfa_hisparse
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
 from vllm_ascend.attention.sfa_hisparse import (
     AscendHiSparseImpl,
@@ -173,6 +178,207 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     assert events == ["close", "close"]
 
 
+@pytest.fixture
+def shared_offload_sdk(monkeypatch):
+    import sys
+
+    from vllm.v1.hisparse import runtime
+
+    configs, messages, allocations, dva_queries = [], [], [], []
+    group = NS(rank_in_group=0, world_size=2, barrier=lambda: None, cpu_all_reduce_=lambda tensor: tensor)
+
+    def broadcast(value, src):
+        if group.rank_in_group == 0:
+            messages.append(value)
+            return value
+        return messages.pop(0)
+
+    def allocate(shape, **kwargs):
+        allocations.append(shape[0])
+        owner = torch.empty(shape[0] + 4096, dtype=kwargs["dtype"])
+        offset = -owner.data_ptr() % 4096
+        return owner[offset : offset + shape[0]]
+
+    def get_dva(ptr):
+        dva_queries.append(group.rank_in_group)
+        if group.rank_in_group != 0:
+            raise RuntimeError("host pointer outside local contribution")
+        return ptr
+
+    def initialize(config):
+        configs.append(config)
+        return 0
+
+    group.broadcast_object = broadcast
+    sdk = NS(
+        OffloadConfig=NS,
+        Scene=NS(SHARED="shared"),
+        initialize=initialize,
+        empty=allocate,
+        get_dva=get_dva,
+    )
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=sdk))
+    monkeypatch.setattr(runtime, "check_hisparse_host_memory", lambda size: None)
+    monkeypatch.setattr(torch, "npu", NS(current_device=lambda: group.rank_in_group), raising=False)
+    monkeypatch.setattr(host_pool, "_shared_owners", [])
+    return sdk, group, configs, allocations, dva_queries
+
+
+def test_single_rank_memfabric_offload_uses_shared_scene(shared_offload_sdk):
+    _, _, configs, allocations, dva_queries = shared_offload_sdk
+    region = host_pool.MemFabricSharedHostRegion([4096])
+
+    assert allocations == [1024**3]
+    (config,) = configs
+    assert config.scene == "shared"
+    assert (config.world_size, config.rank_id) == (1, 0)
+    assert config.alloc_size == config.reserve_size == allocations[0]
+    assert dva_queries == [0]
+    assert region.base_tensor.data_ptr() % 4096 == 0
+
+
+def test_shared_offload_contributes_once_and_exposes_real_zero_copy_views(shared_offload_sdk):
+    _, group, configs, allocations, dva_queries = shared_offload_sdk
+    leader = host_pool.MemFabricSharedHostRegion([32, 64], group=group)
+    group.rank_in_group = 1
+    follower = host_pool.MemFabricSharedHostRegion([32, 64], group=group)
+    assert allocations == [1024**3]
+    assert [config.alloc_size for config in configs] == [1024**3, 0]
+    assert all(not getattr(config, "flags", 0) for config in configs)
+    assert all(config.scene == "shared" for config in configs)
+    assert [config.rank_id for config in configs] == [0, 1]
+    assert all(config.world_size == 2 for config in configs)
+    assert configs[0].store_url == configs[1].store_url
+    assert leader.base_tensor.data_ptr() == follower.base_tensor.data_ptr()
+    assert dva_queries == [0]
+    first = leader.base_tensor[:32]
+    second = leader.base_tensor[32:96]
+    second.fill_(19)
+    torch.testing.assert_close(follower.base_tensor[32:96], second)
+    assert second.data_ptr() == first.data_ptr() + 32
+    leader.cleanup()
+    leader.cleanup()
+
+
+def test_shared_offload_resolves_distinct_device_mapping_per_rank(shared_offload_sdk):
+    sdk, group, _, allocations, _ = shared_offload_sdk
+    sdk.get_dva = lambda ptr: ptr + (group.rank_in_group + 1) * 4096
+    leader = host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    follower = host_pool.MemFabricSharedHostRegion([32], group=group)
+    assert allocations == [1024**3]
+    for region, offset in [(leader, 4096), (follower, 8192)]:
+        mapping = region.base_tensor._hisparse_registration
+        assert mapping.device_ptr == mapping.host_address + offset
+        assert mapping.address_of(region.base_tensor[:32]) == mapping.device_ptr
+
+
+@pytest.mark.parametrize("raises", [False, True], ids=["nonzero-status", "exception"])
+def test_shared_offload_follower_init_failure_stops_all_ranks(shared_offload_sdk, monkeypatch, raises):
+    sdk, _, _, _, _ = shared_offload_sdk
+    bound = []
+    barriers = []
+    rank = threading.local()
+    sync = threading.Barrier(2)
+
+    class Group:
+        world_size = 2
+        flags = [0, 0]
+
+        @property
+        def rank_in_group(self):
+            return rank.value
+
+        def broadcast_object(self, value, src):
+            if rank.value == src:
+                self.message = value
+            sync.wait(timeout=5)
+            result = self.message
+            sync.wait(timeout=5)
+            return result
+
+        def cpu_all_reduce_(self, failure):
+            self.flags[rank.value] = failure.item()
+            sync.wait(timeout=5)
+            failure.fill_(sum(self.flags))
+            sync.wait(timeout=5)
+
+        def barrier(self):
+            barriers.append(rank.value)
+
+    group = Group()
+    monkeypatch.setattr(torch.npu, "current_device", lambda: rank.value)
+
+    def initialize(config):
+        if config.rank_id == 1 and raises:
+            raise RuntimeError("follower SDK failure")
+        return int(config.rank_id == 1)
+
+    sdk.initialize = initialize
+    monkeypatch.setattr(host_pool.MemFabricSharedHostRegion, "_bind_host_pool", lambda *args, **kwargs: bound.append(1))
+
+    def initialize_rank(rank_id):
+        rank.value = rank_id
+        try:
+            host_pool.MemFabricSharedHostRegion([32], group=group)
+        except RuntimeError as exc:
+            return str(exc)
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        errors = list(executor.map(initialize_rank, (0, 1)))
+    assert all(error and "initialization failed" in error for error in errors)
+    assert bound == barriers == []
+
+
+def test_shared_offload_checks_rounded_capacity_before_initialization(monkeypatch, shared_offload_sdk):
+    from vllm.v1.hisparse import runtime
+
+    _, group, configs, allocations, _ = shared_offload_sdk
+    checked = []
+
+    def reject(size):
+        checked.append(size)
+        raise ValueError("insufficient host memory")
+
+    monkeypatch.setattr(runtime, "check_hisparse_host_memory", reject)
+    for rank in (0, 1):
+        group.rank_in_group = rank
+        with pytest.raises(RuntimeError, match="insufficient host memory"):
+            host_pool.MemFabricSharedHostRegion([32], group=group)
+
+    assert checked == [1024**3]
+    assert configs == allocations == []
+
+
+def test_shared_offload_allocation_error_reaches_followers(shared_offload_sdk):
+    sdk, group, _, _, _ = shared_offload_sdk
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("allocation failed")
+
+    sdk.empty = fail
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+
+
+def test_shared_offload_mapping_error_reaches_followers(shared_offload_sdk):
+    sdk, group, _, _, _ = shared_offload_sdk
+
+    def fail(ptr):
+        raise RuntimeError("device mapping unavailable")
+
+    sdk.get_dva = fail
+    with pytest.raises(RuntimeError, match="device mapping unavailable"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    with pytest.raises(RuntimeError, match="device mapping unavailable"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+
+
 def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     from vllm.v1.hisparse import backend as core_backend
     from vllm.v1.hisparse import runtime
@@ -187,12 +393,16 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
     monkeypatch.setattr(core_backend, "get_hisparse_backend", lambda: backend)
     # Restore the process-wide binding when this test exits.
+    monkeypatch.setattr(runtime.HiSparseHostPool, "allocate", runtime.HiSparseHostPool.allocate)
     monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    monkeypatch.setattr(runtime, "allocate_hisparse_host_pools", runtime.allocate_hisparse_host_pools)
     install()
-    installed = runtime.allocate_pinned_host_pool
+    installed = runtime.HiSparseHostPool.allocate
     install()
-    assert runtime.allocate_pinned_host_pool is installed
-    payload, registered = installed(1001)
+    assert runtime.HiSparseHostPool.allocate is installed
+    pool = runtime.HiSparseHostPool(None, NS(hisparse_shared_host_pool=False))
+    payload = pool.allocate(1001)
+    registered = pool.registered
     assert registered._test_registration is backend
     assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
     payload.fill_(17)
@@ -251,22 +461,31 @@ def test_private_host_allocator_selects_explicit_memfabric(
 @pytest.mark.parametrize("device_address", [0, 4096])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy):
+    from vllm.utils import network_utils
+
+    initialized = []
     released = []
     backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
     offset = -backing.data_ptr() % mmap.PAGESIZE
+
+    def initialize(config):
+        initialized.append(config)
+        return 0
+
     arena = NS(
-        initialize=lambda config: 0,
+        initialize=initialize,
         empty=lambda size, **kwargs: backing[offset : offset + size[0]],
         get_dva=lambda addr: device_address,
         uninitialize=lambda: released.append(True),
     )
-    offload = NS(OffloadConfig=NS, Scene=NS(LOCAL=0))
+    offload = NS(OffloadConfig=NS, Scene=NS(LOCAL=0, SHARED=1))
     if legacy:
         vars(offload).update(vars(arena))
     else:
         offload.Offload = lambda: arena
     monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=offload))
     monkeypatch.setattr(torch, "npu", NS(current_device=lambda: 0), raising=False)
+    monkeypatch.setattr(network_utils, "get_open_port", lambda: 12345)
 
     if not device_address:
         with pytest.raises(RuntimeError, match="device address"):
@@ -282,6 +501,10 @@ def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy)
         mapping.close()
         assert mapping.closed
 
+    (config,) = initialized
+    assert config.scene == offload.Scene.SHARED
+    assert config.world_size == 1 and config.rank_id == 0
+    assert config.store_url == "tcp://127.0.0.1:12345"
     assert released == [True]
     assert not host_pool._LEGACY_MEMFABRIC_POOL.locked()
 
@@ -468,6 +691,114 @@ def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
     assert submitted == []
     finish_hisparse_kv_update(cache, real_metadata)
     assert submitted == [True]
+
+
+def test_metadata_builder_registers_representative_warmup(monkeypatch):
+    config = make_mock_vllm_config()
+    config.compilation_config.max_cudagraph_capture_size = 0
+    registry = make_registry(config)
+    # Isolate parent setup while exercising HiSparse's real constructor and registration.
+    monkeypatch.setattr(
+        AscendSFAMetadataBuilder, "__init__", lambda self, *args, **kwargs: setattr(self, "use_pcp", False)
+    )
+    with registry.activate():
+        AscendHiSparseMetadataBuilder(NS(block_size=128), ["layer"], config, torch.device("cpu"))
+    launcher = sfa_hisparse._TRITON_SCATTER_MIN_REPRESENTATIVES
+    assert registry._registrations[launcher] == [((config,), {})]
+
+
+@pytest.fixture
+def prefill_mask_builder(monkeypatch):
+    builder = AscendHiSparseMetadataBuilder.__new__(AscendHiSparseMetadataBuilder)
+    builder.device = torch.device("cpu")
+    builder._row_capacity = 16
+    builder._request_row_buffers = {}
+    monkeypatch.setattr(AscendSFAMetadataBuilder, "_build", lambda self, common, *args: common.metadata)
+    monkeypatch.setattr(sfa_hisparse, "compute_token_to_req_indices", lambda query, buffer, actual, rows: buffer[:rows])
+    monkeypatch.setattr(sfa_hisparse, "build_hisparse_prefill_staging_plan", lambda *args: NS())
+
+    def build(boundaries, rows, num_decodes=0, draft_index=None):
+        query = torch.tensor(boundaries, dtype=torch.int32)
+        num_reqs = len(boundaries) - 1
+        metadata = NS(
+            num_input_tokens=rows,
+            num_actual_tokens=boundaries[-1],
+            query_start_loc=query,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decodes,
+            num_prefills=num_reqs - num_decodes,
+            seq_lens_cpu=torch.diff(query),
+            seq_lens=torch.diff(query),
+            block_table=torch.ones((num_reqs, 1), dtype=torch.int32),
+            block_size=128,
+            prefill_valid_token_mask=None,
+        )
+        common = NS(num_reqs=num_reqs, query_start_loc_cpu=query, metadata=metadata)
+        return builder._build(common, draft_index=draft_index)
+
+    return build
+
+
+@pytest.mark.parametrize("boundaries,rows,num_decodes", [([0, 4], 4, 0), ([0, 1, 5], 8, 1)])
+def test_prefill_mask_is_reused_without_mutating_layer_topk(
+    prefill_mask_builder, monkeypatch, boundaries, rows, num_decodes
+):
+    metadata = prefill_mask_builder(boundaries, rows, num_decodes)
+    mask = metadata.prefill_valid_token_mask
+    expected_mask = (torch.arange(rows) < boundaries[-1])[:, None]
+    torch.testing.assert_close(mask, expected_mask)
+    assert mask.dtype == torch.bool
+
+    observed = []
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.index_group_index = 0
+    impl.index_group = NS(set_logical_topk_ready=lambda index: None, physical_kv_cache=lambda index: None)
+    impl.enable_sparse_sfa_c8 = False
+    impl.hisparse_cache = NS(
+        source_block_table=metadata.block_table,
+        swap_in=lambda *args, **kwargs: None,
+        runtime=NS(cache_ops=NS(attention_capacity=0)),
+    )
+
+    def resident_prefill(query, query_rope, logical, *args):
+        observed.append(logical.clone())
+        return query
+
+    impl._try_c8_resident_prefill = resident_prefill
+    impl._attention_physical = lambda query, *args, **kwargs: query
+    query = torch.zeros((rows, 1, 4))
+    logical = torch.arange(rows * 4, dtype=torch.int32).reshape(rows, 4)
+    logical[0, 0] = -1
+    original = logical.clone()
+
+    def unexpected_arange(*args, **kwargs):
+        pytest.fail("Per-layer forward must reuse the metadata mask")
+
+    monkeypatch.setattr(torch, "arange", unexpected_arange)
+    for layer_topk in (logical, logical + 100):
+        result = impl._execute_sparse_flash_attention_process(query, None, None, layer_topk, metadata, None, None)
+        torch.testing.assert_close(result, query)
+        expected = torch.where(expected_mask, layer_topk, -1)[num_decodes:]
+        torch.testing.assert_close(observed[-1], expected)
+        assert metadata.prefill_valid_token_mask is mask
+    torch.testing.assert_close(logical, original)
+    torch.testing.assert_close(mask, expected_mask)
+
+
+def test_prefill_mask_refreshes_for_new_batches_and_draft_owners(prefill_mask_builder):
+    first = prefill_mask_builder([0, 7], 8)
+    second = prefill_mask_builder([0, 2], 8)
+    draft = prefill_mask_builder([0, 1, 4], 8, num_decodes=1, draft_index=0)
+    assert first.prefill_valid_token_mask.sum() == 7
+    assert second.prefill_valid_token_mask.sum() == 2
+    assert draft.prefill_valid_token_mask.sum() == 4
+    assert first.prefill_valid_token_mask.data_ptr() != second.prefill_valid_token_mask.data_ptr()
+    assert second.prefill_valid_token_mask.data_ptr() != draft.prefill_valid_token_mask.data_ptr()
+
+
+def test_decode_metadata_does_not_allocate_prefill_mask(prefill_mask_builder):
+    metadata = prefill_mask_builder([0, 1, 2], 8, num_decodes=2)
+    assert metadata.prefill_valid_token_mask is None
 
 
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])

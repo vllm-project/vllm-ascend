@@ -50,7 +50,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
 
 
@@ -148,9 +148,7 @@ class RecomputeScheduler(Scheduler):
             except Exception:
                 offload_raised = True
                 logger.warning(
-                    "KV offload raised before decode-side preemption; sending "
-                    "the request back to P for recomputation: request_id=%s, "
-                    "num_computed_tokens=%d",
+                    "KV offload raised before decode-side preemption: request_id=%s, num_computed_tokens=%d",
                     request.request_id,
                     request.num_computed_tokens,
                     exc_info=True,
@@ -159,7 +157,7 @@ class RecomputeScheduler(Scheduler):
         if not offloaded:
             # Mirror the config gate: only a real split (size > 1) forbids the return to P.
             ftpc = get_ascend_config().finegrained_tp_config
-            if ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1:
+            if ftpc.requires_graph(self.vllm_config):
                 logger.error(
                     "KV offload failed with fine-grained TP enabled; aborting the request instead "
                     "of returning it to P for recomputation: request_id=%s, "
@@ -201,6 +199,11 @@ class RecomputeScheduler(Scheduler):
         assert [(req.request_id, req.client_index) for req in finished_reqs] == [
             (request.request_id, request.client_index)
         ]
+        logger.info(
+            "[PD-RECOMPUTE] Finish_recomputed_request: back to P, request_id=%s, client_index=%s",
+            request.request_id,
+            request.client_index,
+        )
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -221,7 +224,7 @@ class RecomputeScheduler(Scheduler):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        if not vllm_version_is("0.33.0") and (
+        if not vllm_version_is("0.34.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
@@ -434,7 +437,11 @@ class RecomputeScheduler(Scheduler):
                                     num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
                     else:
                         preempted_req = self.running.pop()
-
+                    logger.debug(
+                        "[PD-RECOMPUTE] Try to preempt or recompute: preempted_req_id=%s, step=%d",
+                        preempted_req.request_id,
+                        self.current_step,
+                    )
                     locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,
@@ -864,6 +871,20 @@ class RecomputeScheduler(Scheduler):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    if (
+                        self.vllm_config.kv_transfer_config is not None
+                        and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+                        and not request.kv_transfer_params
+                    ):
+                        logger.warning(
+                            "[D_NO_KV_TRANSFER_PARAMS] dp=%s request_id=%s prompt_len=%d: "
+                            "Request without KV transfer parameters may trigger local prefill "
+                            "on the decode node. If cross-DP synchronization is skipped, "
+                            "inconsistent MoE communication paths may cause the service to hang.",
+                            self.vllm_config.parallel_config.data_parallel_rank,
+                            request.request_id,
+                            request.num_prompt_tokens,
+                        )
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -924,33 +945,22 @@ class RecomputeScheduler(Scheduler):
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
         }
-        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                **new_request_kwargs,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
-                scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
@@ -958,7 +968,7 @@ class RecomputeScheduler(Scheduler):
             )
 
         schedule_metadata: dict[str, Any] = {}
-        if not vllm_version_is("0.33.0"):
+        if not vllm_version_is("0.34.0"):
             if iteration_details is not None:
                 iteration_details.num_prefill_requests = (
                     len(num_scheduled_tokens) - iteration_details.num_decode_requests
@@ -966,12 +976,7 @@ class RecomputeScheduler(Scheduler):
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
-            schedule_metadata = {"iteration_details": iteration_details}
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+            schedule_metadata["iteration_details"] = iteration_details
 
         kv_connector_block_state = None
         # #51358 drains boundary offers even without a connector.
@@ -1001,7 +1006,7 @@ class RecomputeScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
             if self.log_stats and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
@@ -1028,11 +1033,6 @@ class RecomputeScheduler(Scheduler):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            **(
-                {"ec_manager_metadata": self.encoder_cache_manager.get_manager_metadata()}
-                if vllm_version_is("0.33.0")
-                else {}
-            ),
             recomputed_reqs=self._recomputed_reqs or None,
             has_sync_kv_loads=has_sync_kv_loads,
             kv_connector_block_state=kv_connector_block_state,

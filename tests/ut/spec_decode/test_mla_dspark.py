@@ -19,7 +19,6 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -76,19 +75,14 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
-    if vllm_version_is("0.33.0"):
-        target_sync = DPSyncState(  # type: ignore[call-arg]
-            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
-        )
-    else:
-        # Main adds the agreed query-length bound for varlen decode graphs.
-        target_sync = DPSyncState(  # type: ignore[call-arg]
-            num_tokens_across_dp=torch.tensor([4, 4]),
-            uniform_token_count=1,
-            max_query_len=None,
-            eager=False,
-            num_reqs=4,
-        )
+    # Main adds the agreed query-length bound for varlen decode graphs.
+    target_sync = DPSyncState(  # type: ignore[call-arg]
+        num_tokens_across_dp=torch.tensor([4, 4]),
+        uniform_token_count=1,
+        max_query_len=None,
+        eager=False,
+        num_reqs=4,
+    )
 
     def parent_propose(self, *args, **kwargs):
         sync = args[11]
@@ -145,7 +139,9 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
     "choices,expected", [((True,), True), ((False,), False), ((True, True), True), ((True, False), False), ((), False)]
 )
 def test_dspark_flashmla_selection_requires_all_mla_groups(monkeypatch, choices, expected):
-    monkeypatch.setattr(shared, "_get_graph_update_backend", lambda _: AscendMLABackend)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dflash.speculator._get_graph_update_backend", lambda _: AscendMLABackend
+    )
     spec = initialize_attention(monkeypatch, AscendMLABackend, flashmla_choices=choices)
     assert spec.attn_architecture == "MLA"
     assert spec.use_flashmla is expected
@@ -157,7 +153,15 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "build_dspark_draft_config", lambda config: config)
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            enforce_eager=None,
+            custom_method=None,
+            speculator_config=SimpleNamespace(
+                speculator_class="vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
+            ),
+            use_dspark=lambda: True,
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
@@ -294,10 +298,9 @@ def test_raw_prefix_capture_preserves_the_native_snapshot():
     captured = target._maybe_add_hidden_state([], 1, state, torch.ones(2, 3, 4))
     assert len(captured) == 1
     torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
-    if not vllm_version_is("0.33.0"):
-        assert captured[0] is not state
-        state.add_(100)
-        torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+    assert captured[0] is not state
+    state.add_(100)
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
 
 
 def test_padded_mla_query_lengths_are_nested():

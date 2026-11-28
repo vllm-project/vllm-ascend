@@ -986,12 +986,12 @@ def test_kimi_lm_initializes_specialized_decode(monkeypatch):
 
 
 def test_kimi_lm_uses_ascend_hybrid_model_state():
-    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+    from vllm_ascend.models.kimi_k3.model_state import AscendKimiModelState
 
     model = kimi_k3.AscendKimiLinearForCausalLM.__new__(kimi_k3.AscendKimiLinearForCausalLM)
 
     # Upstream points at the ROCm state, whose attention metadata is invalid on NPU.
-    assert model.get_model_state_cls() is AscendMambaHybridModelState
+    assert model.get_model_state_cls() is AscendKimiModelState
 
 
 def test_kimi_model_forwards_specialized_decode_step(monkeypatch):

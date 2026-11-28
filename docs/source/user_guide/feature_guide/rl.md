@@ -165,9 +165,58 @@ The repository contains runnable examples for weight transfer:
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
 - [`rlhf_sparse_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/182ea0448550a970e4f0ae3624fe35e38b37bc80/examples/rl/rlhf_sparse_hccl.py)
 
-FRACTAL_NZ must be disabled for weight updates. RL mode forces
-`weight_nz_mode=0`; the weight-transfer start path validates the effective
-Ascend configuration.
+Weight updates require `weight_nz_mode=0`. RL mode applies this setting
+automatically. For direct reload of MoE models, set `enable_fused_mc2=0`.
+Use layerwise reload with fused MC2 or MegaMoE.
+
+#### Direct weight reload
+
+Use the vLLM main revision in `.github/vllm-main-verified.commit` and set
+`VLLM_RELOAD_MODE=direct` before starting the rollout server to reload
+unquantized BF16 Qwen weights in place. The default is `layerwise`. Direct
+reload preserves the weight addresses used by captured decode graphs, so
+the server can replay those graphs after a successful update.
+
+```bash
+VLLM_RELOAD_MODE=direct \
+vllm serve Qwen/Qwen3-0.6B \
+    --dtype bfloat16 \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+For an online transfer, [pause generation](#pause-and-resume-generation)
+and send the full checkpoint using the transfer lifecycle above.
+
+For a disk reload, start the server on localhost with `VLLM_SERVER_DEV_MODE=1`
+to enable the `/collective_rpc` endpoint.
+
+```bash
+VLLM_SERVER_DEV_MODE=1 VLLM_RELOAD_MODE=direct \
+vllm serve Qwen/Qwen3-0.6B \
+    --host 127.0.0.1 \
+    --dtype bfloat16 \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+[Pause generation](#pause-and-resume-generation), then call `reload_weights`
+on every worker. The checkpoint must have the same model architecture and
+weight layout and be readable by all workers.
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8000/collective_rpc \
+    -H 'Content-Type: application/json' \
+    -d '{"method":"reload_weights","kwargs":{"weights_path":"/path/to/updated-checkpoint","is_checkpoint_format":true}}'
+```
+
+Resume generation after the update succeeds. If an update fails after some
+weights have been replaced, keep generation paused and restore a complete
+checkpoint before serving requests.
+
+For packed IPC on shared NPUs, size the trainer's `packed_buffer_size_bytes`
+to fit the largest checkpoint tensor. Leave additional NPU memory for the
+trainer to stage an input tensor. If memory is tight, use unpacked IPC or move
+the trainer to a separate NPU and use HCCL.
 
 #### Sparse HCCL
 
@@ -822,6 +871,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `rl_config.sleep_mode_extra_cleanup=true` | Optional for sleep mode | Release HCCL and ACL graph resources at the cost of slower wake-up |
 | `rl_config.enable_training_consistency=true` | Training-inference consistency | Select FA3; requires the `flash_attn_npu_v3` package |
 | `rl_config.enable_batch_invariant=true` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
+| `VLLM_RELOAD_MODE=direct` | Full-checkpoint reload of unquantized BF16 Qwen weights | Refill weights in place and preserve captured decode graphs |
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |

@@ -28,7 +28,7 @@ Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md)
 
 For ImageNet val zero-shot Top-1 evaluation, prepare:
 
-- [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login and agree to terms)
+- [ImageNet ILSVRC 2012 val images](https://opendatalab.com/OpenDataLab/ILSVRC2012_Images/tree/main/raw/Images) (login and agree to terms)
 - `val_label.txt` in PyTorch index format (0–999), for example from [simple-imagenet-test](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)
 - `imagenet1000_clsidx_to_labels.txt` from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 
@@ -37,6 +37,8 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 > **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I Duo** only. Use the corresponding Docker image and the installation steps below.
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
@@ -54,22 +56,13 @@ You can use the official all-in-one Docker image. For the available image tags a
   export NAME=siglip2-dev
 
   # Start the container with the variables defined above.
-  # Atlas 300I Duo uses a single NPU device (/dev/davinci0).
+  # Atlas 300I Duo: select its single NPU (/dev/davinci0).
   docker run --rm \
+  -e ASCEND_VISIBLE_DEVICES=0 \
   --name $NAME \
   --net=host \
   --shm-size=1g \
-  --privileged=true \
-  --device /dev/davinci0 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
   -v /root/.cache:/root/.cache \
   -it $IMAGE bash
   ```
@@ -284,7 +277,7 @@ ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 
 ### 7.1 Dataset and Labels
 
-1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
+1. Download [ImageNet ILSVRC 2012 val images](https://opendatalab.com/OpenDataLab/ILSVRC2012_Images/tree/main/raw/Images) (login required).
 2. Download `val_label.txt` ([example-imagenet-test](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
 3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 

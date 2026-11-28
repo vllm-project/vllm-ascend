@@ -37,6 +37,8 @@ def _make_impl() -> AscendMLAImpl:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.use_flashmla = False
+    impl.use_quant_flashmla = False
+    impl._is_k3_dspark_draft = False
     impl.dcp_q_replicate_enabled = False
     impl.use_mla_rope = True
     impl.qk_rope_head_dim = ROPE_DIM
@@ -175,7 +177,6 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
         speculative_config=None,
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
-        use_v2_model_runner=False,
     )
     owner = MLAAttention.__new__(MLAAttention)
     nn.Module.__init__(owner)
@@ -210,11 +211,9 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     return impl
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
 @pytest.mark.parametrize("native_weights", [False, True])
-def test_post_load_prepares_private_prolog_weights(monkeypatch, use_v2_runner, native_weights):
+def test_post_load_prepares_private_prolog_weights(monkeypatch, native_weights):
     impl = _make_post_load_impl(monkeypatch)
-    impl.vllm_config.use_v2_model_runner = use_v2_runner
     if native_weights:
         for projection in (impl.fused_qkv_a_proj, impl.q_proj):
             projection.weight = projection.weight.T.contiguous()
@@ -230,11 +229,9 @@ def test_post_load_prepares_private_prolog_weights(monkeypatch, use_v2_runner, n
     assert prepared["weight_uk"] is impl.mlapo_W_UK_T
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_post_load_prepares_sliding_window_prolog_weights(monkeypatch, use_v2_runner):
+def test_post_load_prepares_sliding_window_prolog_weights(monkeypatch):
     impl = _make_post_load_impl(monkeypatch)
     config = impl.vllm_config
-    config.use_v2_model_runner = use_v2_runner
     owner = config.compilation_config.static_forward_context[impl.layer_name]
     owner.sliding_window = BLOCK_SIZE
     assert isinstance(owner.get_kv_cache_spec(config), SlidingWindowMLASpec)
@@ -364,7 +361,12 @@ def test_post_load_skips_unused_prolog_weights(monkeypatch, excluded_path):
 
     impl.process_weights_after_loading(torch.bfloat16)
 
-    assert impl._prolog_v3_weights is None
+    # V2 no longer keeps these global cache modes on the legacy writer layout,
+    # so the sparse-offload/compress paths prepare the private weights.
+    if excluded_path in ("sparse_offload", "compress"):
+        assert impl._prolog_v3_weights is not None
+    else:
+        assert impl._prolog_v3_weights is None
 
 
 @pytest.mark.parametrize(
@@ -387,10 +389,8 @@ def test_post_load_generic_spec_uses_same_layout_exclusions(monkeypatch, field, 
     assert not supports_strided_mla_cache(config, owner, cache_spec)
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_dcp_post_load_prepares_prolog_weights_after_current_kv_buffers(monkeypatch, use_v2_runner):
+def test_dcp_post_load_prepares_prolog_weights_after_current_kv_buffers(monkeypatch):
     impl = _make_post_load_impl(monkeypatch, AscendMlaDCPImpl)
-    impl.vllm_config.use_v2_model_runner = use_v2_runner
     prepare = impl._prepare_prolog_v3_weights
 
     def prepare_after_buffers():
@@ -1556,10 +1556,8 @@ def test_wide_draft_forward_uses_regular_projection_for_fused_cache():
     impl.mla_preprocess_only_decode.assert_not_called()
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_dense_writer_prepares_weights_with_sparse_target(monkeypatch, use_v2_runner):
+def test_dense_writer_prepares_weights_with_sparse_target(monkeypatch):
     impl = _make_post_load_impl(monkeypatch)
-    impl.vllm_config.use_v2_model_runner = use_v2_runner
     impl.vllm_config.parallel_config.decode_context_parallel_size = 1
     impl.vllm_config.model_config.hf_text_config.index_topk = 2048
     impl.use_flashmla = True
@@ -1571,11 +1569,9 @@ def test_dense_writer_prepares_weights_with_sparse_target(monkeypatch, use_v2_ru
     assert impl._prolog_v3_weights is not None
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_fia_draft_skips_unused_prolog_weights_with_sparse_target(monkeypatch, use_v2_runner):
+def test_fia_draft_skips_unused_prolog_weights_with_sparse_target(monkeypatch):
     impl = _make_post_load_impl(monkeypatch)
     config = impl.vllm_config
-    config.use_v2_model_runner = use_v2_runner
     config.model_config.hf_text_config.index_topk = 2048
     config.parallel_config.decode_context_parallel_size = 1
     assert enable_sfa(config)

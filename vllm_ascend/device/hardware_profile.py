@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""Semantic profiles for supported Ascend hardware families.
+"""[Role] Declare semantic profiles for supported Ascend hardware families.
+[Invariants] Business code selects capabilities, not device-name strings.
+[Timeouts & Locks] Immutable registration; no waits or locks.
+[Side-Effect Policy] No device contexts or workloads are started here.
 
 This module is the boundary between hardware identity and shared business
 logic. Detection maps a SoC to one immutable :class:`HardwareProfile`; code
@@ -32,6 +35,9 @@ from types import MappingProxyType
 
 from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
+
+DCP_HEAD_SCATTER_SINGLE_ROW = 0
+DCP_HEAD_SCATTER_MULTI_ROW = 1
 
 
 class HardwareCapability(Enum):
@@ -96,7 +102,7 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
-    # Triton gate fusion after a separate FP32 rotation GEMM.
+    # Separate inverse-rotation MatMul followed by a chunked fused A3 gate.
     ENGRAM_ROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
@@ -108,17 +114,14 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
     FLA_GDN_PREFILL = auto()
+    # Hardware eligibility for A5 chunk32.
+    FLA_GDN_PREFILL_CHUNK32 = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
-    # CANN MsaIndexScore ``return_choice`` TopK fusion, which replaces the
-    # separate TopK and sort post-processing. Callers must also check that the
-    # installed CANN package provides the fused output and that the index score
-    # runs with ``pool_block_size=128``.
-    MINIMAX_M3_INDEX_SCORE_TOPK_FUSION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -250,6 +253,7 @@ class FlashAttentionNpu3Model(Enum):
 
     MINIMAX = auto()
     STEP5 = auto()
+    QWEN = auto()
 
 
 class CPUBindingMode(Enum):
@@ -323,6 +327,9 @@ class HardwareProfile:
 
     # Operator availability alone does not determine which model route to use.
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
+
+    # A5 streams rank contributions across eight output rows per tile.
+    dcp_head_scatter_mode: int = DCP_HEAD_SCATTER_SINGLE_ROW
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -398,11 +405,11 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
@@ -414,12 +421,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
-            # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
-            # Nine is the first observed failing configuration, not a proven
-            # universal kernel bound. Remove after native recurrent parity is
-            # validated on the replacement operator stack.
-            gdn_fixed_spec_recurrent_fallback_min_query_len=9,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -436,11 +438,18 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
+                # Atlas A2 provides the CANN MegaMoe operator for the INT
+                # quant paths (arch22 kernel, e.g.
+                # mega_moe_kernel_a2_bf16_w4a8.hpp). CANN_MEGAMOE_MXFP is
+                # deliberately not granted: that capability also changes
+                # x_active_mask handling to a convention the A2 operator does
+                # not implement.
+                HardwareCapability.CANN_MEGAMOE,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -491,6 +500,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
             qwen4exp_hc_gate_mix_row_block_min_rows=1024,
+            dcp_head_scatter_mode=DCP_HEAD_SCATTER_MULTI_ROW,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -522,6 +532,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
+                    HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
@@ -533,7 +544,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
-                    HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,

@@ -563,7 +563,9 @@ class MooncakeBaseConnectorScheduler:
         """Return prompt tokens that will be loaded from a remote producer."""
         params = request.kv_transfer_params
         logger.debug(
-            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
+            "MooncakeConnector get_num_new_matched_tokens: request_id=%s, num_computed_tokens=%s, "
+            "kv_transfer_params=%s",
+            request.request_id,
             num_computed_tokens,
             params,
         )

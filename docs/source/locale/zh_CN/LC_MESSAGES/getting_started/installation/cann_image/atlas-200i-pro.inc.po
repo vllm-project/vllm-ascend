@@ -24,26 +24,28 @@ msgstr "=== \"Atlas 200I Pro\""
 msgid "#### Pull the image"
 msgstr "#### 拉取镜像"
 
-msgid "=== \"Ubuntu\""
-msgstr "=== \"Ubuntu\""
-
-msgid "=== \"openEuler\""
-msgstr "=== \"openEuler\""
-
 msgid "#### Start the container"
 msgstr "#### 启动容器"
 
 msgid "???+ warning \"Atlas 200I Pro container startup requirements\""
 msgstr "???+ warning \"Atlas 200I Pro 容器启动要求\""
 
-msgid ""
-"Atlas 200I Pro requires additional device nodes, driver libraries, and host "
-"configuration files. Before starting the container, make sure that all host "
-"paths mounted by the command below exist."
-msgstr "Atlas 200I Pro 需要额外的设备节点、驱动库和主机配置文件。在启动容器之前，请确保以下命令挂载的所有主机路径均存在。"
-
 msgid "=== \"Ubuntu\""
 msgstr "=== \"Ubuntu\""
 
 msgid "=== \"openEuler\""
 msgstr "=== \"openEuler\""
+
+msgid ""
+"Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the "
+"container needs Ascend Docker Runtime on the host. The runtime mounts the "
+"driver libraries, but its default mount list looks for `npu-smi` at "
+"`/usr/local/bin/npu-smi`, while this product installs it at "
+"`/usr/local/sbin/npu-smi`, so the command below mounts it explicitly. The "
+"command also passes the `ascend_manager` and `user_config` devices and the "
+"Atlas 300I Duo host libraries. Make sure every host path it mounts exists."
+msgstr ""
+"Atlas 200I Pro 通过 `ASCEND_VISIBLE_DEVICES` 选择其 NPU，因此容器需要在宿主机上安装 Ascend "
+"Docker Runtime。该运行时负责挂载驱动库，但其默认挂载列表会在 `/usr/local/bin/npu-smi` 查找 `npu-"
+"smi`，而本产品将 `npu-smi` 安装到 `/usr/local/sbin/npu-smi`，因此下面的命令会显式挂载它。该命令还会传入 "
+"`ascend_manager` 和 `user_config` 设备以及 Atlas 300I Duo 宿主机库。请确保其挂载的每个宿主机路径都存在。"

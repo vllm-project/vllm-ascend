@@ -8,24 +8,133 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorPromMetrics,
+        KVConnectorStats,
+        PromMetric,
+        PromMetricT,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
+        HiSparseDraftHostMirrorSaveHook,
+    )
+
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type["KVConnectorBaseType"], "VllmConfig"]]:
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        has_hisparse = transfer.has_connector("HiSparseConnector")
+        children = super()._get_connector_classes_and_configs(vllm_config)
+        for index, (connector_cls, config) in enumerate(children):
+            if connector_cls is MooncakeConnectorV2:
+                assert config.kv_transfer_config is not None
+                child_transfer = config.kv_transfer_config
+                use_hisparse = (
+                    has_hisparse and child_transfer.kv_connector_extra_config.get("transfer_backend") == "memfabric"
+                )
+                children[index] = (
+                    MooncakeConnectorV2._get_connector_cls(child_transfer, use_hisparse=use_hisparse),
+                    config,
+                )
+        return children
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> "KVConnectorPromMetrics":
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorPromMetrics
+
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+        metrics = super().build_prom_metrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+        assert isinstance(metrics, MultiKVConnectorPromMetrics)
+        hisparse_metrics = metrics._prom_metrics.pop(_HiSparseMooncakePullConnector.__name__, None)
+        if hisparse_metrics is not None:
+            metrics._prom_metrics[MooncakeConnectorV2.__name__] = hisparse_metrics
+        return metrics
+
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        stats = super().get_kv_connector_stats()
+        if stats is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+            hisparse_stats = stats.data.pop(_HiSparseMooncakePullConnector.__name__, None)
+            if hisparse_stats is not None:
+                stats.data[MooncakeConnectorV2.__name__] = hisparse_stats
+        return stats
+
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        children = transfer.kv_connector_extra_config.get("connectors", ())
+        names = {child.get("kv_connector") for child in children}
+        colocated_pair = {"HiSparseConnector", "AscendStoreConnector"}
+        if "HiSparseConnector" in names and "MooncakeConnectorStoreV1" in names:
+            raise ValueError("Use AscendStoreConnector when combining the pool with HiSparseConnector.")
+        self._hisparse_store_shutdown_order: tuple[int, int] | None = None
+        if colocated_pair <= names:
+            # Both children share the local Host Source and Indexer import path.
+            # Reject other transfer topologies before creating any child.
+            if transfer.kv_role != "kv_both" or any(child.get("kv_role") != "kv_both" for child in children):
+                raise ValueError(
+                    "HiSparse with AscendStore requires kv_role='kv_both' on MultiConnector and all children. "
+                    "PD disaggregation is unsupported."
+                )
+            if names != colocated_pair:
+                raise ValueError(
+                    "HiSparse with AscendStore supports only HiSparseConnector and AscendStoreConnector children."
+                )
+            if len(children) != len(colocated_pair):
+                raise ValueError(
+                    "HiSparse pooling requires exactly one HiSparseConnector and one AscendStoreConnector."
+                )
+            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+                raise ValueError("HiSparse with AscendStore requires prefill_context_parallel_size=1.")
+            nnodes = vllm_config.parallel_config.nnodes
+            if role == KVConnectorRole.WORKER and nnodes == 1:
+                from vllm.distributed.parallel_state import get_node_count
+
+                nnodes = get_node_count()
+            if nnodes != 1:
+                raise ValueError(
+                    f"HiSparse with AscendStore requires single-node colocated Prefill and Decode, got {nnodes} nodes."
+                )
+            child_names = [child["kv_connector"] for child in children]
+            self._hisparse_store_shutdown_order = (
+                child_names.index("AscendStoreConnector"),
+                child_names.index("HiSparseConnector"),
+            )
+
         super().__init__(
             vllm_config=vllm_config,
             role=role,
             kv_cache_config=kv_cache_config,
         )
 
-        transfer = vllm_config.kv_transfer_config
         self._requires_full_dspark_prompt = (
             uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
         )
@@ -38,6 +147,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        uses_shared_buffers = role == KVConnectorRole.WORKER and get_layerwise_reuse_layout(kv_cache_config) is not None
+        if uses_shared_buffers and len(self._connectors) > 1:
+            all_pd_fenced = len(self._non_slot_release_connectors) == 1
+            if not (all_pd_fenced and self._external_slot_release_sink_configured):
+                raise ValueError("Layerwise offload requires a slot-release fence for every PD connector.")
+        self._draft_host_mirror_save_hook: HiSparseDraftHostMirrorSaveHook | None = None
+        if (
+            role == KVConnectorRole.WORKER
+            and has_hisparse_cache_layout(kv_cache_config)
+            and vllm_config.speculative_config is not None
+        ):
+            self._configure_draft_host_mirror_save_hook()
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -53,6 +174,25 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self.requires_mamba_state_copy_after_load = any(
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
+
+    def _configure_draft_host_mirror_save_hook(self) -> None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
+            HiSparseDraftHostMirrorSaveHook,
+        )
+
+        source = next((child for child in self._connectors if isinstance(child, HiSparseConnector)), None)
+        stores = [child for child in self._connectors if isinstance(child, AscendStoreConnector)]
+        if source is not None and stores:
+            assert source.connector_worker is not None
+            self._draft_host_mirror_save_hook = HiSparseDraftHostMirrorSaveHook(source.connector_worker, stores)
+
+    def wait_for_save(self):
+        if self._draft_host_mirror_save_hook is not None:
+            self._draft_host_mirror_save_hook.flush_host_mirror_if_needed()
+        super().wait_for_save()
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
@@ -97,6 +237,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             provider.wait_for_layer_reuse(layer_idx)
 
     def shutdown(self) -> None:
+        if self._hisparse_store_shutdown_order is not None:
+            store_index, hisparse_index = self._hisparse_store_shutdown_order
+            # Join the Store's transfers before freeing HiSparse Host memory.
+            # If Store shutdown raises, the Host registration must stay live.
+            self._connectors[store_index].shutdown()
+            self._connectors[hisparse_index].shutdown()
+            return
         # Release provider waits before joining the store's receive threads.
         self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         super().shutdown()

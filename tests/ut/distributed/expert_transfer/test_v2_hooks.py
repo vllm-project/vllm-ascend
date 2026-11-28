@@ -100,6 +100,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
         },
     )
     runner = runner_class()
+    runner.pcp_manager = None
     runner.model = torch.nn.Module()
     if manager is not None:
         runner.model._expert_offload_manager = manager
@@ -110,6 +111,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     runner._start_dump_data = Mock()
     runner._finalize_dump_data = Mock()
     runner.ascend_config = SimpleNamespace(
+        ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False)),
         expert_offload_config=ExpertOffloadConfig(enabled=manager is not None, num_device_experts=2),
     )
@@ -217,7 +219,7 @@ def quant_methods(monkeypatch, request):
     monkeypatch.setattr(
         routed_experts,
         "get_current_vllm_config",
-        lambda: SimpleNamespace(use_v2_model_runner=True, model_config=SimpleNamespace(runner_type="generate")),
+        lambda: SimpleNamespace(model_config=SimpleNamespace(runner_type="generate")),
     )
     monkeypatch.setattr("vllm_ascend.distributed.expert_transfer.expert_offload_manager.LayerOffloadBinding", binding)
     monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")

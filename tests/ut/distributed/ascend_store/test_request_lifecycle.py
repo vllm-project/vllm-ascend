@@ -29,6 +29,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
@@ -60,7 +61,9 @@ class MemoryBackend(Backend):
     def set_device(self):
         pass
 
-    def register_buffer(self, ptrs, lengths):
+    def register_buffer(self, buffers):
+        ptrs = [buffer.address for buffer in buffers]
+        lengths = [buffer.size_bytes for buffer in buffers]
         self.regions.extend(zip(ptrs, lengths))
 
     def exists(self, keys):
@@ -70,14 +73,14 @@ class MemoryBackend(Backend):
     def check_address(self, addr, size):
         assert any(start <= addr and addr + size <= start + length for start, length in self.regions)
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
         return [True] * len(keys)
 
-    def get(self, keys, addrs, sizes):
+    def get(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size, data in zip(row, lengths, self.payloads[key], strict=True):
                 self.check_address(addr, size)
@@ -245,6 +248,7 @@ def test_raw_sequence_lifecycle(
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    plan = make_resolved_cache_config(config, plan)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, plan)
     caches = allocate()
     worker.register_kv_caches(caches)

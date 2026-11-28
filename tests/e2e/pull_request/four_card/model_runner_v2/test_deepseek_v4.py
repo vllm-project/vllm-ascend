@@ -44,7 +44,6 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
@@ -118,7 +117,6 @@ def test_deepseek_v4_mtp_full_decode_only():
         ),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,

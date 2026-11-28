@@ -165,7 +165,6 @@ def test_hang(monkeypatch):
     Uneven work leaves one rank running padded dummy batches. Its draft must
     reuse the target's DP agreement without changing the logical query width.
     """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.

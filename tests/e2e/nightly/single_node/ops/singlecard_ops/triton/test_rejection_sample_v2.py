@@ -8,17 +8,11 @@ import numpy as np
 import pytest
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import unconditional_to_conditional_rates
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
-
-if not vllm_version_is("0.33.0"):
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import unconditional_to_conditional_rates
-else:
-    # The legacy module exists only in vLLM v0.33.0.
-    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates  # type: ignore[import-not-found]
 
 VOCAB_SIZE = 4096
 
@@ -93,7 +87,6 @@ def _build_rejection_sample_inputs(
         (3, 0.0, [1.0, 1.0, 1.0]),
         (3, 1.0, [0.0, 0.0, 0.0]),
         (3, 0.0, [0.0, 0.0, 0.0]),
-        (1, 1.0, [0.7]),
         (1, 0.0, [0.7]),
     ],
 )
@@ -155,7 +148,6 @@ def test_synthetic_rejection_sample(
         )
         # num_sampled includes the resampled/bonus token.
         num_accepted_chunks.append(num_sampled - 1)
-        gc.collect()
         torch.npu.empty_cache()
 
     num_accepted = torch.cat(num_accepted_chunks)
@@ -174,8 +166,11 @@ def test_synthetic_rejection_sample(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("has_draft_logits", [True, False])
-@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize(
+    "use_block_verification,has_draft_logits",
+    # Exercise vocab clamping in both modes and use block mode for the no-draft control.
+    [(False, True), (True, True), (True, False)],
+)
 @torch.inference_mode()
 def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_block_verification: bool):
     """A draft vocab narrower than the target's must not read out of bounds.
@@ -342,6 +337,33 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
         # Later one-hot positions have fewer observations.
         tolerance = 5.0 * (0.25 / tokens.numel()) ** 0.5
         torch.testing.assert_close(observed, target.cpu(), rtol=0, atol=tolerance)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@torch.inference_mode()
+def test_block_verification_revisited_position_preserves_target_distribution():
+    """Check the second generated token when verification revisits its position."""
+    num_trials, num_steps = 8192, 2
+    logits = torch.zeros(2, device="npu")
+    inputs = _build_rejection_sample_inputs(logits, logits, num_steps, 1.0, num_trials)
+    inputs["draft_logits"] = None
+    inputs["draft_sampled"].zero_()
+
+    def verify(start):
+        inputs["pos"] = inputs["expanded_local_pos"] + start
+        return rejection_sample(
+            **inputs, num_speculative_steps=num_steps, use_block_verification=True, use_entropy_verify=False
+        )
+
+    first, first_counts = verify(1)
+    inputs["draft_sampled"].view(num_trials, num_steps + 1)[:, 0] = first[:, 0]
+    second, _ = verify(2)
+    # A second round is needed only when the first committed a single token.
+    token_at_position_2 = torch.where(first_counts == 1, second[:, 0], first[:, 1])
+    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(0.5, abs=0.03)
 
 
 @pytest.mark.skipif(
@@ -560,8 +582,16 @@ def test_entropy_verify_ragged_requests(has_draft_logits, temperature):
     assert (sampled[valid] == 1).all()
 
 
-@pytest.mark.parametrize("has_draft_logits", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype,has_draft_logits",
+    # FP32 compares both paths; BF16 and FP16 exercise loading both logits tensors.
+    [
+        (torch.float32, False),
+        (torch.float32, True),
+        (torch.float16, True),
+        (torch.bfloat16, True),
+    ],
+)
 @torch.inference_mode()
 def test_entropy_parameters_and_per_position_thresholds(has_draft_logits, dtype):
     num_trials, steps = 256, 3

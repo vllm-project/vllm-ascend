@@ -39,9 +39,11 @@ def hook_scope(root, *, composite=True):
         "get_kv_transfer_group": lambda: root,
         "has_kv_transfer_group": Mock(return_value=True),
         "is_v1_kv_transfer_group": Mock(return_value=True),
+        "record_attention_prefetch_start": Mock(),
     }
     for name in (
         "_kv_layer_transfer_connectors",
+        "_supports_attention_prefetch_gate",
         "wait_for_kv_layer_from_connector",
         "maybe_save_kv_layer_to_connector",
     ):
