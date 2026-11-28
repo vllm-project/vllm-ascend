@@ -1530,3 +1530,25 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** File: worker/patch_adaptive_verification_budget.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification.assign_draft_token_budget`
+#    Why:
+#       The allocator ranks survival probabilities by their integer bit patterns
+#       and binary-searches up to float inf (0x7F800000). A NaN or out-of-range
+#       confidence sorts above every real draft, is admitted unconditionally,
+#       and makes the per-request admitted capacities sum to more than the
+#       global draft budget. On Ascend the device `query_start_loc` then no
+#       longer matches the adaptive-verification token count and trips the FIA
+#       padding invariant in `NPUModelRunner`.
+#    How:
+#       Wrap the allocator and map every confidence outside (0, 1] to zero for
+#       the slots being allocated, before the Triton kernel runs. The patch
+#       disables itself once upstream clamps these values in the kernel.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/69440
+#    Future Plan:
+#       Remove this patch when #69440 is available in the supported vLLM
+#       version and the Ascend FIA repro has been re-validated on NPU.
+#

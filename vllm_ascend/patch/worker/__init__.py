@@ -63,6 +63,7 @@ import vllm_ascend.patch.worker.patch_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dspark  # noqa
+import vllm_ascend.patch.worker.patch_adaptive_verification_budget  # noqa
 
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
