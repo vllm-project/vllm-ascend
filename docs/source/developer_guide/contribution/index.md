@@ -1,5 +1,8 @@
 # Contributing
 
+For dependency upgrade experiments, see
+[qualifying third-party dependency candidates](dependency_compatibility.md).
+
 ## Building and Testing
 
 It's recommended to set up a local development environment to build vllm-ascend and run tests
