@@ -56,6 +56,11 @@ def split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
     gate_size: tl.constexpr,
+    positions,
+    plane_stride,
+    token_stride,
+    cache_stride,
+    UNIT_OFFSET: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -71,6 +76,9 @@ def split_qkv_rmsnorm_mrope_kernel(
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
     k_rmsnorm_weight = tl.load(k_weight_ptr + tl.arange(0, head_size))
+    if UNIT_OFFSET:
+        q_rmsnorm_weight = (q_rmsnorm_weight.to(tl.float32) + 1.0).to(q_rmsnorm_weight.dtype)
+        k_rmsnorm_weight = (k_rmsnorm_weight.to(tl.float32) + 1.0).to(k_rmsnorm_weight.dtype)
 
     if has_bias:
         q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
@@ -121,14 +129,19 @@ def split_qkv_rmsnorm_mrope_kernel(
                 cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
             )
 
-        t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
-        h_cos_offset = t_cos_offset + num_tokens * rope_dim
-        w_cos_offset = h_cos_offset + num_tokens * rope_dim
-
-        t_sin_offset = cos_sin_ptr + (block_offset + index) * rope_dim + half_rope_dim
-        h_sin_offset = t_sin_offset + num_tokens * rope_dim
-        w_sin_offset = h_sin_offset + num_tokens * rope_dim
-
+        token = block_offset + index
+        if positions is not None:
+            pos = positions + token * token_stride
+            t_cos_offset = cos_sin_ptr + tl.load(pos).to(tl.int64) * cache_stride
+            h_cos_offset = cos_sin_ptr + tl.load(pos + plane_stride).to(tl.int64) * cache_stride
+            w_cos_offset = cos_sin_ptr + tl.load(pos + 2 * plane_stride).to(tl.int64) * cache_stride
+        else:
+            t_cos_offset = cos_sin_ptr + token * rope_dim
+            h_cos_offset = t_cos_offset + num_tokens * rope_dim
+            w_cos_offset = h_cos_offset + num_tokens * rope_dim
+        t_sin_offset = t_cos_offset + half_rope_dim
+        h_sin_offset = h_cos_offset + half_rope_dim
+        w_sin_offset = w_cos_offset + half_rope_dim
         t_cos_tensor = tl.load(t_cos_offset + cos_offsets, mask=t_mask, other=0)
         h_cos_tensor = tl.load(h_cos_offset + cos_offsets, mask=h_mask, other=0)
         w_cos_tensor = tl.load(w_cos_offset + cos_offsets, mask=w_mask, other=0)
@@ -294,6 +307,8 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
+    unit_offset: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
@@ -361,6 +376,11 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim // 2,
         IS_PARTIAL_ROPE,
         gate_size,
+        positions,
+        positions.stride(0) if positions is not None else 0,
+        positions.stride(1) if positions is not None else 0,
+        cos_sin.stride(0),
+        unit_offset,
     )
 
     return q_output, k_output, v_output, gate_output
@@ -381,6 +401,8 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
+    unit_offset: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
