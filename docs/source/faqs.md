@@ -162,6 +162,16 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
+If startup reports that free NPU memory stayed unchanged and automatic KV cache
+sizing failed, check whether the device or virtualization layer reports the
+actual memory used by the worker. HiSparse requires a drop in reported free
+memory to measure allocations retained after profiling. If you know the free
+memory available after model loading and warmup, the generic worker accepts a conservative per-worker budget with
+`--kv-cache-memory-bytes`. On 310P with dedicated HBM (EP), an unchanged
+reading requires consistent allocator counters. The budget accounts for both
+retained allocations and peak transient use before reserving half for
+workspaces. In shared-memory (RC) mode, both samples use host available memory.
+
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
 Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.

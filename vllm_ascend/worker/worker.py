@@ -779,25 +779,38 @@ class NPUWorker(GPUWorker):
             profile_result.non_kv_cache_memory = (
                 profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
             )
+        elif self.init_snapshot.free_memory == profile_result.after_profile.free_memory:
+            # Core's non-KV total only includes transient headroom when the device free-memory delta is zero.
+            raise ValueError(
+                "Error in memory profiling. HiSparse cannot measure retained allocations from unchanged "
+                "free NPU memory. Check device memory reporting or set a known-safe budget "
+                "with --kv-cache-memory-bytes."
+            )
         else:
             # Reuse Core's measured total, including owners retained from an
             # earlier profile. Preserve this authority for startup suggestions.
             self._hisparse_profiled_non_kv_memory = profile_result.non_kv_cache_memory
 
+        initial = self.init_snapshot
+        profiled = profile_result.after_profile
+        self._check_profile_free_memory(profiled.free_memory)
+        if profiled.free_memory == initial.free_memory:
+            # Model weights can fit in memory already reserved and reported as used
+            # at initialization. Require the allocator to account for them.
+            allocated_increase = profiled.torch_allocated - initial.torch_allocated
+            if not self._fits_initial_reserve(profiled, profile_result.weights_memory) or (
+                profile_result.non_kv_cache_memory < allocated_increase
+            ):
+                raise ValueError(
+                    "Error in memory profiling. "
+                    f"Free NPU memory stayed at {GiB(initial.free_memory)} GiB, but device and allocator "
+                    "statistics do not support a reliable automatic KV cache budget. "
+                    "Check the NPU memory reporting or specify a known-safe budget with --kv-cache-memory-bytes."
+                )
+
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.non_torch_memory = profile_result.non_torch_increase
-
-        free_gpu_memory = profile_result.after_profile.free_memory
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
@@ -811,6 +824,26 @@ class NPUWorker(GPUWorker):
             self.available_kv_cache_memory_bytes
         )
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+
+    def _check_profile_free_memory(self, free_memory: int, source: str = "NPU") -> None:
+        initial_free = self.init_snapshot.free_memory
+        if free_memory > initial_free:
+            raise ValueError(
+                f"Error in memory profiling. Free {source} memory increased by {free_memory - initial_free} bytes "
+                f"from {format_gib(initial_free)} GiB to {format_gib(free_memory)} GiB. "
+                "Check whether another process released memory during startup."
+            )
+
+    def _fits_initial_reserve(self, profiled: MemorySnapshot, weights_memory: int) -> bool:
+        initial = self.init_snapshot
+        allocated_increase = profiled.torch_allocated - initial.torch_allocated
+        unused_reserve = initial.torch_memory - initial.torch_allocated
+        return (
+            profiled.total_memory == initial.total_memory
+            and profiled.torch_memory == initial.torch_memory
+            and initial.torch_memory <= initial.total_memory - initial.free_memory
+            and 0 <= weights_memory <= allocated_increase <= unused_reserve
+        )
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
