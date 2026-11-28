@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 from copy import deepcopy
-from dataclasses import is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -353,7 +353,11 @@ def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts
         ]
         grouped.launch()
         for metadata, oracle in zip(actual, expected, strict=True):
-            _assert_metadata_equal(metadata, oracle)
+            # The generic builder attaches host bookkeeping for later block-table
+            # updates. Compare the entire declared metadata consumed by this Q6 step.
+            assert metadata.pcp_context is oracle.pcp_context is None
+            for field in fields(oracle):
+                _assert_metadata_equal(getattr(metadata, field.name), getattr(oracle, field.name))
         return actual
 
     first = step([15, 32], 1, [2, 5])
