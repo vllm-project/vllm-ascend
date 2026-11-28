@@ -202,17 +202,33 @@ automatically from the test tree.
 
 The directory determines the runner. No configuration change is needed.
 
+## Adding an A5 (Ascend 950) Test
+
+A5 tests live in `tests/e2e/pull_request/a5/`. That directory is both the `a5`
+curated suite and its routing rule: any `test_*.py` under it joins the suite and
+is routed to the A5 partition by path. Adding an A5 test therefore needs **no
+edit to `test_config.yaml`** — just drop the file in the directory — so it stays
+on the precise selection path instead of forcing the full suite.
+
+Run the suite with:
+
+```bash
+python3 .github/workflows/scripts/select_tests.py --curated a5
+```
+
 ## Adding a Curated Suite
 
-Add a named list to `curated_tests` in `.github/workflows/scripts/test_config.yaml`:
+Add a named list to `curated_tests` in `.github/workflows/scripts/test_config.yaml`.
+An entry may be a single file or a directory:
 
 ```yaml
 curated_tests:
-  a5:
-    - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+  my_suite:
+    - tests/e2e/pull_request/two_card/test_kvpp.py
+    - tests/e2e/pull_request/my_dir
 ```
 
-Then run it with `select_tests.py --curated a5` (optionally combined with
+Then run it with `select_tests.py --curated my_suite` (optionally combined with
 `--runner-label-override`).
 
 ## Running Selective Tests Locally
