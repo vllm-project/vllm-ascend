@@ -1,0 +1,6 @@
+pr: 23525
+entries:
+  - category: dependency
+    text: >-
+      Ubuntu and openEuler A5 images now preinstall TileLang 0.1.15 and Apache
+      TVM FFI 0.1.12. Use an updated A5 image to obtain these compute dependencies.

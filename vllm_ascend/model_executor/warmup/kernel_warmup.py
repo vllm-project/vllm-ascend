@@ -15,7 +15,7 @@
 #
 """JIT kernel warmup orchestration on Ascend NPU.
 
-Kernels register themselves declaratively (``AscendTritonJitKernel``
+Kernels register themselves declaratively (Ascend Triton or TileLang
 wrappers) into the upstream ``JitWarmupRegistry`` during model runner
 construction; this module expands those registrations and compiles every
 kernel/key pair once, before ACL graph capture.
@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.ops.tilelang import HAS_TILELANG
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
@@ -177,9 +179,17 @@ def _prune_unlaunchable_registrations(registry) -> int:
     ``_set_up_drafter`` window; compiling those would fail
     ``registry.warmup()``.
     """
-    from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
+    supported_types: tuple[type, ...] = ()
+    if HAS_TRITON:
+        from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
-    pruned = [kernel for kernel in registry._registrations if not isinstance(kernel, AscendTritonJitKernel)]
+        supported_types += (AscendTritonJitKernel,)
+
+    if HAS_TILELANG:
+        from vllm_ascend.ops.tilelang.ascend_jit_warmup import AscendTileLangJitKernel
+
+        supported_types += (AscendTileLangJitKernel,)
+    pruned = [kernel for kernel in registry._registrations if not isinstance(kernel, supported_types)]
     for kernel in pruned:
         del registry._registrations[kernel]
     return len(pruned)
@@ -188,9 +198,6 @@ def _prune_unlaunchable_registrations(registry) -> int:
 def kernel_warmup(worker: NPUWorker) -> None:
     """Expand JIT warmup registrations and compile every kernel/key pair
     before ACL graph capture."""
-    if not HAS_TRITON:
-        return
-
     kernel_config = getattr(worker.vllm_config, "kernel_config", None)
     enable_jit_warmup = getattr(kernel_config, "enable_jit_warmup", True)
     if not enable_jit_warmup:
@@ -200,18 +207,19 @@ def kernel_warmup(worker: NPUWorker) -> None:
     start = time.perf_counter()
     registry = worker.model_runner.jit_warmup_registry
 
-    # Cache-dependent keys are unavailable during model construction. Bindings
-    # are final here, before registry compilation and graph capture.
-    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    dspark_registered = 0
+    if HAS_TRITON:
+        # Cache-dependent keys are unavailable during model construction.
+        from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
-    with registry.activate():
-        for layer in worker.vllm_config.compilation_config.static_forward_context.values():
-            indexer = getattr(getattr(layer, "impl", None), "indexer", None)
-            if isinstance(indexer, AscendSFAIndexerBackend):
-                indexer.register_k_cache_warmup()
+        with registry.activate():
+            for layer in worker.vllm_config.compilation_config.static_forward_context.values():
+                indexer = getattr(getattr(layer, "impl", None), "indexer", None)
+                if isinstance(indexer, AscendSFAIndexerBackend):
+                    indexer.register_k_cache_warmup()
 
-    _register_dcp_warmup(worker)
-    dspark_registered = _register_dspark_swa_indices_warmup(worker)
+        _register_dcp_warmup(worker)
+        dspark_registered = _register_dspark_swa_indices_warmup(worker)
     pruned = _prune_unlaunchable_registrations(registry)
     if dspark_registered or pruned:
         logger.info(
@@ -222,9 +230,9 @@ def kernel_warmup(worker: NPUWorker) -> None:
 
     if len(registry) == 0:
         logger.warning(
-            "JIT kernel warmup found no registered kernels; Triton kernels "
+            "JIT kernel warmup found no registered kernels; JIT kernels "
             "will compile lazily at runtime. If this run should use Ascend "
-            "Triton kernels, check that the model runner held a registry "
+            "JIT kernels, check that the model runner held a registry "
             "window open during construction."
         )
         return

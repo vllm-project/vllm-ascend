@@ -12,6 +12,7 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 - **[E2E CI Test](contribution/e2e_ci_test.md)** — E2E CI testing
 
 - **[Contributing Triton operators](contribution/triton_operators.md)** — Deliverables and operator quality requirements
+- **[Contributing TileLang operators](contribution/tilelang_operators.md)** — Deliverables, operator quality requirements and A5 integration
 
 ## Design Documents
 

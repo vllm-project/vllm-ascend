@@ -113,6 +113,23 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
     python3 -m pip cache purge
 
+# TileLang source: a35f8ddf45eba16c21211ec8822d56ce5363036f
+# Bundled TVM source: 4211874e9e4b8770fd20ad0d98ab80afd1df5028
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    tilelang_packages=( \
+        'tilelang @ https://files.pythonhosted.org/packages/b2/cc/74b077cfd53ca589c76e9f4dfb02016a83c8683b17c93b120da480ab51d4/tilelang-0.1.15-cp39-abi3-manylinux_2_34_aarch64.whl#sha256=77343b47643eaab07d8c1f8314c6c33e4992cb07883207796c900b719626524f ; platform_machine == "aarch64"' \
+        'apache-tvm-ffi @ https://files.pythonhosted.org/packages/9c/20/51d0c31c76bef0f21c11bce0465598d1ea5fdaca22e47a69c29deadeada7/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl#sha256=8a7b08f377ea2663dae10e3045f8d0215f0378ee975096174a8af6381eeb1504 ; platform_machine == "aarch64"' \
+        'tilelang @ https://files.pythonhosted.org/packages/87/7c/eeda90666b629bc92e8a775ea219f91b8696d8592d7a5c7dff7067dd2642/tilelang-0.1.15-cp39-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl#sha256=ca021a3450ad84b8fe7deb1b659c8d3d2e4b0855fdb59e2992a5349acf019881 ; platform_machine == "x86_64"' \
+        'apache-tvm-ffi @ https://files.pythonhosted.org/packages/52/f3/fba607d803cb081be2d66ea51865492b42872898bd271d9bcc3e1ced4ef3/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl#sha256=dc0acd7eeb0e451d5e3f686af3ba0b495fdbf97b5b54cf9a0f770cdafe0e691a ; platform_machine == "x86_64"' \
+    ) && \
+    mkdir -p /opt/tilelang && \
+    python3 -m pip install --force-reinstall --no-deps --report /opt/tilelang/manifest.json \
+        "${tilelang_packages[@]}" && \
+    python3 -m pip install "${tilelang_packages[@]}" \
+        "torch==$(python3 -c 'from importlib.metadata import version; print(version("torch"))')" \
+        "numpy==$(python3 -c 'from importlib.metadata import version; print(version("numpy"))')" && \
+    python3 -m pip cache purge
+
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 

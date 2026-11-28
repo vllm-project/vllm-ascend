@@ -44,6 +44,7 @@ curated_tests:
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5.py
+    - tests/e2e/pull_request/one_card/test_tilelang_a5.py
     - tests/e2e/pull_request/one_card/test_expert_offload_a5.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8.py
@@ -120,6 +121,8 @@ accuracy_tests:
 runner_mapping:
   # CANN V2 QLI selection and graph replay require A5.
   tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5\.py$:
+    default: a5-4
+  tests/e2e/pull_request/one_card/test_tilelang_a5\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card/test_expert_offload_a5\.py$:
     default: a5-4
