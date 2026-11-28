@@ -211,3 +211,29 @@ def test_unaffected_layouts_keep_native_reader(unsupported):
 
     fmt = 29 if unsupported == "nz" else 2
     assert not load_reader(forbidden_copy, fmt)(DeviceTensor(cache), DeviceTensor(cache), None, None, None, None, None)
+
+
+def test_fp8_history_context_reads_only_requested_rows_from_token_interleaved_pages():
+    block_size, latent_dim, rope_dim = 128, 512, 64
+    width = latent_dim + rope_dim
+    stride = block_size * width + 64
+    raw = ((torch.arange(32 + 3 * stride) % 33) - 16).to(torch.float8_e4m3fn).view(torch.int8)
+    cache = torch.as_strided(raw, (3, block_size, 1, width), (stride, width, width, 1), 32)
+    latent, rope = cache[..., :latent_dim], cache[..., latent_dim:]
+    table = torch.tensor([[2, 0], [999, 999], [1, 0]], dtype=torch.int32)
+    lengths = torch.tensor([2, 0, 1], dtype=torch.int32)
+    starts = torch.tensor([127, 9999, 6], dtype=torch.int32)
+
+    def copy(parts, slots):
+        assert tuple(x.dtype for x in parts) == (torch.int8, torch.int8)
+        assert slots.tolist() == [383, 0, 134, 383, 383, 383, 383, 383]
+        return torch.stack(
+            [torch.cat([part[slot // block_size, slot % block_size, 0] for part in parts]) for slot in slots.tolist()]
+        )
+
+    read_context = load_reader(copy, function="load_mla_cache_context_rows")
+    history = read_context(latent, rope, table, lengths, starts, 3)
+    expected = torch.stack([cache[2, 127, 0], cache[0, 0, 0], cache[1, 6, 0]])
+    torch.testing.assert_close(history, expected, rtol=0, atol=0)
+    empty = read_context(latent, rope, table[1:2], lengths[1:2], starts[1:2], 0)
+    assert empty.shape == (0, width) and empty.dtype == torch.int8

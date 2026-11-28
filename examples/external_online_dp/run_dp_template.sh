@@ -1,3 +1,7 @@
+#!/usr/bin/env bash
+
+# Arguments: devices, API port, DP size, DP rank, DP address, DP RPC port, TP, PCP, PP.
+# The Python launcher supplies all nine arguments, including PCP/PP defaults.
 export HCCL_IF_IP=your_ip_here
 export GLOO_SOCKET_IFNAME=your_socket_ifname_here
 export TP_SOCKET_IFNAME=your_socket_ifname_here
@@ -20,6 +24,8 @@ vllm serve model_path \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
+    --pipeline-parallel-size $9 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \

@@ -67,7 +67,7 @@ concurrency:
 
 jobs:
   select-all-tests:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -338,7 +338,7 @@ jobs:
   update-estimated-times:
     needs: [run-all-tests]
     if: ${{ !cancelled() && inputs.update_est_times }}
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - uses: actions/checkout@v7
         with:

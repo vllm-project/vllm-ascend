@@ -1,0 +1,10 @@
+pr: 22867
+entries:
+  - category: feature
+    text: >-
+      NPU profiling settings can now be overridden per session through
+      `/start_profile` using `profiler_kwargs`, without restarting the service.
+      Enable profiling with `--profiler-config`; omitted session options inherit
+      startup defaults, including NPU-specific defaults set through
+      `--additional-config` under `npu_profiler_config`, and overrides do not
+      carry over to later sessions.

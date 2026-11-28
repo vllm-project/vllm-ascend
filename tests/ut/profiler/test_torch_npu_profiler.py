@@ -1,5 +1,7 @@
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+from pydantic import TypeAdapter
 from vllm.config import ProfilerConfig
 
 from tests.ut.base import TestBase
@@ -334,7 +336,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         overrides = {"profile_memory": True}
         wrapper.set_profiler_kwargs(overrides)
         overrides["profile_memory"] = False
-        for invalid in (
+        invalid_options: tuple[Any, ...] = (
             {"activities": []},
             {"activities": ["CPU", "CPU"]},
             {"activities": ["CUDA"]},
@@ -360,7 +362,8 @@ class TestTorchNPUProfilerWrapper(TestBase):
             {"experimental_config": {"op_attr": True}},
             {"on_trace_ready": "callback"},
             [],
-        ):
+        )
+        for invalid in invalid_options:
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 wrapper.set_profiler_kwargs(invalid)
         with patch.object(wrapper, "_create_profiler", return_value=MagicMock()) as mock_create:
@@ -387,7 +390,9 @@ class TestTorchNPUProfilerWrapper(TestBase):
             torch_profiler_with_flops=True,
             torch_profiler_with_stack=False,
         )
-        npu_config = NPUProfilerConfig(with_stack=True, experimental_config={"profiler_level": "Level2", "mstx": True})
+        npu_config = TypeAdapter(NPUProfilerConfig).validate_python(
+            {"with_stack": True, "experimental_config": {"profiler_level": "Level2", "mstx": True}}
+        )
         mock_config.return_value.msmonitor_use_daemon = False
         mock_config.return_value.npu_profiler_config = npu_config
         wrapper = TorchNPUProfilerWrapper(config, "rank0")
@@ -421,7 +426,8 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertEqual(mock_exp.call_args.kwargs["profiler_level"], torch_npu.profiler.ProfilerLevel.Level2)
         wrapper.stop()
 
-        for overrides in ({"experimental_config": {}}, {}, None):
+        session_overrides: tuple[dict[str, Any] | None, ...] = ({"experimental_config": {}}, {}, None)
+        for overrides in session_overrides:
             wrapper.set_profiler_kwargs(overrides)
             wrapper.start()
             kwargs = mock_profile.call_args.kwargs
@@ -438,7 +444,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
         config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
         wrapper = TorchNPUProfilerWrapper(config, "trace")
-        overrides = {"activities": ["NPU"], "experimental_config": {"mstx": True}}
+        overrides: dict[str, Any] = {"activities": ["NPU"], "experimental_config": {"mstx": True}}
         wrapper.set_profiler_kwargs(overrides)
         overrides["activities"].append("CPU")
         overrides["experimental_config"]["mstx"] = False

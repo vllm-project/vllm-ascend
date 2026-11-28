@@ -18,8 +18,6 @@
 """End-to-end trace replay coverage for the Ascend Model Runner V2 path."""
 
 import math
-import os
-from unittest.mock import patch
 
 from vllm import SamplingParams
 
@@ -30,7 +28,6 @@ PROMPT = "Hello, my name is"
 TRACE_TOKEN_IDS = [444, 2210, 13, 358, 2776, 264, 220, 17]
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_trace_replay_outputs_requested_tokens_and_scores() -> None:
     """Replay a fixed response and return scores from the real logits."""
     sampling_params = SamplingParams(

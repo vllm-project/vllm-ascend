@@ -4,6 +4,7 @@
 import pytest
 import torch
 from vllm.triton_utils import triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -15,18 +16,25 @@ from vllm_ascend.worker.v2.block_table import (
 )
 
 
+def _cpu_slot_ids(table: torch.Tensor, row: int, positions: torch.Tensor, block_size: int) -> torch.Tensor:
+    return table[row, positions // block_size] * block_size + positions % block_size
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("replicated_draft", [False, True])
 @pytest.mark.parametrize(
-    ("cp_size", "cp_rank", "cp_interleave"),
+    ("cp_size", "cp_rank", "cp_interleave", "replicated_draft"),
     [
-        pytest.param(1, 0, 1, id="cp1"),
-        pytest.param(2, 1, 2, id="cp2_interleaved"),
-        pytest.param(4, 2, 1, id="cp4_interleaved"),
-        pytest.param(4, 2, 128, id="cp4_logical_block_interleaved"),
+        # CP_SIZE=1 uses the same mapping for either draft layout.
+        pytest.param(1, 0, 1, False, id="cp1-False"),
+        pytest.param(2, 1, 2, False, id="cp2_interleaved-False"),
+        pytest.param(2, 1, 2, True, id="cp2_interleaved-True"),
+        pytest.param(4, 2, 1, False, id="cp4_interleaved-False"),
+        pytest.param(4, 2, 1, True, id="cp4_interleaved-True"),
+        pytest.param(4, 2, 128, False, id="cp4_logical_block_interleaved-False"),
+        pytest.param(4, 2, 128, True, id="cp4_logical_block_interleaved-True"),
     ],
 )
 def test_compute_slot_mapping_npu_kernel_cp(
@@ -38,8 +46,10 @@ def test_compute_slot_mapping_npu_kernel_cp(
     # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
     # skip that row rather than resolving it while staging a block-table window.
     idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=device)
+    manager_block_sizes = (128, 256)
     # Each non-empty request crosses a 1024-token tile boundary and starts one
-    # token before a block boundary. This exercises the window's largest span.
+    # token before a manager block boundary.
+    position_starts = (127, 255)
     tokens_per_request = 1025
     query_start_loc = torch.tensor(
         [0, tokens_per_request, tokens_per_request, 2 * tokens_per_request],
@@ -47,15 +57,17 @@ def test_compute_slot_mapping_npu_kernel_cp(
         device=device,
     )
     positions = torch.cat(
-        (
-            torch.arange(63, 63 + tokens_per_request, dtype=torch.int64, device=device),
-            torch.arange(127, 127 + tokens_per_request, dtype=torch.int64, device=device),
-        )
+        [torch.arange(start, start + tokens_per_request, dtype=torch.int64, device=device) for start in position_starts]
     )
 
-    num_groups = 2
+    num_groups = len(manager_block_sizes)
     sharded = torch.tensor([True, not replicated_draft], dtype=torch.bool, device=device)
-    block_tables = [torch.randint(0, 320, (3, 320), dtype=torch.int32, device=device) for _ in range(num_groups)]
+    num_req_states = idx_mapping.numel()
+    block_tables = []
+    for block_size in manager_block_sizes:
+        table_width = triton.cdiv(max(position_starts) + tokens_per_request, block_size)
+        table = torch.arange(1, num_req_states * table_width + 1, dtype=torch.int32, device=device)
+        block_tables.append(table.view(num_req_states, table_width))
     block_table_ptrs = torch.tensor(
         [table.data_ptr() for table in block_tables],
         dtype=torch.uint64,
@@ -66,14 +78,10 @@ def test_compute_slot_mapping_npu_kernel_cp(
         dtype=torch.int64,
         device=device,
     )
-    # The block table is expanded in kernel-block units. The allocation and
-    # kernel sizes deliberately differ to cover the V2 DCP mapping regression.
-    kv_block_sizes = torch.tensor([128, 256], dtype=torch.int32, device=device)
-    # Starting at positions 63 and 127 makes a 1024-token tile span the largest
-    # window for the 64-token group.
-    kernel_block_sizes = torch.tensor([64, 128], dtype=torch.int32, device=device)
-    min_kernel_block_size = min(kernel_block_sizes.tolist())
-    block_table_window_size = triton.next_power_of_2((1024 + min_kernel_block_size - 1) // min_kernel_block_size + 1)
+    kv_block_sizes = torch.tensor(manager_block_sizes, dtype=torch.int32, device=device)
+    # A tile that starts just before a manager block boundary needs one extra entry.
+    min_block_size = min(manager_block_sizes)
+    block_table_window_size = triton.next_power_of_2(triton.cdiv(1024, min_block_size) + 1)
     slot_mappings = torch.zeros((num_groups, max_num_tokens), dtype=torch.int32, device=device)
     ref_slot_mappings = torch.full((num_groups, max_num_tokens), -1, dtype=torch.int32)
 
@@ -85,7 +93,6 @@ def test_compute_slot_mapping_npu_kernel_cp(
         block_table_ptrs,
         block_table_strides,
         kv_block_sizes,
-        kernel_block_sizes,
     )
     grid = (num_groups, idx_mapping.shape[0] + 1)
     kernel_kwargs = {
@@ -107,11 +114,10 @@ def test_compute_slot_mapping_npu_kernel_cp(
     # kernel's allocation-page arithmetic and block-table window staging.
     boundaries = query_start_loc.cpu().tolist()
     global_positions = positions.cpu()
-    for group, (table, kernel_size, is_sharded) in enumerate(
-        zip(block_tables, kernel_block_sizes.cpu().tolist(), sharded.cpu().tolist())
-    ):
+    host_mapping = idx_mapping.cpu().tolist()
+    for group, (table, block_size, is_sharded) in enumerate(zip(block_tables, manager_block_sizes, sharded.tolist())):
         table = table.cpu()
-        for req, row in enumerate(idx_mapping.cpu().tolist()):
+        for req, row in enumerate(host_mapping):
             if row < 0:
                 continue
             start, end = boundaries[req : req + 2]
@@ -122,7 +128,7 @@ def test_compute_slot_mapping_npu_kernel_cp(
             else:
                 local = pos
                 owned = torch.ones_like(pos, dtype=torch.bool)
-            slots = table[row, local // kernel_size] * kernel_size + local % kernel_size
+            slots = _cpu_slot_ids(table, row, local, block_size)
             ref_slot_mappings[group, start:end] = torch.where(owned, slots, -1).to(torch.int32)
 
     torch.testing.assert_close(slot_mappings.cpu(), ref_slot_mappings)
@@ -150,7 +156,6 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.uint64, device=device)
     block_tables.block_table_strides = torch.tensor([block_table.stride(0)], dtype=torch.int64, device=device)
     block_tables.block_sizes_tensor = torch.tensor([4], dtype=torch.int32, device=device)
-    block_tables.kernel_block_sizes_tensor = torch.tensor([4], dtype=torch.int32, device=device)
     block_tables.cp_rank = 0
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
@@ -174,3 +179,57 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
         torch.tensor([[120, 123, 124, 40, 44, 47, -1, -1]], dtype=torch.int32),
     )
     torch.testing.assert_close(out[:, 8:].cpu(), torch.full((1, 4), -1, dtype=torch.int32))
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("disabled_group", [None, 4], ids=["all-groups", "disabled-group"])
+def test_compute_slot_mapping_deepseek_v4_prefill(disabled_group: int | None) -> None:
+    """Replay the slot-mapping input shapes captured from a DeepSeek V4 Flash prefill."""
+    device = torch.device("npu")
+    num_tokens = 79
+    block_sizes = [128, 4096, 32, 32, 2, 8]
+    block_counts = [triton.cdiv(num_tokens, size) for size in block_sizes]
+    req_row = 1
+    slot_mapping_enabled = [group != disabled_group for group in range(len(block_sizes))]
+    block_tables = AscendBlockTables(
+        block_sizes=block_sizes,
+        max_num_reqs=4,
+        max_num_batched_tokens=4096,
+        max_num_blocks_per_group=block_counts,
+        device=device,
+        cp_size=1,
+        slot_mapping_enabled=slot_mapping_enabled,
+    )
+
+    # The shape and block sizes came from the runner. Use synthetic block
+    # IDs and give every group a distinct range to check group selection.
+    block_ids = []
+    next_id = 1
+    for count in block_counts:
+        block_ids.append(list(range(next_id, next_id + count)))
+        next_id += count
+    block_tables.append_block_ids(req_row, tuple(block_ids), overwrite=True)
+    block_tables.apply_staged_writes()
+
+    positions = torch.arange(num_tokens, dtype=torch.int64)
+    result = block_tables.compute_slot_mappings(
+        torch.tensor([req_row], dtype=torch.int64, device=device),
+        torch.tensor([0, num_tokens], dtype=torch.int32, device=device),
+        positions.to(device),
+        num_tokens_padded=num_tokens,
+    )
+
+    expected = torch.stack(
+        [
+            _cpu_slot_ids(torch.tensor(ids, dtype=torch.int32).unsqueeze(0), 0, positions, size)
+            for ids, size in zip(block_ids, block_sizes)
+        ]
+    )
+    if disabled_group is not None:
+        expected[disabled_group].fill_(PAD_SLOT_ID)
+        disabled_slots = block_tables.slot_mappings[disabled_group].cpu()
+        torch.testing.assert_close(disabled_slots, torch.full_like(disabled_slots, PAD_SLOT_ID), rtol=0, atol=0)
+    torch.testing.assert_close(result.cpu(), expected.to(torch.int32), rtol=0, atol=0)

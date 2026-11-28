@@ -89,7 +89,7 @@ To enable RFork, pass `--load-format rfork` and provide the required settings th
 | **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. A non-empty JSON string takes priority over `RFORK_SCHEDULER_URL`; an absent, empty, or non-string JSON value falls back to the environment variable. |
 | **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup; together with `rfork_request_timeout_sec`, it also bounds the shutdown wait for the heartbeat thread. | Optional. Default: `5.0`. Must be finite and greater than `0`; a numeric string such as `"7.5"` is also accepted. A valid JSON value takes priority over `RFORK_SEED_TIMEOUT_SEC`; an invalid or absent JSON value uses a valid environment value, otherwise the default. |
 | **rfork_request_timeout_sec** | Number | HTTP connect/read timeout for planner and seed metadata requests. | Optional. Default: `10.0`. Must be finite and greater than `0`; a numeric string such as `"7.5"` is also accepted. The startup health probe uses a separate bound: the remaining `rfork_seed_timeout_sec`, capped at 10 seconds. A valid JSON value takes priority over `RFORK_REQUEST_TIMEOUT_SEC`; an invalid or absent JSON value uses a valid environment value, otherwise the default. |
-| **rfork_model_identity_headers** | Boolean | Attach readable model identity headers to every planner request. | Optional. Default: `false`. Explicit JSON `true` or `false` overrides `RFORK_MODEL_IDENTITY_HEADERS`; otherwise the environment variable accepts `0`, `1`, `true`, or `false`, ignoring case and surrounding whitespace. |
+| **rfork_model_identity_headers** | Boolean | Attach readable model identity headers to every planner request. | Optional. Default: `false`. Explicit JSON `true` or `false` overrides `RFORK_MODEL_IDENTITY_HEADERS`; when the JSON key is absent, the environment variable accepts `0`, `1`, `true`, or `false`, ignoring case and surrounding whitespace; any other JSON type fails configuration initialization. |
 | **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
 | **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. JSON configuration only. Must be a positive integer; invalid values fail configuration initialization. Permanent planner rejection still stops retries. |
 | **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
@@ -143,7 +143,7 @@ Both sources are supported configuration inputs. The environment route suits dep
 
 ## Example Commands & Placeholders
 
-> Replace parts in `<...>` before running.
+> Replace placeholders such as `<planner_port>` with your own values before running the commands.
 
 ### 1. Install YuanRong Datasystem
 
@@ -355,7 +355,6 @@ Performance depends on model size, shard topology, NPU tensor layout, TransferEn
     - **Sleep mode** (`enable_sleep_mode` on either the model config or `vllm_config.model_config`), because sleeping discards and reallocates weight storage.
     - **Online weight transfer** (`weight_transfer_config` is set), because weights can be replaced after loading.
     - **EPLB** (`--enable-eplb`), because asynchronous expert rearrangement rewrites expert weights and placement maps in place after the seed service starts.
-- The static, recording, and legacy dynamic EPLB modes configured through `additional_config.eplb_config` (`expert_map_path`, `expert_map_record_path`, `dynamic_eplb`) belonged to Model Runner V1 and have been removed. They no longer take effect, so they neither enable EPLB nor bypass RFork.
 - Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork makes at most two cleanup attempts (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2), with a short backoff before the second attempt, and only then reclaims memory and reruns the default loader. A pending legacy `/put_seed` for an unpublished receiver does not block native finalization, but if required local cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol. Its unauthenticated `GET /debug/snapshot` endpoint lists every registered `seed_key` and every active lease `USER_ID`; those IDs authorize lease renewal and release, so anything that can reach the mock planner can learn cluster keys and disrupt active allocations. Keep it reachable only inside the trusted network segment (see the [FAQ](#faq)).
 - The planner protocol headers `SEED_REFCNT` and `SEED_RANK` carry no scheduling meaning, but they are not optional on the wire today:
@@ -366,7 +365,7 @@ Performance depends on model size, shard topology, NPU tensor layout, TransferEn
   while its HTTP listener is unresponsive can still keep heartbeating. Monitor the advertised seed port at the network
   level if that distinction matters. If the thread exits, RFork stops sending heartbeats and
   attempts to withdraw the advertisement when the planner supports removal. A heartbeat failure alone does not stop
-  the metadata service; shutdown or fallback cleanup handles that teardown. If removal is unsupported or unknown, RFork
+  the seed HTTP service; shutdown or fallback cleanup handles that teardown. If removal is unsupported or unknown, RFork
   retains the published seed's registered memory and storage owner until a later withdrawal is confirmed and native
   cleanup succeeds, or the process exits, while keeping the loaded model available for inference.
 - Temporary planner outages do not stop inference. Retryable initial advertisements and lease releases continue in the

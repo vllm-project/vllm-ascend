@@ -26,12 +26,10 @@ from uuid import uuid4
 import torch_npu
 from pydantic import TypeAdapter
 from vllm.config import ProfilerConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.profiler.wrapper import WorkerProfiler
 
 from vllm_ascend.ascend_config import NPUProfilerConfig, NPUProfilerExperimentalConfig, get_ascend_config
-
-logger = init_logger(__name__)
 
 
 class TorchNPUProfilerWrapper(WorkerProfiler):

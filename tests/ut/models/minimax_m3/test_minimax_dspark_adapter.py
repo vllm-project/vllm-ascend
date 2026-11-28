@@ -120,8 +120,7 @@ def _header(tensors):
     return {name: {"shape": list(value.shape), "dtype": "BF16"} for name, value in tensors.items()}
 
 
-@pytest.mark.parametrize("release", [False, True])
-def test_hf_override_uses_versioned_config_class(adapter_modules, checkpoint, monkeypatch, tmp_path, release):
+def test_hf_override_uses_versioned_config_class(adapter_modules, checkpoint, monkeypatch, tmp_path):
     module = adapter_modules.weights
     source, tensors = checkpoint
     source = {**source, "architectures": [module.ADAPTER_ARCHITECTURE], "bos_token_id": 0, "eos_token_id": 1}
@@ -130,16 +129,12 @@ def test_hf_override_uses_versioned_config_class(adapter_modules, checkpoint, mo
     )
     read_header = Mock(return_value=_header(tensors))
     monkeypatch.setattr(module, "read_draft_header", read_header)
-    monkeypatch.setattr(module, "vllm_version_is", lambda version: release)
 
     actual = module.draft_hf_override(hf_config)
 
-    if release:
-        assert isinstance(actual, _StubMiniMaxTextConfig)
-    else:
-        from transformers import MiniMaxM3VLTextConfig
+    from transformers import MiniMaxM3VLTextConfig
 
-        assert isinstance(actual, MiniMaxM3VLTextConfig)
+    assert isinstance(actual, MiniMaxM3VLTextConfig)
     read_header.assert_called_once_with(tmp_path)
     assert actual.num_hidden_layers == source["num_hidden_layers"]
     assert actual.hidden_size == source["hidden_size"]
