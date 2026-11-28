@@ -441,8 +441,8 @@ class AscendModelState(DefaultModelState):
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
         if (
             not vllm_version_is("0.34.0")
+            and (set_embedding_num_tokens_padded is not None or getattr(self, "supports_mm_inputs", False))
             and input_batch.num_tokens == 0
-            and (set_embedding_num_tokens_padded is not None or self.supports_mm_inputs)
         ):
             # vLLM #64435 skips embedding lookup for empty local PCP batches.
             # Ascend must still join the padded token exchange with busy peers.
