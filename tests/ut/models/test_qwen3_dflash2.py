@@ -4,6 +4,7 @@
 """Check the Ascend DFlash2 MLA draft's attention settings and context KV path."""
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -30,10 +31,16 @@ def test_grouped_conv_keeps_nonfinite_taps_inside_each_request():
 
 @pytest.fixture
 def build_mla_layer(monkeypatch):
+    speculative_config: Any = SimpleNamespace(
+        num_speculative_tokens=7,
+        draft_model_config=None,
+        prefill_context_kv_only=False,
+    )
+    speculative_config.speculator_config = dflash2.DFlash2SpeculatorConfig(speculative_config)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(num_hidden_layers=2)),
         compilation_config=SimpleNamespace(static_forward_context={}),
-        speculative_config=SimpleNamespace(num_speculative_tokens=7),
+        speculative_config=speculative_config,
     )
     monkeypatch.setattr(upstream_dflash, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(mla, "get_current_vllm_config", lambda: vllm_config)
