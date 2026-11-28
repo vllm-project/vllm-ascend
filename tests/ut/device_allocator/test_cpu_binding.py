@@ -765,6 +765,71 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
     )
+    def test_build_cpu_pools_topo_mode_resolves_physical_npu_id_to_logic_id(self, _mock_get_device_type):
+        # 910B3 container: `npu-smi info -m` reports NPU ID=7 for Chip Logic ID=0,
+        # while `npu-smi info -t topo` keys the CPU affinity by the physical id.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = list(range(48, 72))
+        cpu_alloc.device_info.npu_affinity = {7: list(range(48, 72))}
+        cpu_alloc.device_info.npu_map_info = {"7": {"0": "0"}}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: list(range(48, 72))})
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_mode_prefers_physical_mapping_over_overlapping_key(self, _mock_get_device_type):
+        # The topo table also contains an entry for the logic id itself, but the
+        # explicit mapping says logic id 0 belongs to physical NPU 7. The mapping
+        # must win, otherwise the wrong device's CPUs are selected.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = [48, 49, 50, 51]
+        cpu_alloc.device_info.npu_affinity = {0: [48, 49], 7: [50, 51]}
+        cpu_alloc.device_info.npu_map_info = {"7": {"0": "0"}}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [50, 51]})
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_mode_resolves_overlapping_logic_and_physical_ids(self, _mock_get_device_type):
+        # physical NPU 1 -> logic id 0 and physical NPU 7 -> logic id 1. Only the
+        # CPUs of NPU 7 are allowed, so logic NPU 1 must resolve to physical 7
+        # instead of matching the numeric key 1 in the topo table.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1]
+        cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.device_info.allowed_cpus = [100, 101, 102, 103]
+        cpu_alloc.device_info.npu_affinity = {1: [0, 1], 7: [100, 101, 102, 103]}
+        cpu_alloc.device_info.npu_map_info = {"1": {"0": "0"}, "7": {"0": "1"}}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {1: [100, 101, 102, 103]})
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
     def test_build_cpu_pools_topo_mode_skips_non_running_npu_without_cpuset_overlap(self, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.all_logic_npus = [0, 1]
