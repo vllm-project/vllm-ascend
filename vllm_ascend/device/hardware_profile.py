@@ -206,6 +206,8 @@ class HardwareCapability(Enum):
     TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+    # The device OPP provides the A8W4 GroupedMatmulSituQuantMsd operator.
+    GMM1_SITU_QUANT_MSD = auto()
 
 
 class WeightFormat(Enum):
@@ -405,6 +407,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.GMM1_SITU_QUANT_MSD,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,

@@ -324,15 +324,9 @@ class TestW4A8SituPath(unittest.TestCase):
         with (
             patch("torch_npu.npu_dynamic_quant", return_value=("qx", torch.ones(2)), create=True),
             patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
-            patch(
-                "torch.ops._C_ascend.dequant_situ_quant",
-                return_value=("qout", "oscale"),
-                create=True,
-            ) as mock_situ,
         ):
-            out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
+            self.assertEqual(method.apply_gmm1(mlp_compute_input), "bf16_out")
 
-        self.assertEqual((out, scale), ("qout", "oscale"))
         # Per-channel W4A8 must pass the scale in [E, 1, N] layout, matching
         # upstream quant_apply_mlp's SITU branch (unsqueeze(-2)); otherwise the
         # A8W4 tiling reads the flattened scale as quantGroupNum and fails.
@@ -341,9 +335,6 @@ class TestW4A8SituPath(unittest.TestCase):
         self.assertEqual(gmm_scale.shape, (1, 1, 8))
         self.assertIs(mock_gmm.call_args.kwargs["bias"][0], layer.w13_scale_bias)
         self.assertEqual(mock_gmm.call_args.kwargs["output_dtype"], torch.bfloat16)
-        mock_situ.assert_called_once()
-        self.assertEqual(mock_situ.call_args.kwargs["beta"], 4.0)
-        self.assertEqual(mock_situ.call_args.kwargs["linear_beta"], 25.0)
 
 
 class TestW4A16FusedMoEMethod(unittest.TestCase):
