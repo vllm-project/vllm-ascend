@@ -72,6 +72,8 @@ For a **new environment variable** (exceptional), the PR must show a strong reas
 
 ## Testing
 
+Before adding or modifying tests, read and follow [tests/AGENTS.md](tests/AGENTS.md) for test design principles.
+
 Run tests appropriate to the change and complete required checks. Broaden or repeat testing when new changes, failures, or unresolved risks justify it.
 
 When preparing or reviewing a PR, read the [PR testing requirements](docs/source/developer_guide/contribution/testing.md#pr-testing-requirements) for coverage, hardware evidence, and validation reporting. Use the other sections of the same guide for environment setup and test commands as needed.
