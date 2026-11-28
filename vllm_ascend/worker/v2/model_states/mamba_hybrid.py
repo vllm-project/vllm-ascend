@@ -568,7 +568,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self._align_mode:
+        if self.mamba_prefix_caching:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_builders = [
                 (group_idx, builder)

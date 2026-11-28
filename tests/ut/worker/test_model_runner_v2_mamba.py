@@ -45,9 +45,10 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
 
 
 class _MetadataState(SimpleNamespace):
-    # Metadata-only doubles still use the real inherited entry check.
+    # Metadata-only doubles still use the real model state checks.
     _check_finegrained_tp_idle_graph_step = AscendMambaHybridModelState._check_finegrained_tp_idle_graph_step
     _uses_global_mamba_pcp = AscendMambaHybridModelState._uses_global_mamba_pcp
+    mamba_prefix_caching = AscendMambaHybridModelState.mamba_prefix_caching
 
 
 class _FakeAttentionBackend:
@@ -422,6 +423,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         max_model_len=1024,
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -490,6 +492,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
         max_model_len=1024,
         recoverssm=None,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,
@@ -679,6 +682,7 @@ def test_mamba_padding_is_independent_of_pcp_context(
         max_model_len=1024,
         recoverssm=None,
         _align_mode=False,
+        prefix_caching=False,
     )
     batch = SimpleNamespace(
         num_reqs=1,
@@ -1464,6 +1468,7 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=16,
@@ -1513,6 +1518,7 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
         max_model_len=1024,
         recoverssm=None,
         _align_mode=True,
+        prefix_caching=True,
         _get_mamba_group_info=MagicMock(return_value=(list(range(24)), None)),
         _ensure_align_ctx=MagicMock(return_value=SimpleNamespace(compute_aligned_state_indices=gather)),
     )

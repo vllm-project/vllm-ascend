@@ -337,6 +337,7 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     # The bare instance bypasses __init__, so mirror the upstream default that
     # prepare_attn now consults for the aligned mamba cache path.
     state._align_mode = False
+    state.prefix_caching = False
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )
