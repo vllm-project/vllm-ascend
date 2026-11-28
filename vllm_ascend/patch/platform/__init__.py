@@ -34,6 +34,7 @@ import vllm_ascend.patch.platform.patch_torch_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+import vllm_ascend.patch.platform.patch_hybrid_checkpoint  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
 import vllm_ascend.patch.platform.patch_metrics_level  # noqa
 

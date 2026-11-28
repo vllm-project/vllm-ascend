@@ -1,0 +1,8 @@
+pr: 21536
+entries:
+  - category: feature
+    text: Added FlashState frontier checkpoints for hybrid models on Ascend, so a request that extends a cached prefix can resume from the recurrent state checkpoint instead of recomputing the whole prefix.
+  - category: config
+    text: Added the `flashstate` section to `additional_config` with `enable_frontier`, `prefix_cache_eviction`, `prefill_cost_coefficients`, `prefix_cache_leaf_last` and `prefix_cache_leaf_idle_seconds`.
+  - category: documentation
+    text: Added a feature guide for FlashState frontier checkpoints covering usage, configuration, verification and troubleshooting.
