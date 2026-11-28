@@ -490,6 +490,39 @@ class ExpertOffloadConfig:
 
 
 @config
+class MMStagingConfig:
+    """Configuration Object for ``additional_config["mm_staging_config"]``.
+
+    Fixed pinned host staging pool for the multimodal input path (issue
+    #21094): torch_npu 2.10 pinned allocations go through
+    ``aclrtMallocHostWithCfg`` (VA flag) with no small-page fallback, and
+    the multimodal staging/merge path turns into a high-frequency stream
+    of variable-size driver grabs that fail with 207001/EL0018 under host
+    memory pressure. The pool absorbs those allocations; when disabled
+    (``pinned_pool_mb=0``) the original allocation behavior is kept.
+    """
+
+    # Total pinned pool size per worker, in MiB. 0 disables the pool.
+    pinned_pool_mb: int = 2048
+    # Slot granularity in MiB; oversize merges take several adjacent slots
+    # as one contiguous slice.
+    slot_mb: int = 512
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.pinned_pool_mb < 0:
+            raise ValueError(f"mm_staging_config.pinned_pool_mb must be >= 0, got {self.pinned_pool_mb}")
+        if self.pinned_pool_mb > 0:
+            if self.slot_mb <= 0:
+                raise ValueError(f"mm_staging_config.slot_mb must be positive, got {self.slot_mb}")
+            if self.pinned_pool_mb < self.slot_mb:
+                raise ValueError(
+                    f"mm_staging_config.pinned_pool_mb ({self.pinned_pool_mb}) must be >= slot_mb ({self.slot_mb})"
+                )
+        return self
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -622,6 +655,10 @@ class AscendConfig:
                 "dram_size_per_dp_GB": 110,
                 "keep_device_kv_cache": false,
                 "store_port_base": 8500
+            },
+            "mm_staging_config": {
+                "pinned_pool_mb": 2048,
+                "slot_mb": 512
             }
         }
 
@@ -729,6 +766,7 @@ class AscendConfig:
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
     expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
+    mm_staging_config: MMStagingConfig = dataclasses.field(default_factory=MMStagingConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit

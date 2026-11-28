@@ -43,6 +43,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
+| `mm_staging_config`                 | dict | `{}`    | Fixed pinned host staging pool for the multimodal input path. See [Multimodal staging pool](#multimodal-staging-pool). |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
 | `runtime_config_hot_reload`         | bool | `False` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
@@ -386,6 +387,19 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
     }
 }
 ```
+
+### Multimodal staging pool
+
+torch_npu 2.10 pinned host allocations go through `aclrtMallocHostWithCfg` (VA flag), which binds every allocation to 2MiB base-heap physical pages with no small-page fallback. The multimodal input path allocates per-request staging temporaries and cross-request merge outputs through `pin_memory=True`, producing a high-frequency stream of variable-size driver grabs; under host memory pressure these grabs fail with error 207001 / EL0018 and terminate prefill serving ([issue #21094](https://github.com/vllm-project/vllm-ascend/issues/21094)).
+
+`mm_staging_config` routes those allocations through one fixed pinned pool allocated once per worker at first use (full DMA speed, zero runtime driver grabs). Oversize merges are served from several adjacent slots as one contiguous slice, and a slice is recycled only after the H2D copy enqueued from it completes. Every pool interaction degrades to the original allocation path on failure. The pool only materializes for multimodal workloads.
+
+| Parameter  | Type | Default | Description                                                                    |
+| ---------- | ---- | ------- | ------------------------------------------------------------------------------ |
+| `pinned_pool_mb` | int  | `2048`  | Total pinned pool size per worker, in MiB. `0` disables the pool and keeps the original allocation behavior. |
+| `slot_mb`  | int  | `512`   | Slot granularity in MiB; must not exceed `pinned_pool_mb`. Oversize merges take several adjacent slots as one contiguous slice. |
+
+Example: `--additional-config='{"mm_staging_config": {"pinned_pool_mb": 4096, "slot_mb": 1024}}'`
 
 ## GDN internal prefill checkpoints
 

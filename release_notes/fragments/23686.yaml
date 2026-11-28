@@ -1,0 +1,4 @@
+pr: 23686
+entries:
+  - category: bugfix
+    text: Fixed multimodal serving crashes (error 207001) that terminated prefill under host memory pressure. Multimodal staging buffers are now served from a fixed pinned pool (2048 MiB per worker by default, configurable via additional_config.mm_staging_config; set pinned_pool_mb=0 to keep the previous behavior).
