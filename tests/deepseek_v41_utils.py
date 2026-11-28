@@ -40,6 +40,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             head_size=width,
             dtype=torch.bfloat16,
             sliding_window=window,
+            bounded_replay=getattr(vllm_config.cache_config, "swa_bounded_replay", False),
             model_version="deepseek_v41",
         )
         if not role.is_kv_source:

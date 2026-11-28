@@ -59,17 +59,14 @@ Graph on Decode. The two-node colocated configuration uses DP2/TP8/EP16.
 
 ### Block-outer KV layout for long contexts
 
-On A2/A3 with model runner V2 and BF16 cache, set `VLLM_KV_CACHE_LAYOUT=BLHNC`
-to use vLLM's block-outer planner. On Flash with 128-token blocks, each history
-block occupies 360.625 KiB, compared with 528.25 KiB for the default layout.
-Each group of sliding-window pages then holds two layers per block ID. The
-capacity gain depends on how much history each request keeps.
-Prefix caching can be enabled or disabled.
+Set `VLLM_KV_CACHE_LAYOUT=BLHNC` to select vLLM's block-outer planner.
+For P/D disaggregation, use matching cache layout settings on both sides.
 
-This layout applies to the static hybrid cache with PP, PCP and DCP sizes of
-one. Speculative decoding, SWA bounded replay, KVPP, HiSparse and layerwise
-shared-buffer offload use the existing layout. For P/D disaggregation, use
-matching cache layout settings on both sides.
+On A2/A3 with model runner V2, BF16 KV cache and 128-token blocks, each Flash
+history block occupies 360.625 KiB, compared with 528.25 KiB for the default
+layout. Each group of sliding-window pages holds two layers per block ID.
+The capacity gain depends on how much history each request keeps.
+Prefix caching can be enabled or disabled.
 
 ## 3 Prerequisites
 

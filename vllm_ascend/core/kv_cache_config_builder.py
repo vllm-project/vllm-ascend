@@ -12,7 +12,6 @@ no longer needs a monkey patch for these decisions.
 from collections import defaultdict
 from dataclasses import fields, replace
 
-import torch
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import (
@@ -52,7 +51,6 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     group_cache_specs,
     is_deepseek_v41_cache,
     make_cache_groups,
-    uses_a5_packed_cache,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -84,30 +82,8 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _use_upstream_dsv41_layout(config: VllmConfig) -> bool:
-    """Use upstream block-outer groups for the MRV2 paged BF16 cache."""
-    cache = config.cache_config
-    if getattr(cache, "kv_cache_layout", None) != "BLHNC":
-        return False
-    parallel = config.parallel_config
-    return (
-        config.use_v2_model_runner
-        and not uses_a5_packed_cache()
-        and config.model_config.dtype == torch.bfloat16
-        and cache.cache_dtype in ("auto", "bfloat16")
-        and not cache.enable_extensible_kv_cache
-        and not cache.swa_bounded_replay
-        and not config.scheduler_config.disable_hybrid_kv_cache_manager
-        and config.speculative_config is None
-        and config.attention_config.hisparse_config is None
-        and (
-            parallel.pipeline_parallel_size,
-            parallel.prefill_context_parallel_size,
-            parallel.decode_context_parallel_size,
-        )
-        == (1, 1, 1)
-        and not (config.additional_config or {}).get("enable_kvpp", False)
-        and get_layerwise_offload_config(config.kv_transfer_config) is None
-    )
+    """Use upstream planning when layout resolution selects block-outer pages."""
+    return getattr(config.cache_config, "kv_cache_layout", None) == "BLHNC"
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
