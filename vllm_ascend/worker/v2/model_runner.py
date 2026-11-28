@@ -284,6 +284,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: Any = None
         if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
+            if isinstance(self.speculator, DraftModelSpeculator):
+                # Keep the target group before draft loading enters single_pp_stage().
+                self.speculator._target_pp_group = get_pp_group()
             # Share the update stream between the target and draft graph managers.
             self.speculator.update_stream = self.update_stream
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.

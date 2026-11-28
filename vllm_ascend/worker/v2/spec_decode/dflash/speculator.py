@@ -30,7 +30,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
 @contextmanager
@@ -153,7 +153,7 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-class AscendDFlashSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     use_a3_mla_sink: bool = False
     _windowed_fia_layers: tuple[str, ...] = ()
     _windowed_flashmla_builders: tuple[FlashMLAMetadataBuilder, ...] = ()
@@ -163,6 +163,10 @@ class AscendDFlashSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
             return False
+
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        release_target_embed(self, target_model, self.model)
 
     @draft_config_context()
     def load_draft_model(
@@ -175,7 +179,7 @@ class AscendDFlashSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin
         # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
             model.post_process(
-                self.vllm_config, on_embedding_replaced=partial(self._release_target_embed, target_model, model)
+                self.vllm_config, on_embedding_replaced=partial(release_target_embed, self, target_model, model)
             )
         return model
 

@@ -58,7 +58,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -67,7 +67,6 @@ logger = logging.getLogger(__name__)
 
 
 class AscendTargetDependentARSpeculator(
-    TargetEmbedCleanupMixin,
     LmheadTPDraftSamplingMixin,
     TargetDependentARSpeculator,
 ):
@@ -196,6 +195,7 @@ class AscendTargetDependentARSpeculator(
             # The draft runs on the last PP stage without an encoder cache.
             # Set this before profiling so compiled inputs stay consistent.
             self.supports_mm_inputs = False
+        release_target_embed(self, target_model, getattr(self, "model", None))
 
     @draft_config_context()
     def load_draft_model(

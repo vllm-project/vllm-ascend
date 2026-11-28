@@ -25,6 +25,7 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import TargetDependentARSpeculator
 
 from vllm_ascend.models.glm5next import model as glm5next_model
 from vllm_ascend.models.glm5next import mtp as mtp_module
@@ -296,7 +297,11 @@ def test_pp2_private_mtp_embedding_releases_target_copy(monkeypatch, tmp_path):
             draft_loader.load_weights(draft, model_config)
         return draft
 
+    def load_model(speculator, target):
+        speculator.model = speculator.load_draft_model(target, set())
+
     monkeypatch.setattr(eagle_utils, "get_model", load_draft_from_disk)
+    monkeypatch.setattr(TargetDependentARSpeculator, "load_model", load_model)
     speculator = AscendMTPSpeculator.__new__(AscendMTPSpeculator)
     speculator.method = "mtp"
     speculator.vllm_config = target_config
@@ -309,11 +314,9 @@ def test_pp2_private_mtp_embedding_releases_target_copy(monkeypatch, tmp_path):
         if not vllm_version_is("0.34.0"):
             assert parallel_state.get_pp_group().world_size == 1
             assert parallel_state.get_pp_group().is_first_rank is True
-        loaded_draft = speculator.load_draft_model(target, set())
-        speculator.model = loaded_draft
-        speculator.free_unused_weights(target)
+        speculator.load_model(target)
 
-    assert loaded_draft is draft
+    assert speculator.model is draft
     torch.testing.assert_close(draft.model.layers["45"].enorm.weight, mtp_norm)
     assert draft.has_own_embed_tokens is True
     assert draft.model.embed_tokens is private_draft_embed

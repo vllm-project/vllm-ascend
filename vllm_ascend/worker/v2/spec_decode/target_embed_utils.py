@@ -5,11 +5,9 @@
 from typing import Any
 
 import torch
-from vllm.distributed import GroupCoordinator, get_pp_group
+from vllm.distributed import GroupCoordinator
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.models.utils import PPMissingLayer
-
-from vllm_ascend.utils import vllm_version_is
 
 
 def _unwrap_embed_base(module: Any) -> Any:
@@ -56,15 +54,17 @@ def _target_needs_embed_on_last_stage(
     return any(_references_embed(lm_head, target_embed, target_base) for lm_head in lm_heads)
 
 
-def _release_unused_target_embed(
+def release_target_embed(
+    speculator: Any,
     target_model: torch.nn.Module,
-    draft_model: torch.nn.Module,
-    *,
-    pp_group: GroupCoordinator,
-    vllm_config: Any = None,
-    speculator_target_embed: Any = None,
+    draft_model: torch.nn.Module | None,
+    pp_group: GroupCoordinator | None = None,
 ) -> None:
-    """Release a last-stage target embedding when neither target nor draft uses it."""
+    """Release an unused target input embedding from the final PP stage."""
+    if draft_model is None:
+        return
+    if pp_group is None or pp_group.world_size == 1:
+        pp_group = speculator._target_pp_group
     if pp_group.world_size <= 1 or not pp_group.is_last_rank:
         return
 
@@ -82,10 +82,10 @@ def _release_unused_target_embed(
         target_inner,
         target_embed,
         target_base,
-        vllm_config,
+        speculator.vllm_config,
     ):
         return
-    if _references_embed(speculator_target_embed, target_embed, target_base):
+    if _references_embed(getattr(speculator, "target_embeddings", None), target_embed, target_base):
         return
 
     draft_inner = getattr(draft_model, "model", None)
@@ -94,45 +94,3 @@ def _release_unused_target_embed(
         return
 
     target_inner.embed_tokens = PPMissingLayer()
-
-
-class TargetEmbedCleanupMixin:
-    """Release unused last-stage target embeddings after draft initialization."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        # Capture the real target PP group outside single_pp_stage() because
-        # vLLM main invokes free_unused_weights() inside single_pp_stage().
-        self._target_pp_group = get_pp_group()
-
-    def load_model(self, target_model: torch.nn.Module) -> None:
-        super().load_model(target_model)  # type: ignore[misc]
-        # vLLM v0.34.0's runner stops after load_model(), while pinned main
-        # calls free_unused_weights() afterward.
-        if vllm_version_is("0.34.0"):
-            self.free_unused_weights(target_model)
-
-    def free_unused_weights(self, target_model: torch.nn.Module) -> None:
-        # Chain upstream cleanup (such as DFlash context_kv_only) before dropping
-        # the extra target embedding so target parameters stay intact for it.
-        if not vllm_version_is("0.34.0"):
-            super().free_unused_weights(target_model)  # type: ignore[misc]
-        self._release_target_embed(target_model, getattr(self, "model", None))
-
-    def _release_target_embed(
-        self,
-        target_model: torch.nn.Module,
-        draft_model: torch.nn.Module | None,
-        pp_group: GroupCoordinator | None = None,
-    ) -> None:
-        if draft_model is None:
-            return
-        if pp_group is None or pp_group.world_size == 1:
-            pp_group = self._target_pp_group
-        _release_unused_target_embed(
-            target_model,
-            draft_model,
-            pp_group=pp_group,
-            vllm_config=getattr(self, "vllm_config", None),
-            speculator_target_embed=getattr(self, "target_embeddings", None),
-        )

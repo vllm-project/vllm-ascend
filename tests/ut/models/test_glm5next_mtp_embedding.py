@@ -13,7 +13,7 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
 from vllm_ascend.models.glm5next import mtp as mtp_module
-from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
 def _draft_pp_context(pp_size):
@@ -81,13 +81,8 @@ def test_mtp_specific_embedding_takes_precedence(mtp, shared_first, monkeypatch)
     monkeypatch.setattr(parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1))
     with _draft_pp_context(1):
         eagle_utils.maybe_share_target_embed(mtp, mtp.model, target_inner)
-    speculator = AscendMTPSpeculator.__new__(AscendMTPSpeculator)
-    speculator.model = mtp
-    speculator._target_pp_group = parallel_state.get_pp_group()
-    speculator.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(tie_word_embeddings=False)),
-    )
-    speculator.free_unused_weights(target)
+    speculator = SimpleNamespace(_target_pp_group=parallel_state.get_pp_group())
+    release_target_embed(speculator, target, mtp)
     assert target_inner.embed_tokens is target_embed
     assert mtp.has_own_embed_tokens
     torch.testing.assert_close(mtp.model.embed_tokens.weight, own[1])

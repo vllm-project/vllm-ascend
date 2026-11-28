@@ -55,10 +55,10 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
     prepare_replicated_draft_profile_inputs,
 )
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
-class AscendDSparkSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin, DSparkSpeculator):
+class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
@@ -110,13 +110,13 @@ class AscendDSparkSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin
         )
         if hasattr(model, "post_process"):
             model.post_process(
-                self.vllm_config, on_embedding_replaced=partial(self._release_target_embed, target_model, model)
+                self.vllm_config, on_embedding_replaced=partial(release_target_embed, self, target_model, model)
             )
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
         self._lmhead_tp_wrap_draft_logits(model)
-
+        release_target_embed(self, target_model, model)
         return model
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:

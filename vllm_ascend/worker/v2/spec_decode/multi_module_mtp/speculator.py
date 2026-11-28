@@ -40,10 +40,10 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
-class AscendMultiModuleMTPSpeculator(TargetEmbedCleanupMixin, MultiModuleMTPSpeculator):
+class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     """Ascend multi-module MTP speculator.
 
     The whole draft loop (input rolling, per-module forward, sampling) is
@@ -91,6 +91,7 @@ class AscendMultiModuleMTPSpeculator(TargetEmbedCleanupMixin, MultiModuleMTPSpec
     def load_model(self, target_model: torch.nn.Module) -> None:
         self._fixup_draft_model_config()
         super().load_model(target_model)
+        release_target_embed(self, target_model, self.model)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         parallel_config = get_mtp_draft_parallel_config(self.vllm_config)
