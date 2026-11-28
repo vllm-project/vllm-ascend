@@ -1,0 +1,8 @@
+pr: 0
+entries:
+  - category: performance
+    text: >-
+      Issue the num_computed_tokens D2H snapshot before the RecoverSSM commit
+      kernels during speculative-decode postprocessing on Model Runner V2, so
+      the CPU-side sequence-length consumer no longer waits for the commit to
+      drain and the commit overlaps the next step's input preparation.
