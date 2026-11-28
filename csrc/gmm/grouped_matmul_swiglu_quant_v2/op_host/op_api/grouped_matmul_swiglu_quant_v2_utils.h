@@ -297,23 +297,35 @@ protected:
     {
         int64_t m = gmmDsqParams_.x->GetViewShape().GetDim(0); // 从x的第0维获取m
         int64_t k = gmmDsqParams_.x->GetViewShape().GetDim(1); // 从x的第1维获取k
-        // 转置情况下从weight的第1维获取n，非转置情况下从weight的第2维获取n
-        int64_t n = gmmDsqParams_.transposeWeight ? ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(1) :
-                                                    ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(2);
-        int64_t e = ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(0); // 从weight的第0维获取e
+        // packed: weight is [E, K, N] (or [E, N, K] transposed); list: each weight is [K, N] (or [N, K])
+        bool isList = gmmDsqParams_.weight->Size() > SINGLE_TENSOR_SIZE;
+        const aclTensor *weight0 = (*gmmDsqParams_.weight)[0];
+        int64_t e;
+        int64_t n;
+        if (gmmDsqParams_.transposeWeight) {
+            n = weight0->GetViewShape().GetDim(weight0->GetViewShape().GetDimNum() - 2);
+            e = isList ? static_cast<int64_t>(gmmDsqParams_.weight->Size()) : weight0->GetViewShape().GetDim(0);
+        } else {
+            n = weight0->GetViewShape().GetDim(weight0->GetViewShape().GetDimNum() - 1);
+            e = isList ? static_cast<int64_t>(gmmDsqParams_.weight->Size()) : weight0->GetViewShape().GetDim(0);
+        }
 
         // x的shape期望为[M, K]
         op::Shape xExpectShape = {m, k};
         // xScale的shape期望为[M, CeilDiv(K, 64), 2]
         op::Shape xScaleExpectShape = {m, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), SWIGLU_SPLIT_FACTOR};
-        // weight的shape期望为[E, K, N]
-        op::Shape weightExpectShape = {e, k, n};
         // weightScale的shape期望为[E, CeilDiv(K, 64), N, 2]
-        op::Shape weightScaleExpectShape = {e, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), n, SWIGLU_SPLIT_FACTOR};
-        // weight转置的shape期望为[E, N, K]
-        op::Shape weightTransExpectShape = {e, n, k};
-        // weightScale转置的shape期望为[E, N, CeilDiv(K, 64), 2]
-        op::Shape weightScaleTransExpectShape = {e, n, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), SWIGLU_SPLIT_FACTOR};
+        op::Shape weightScaleExpectShape =
+            isList ? op::Shape{Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), n, SWIGLU_SPLIT_FACTOR}
+                   : op::Shape{e, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), n, SWIGLU_SPLIT_FACTOR};
+        // weight的shape期望为[E, K, N] (packed) 或 [K, N] (list)
+        op::Shape weightExpectShape = isList ? op::Shape{k, n} : op::Shape{e, k, n};
+        // weight转置的shape期望为[E, N, K] (packed) 或 [N, K] (list)
+        op::Shape weightTransExpectShape = isList ? op::Shape{n, k} : op::Shape{e, n, k};
+        // weightScale转置的shape期望为[E, N, CeilDiv(K, 64), 2] (packed) 或 [N, CeilDiv(K, 64), 2] (list)
+        op::Shape weightScaleTransExpectShape =
+            isList ? op::Shape{n, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), SWIGLU_SPLIT_FACTOR}
+                   : op::Shape{e, n, Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE), SWIGLU_SPLIT_FACTOR};
         int64_t nAfterHalve = static_cast<int64_t>(n / SWIGLU_SPLIT_FACTOR);
         // output的shape期望为[M, N / 2]
         op::Shape outputExpectShape = {m, nAfterHalve};
@@ -563,14 +575,13 @@ and greater or equal to 4, but actual value is %lu.",
                     xScaleDimNumber);
             return false;
         }
-        if (gmmDsqParams_.weight->Size() != SINGLE_TENSOR_SIZE) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The size of weight should be 1, current size is %lu.",
-                    gmmDsqParams_.weight->Size());
+        // MX mode supports both packed single tensor and per-expert tensor list (same as built-in WeightNzV2)
+        if (gmmDsqParams_.weight->Size() == 0) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The size of weight should not be 0.");
             return false;
         }
-        if (gmmDsqParams_.weightScale->Size() != SINGLE_TENSOR_SIZE) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The size of weightScale should be 1, current size is %lu.",
-                    gmmDsqParams_.weightScale->Size());
+        if (gmmDsqParams_.weightScale->Size() == 0) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The size of weightScale should not be 0.");
             return false;
         }
         if (outputDimNumber != MX_OUTPUT_DIM) {
@@ -585,13 +596,15 @@ and greater or equal to 4, but actual value is %lu.",
         }
         auto weightDimNumber = ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDimNum();
         auto weightScaleDimNumber = ((*gmmDsqParams_.weightScale)[0])->GetViewShape().GetDimNum();
-        if (weightScaleDimNumber != MX_WEIGHT_SCALE_DIM) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim num of weightScale should be equal 2, current dim is %lu.",
+        // packed weightScale is 4D [E, K/64, N, 2]; per-expert list weightScale is 3D [K/64, N, 2]
+        if (weightScaleDimNumber != MX_WEIGHT_SCALE_DIM && weightScaleDimNumber != (MX_WEIGHT_SCALE_DIM - 1)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim num of weightScale should be equal 3 or 4, current dim is %lu.",
                     weightScaleDimNumber);
             return false;
         }
-        if (weightDimNumber != MX_WEIGHT_DIM) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim num of weight should be equal 3, current dim is %lu.",
+        // packed weight is 3D [E, K, N]; per-expert list weight is 2D [K, N]
+        if (weightDimNumber != MX_WEIGHT_DIM && weightDimNumber != (MX_WEIGHT_DIM - 1)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim num of weight should be equal 2 or 3, current dim is %lu.",
                     weightDimNumber);
             return false;
         }
@@ -658,8 +671,15 @@ and greater or equal to 4, but actual value is %lu.",
         // 从x的第1维获取k
         int64_t kInX = gmmDsqParams_.x->GetViewShape().GetDim(1);
         // 根据是否转置从weight中读取维度k
-        int64_t kInWeight = gmmDsqParams_.transposeWeight ? ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(2) :
-                                                    ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(1);
+        // packed weight is [E, K, N]/[E, N, K]; per-expert list weight is [K, N]/[N, K]
+        // -> k is always the last dim for non-transposed, second-to-last is N; use trailing dims by transpose flag
+        const aclTensor *weight0K = (*gmmDsqParams_.weight)[0];
+        int64_t kInWeight;
+        if (gmmDsqParams_.transposeWeight) {
+            kInWeight = weight0K->GetViewShape().GetDim(weight0K->GetViewShape().GetDimNum() - 1);
+        } else {
+            kInWeight = weight0K->GetViewShape().GetDim(weight0K->GetViewShape().GetDimNum() - 2);
+        }
         if (kInX != kInWeight) {
             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
                     "Expected input tensor x and weight tensor to have consistent k-dimension, but k=%ld in x, while "
@@ -770,7 +790,9 @@ and greater or equal to 4, but actual value is %lu.",
         for (size_t i = 0; i < wLength; i++) {
             const aclTensor *weightScale = (*gmmDsqParams_.weightScale)[i];
             const aclTensor *weight = (*gmmDsqParams_.weight)[i];
-            if (op::IsPrivateFormat(weight->GetStorageFormat())) {
+            // FRACTAL_NZ weight is allowed (WeightNz entry sets it explicitly); only reject other private formats
+            bool isNZ = weight->GetStorageFormat() == op::Format::FORMAT_FRACTAL_NZ;
+            if (!isNZ && op::IsPrivateFormat(weight->GetStorageFormat())) {
                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Format of weight should be ND, current format is format is %s.",
                         op::ToString(weight->GetStorageFormat()).GetString());
                 return false;
