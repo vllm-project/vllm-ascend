@@ -418,6 +418,9 @@ class AscendDSAV41Impl:
             and (metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs)
         )
 
+    def _on_swa_cache_written(self, attn, local_metadata):
+        """Hook invoked on all ranks immediately after SWA cache write."""
+
     @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
         kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
@@ -450,6 +453,7 @@ class AscendDSAV41Impl:
         )
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
             q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
+            self._on_swa_cache_written(attn, local_metadata)
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
@@ -465,6 +469,7 @@ class AscendDSAV41Impl:
                 kv = hidden_states.new_empty((0, attn.head_dim))
             # Empty PCP ranks still participate in the replicated-cache gather.
             self._write_swa_cache(attn, local_metadata.swa, kv)
+            self._on_swa_cache_written(attn, local_metadata)
         prepared_indexer = None
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)

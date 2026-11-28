@@ -235,6 +235,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
     # Maps scheduler token order to the rank-major gathered layout.
     hidden_restore_idx: torch.Tensor
     c2_metadata: V41PCPC2Metadata
+    gathered_swa_flat_slot_mapping: torch.Tensor | None = None
 
     @classmethod
     def from_local_metadata(
@@ -244,6 +245,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
         local_num_tokens_after_padding: int,
         hidden_restore_idx: torch.Tensor,
         c2_metadata: V41PCPC2Metadata,
+        gathered_swa_flat_slot_mapping: torch.Tensor | None = None,
     ) -> "AscendDSAV41PCPMetadata":
         values = {field.name: getattr(local, field.name) for field in fields(AscendDSAV41Metadata)}
         values["global_metadata"] = global_metadata
@@ -252,6 +254,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
             local_num_tokens_after_padding=local_num_tokens_after_padding,
             hidden_restore_idx=hidden_restore_idx,
             c2_metadata=c2_metadata,
+            gathered_swa_flat_slot_mapping=gathered_swa_flat_slot_mapping,
         )
 
 
@@ -270,6 +273,16 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._hidden_restore_idx_buffer = torch.empty(self._max_tokens, dtype=torch.int64, device=device)
+        self._gathered_swa_flat_slot_mapping_buffer = (
+            torch.full(
+                (self._pcp_world_size * self._max_tokens,),
+                -1,
+                dtype=torch.int64,
+                device=device,
+            )
+            if self._cache_kind == "swa" and self._uses_a5_packed_cache
+            else None
+        )
 
         # DualChunkSwap doubles prefill rows; decode graphs also pad requests.
         max_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -605,8 +618,32 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 buffer_capacity=max(self._max_tokens, self._seq_lens.numel()),
             )
             shared["c2_metadata"] = c2_metadata
+        gathered_swa_flat_slot_mapping = None
+        if needs_global_metadata and self._cache_kind == "swa" and self._uses_a5_packed_cache:
+            total_gathered_tokens = self._pcp_world_size * local_common.num_input_tokens
+            buf = self._gathered_swa_flat_slot_mapping_buffer
+            if buf is None or buf.numel() < total_gathered_tokens:
+                buf = torch.full(
+                    (max(total_gathered_tokens, self._pcp_world_size * self._max_tokens),),
+                    -1,
+                    dtype=torch.int64,
+                    device=self._seq_lens.device,
+                )
+                self._gathered_swa_flat_slot_mapping_buffer = buf
+            gathered_swa_flat_slot_mapping = buf[:total_gathered_tokens]
+            gathered_swa_flat_slot_mapping.fill_(-1)
+            if not pcp_context.global_batch.is_dummy and global_metadata.num_actual_tokens > 0:
+                actual = global_metadata.num_actual_tokens
+                gathered_swa_flat_slot_mapping[pcp_context.hidden_restore_idx[:actual]] = (
+                    global_metadata.flat_slot_mapping[:actual]
+                )
         return AscendDSAV41PCPMetadata.from_local_metadata(
-            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx, c2_metadata
+            local_metadata,
+            global_metadata,
+            local_common.num_input_tokens,
+            pcp_context.hidden_restore_idx,
+            c2_metadata,
+            gathered_swa_flat_slot_mapping=gathered_swa_flat_slot_mapping,
         )
 
 
@@ -653,17 +690,33 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
             return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
-        projector = attn.dsa_attn.dsa_attn.impl
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
-        prepared = self._preprocess(attn, hidden_states, metadata, global_metadata)
-        projector._parallel_o_proj.all_gather_weights()
-        return prepared
+        return self._preprocess(attn, hidden_states, metadata, global_metadata)
+
+    @staticmethod
+    def _all_gather_o_proj_weights(attn) -> None:
+        dsa_attn = getattr(attn, "dsa_attn", None)
+        inner = getattr(dsa_attn, "dsa_attn", None)
+        projector = getattr(inner, "impl", None)
+        if projector is not None:
+            projector._parallel_o_proj.all_gather_weights()
+
+    def _on_swa_cache_written(self, attn, local_metadata):
+        if isinstance(local_metadata.swa, AscendDSAV41PCPMetadata) and not self.role.is_kv_source:
+            self._all_gather_o_proj_weights(attn)
+
+    @staticmethod
+    def _gather_only_rows(rows, metadata):
+        if rows.shape[0] == metadata.local_num_tokens_after_padding:
+            padded = rows.contiguous()
+        else:
+            padded = rows.new_zeros((metadata.local_num_tokens_after_padding, *rows.shape[1:]))
+            padded[: rows.shape[0]].copy_(rows)
+        return get_pcp_group().all_gather(padded, dim=0)
 
     @staticmethod
     def _gather_cache_rows(rows, metadata):
-        padded = rows.new_zeros((metadata.local_num_tokens_after_padding, *rows.shape[1:]))
-        padded[: rows.shape[0]].copy_(rows)
-        gathered = get_pcp_group().all_gather(padded, dim=0)
+        gathered = AscendDSAV41PCPImpl._gather_only_rows(rows, metadata)
         return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
 
     def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata):
@@ -676,11 +729,9 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         kv, scores = compressor.wkv(hidden_states_fp32), compressor.wgate(hidden_states_fp32)
         send_kv_scores = kv.new_zeros((c2_metadata.send_token_indices.numel(), 2 * compressor.width))
         if hidden_states.shape[0]:
-            send_kv_scores.copy_(
-                torch.cat((kv, scores), dim=-1).index_select(
-                    0, c2_metadata.send_token_indices.clamp_max(hidden_states.shape[0] - 1)
-                )
-            )
+            clamp_idx = c2_metadata.send_token_indices.clamp_max(hidden_states.shape[0] - 1)
+            send_kv_scores[:, : compressor.width].copy_(kv.index_select(0, clamp_idx))
+            send_kv_scores[:, compressor.width :].copy_(scores.index_select(0, clamp_idx))
             valid_send_rows = c2_metadata.send_valid_mask & (c2_metadata.send_token_indices < hidden_states.shape[0])
             send_kv_scores.masked_fill_(~valid_send_rows[:, None], 0)
         gathered_kv_scores = get_pcp_group().all_gather(send_kv_scores, dim=0)
@@ -715,6 +766,17 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         if isinstance(metadata, AscendDSAV41PCPMetadata):
+            backend = getattr(attn, "packed_cache_ops", None)
+            if backend is not None and metadata.gathered_swa_flat_slot_mapping is not None:
+                gathered = AscendDSAV41PCPImpl._gather_only_rows(value, metadata)
+                if gathered.shape[0]:
+                    backend.write_attention_cache(
+                        attn.dsa_attn.swa_cache_layer.kv_cache,
+                        metadata.gathered_swa_flat_slot_mapping[: gathered.shape[0]],
+                        gathered,
+                        kind="win",
+                    )
+                return
             value = AscendDSAV41PCPImpl._gather_cache_rows(value, metadata)
             metadata = metadata.global_metadata
         AscendDSAV41Impl._write_swa_cache(attn, metadata, value)
@@ -747,6 +809,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
                 attn.rotary_emb.layername, global_metadata.swa.num_input_tokens
             )
         latent = self._gather_cache_rows(latent, local_metadata.swa)
+        self._all_gather_o_proj_weights(attn)
         self._write_compressed_caches(attn, latent, source_cos, source_sin, global_metadata)
 
     def forward(self, attn, positions, hidden_states, output=None):

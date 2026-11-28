@@ -1727,3 +1727,326 @@ def test_a5_async_plans_reject_unsupported_visibility_contract(
     with pytest.raises(ValueError, match=error):
         dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
     builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()
+
+
+class TestPCPAttentionOptimizations:
+    def test_swa_gathered_flat_slot_mapping_skips_reorder_on_a5(self, builders, monkeypatch):
+        owner_builders = builders(2, 0)
+        swa_builder = owner_builders["swa"]
+        swa_builder._uses_a5_packed_cache = True
+        swa_builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+        swa_builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+        swa_builder._device_backend = SimpleNamespace(
+            mixed_quant_sparse_flash_mla_metadata=lambda *args, **kwargs: torch.zeros(
+                dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32
+            )
+        )
+        monkeypatch.setattr(
+            dsa_v41,
+            "build_dspark_swa_indices",
+            lambda *args, **kwargs: (
+                torch.zeros((args[6], 1, 8), dtype=torch.int32),
+                torch.full((args[6], 1), 6, dtype=torch.int32),
+            ),
+        )
+
+        for scenario in ("prefill", "decode", "dummy", "mixed"):
+            batch = _batch(2, 0, scenario)
+            meta = _build_planes(owner_builders, batch)[PREFIXES["swa"]]
+            if scenario in {"decode", "dummy"} and not swa_builder._is_decode_sharded:
+                assert not isinstance(meta, dsa_v41_cp.AscendDSAV41PCPMetadata)
+                continue
+            assert isinstance(meta, dsa_v41_cp.AscendDSAV41PCPMetadata)
+            gathered_slots = meta.gathered_swa_flat_slot_mapping
+            assert gathered_slots is not None
+            assert gathered_slots.dtype == torch.int64
+            assert gathered_slots.shape == (2 * meta.local_num_tokens_after_padding,)
+            if scenario == "dummy":
+                assert torch.all(gathered_slots == -1)
+            else:
+                assert meta.global_metadata is not None
+                assert meta.global_metadata.flat_slot_mapping is not None
+                actual = meta.global_metadata.num_actual_tokens
+                restore = meta.hidden_restore_idx[:actual]
+                torch.testing.assert_close(gathered_slots[restore], meta.global_metadata.flat_slot_mapping[:actual])
+                unwritten = torch.ones(gathered_slots.numel(), dtype=torch.bool)
+                unwritten[restore] = False
+                assert torch.all(gathered_slots[unwritten] == -1)
+
+        # Verify _write_swa_cache uses _gather_only_rows without index_select.
+        rank0 = torch.tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])
+        rank1 = torch.tensor([[40.0, 41.0], [50.0, 51.0], [0.0, 0.0]])
+        group = SimpleNamespace(all_gather=lambda t, dim: torch.cat([t, rank1], dim=dim))
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(
+            torch,
+            "index_select",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected index_select on A5 SWA")),
+        )
+        cache = torch.zeros(16, 2)
+        writes = []
+
+        class PackedBackend:
+            @staticmethod
+            def write_attention_cache(dst, slots, values, *, kind):
+                writes.append((slots.clone(), values.clone(), kind))
+                valid = slots >= 0
+                dst[slots[valid]] = values[valid]
+
+        attn = SimpleNamespace(
+            packed_cache_ops=PackedBackend(),
+            dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=cache)),
+        )
+        restore_idx = torch.tensor([0, 3, 1, 4, 2])
+        gathered_slots = torch.full((6,), -1, dtype=torch.int64)
+        flat_global = torch.tensor([2, 5, 7, 1, 9], dtype=torch.int64)
+        gathered_slots[restore_idx] = flat_global
+        pcp_meta: Any = dsa_v41_cp.AscendDSAV41PCPMetadata.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
+        pcp_meta.local_num_tokens_after_padding = 3
+        pcp_meta.hidden_restore_idx = restore_idx
+        pcp_meta.gathered_swa_flat_slot_mapping = gathered_slots
+        pcp_meta.global_metadata = SimpleNamespace(flat_slot_mapping=flat_global)
+
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(attn, pcp_meta, rank0)
+        assert len(writes) == 1
+        assert writes[0][2] == "win"
+        torch.testing.assert_close(writes[0][1], torch.cat([rank0, rank1], dim=0))
+        expected = torch.zeros(16, 2)
+        expected[flat_global] = torch.cat([rank0, rank1], dim=0)[restore_idx]
+        torch.testing.assert_close(cache, expected)
+
+    def test_gather_cache_rows_zero_copy_when_length_matches(self, monkeypatch):
+        seen_ptrs = []
+
+        def fake_gather(tensor, dim):
+            seen_ptrs.append((tensor.data_ptr(), tensor.shape[0]))
+            return torch.cat([tensor, tensor], dim=dim)
+
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=fake_gather))
+        meta = SimpleNamespace(local_num_tokens_after_padding=3, hidden_restore_idx=torch.tensor([0, 3, 1]))
+
+        exact = torch.randn(3, 4)
+        out = dsa_v41_cp.AscendDSAV41PCPImpl._gather_cache_rows(exact, meta)
+        assert seen_ptrs[-1] == (exact.data_ptr(), 3)
+        assert out.shape == (3, 4)
+
+        short = torch.randn(2, 4)
+        out_short = dsa_v41_cp.AscendDSAV41PCPImpl._gather_cache_rows(short, meta)
+        assert seen_ptrs[-1][0] != short.data_ptr()
+        assert seen_ptrs[-1][1] == 3
+        assert out_short.shape == (3, 4)
+
+    def test_compress_local_c2_selects_before_cat(self, monkeypatch):
+        hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        c2_meta = SimpleNamespace(
+            send_token_indices=torch.tensor([2, 0, 5]),
+            send_valid_mask=torch.tensor([True, False, True]),
+            prev_token_row_indices=torch.tensor([0, 1]),
+            ring_source_row_indices=torch.tensor([0]),
+            ring_request_indices=torch.tensor([0]),
+            ring_token_offsets=torch.tensor([0]),
+        )
+        local_meta = SimpleNamespace(
+            swa=SimpleNamespace(c2_metadata=c2_meta),
+            compressor=SimpleNamespace(state=SimpleNamespace(c2_metadata_group_id=None)),
+        )
+        global_meta = SimpleNamespace(
+            compressor=SimpleNamespace(
+                state=SimpleNamespace(c2_metadata_group_id=None, c2_ring_metadata=torch.zeros(5, 1))
+            )
+        )
+        gathered_seen = []
+        ring_seen = []
+
+        def fake_gather(tensor, dim):
+            gathered_seen.append(tensor.clone())
+            return tensor
+
+        compressor = SimpleNamespace(
+            width=2,
+            wkv=lambda x: x[:, :2] + 1.0,
+            wgate=lambda x: x[:, 2:] + 10.0,
+            state_cache=SimpleNamespace(kv_cache=torch.zeros(4, 2, 1, 4)),
+            pool_projected=lambda kv, scores, *args, **kwargs: kv.to(torch.bfloat16),
+        )
+        attn = SimpleNamespace(compressor=compressor)
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=fake_gather))
+        monkeypatch.setattr(
+            "vllm_ascend.ops.triton.compressor.compressor_triton.write_pcp_ring_rows",
+            lambda gathered, *args: ring_seen.append(gathered.clone()),
+        )
+        monkeypatch.setattr(
+            torch,
+            "cat",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("torch.cat should not be called in C2")),
+        )
+
+        impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
+        latent = impl._compress_local_c2(attn, hidden, local_meta, global_meta)
+        assert latent.shape == (3, 2)
+        expected_send = torch.tensor(
+            [
+                [9.0, 10.0, 20.0, 21.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        torch.testing.assert_close(gathered_seen[0], expected_send)
+        torch.testing.assert_close(ring_seen[0], expected_send)
+
+    @pytest.mark.parametrize("is_kv_source", [False, True])
+    @pytest.mark.parametrize("empty_rank", [False, True])
+    @pytest.mark.parametrize("overlap", [False, True])
+    def test_pcp_early_all_gather_weights_order(self, monkeypatch, is_kv_source, empty_rank, overlap):
+        from contextlib import contextmanager
+
+        events: list[str] = []
+        stream_counts = {"record_event": 0, "wait_event": 0}
+
+        class Stream:
+            def record_event(self):
+                stream_counts["record_event"] += 1
+                return object()
+
+            def wait_event(self, event):
+                stream_counts["wait_event"] += 1
+
+            def wait_stream(self, stream):
+                pass
+
+        class IdentityLinear:
+            bias = None
+
+            def __call__(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        @contextmanager
+        def switch(stream):
+            yield
+
+        main_stream = Stream()
+        aux_stream = Stream()
+        monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+        monkeypatch.setattr(torch.npu, "stream", switch)
+        monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux_stream)
+        monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))
+
+        def project_query(qr: torch.Tensor) -> torch.Tensor:
+            events.append("index_proj_q")
+            return qr
+
+        def project_weights(h: torch.Tensor) -> torch.Tensor:
+            events.append("index_proj_w")
+            return torch.ones(h.shape[0], 1)
+
+        def quantize_query(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            events.append("index_quant_q")
+            return q, torch.ones(q.shape[0])
+
+        def gather_compressed(rows: torch.Tensor, meta: Any) -> torch.Tensor:
+            events.append("gather_compressed")
+            return torch.zeros(4, 4)
+
+        num_tokens = 0 if empty_rank else 2
+        hidden = torch.randn(4, 4)
+        cos = torch.ones(num_tokens, 1, 1, 2)
+        sin = torch.zeros(num_tokens, 1, 1, 2)
+        pcp_swa: Any = dsa_v41_cp.AscendDSAV41PCPMetadata.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
+        pcp_swa.num_actual_tokens = num_tokens
+        pcp_swa.num_input_tokens = 2
+        pcp_swa.num_prefills = 1
+        pcp_swa.num_decodes = 0
+        pcp_swa.num_reqs = 1
+        pcp_swa.local_num_tokens_after_padding = 2
+        pcp_swa.hidden_restore_idx = torch.tensor([0, 1, 2, 3])
+        pcp_swa.gathered_swa_flat_slot_mapping = None
+        pcp_swa.global_metadata = SimpleNamespace(
+            num_actual_tokens=4, num_input_tokens=4, num_prefills=1, num_decodes=0, num_reqs=1
+        )
+        local_meta = SimpleNamespace(
+            swa=pcp_swa,
+            rope=lambda name, count: (cos[:count], sin[:count]),
+            indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=4)),
+        )
+        global_meta = SimpleNamespace(
+            swa=pcp_swa.global_metadata,
+            rope=lambda name, count: (torch.ones(count, 1, 1, 2), torch.zeros(count, 1, 1, 2)),
+            compressor=SimpleNamespace(cache=SimpleNamespace(slot_mapping=torch.zeros(4, 2, dtype=torch.long))),
+            indexer=SimpleNamespace(cache=SimpleNamespace(slot_mapping=torch.zeros(4, 2, dtype=torch.long))),
+        )
+        projector = SimpleNamespace(
+            cv_wq_a=SimpleNamespace(
+                _quant_method=object(),
+                _has_communication=False,
+                quantize=lambda x: (x, torch.ones(x.shape[0])),
+                matmul=lambda x, s, bias=None: x,
+            ),
+            cv_wq_b=SimpleNamespace(
+                _quant_method=object(),
+                _has_communication=False,
+                quantize=lambda x: (x, torch.ones(x.shape[0])),
+                matmul=lambda x, s, bias=None: x,
+            ),
+            cv_wkv=SimpleNamespace(
+                _quant_method=object(),
+                _has_communication=False,
+                quantize=lambda x: (x, torch.ones(x.shape[0])),
+                matmul=lambda x, s, bias=None: x,
+            ),
+            _parallel_o_proj=SimpleNamespace(all_gather_weights=lambda: events.append("all_gather_weights")),
+        )
+        attn = SimpleNamespace(
+            wq_a=IdentityLinear(),
+            wq_b=IdentityLinear(),
+            wkv=IdentityLinear(),
+            q_norm=lambda x: x,
+            kv_norm=lambda x: x,
+            head_dim=4,
+            nope_head_dim=2,
+            rotary_emb=SimpleNamespace(layername=LAYER),
+            compressor=lambda x: torch.zeros(x.shape[0], 4),
+            indexer=SimpleNamespace(
+                project_query=project_query,
+                project_weights=project_weights,
+                apply_query_rope=lambda q, c, s: events.append("index_q_rope"),
+                quantize_query=quantize_query,
+                update_keys=lambda *args: None,
+            ),
+            long_kv_cache=SimpleNamespace(kv_cache=torch.zeros(4, 4)),
+            dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+        )
+
+        impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
+        impl.multistream_dsv4_dsa_overlap = overlap
+        impl.role = SimpleNamespace(
+            is_kv_source=is_kv_source, has_long_context=True, is_index_source=True, compress_ratio=1
+        )
+        monkeypatch.setattr(impl, "_global_layer_metadata", lambda by_prefix: global_meta)
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl, "_write_swa_cache", staticmethod(lambda *a: events.append("write_swa"))
+        )
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl,
+            "_gather_cache_rows",
+            staticmethod(gather_compressed),
+        )
+        monkeypatch.setattr(impl, "_write_compressed_caches", lambda *a: events.append("write_compressed"))
+        monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", staticmethod(lambda *a: events.append("rope")))
+
+        impl._prepare_inputs_and_caches(attn, hidden, local_meta, {})
+
+        assert events.count("all_gather_weights") == 1
+        if not is_kv_source:
+            assert events.index("write_swa") + 1 == events.index("all_gather_weights")
+        else:
+            assert (
+                events.index("gather_compressed")
+                < events.index("all_gather_weights")
+                < events.index("write_compressed")
+            )
+        if empty_rank:
+            assert stream_counts == {"record_event": 0, "wait_event": 0}
+        elif overlap:
+            assert stream_counts == {"record_event": 7, "wait_event": 6}
+        else:
+            assert stream_counts == {"record_event": 4, "wait_event": 3}
