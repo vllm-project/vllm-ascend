@@ -47,7 +47,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: linux-amd64-cpu-4-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend:lint
     outputs:
       has_tests: ${{ steps.plan.outputs.has_tests }}
       targets: ${{ steps.plan.outputs.targets }}
