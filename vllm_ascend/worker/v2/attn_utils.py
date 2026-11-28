@@ -57,7 +57,9 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
+    create_kv_cache_views,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec, select_common_block_size
@@ -1423,6 +1425,16 @@ def create_kv_cache_runtime_views(
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             if qwen4_exp:
+                if is_hidden_state_cache_spec(spec):
+                    views = create_kv_cache_views(
+                        backing,
+                        spec,
+                        num_blocks,
+                        KVCacheLayout.LBHNC,
+                        descriptor,
+                    )
+                    caches[name] = views[layer_index]
+                    continue
                 raw_cache = backing[start : start + span]
                 block_stride = descriptor.block_stride
                 # Migrate allocation callers from get_kv_cache_shape to this interface gradually.

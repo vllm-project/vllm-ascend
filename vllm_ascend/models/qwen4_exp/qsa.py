@@ -23,7 +23,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
 
 # Upstream model and QSA import each other; initialize the model first when
 # this submodule is imported directly, independently of lazy package exports.
@@ -35,7 +34,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
 from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, HiddenStateCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
@@ -813,34 +812,11 @@ class AscendQSAIndexerBackend(QSAIndexerBackend):
 qsa_indexer.QSAIndexerBackend = AscendQSAIndexerBackend
 
 
-def _get_hidden_state_runtime_shapes_and_dtypes(
-    spec: HiddenStateCacheSpec,
-    num_blocks: int,
-    kernel_block_size: int | None = None,
-) -> KVCacheRuntimeShapesAndDtypes:
-    shape = (
-        num_blocks,
-        spec.num_heads,
-        spec.num_states,
-        spec.state_content_size_bytes // get_dtype_size(spec.dtype),
-    )
-    return (shape,), (spec.dtype,)
-
-
-def _format_hidden_state_runtime_views(_spec: HiddenStateCacheSpec, components: list[torch.Tensor]) -> torch.Tensor:
-    (cache,) = components
-    return cache
-
-
 # Flash Next's companion caches also need runtime views from the unified pool.
 # PLE uses the same manager-block state indexing as GDN.
 PleShortConvAttentionBackend.get_runtime_shapes_and_dtypes = staticmethod(  # type: ignore[attr-defined]
     AscendGDNAttentionBackend.get_runtime_shapes_and_dtypes
 )
-CacheOnlyAttentionBackend.get_runtime_shapes_and_dtypes = staticmethod(  # type: ignore[attr-defined]
-    _get_hidden_state_runtime_shapes_and_dtypes
-)
-CacheOnlyAttentionBackend.format_runtime_views = staticmethod(_format_hidden_state_runtime_views)  # type: ignore[attr-defined]
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
