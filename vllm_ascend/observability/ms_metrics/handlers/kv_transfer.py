@@ -110,12 +110,12 @@ def _camel_to_snake(name: str) -> str:
 def _connector_label(obj: Any) -> str:
     class_name = type(obj).__name__
     module_name = type(obj).__module__
-    for marker, label in _MODULE_LABELS:
+    for marker, module_label in _MODULE_LABELS:
         if marker in module_name:
-            return label
-    label = _CLASS_LABELS.get(class_name)
-    if label is not None:
-        return label
+            return module_label
+    class_label = _CLASS_LABELS.get(class_name)
+    if class_label is not None:
+        return class_label
     for prefix, prefix_label in _CLASS_PREFIX_LABELS:
         if class_name.startswith(prefix):
             return prefix_label
