@@ -60,8 +60,8 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
-void sgmv_expand_inplace_meta(const at::Tensor &, const at::Tensor &, const at::Tensor &, const at::Tensor &,
-                              at::Tensor &, int64_t, int64_t) {}
+void sgmv_expand_inplace_meta(at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &,
+                             at::Tensor &, int64_t, int64_t) {}
 
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
