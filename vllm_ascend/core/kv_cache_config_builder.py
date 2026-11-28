@@ -105,7 +105,7 @@ def _use_upstream_dsv41_layout(config: VllmConfig) -> bool:
             parallel.decode_context_parallel_size,
         )
         == (1, 1, 1)
-        and not config.additional_config.get("enable_kvpp", False)
+        and not (config.additional_config or {}).get("enable_kvpp", False)
         and get_layerwise_offload_config(config.kv_transfer_config) is None
     )
 
