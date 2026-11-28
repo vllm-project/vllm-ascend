@@ -1,0 +1,140 @@
+meta:
+  title: "Qwen3-VL-Embedding-2B"
+  slug: "Qwen3-VL-Embedding-2B"
+  provider: "Qwen"
+  description: "2B vision-language embedding model. Single-card pooling verified on Atlas A3 (Ascend 910C) and Atlas 300I DUO (310P) with vLLM Ascend 0.23.0."
+  date_added: 2026-10-19
+  date_updated: 2026-11-27
+  tasks:
+    - embedding
+  performance_headline: "Atlas A3: LeCaRDv2 0.65931, embeddings bench 153.13 req/s (vLLM Ascend 0.23.0)"
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: verified
+
+model:
+  model_id: "Qwen/Qwen3-VL-Embedding-2B"
+  min_vllm_version: "0.23.0"
+  architecture: dense
+  parameter_count: "2B"
+  active_parameters: "2B"
+  context_length: 32768
+  base_args:
+    - "--runner"
+    - "pooling"
+    - "--max-model-len"
+    - "32768"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 8
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+        docker_serve_command: "vllm serve"
+        extra_args:
+          - "--enforce-eager"
+        extra_env:
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    description: "BF16 pooling on one Ascend 910C die; --enforce-eager required on the verified 0.23.0 stack"
+
+compatible_strategies:
+  - single_node_tp
+
+guide: |
+  ## Overview
+
+  Qwen3-VL-Embedding-2B produces vectors for text and mixed multimodal inputs
+  (retrieval, clustering, similarity). This Ascend-owned recipe records verified
+  single-card pooling on Atlas A3 (Ascend 910C) and Atlas 300I DUO (310P) with
+  vLLM 0.23.0 / vLLM Ascend 0.23.0. Atlas 800I A2 commands from the official
+  tutorial are included as an untested reference. The recipes renderer has no
+  dedicated 310P hardware profile yet, so 310P evidence is documented in prose.
+
+  ## Launching the Server
+
+  ### Ascend 910C / Atlas 800 A3 (verified)
+
+  On the verified vLLM Ascend 0.23.0 stack, engine init failed during torch.compile
+  unless `--enforce-eager` is set. Default dtype is bfloat16. The default command
+  uses `--max-model-len 32768` (model context); lower it for low-memory hosts.
+
+  ```bash
+  export ASCEND_RT_VISIBLE_DEVICES=0
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+  vllm serve Qwen/Qwen3-VL-Embedding-2B \
+    --runner pooling \
+    --max-model-len 32768 \
+    --enforce-eager \
+    --port 8000
+  ```
+
+  Smoke: HTTP 200, dimension 2048, `prompt_tokens` 39.
+
+  Embeddings bench (`vllm bench serve --backend openai-embeddings --dataset-name random
+  --endpoint /v1/embeddings --random-input 200`, no request-rate limit, 1000 requests):
+  1000/1000 success, 153.13 req/s, 30626.58 tok/s, mean E2E 4644.98 ms, P99 6426.33 ms.
+
+  Accuracy: MTEB `LeCaRDv2` **0.65931** via `VllmEncoderWrapper`
+  (`revision="norm"`, `dtype="float16"`, `max_model_len=10240`, `enforce_eager=True`,
+  `enable_chunked_prefill=False`, `batch_size=1`). Default chunked prefill stalled at
+  151/159 prompts on this host.
+
+  ### Atlas 300I DUO / 310P (verified on hardware; no renderer profile yet)
+
+  Use a low `--max-model-len` on 310P to avoid oversized attention masks / OOM.
+
+  ```bash
+  export ASCEND_RT_VISIBLE_DEVICES=0
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+  vllm serve Qwen/Qwen3-VL-Embedding-2B \
+    --runner pooling \
+    --dtype float16 \
+    --max-model-len 1024 \
+    --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
+    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+    --port 8000
+  ```
+
+  `--runner pooling` is required. Keep `--max-model-len` explicit. `No module named
+  'triton'` is expected on 310P. Verified 310P3 smoke: HTTP 200, dimension 2048,
+  `prompt_tokens` 39, leading values match the tutorial sample.
+
+  ### Atlas 800I A2 (tutorial reference, not verified here)
+
+  ```bash
+  vllm serve Qwen/Qwen3-VL-Embedding-2B \
+    --runner pooling \
+    --max-model-len 1024 \
+    --port 8000
+  ```
+
+  ## Client Usage
+
+  ```bash
+  curl -sS http://localhost:8000/v1/embeddings \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "Qwen/Qwen3-VL-Embedding-2B",
+      "input": [
+        "The capital of China is Beijing.",
+        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
+      ]
+    }'
+  ```
+
+  ## Troubleshooting
+
+  - **Startup OOM:** set `--max-model-len 1024` and `--dtype float16` on 310P.
+  - **Not an embeddings response:** restart with `--runner pooling`.
+  - **A3 compile failure:** add `--enforce-eager`.
+
+  ## References
+
+  - Downstream Ascend recipes (merged): https://github.com/vllm-ascend/vllm-ascend-recipes/pull/117
+  - [Qwen3-VL-Embedding tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-VL-Embedding.html)
+  - [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)

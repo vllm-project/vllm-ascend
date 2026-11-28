@@ -8,7 +8,7 @@
 meta:
   hardware:
     ascend_910b: verified
-    ascend_910c: supported
+    ascend_910c: verified
     ascend_950dt: supported
 
 strategy_hardware:
@@ -1293,3 +1293,42 @@ guide_sections:
     1. Before starting the container, prepare the SSD or loop devices and mount them together with the MemCache configuration directory as shown in [Section 4.3, Docker for three-tier PD pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling).
     2. In [Section 5.5, PD separation with a MemCache three-tier KV cache pool](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool), select your hardware. For a new pool, configure the MetaService and LocalService files and start MetaService. For an existing pool, use its endpoints and LocalService files and preserve its disk initialization settings.
     3. Confirm the MetaService and ConfigStore endpoints are reachable, then use the service environment and P/D launch commands in the same hardware tab.
+
+    ### Ascend Atlas 800 A3 single-node DP1×TP8 (W8A8-MTP)
+
+    Hand-written lab config (not the builder default for A3, which currently emits
+    FP8 / TP4 / `qwen3_5_mtp` paths). Verified on Atlas 800 A3 (8 Ascend910 dies)
+    with vLLM Ascend `v0.32.0rc1-a3` and ModelScope-only Eco-Tech W8A8-MTP weights
+    (`Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp`). Tutorial-style DP1×TP8 +
+    `FULL_DECODE_ONLY` ACLGraph serve returned HTTP 200; text chat and multimodal
+    OCR PASS; AISBench GSM8K accuracy 96.51.
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
+    export VLLM_ASCEND_ENABLE_QSA_E3V=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp \
+      --trust-remote-code \
+      --quantization ascend \
+      --served-model-name qwen3.8-flash-next \
+      --tensor-parallel-size 8 \
+      --data-parallel-size 1 \
+      --enable-expert-parallel \
+      --max-model-len 8192 \
+      --gpu-memory-utilization 0.90 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"method_extra":{"enforce_eager":false}}' \
+      --host 0.0.0.0 \
+      --port 8088
+    ```
+
+    On older Ascend images (`qwen3.8-next-a3`, `v0.30.0-a3`), default ACLGraph may fail
+    Conv2D capture — add `--enforce-eager` or upgrade to `v0.32.0rc1-a3`.
+
+    Downstream Ascend recipes mirror:
+    https://github.com/vllm-ascend/vllm-ascend-recipes/pull/168
+

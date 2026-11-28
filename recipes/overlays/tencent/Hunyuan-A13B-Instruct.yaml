@@ -1,0 +1,77 @@
+# Overlay for tencent/Hunyuan-A13B-Instruct on Huawei Ascend.
+# Verified single-node TP4 BF16 on Atlas 800 A3 (Ascend 910C).
+meta:
+  date_updated: 2026-11-27
+  hardware:
+    ascend_910c: verified
+
+strategy_hardware:
+  # Only single_node_tp TP4 was validated on A3; inherited multi-node / TEP
+  # strategies either render empty Ascend commands or invent unvalidated layouts.
+  multi_node_tp:
+    ascend_910c: unsupported
+  multi_node_tep:
+    ascend_910c: unsupported
+  multi_node_dep:
+    ascend_910c: unsupported
+  single_node_tep:
+    ascend_910c: unsupported
+
+variants:
+  ascend_bf16:
+    precision: bf16
+    label: BF16 (Ascend A3)
+    vram_minimum_gb: 40
+    description: Single-node TP4 BF16 verified on Atlas 800 A3 (4 Ascend910 dies).
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    min_vllm_version: 0.23.0
+    extra_args:
+      - '--trust-remote-code'
+      - '--host'
+      - '0.0.0.0'
+      - '--served-model-name'
+      - 'Hunyuan'
+      - '--max-model-len'
+      - '32768'
+      - '--gpu-memory-utilization'
+      - '0.90'
+    extra_env:
+      HCCL_INTRA_ROCE_ENABLE: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '512'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+        docker_serve_command: vllm serve
+
+guide_sections:
+  ascend: |
+    ### Ascend Atlas 800 A3 (910C)
+
+    Verified single-node TP=4 BF16 on Atlas 800 A3 (4 Ascend910 dies) with vLLM Ascend
+    `v0.23.0-a3`. Static weight load logged `Loading model weights took 37.4562 GB` per
+    NPU (tutorial KPI ~37.46 GB/NPU). Tutorial chat curl PASS. AISBench PERF gsm8k
+    MaxConc=16 PASS (TTFT≈247.7ms, TPOT≈44.8ms).
+
+    Use the same Hugging Face id the recipe page renders (`tencent/Hunyuan-A13B-Instruct`).
+
+    ```bash
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=512
+
+    vllm serve tencent/Hunyuan-A13B-Instruct \
+      --trust-remote-code \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name Hunyuan \
+      --tensor-parallel-size 4 \
+      --max-model-len 32768 \
+      --gpu-memory-utilization 0.90
+    ```
+
+    Downstream Ascend recipes mirror:
+    https://github.com/vllm-ascend/vllm-ascend-recipes/pull/169
