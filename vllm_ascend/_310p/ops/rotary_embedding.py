@@ -24,28 +24,45 @@ import torch_npu
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice, update_cos_sin
 
 # Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
 _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
+_CHECK_COMPILED_ROPE_ALIASING = is_torch_equal_or_newer("2.14.0")
 
 
-def _apply_rotary_mrope_torch(
+def _apply_rotary_torch(
     q_rot: torch.Tensor,
     k_rot: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """PyTorch path aligned with vLLM MRotaryEmbedding.forward_native -> ApplyRotaryEmb."""
+    """Apply standard or multimodal RoPE through vLLM's out-of-place implementation."""
     half = cos.shape[-1] // 2
     cos_h = cos[0, :, 0, :half].contiguous()
     sin_h = sin[0, :, 0, :half].contiguous()
     q_out = ApplyRotaryEmb.forward_static(q_rot[0], cos_h, sin_h, is_neox_style)
     k_out = ApplyRotaryEmb.forward_static(k_rot[0], cos_h, sin_h, is_neox_style)
     return q_out.unsqueeze(0), k_out.unsqueeze(0)
+
+
+def _apply_fused_rotary(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # The 310P kernel returns input aliases despite its functional schema.
+    # Torch 2.14 checks that contract on the compiled graph's first invocation.
+    if _CHECK_COMPILED_ROPE_ALIASING and torch.compiler.is_compiling():
+        return _apply_rotary_torch(query, key, cos, sin, is_neox_style)
+    rotary_mode = "half" if is_neox_style else "interleave"
+    return torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
 
 
 def merge_mrope_cos_sin_for_apply(
@@ -139,11 +156,10 @@ def _rope_forward_oot(
     cos, sin = get_cos_and_sin_slice()
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
-    rotary_mode = "half" if is_neox_style else "interleave"
     if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128:
         query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
         key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-        query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
+        query, key = _apply_fused_rotary(query, key, cos, sin, is_neox_style)
     elif self.rotary_dim < self.head_size:
         num_tokens = query.shape[0]
         query = query.view(num_tokens, -1, self.head_size)
@@ -155,7 +171,7 @@ def _rope_forward_oot(
         if self.rotary_dim == 64:
             q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
+            q_rot, k_rot = _apply_fused_rotary(q_rot, k_rot, cos, sin, is_neox_style)
         else:
             q_rot = q_rot.contiguous().view(num_tokens, -1)
             k_rot = k_rot.contiguous().view(num_tokens, -1)
@@ -194,9 +210,6 @@ class AscendMRotaryEmbedding310(MRotaryEmbedding):
     ):
         query_shape, key_shape = query.shape, key.shape
 
-        # MRoPE T/H/W layout is handled in `merge_mrope_cos_sin_for_apply` (mrope_interleaved).
-        # Here `rotary_mode` matches vLLM ApplyRotaryEmb: half = neox chunk, interleave = GPT-J pairs.
-        rotary_mode = "half" if self.is_neox_style else "interleave"
         num_tokens = query.shape[0]
         if _mrope_cos_slice is None or _mrope_sin_slice is None:
             raise RuntimeError(
@@ -220,9 +233,9 @@ class AscendMRotaryEmbedding310(MRotaryEmbedding):
         use_npu_apply = self.rotary_dim in (64, 128)
 
         if use_npu_apply:
-            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
+            q_rot, k_rot = _apply_fused_rotary(q_rot, k_rot, cos, sin, self.is_neox_style)
         else:
-            q_rot, k_rot = _apply_rotary_mrope_torch(q_rot, k_rot, cos, sin, self.is_neox_style)
+            q_rot, k_rot = _apply_rotary_torch(q_rot, k_rot, cos, sin, self.is_neox_style)
 
         if is_partial_rope:
             q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
