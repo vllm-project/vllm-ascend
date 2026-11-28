@@ -18,6 +18,7 @@ from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_vision_params,
     expand_fused_expert_params,
     expand_minimax_m3_params,
+    kimi_k3_meta_model,
     minimax_m3_checkpoint_name,
 )
 
@@ -62,6 +63,8 @@ class WeightUpdateModelCase:
     instead of being reported as a transfer regression; the reason is attached to
     the case so the report says which prerequisite is missing.
     """
+    # Shape-only adapters avoid importing a model's training kernels on trainers.
+    meta_model_factory: Callable[[Any], Any] | None = None
 
     def server_args(self) -> list[str]:
         # Run the worker out-of-process. With a single-process executor the
@@ -244,6 +247,40 @@ GLM51_CASE = WeightUpdateModelCase(
 GLM_CASES = (GLM51_CASE,)
 
 
+KIMI_K3_CASE = WeightUpdateModelCase(
+    id="kimi-k3-kda-mla-moe",
+    model="moonshotai/Kimi-K3",
+    hf_overrides={
+        "architectures": ["KimiLinearForCausalLM"],
+        "quantization_config": None,
+        "text_config": {
+            "num_hidden_layers": 4,
+            "num_experts": 8,
+            "num_experts_per_token": 4,
+            "num_nextn_predict_layers": 0,
+            "quantization_config": None,
+            # Exercise a residual-block boundary in the four-layer text tower.
+            "attn_res_block_size": 2,
+            "linear_attn_config": {
+                "full_attn_layers": [4],
+                "kda_layers": [1, 2, 3],
+                "head_dim": 128,
+                "num_heads": 96,
+                "short_conv_kernel_size": 4,
+                "use_full_rank_gate": True,
+                "gate_lower_bound": -5.0,
+            },
+        },
+    },
+    meta_config_attribute="text_config",
+    meta_model_factory=kimi_k3_meta_model,
+    extra_server_args=("--enable-prefix-caching",),
+)
+
+
+KIMI_CASES = (KIMI_K3_CASE,)
+
+
 # Bound KV allocation to leave room for the sparse-attention graph workspace.
 MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
 
@@ -323,7 +360,15 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE)
+MODEL_CASES = (
+    *QWEN_CASES,
+    *DEEPSEEK_CASES,
+    *DEEPSEEK_V41_CASES,
+    *GLM_CASES,
+    *KIMI_CASES,
+    MINIMAX_M3_CASE,
+    MINIMAX_M31_FLASH_CASE,
+)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
