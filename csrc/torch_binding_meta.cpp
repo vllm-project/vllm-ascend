@@ -48,14 +48,16 @@ c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
-// LoRA kernels update the values in the output buffer without changing its metadata.
-void bgmv_shrink_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, double) {}
+// LoRA kernels update the values in the output buffer without changing its
+// metadata. Meta kernels must repeat the exact PrivateUse1 kernel signatures:
+// the dispatcher rejects mismatched C++ signatures across dispatch keys.
+void bgmv_shrink_meta(at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, double) {}
 
-void bgmv_expand_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t, int64_t) {}
+void bgmv_expand_meta(at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t) {}
 
-void sgmv_shrink_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, double) {}
+void sgmv_shrink_meta(at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, double) {}
 
-void sgmv_expand_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t,
+void sgmv_expand_meta(at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, int64_t,
                       int64_t) {}
 
 void mla_preprocess(
