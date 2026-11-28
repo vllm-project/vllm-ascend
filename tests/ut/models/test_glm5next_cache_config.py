@@ -410,3 +410,31 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     )
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
+
+
+def test_glm5_next_collector_aligned_planner_characterization():
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    specs = make_specs()
+    main_page = specs["model.layers.3.attn"].page_size_bytes
+    aligned = {
+        name: replace(spec, page_size_padded=main_page) if isinstance(spec, MambaSpec) else spec
+        for name, spec in specs.items()
+    }
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(config, aligned)
+    plan = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=4)
+
+    assert [g.layer_names for g in groups] == [
+        ["model.layers.3.attn", "model.layers.3.indexer.k_cache"],
+        ["model.layers.3.indexer.tail_cache"],
+        ["model.layers.0.linear_attn"],
+        ["model.layers.1.linear_attn"],
+        ["model.layers.2.linear_attn"],
+    ]
+    assert [(t.size, t.block_stride, t.layer_stride, t.offset) for t in plan.kv_cache_tensors] == [
+        (4 * main_page, main_page, 0, 0),
+        (4 * 16384, 16384, 0, 0),
+    ]
