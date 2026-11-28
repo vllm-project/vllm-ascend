@@ -1194,6 +1194,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """Whether the fused triton build can replace the eager torch chain."""
         if build_dspark_swa_slot_indices_triton is None or self._dspark_index_width is None:
             return False
+        # The triton kernel can only consume device-resident buffers; a
+        # CPU-device builder (unit-test harnesses) must keep the eager torch
+        # chain, otherwise the kernel is launched with host pointers and
+        # faults the device (AI Core Error 95, see #21270).
+        if self.device.type != "npu":
+            return False
         return dspark_swa_indices_supported(self.storage_block_size, self.block_table.shape[1]) and (
             num_decode_reqs <= self.max_num_reqs_for_dspark()
         )
