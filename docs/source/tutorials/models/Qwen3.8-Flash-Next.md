@@ -104,6 +104,8 @@ Select the image for your target hardware.
       -v /usr/local/sbin:/usr/local/sbin \
       -v /var/log/npu:/usr/slog \
       -v /etc/hixlep:/etc/hixlep \
+      -v /lib/route.conf:/lib/route.conf \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
