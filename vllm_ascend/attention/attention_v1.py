@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch_npu
@@ -25,7 +25,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
     AttentionCGSupport,
@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     _select_seq_lens,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -73,6 +74,35 @@ _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # Standard GQA/MHA kernels (PA, FIA, DCP, and all PD connectors) consume
+    # contiguous K and V component planes within each layer's byte slice.
+    uses_contiguous_cache_components: ClassVar[bool] = True
+
+    @staticmethod
+    def wrap_kv_cache_views(components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe standard GQA/MHA K/V components as [kernel_blocks, heads, tokens, bytes]."""
+        if cls is not AscendAttentionBackend:
+            raise NotImplementedError(f"{cls.__name__} does not implement unified runtime shapes.")
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            raise ValueError(f"Unified runtime views do not support HND layout ({envs_vllm.VLLM_KV_CACHE_LAYOUT}).")
+        tokens = kernel_block_size or spec.num_states
+        blocks = num_blocks * (spec.num_states // tokens)
+        elem_size = get_dtype_size(spec.dtype)
+        head_size_v = getattr(spec, "head_size_v", spec.head_size)
+        return (
+            (blocks, spec.num_kv_heads, tokens, spec.head_size * elem_size),
+            (blocks, spec.num_kv_heads, tokens, head_size_v * elem_size),
+        )
 
     @staticmethod
     def get_name() -> str:

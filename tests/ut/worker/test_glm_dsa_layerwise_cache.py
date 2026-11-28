@@ -74,6 +74,8 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
         num_kv_heads=1,
         head_size=656 if packed else 576,
         dtype=dtype,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
         cache_sparse_sfa_c8=packed,
     )
     indexer = AscendSFAIndexerCacheSpec(
@@ -134,6 +136,16 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
         return backing
 
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
+    monkeypatch.setattr(
+        attn_utils,
+        "_allocate_kv_cache",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Must use unified allocator")),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "_reshape_kv_cache_v2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Must not use legacy reshape")),
+    )
     caches = attn_utils.allocate_kv_cache_main(worker_config, torch.device("cpu"), None, [128])
     (backing,) = allocations
     assert backing.numel() == expected_bytes

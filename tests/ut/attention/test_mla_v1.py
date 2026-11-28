@@ -1274,7 +1274,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
         self.kv_cache_spec.head_size = 64
-        self.kv_cache_spec.num_heads = 32
+        self.kv_cache_spec.num_heads = 1
+        self.kv_cache_spec.num_query_heads = 32
 
     def tearDown(self):
         self.parent_init_patcher.stop()

@@ -70,7 +70,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1385,8 +1385,14 @@ def _get_cache_attention_groups(
                 ):
                     # Match create_metadata_builders() without rebuilding its
                     # metadata buffers. Each backend can use smaller pages than
-                    # the common view size of its KV cache group.
-                    kernel_block_size = select_common_block_size(kernel_block_sizes[group_id], [backend], [layer_spec])
+                    # the common view size of its KV cache group; keep caller
+                    # sizes when synthetic test specs use sub-kernel blocks.
+                    try:
+                        kernel_block_size = select_common_block_size(
+                            kernel_block_sizes[group_id], [backend], [layer_spec]
+                        )
+                    except ValueError:
+                        kernel_block_size = kernel_block_sizes[group_id]
                     if kernel_block_size != layer_spec.block_size:
                         attn_group.kernel_block_size = kernel_block_size
                 group_map[key] = attn_group
@@ -1434,6 +1440,37 @@ def create_cache_component_views(
     return views
 
 
+def create_contiguous_cache_component_views(
+    raw_tensor: torch.Tensor,
+    cache_shapes: Sequence[tuple[int, ...]],
+    cache_dtypes: Sequence[torch.dtype],
+) -> list[torch.Tensor]:
+    """Create contiguous component planes sequentially across a layer's byte slice."""
+    base = raw_tensor.storage_offset() * raw_tensor.element_size()
+    offset = 0
+    views = []
+    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
+        itemsize = get_dtype_size(dtype)
+        if (base + offset) % itemsize:
+            raise ValueError(f"Cache component placement is not aligned to {dtype}.")
+        size = math.prod(shape) * itemsize
+        if offset + size > raw_tensor.nbytes:
+            raise ValueError("Cache view exceeds the backing allocation")
+        views.append(raw_tensor.narrow(0, offset, size).view(dtype).view(shape))
+        offset += size
+    return views
+
+
+def _runtime_cache_groups(
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: Sequence[int],
+) -> Iterable[tuple[AttentionGroup, int]]:
+    # Encoder-only groups have no runtime KV blocks.
+    for group in attn_groups:
+        if group.kv_cache_group_id < len(kernel_block_sizes):
+            yield group, group.kernel_block_size or kernel_block_sizes[group.kv_cache_group_id]
+
+
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1442,17 +1479,16 @@ def create_kv_cache_runtime_views(
     shared_layers: Mapping[str, str],
     layout: Any = None,
 ) -> dict[str, Any]:
-    """Delegate component views to backends using the descriptor block strides."""
+    """Delegate component views to backends using the descriptor placements."""
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
         for layer_index, name in enumerate(descriptor.layers)
     }
     caches: dict[str, Any] = {}
-    for group in attn_groups:
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
+    for group, kernel_block_size in _runtime_cache_groups(attn_groups, kernel_block_sizes):
         spec = group.kv_cache_spec
+        uses_contiguous = getattr(group.backend, "uses_contiguous_cache_components", False)
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
@@ -1464,30 +1500,62 @@ def create_kv_cache_runtime_views(
                 spec,
                 num_blocks,
                 layout,
-                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                kernel_block_size=kernel_block_size,
             )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
+            dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,) * len(shapes)
+            # Backend shapes describe bytes in [B, H, N, *inner, C]; kernels
+            # consume [B, N, H, *inner, D] views in dtype elements.
             cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
+                (blocks, tokens, heads, *inner, content_bytes // get_dtype_size(dtype))
+                for (blocks, heads, tokens, *inner, content_bytes), dtype in zip(shapes, dtypes, strict=True)
             ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
-            if issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
+            raw = backing[start : start + span]
+            if uses_contiguous:
+                if descriptor.block_stride != spec.page_size_bytes:
+                    raise ValueError(
+                        f"Contiguous cache components for {name} require dense layer blocks "
+                        f"(block_stride={descriptor.block_stride}, page_size_bytes={spec.page_size_bytes})."
+                    )
+                components = create_contiguous_cache_component_views(raw, cache_shapes, dtypes)
             else:
-                caches[name] = components
+                pages_per_block, rem_blocks = divmod(shapes[0][0], num_blocks)
+                if rem_blocks != 0 or descriptor.block_stride % pages_per_block != 0:
+                    raise ValueError(f"Invalid kernel page ratio for {name}.")
+                if pages_per_block > 1 and descriptor.block_stride != spec.page_size_bytes:
+                    raise ValueError(
+                        f"Multi-page blocks for {name} require unpadded block_stride "
+                        f"(block_stride={descriptor.block_stride}, page_size_bytes={spec.page_size_bytes})."
+                    )
+                components = create_cache_component_views(
+                    raw,
+                    cache_shapes,
+                    dtypes,
+                    descriptor.block_stride // pages_per_block,
+                )
+            wrap_views = getattr(group.backend, "wrap_kv_cache_views", None)
+            caches[name] = wrap_views(components) if wrap_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
+
+
+def _resolve_cache_attention_groups(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    kernel_block_sizes: Sequence[int],
+) -> tuple[dict[str, AttentionLayerBase], dict[str, str], list[AttentionGroup]]:
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if getattr(compilation_config, "static_forward_context", None) is not None:
+        shared_layers = get_shared_kv_cache_layers(vllm_config)
+    else:
+        shared_layers = {
+            layer_name: target_layer
+            for layer_name, layer in attn_layers.items()
+            if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+        }
+    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+    return attn_layers, shared_layers, attn_groups
 
 
 def unified_allocate_kv_cache(
@@ -1495,6 +1563,9 @@ def unified_allocate_kv_cache(
     device: torch.device,
     layout: Any,
     kernel_block_sizes: list[int],
+    *,
+    attn_groups: Sequence[AttentionGroup] | None = None,
+    shared_layers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Materialize the shared pool described by upstream byte placements.
 
@@ -1506,22 +1577,62 @@ def unified_allocate_kv_cache(
     sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
     if len(sizes) != 1:
         raise ValueError("Unified KV cache descriptors must share one backing allocation.")
-    vllm_config = get_current_vllm_config()
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = get_shared_kv_cache_layers(vllm_config)
+    if attn_groups is None or shared_layers is None:
+        _, resolved_shared, resolved_groups = _resolve_cache_attention_groups(
+            get_current_vllm_config(), kv_cache_config, kernel_block_sizes
+        )
+        shared_layers = resolved_shared if shared_layers is None else shared_layers
+        attn_groups = resolved_groups if attn_groups is None else attn_groups
     backing_size = sizes.pop()
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
-    alignment = 2 * 1024 * 1024
     logger.info("Allocating unified KV cache: %d bytes", backing_size)
-    buf = _allocate_int8_cache_tensor(backing_size, alignment, device)
+    buf = _allocate_int8_cache_tensor(backing_size, KV_CACHE_BUFFER_ALIGNMENT, device)
     return create_kv_cache_runtime_views(
         kv_cache_config,
         buf,
-        _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
+        attn_groups,
         kernel_block_sizes,
         shared_layers,
         layout,
+    )
+
+
+def _uses_specialized_kv_allocator(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    attn_groups: Sequence[AttentionGroup],
+) -> bool:
+    """KVPP, multi-group layerwise reuse, and sparse KV offload own dedicated layouts."""
+    return (
+        KVPPConfig.from_vllm_config(vllm_config).size > 1
+        or (get_layerwise_reuse_layout(kv_cache_config) is not None and len(kv_cache_config.kv_cache_groups) > 1)
+        or any(getattr(g.kv_cache_spec, "store_on_host", False) for g in attn_groups)
+    )
+
+
+def _can_use_glm_unified_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: Sequence[int],
+) -> bool:
+    """Gate GLM's unified-pool path while legacy specialized modes remain active."""
+    if _uses_specialized_kv_allocator(vllm_config, kv_cache_config, attn_groups):
+        return False
+    if is_c8_mxfp_kv_quant(vllm_config) or enable_fa_quant(vllm_config):
+        return False
+    strides = {name: d.block_stride for d in kv_cache_config.kv_cache_tensors for name in d.layers}
+    return all(
+        hasattr(g.backend, "get_runtime_shapes")
+        and (
+            not getattr(g.backend, "uses_contiguous_cache_components", False)
+            or (
+                getattr(g.kv_cache_spec, "page_size_padded", None) is None
+                and all(strides.get(name) == g.kv_cache_spec.page_size_bytes for name in g.layer_names)
+            )
+        )
+        for g, _ in _runtime_cache_groups(attn_groups, kernel_block_sizes)
     )
 
 
@@ -1546,20 +1657,28 @@ def allocate_kv_cache_main(
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
     if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        layer_name: target_layer
-        for layer_name, layer in attn_layers.items()
-        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
+
+    attn_layers, shared_layers, attn_groups = _resolve_cache_attention_groups(
+        vllm_config, kv_cache_config, kernel_block_sizes
+    )
+
+    if model_type == "glm_moe_dsa" and _can_use_glm_unified_kv_cache(
+        vllm_config, kv_cache_config, attn_groups, kernel_block_sizes
+    ):
+        return unified_allocate_kv_cache(
+            kv_cache_config,
+            device,
+            layout,
+            kernel_block_sizes,
+            attn_groups=attn_groups,
+            shared_layers=shared_layers,
+        )
 
     raw_tensors = _allocate_kv_cache(
         kv_cache_config,
         shared_layers=shared_layers,
         device=device,
     )
-
-    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
     # Different KV groups can share a slot by using separate block pages.
     # Splitting the whole slot by component can put data in another group's page.
@@ -1624,16 +1743,8 @@ def _reshape_kv_cache_v2(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
-    for group in attn_groups:
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-
+    for group, selected_kernel_block_size in _runtime_cache_groups(attn_groups, kernel_block_sizes):
         group_spec = group.kv_cache_spec
-        selected_kernel_block_size = (
-            group.kernel_block_size
-            if group.kernel_block_size is not None
-            else kernel_block_sizes[group.kv_cache_group_id]
-        )
         kernel_block_size = selected_kernel_block_size
         if isinstance(group_spec, AttentionSpec) and group_spec.num_states != group_spec.block_size:
             kernel_block_size = (
@@ -1764,86 +1875,37 @@ def _reshape_kv_cache_v2(
                 if owner.role != HIDDEN:
                     raise RuntimeError(f"Unsupported Qwen4 hybrid owner {owner}.")
 
-            if isinstance(group_spec, AscendSFAIndexerCacheSpec):
-                assert kv_cache_config is not None
-                raw_cache = kv_cache_raw_tensors[layer_name]
-                if isinstance(raw_cache, torch.Tensor):
-                    sum_page_size_bytes = raw_cache.numel()
-                else:
-                    assert isinstance(raw_cache, tuple)
-                    if group_spec.scale_dim:
-                        raw_k_tensor, raw_scale_tensor = raw_cache
-                        sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
-                    else:
-                        (raw_k_tensor,) = raw_cache
-                        sum_page_size_bytes = raw_k_tensor.numel()
-
-                assert sum_page_size_bytes % group_spec.page_size_bytes == 0
-                num_blocks = sum_page_size_bytes // group_spec.page_size_bytes
-                assert num_blocks >= kv_cache_config.num_blocks
-                # Page-size unification can make one manager block span several
-                # kernel pages. Match the kernel block table without copying KV.
-                num_kernel_blocks = num_blocks * group_spec.block_size // kernel_block_size
-
-                assert group_spec.block_size % kernel_block_size == 0
-                kv_cache_shape = group.backend.get_kv_cache_shape(
-                    num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
-                    kernel_block_size,
-                    group_spec.num_kv_heads,
-                    group_spec.head_size,
-                )
-
-                if group_spec.scale_dim:
-                    indexer_scale_cache_shape = group.backend.get_kv_cache_shape(
-                        num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
-                        kernel_block_size,
-                        group_spec.num_kv_heads,
-                        group_spec.scale_dim,
-                    )
-                    if group_spec.cache_sparse_li_c4:
-                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
-
-                if isinstance(raw_cache, torch.Tensor):
-                    if group_spec.scale_dim:
-                        # Keep each kernel block's K and scales in the same page.
-                        # Global K/scale planes disagree with overlaying attention
-                        # groups about where a scheduler block begins and ends.
-                        kernel_page_bytes = group_spec.page_size_bytes // (
-                            group_spec.sfa_dcp_replicated_indexer_size * (group_spec.block_size // kernel_block_size)
-                        )
-                        indexer_k_cache = make_page_strided_cache_view(
-                            raw_cache, kv_cache_shape, group_spec.dtype, kernel_page_bytes
-                        )
-                        key_bytes = (
-                            kernel_block_size
-                            * group_spec.num_kv_heads
-                            * group_spec.head_size
-                            * get_dtype_size(group_spec.dtype)
-                        )
-                        indexer_scale_cache = make_page_strided_cache_view(
-                            raw_cache,
-                            indexer_scale_cache_shape,
-                            group_spec.scale_dtype,
-                            kernel_page_bytes,
-                            offset_bytes=key_bytes,
-                        )
-                    else:
-                        indexer_k_cache = raw_cache.view(group_spec.dtype).view(kv_cache_shape)
-                else:
-                    indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
-                    if group_spec.scale_dim:
-                        indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(
-                            indexer_scale_cache_shape
-                        )
-
-                if group_spec.scale_dim:
-                    kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
-                else:
-                    kv_caches[layer_name] = (indexer_k_cache,)
-
-                continue
-
             raw_cache = kv_cache_raw_tensors[layer_name]
+            if isinstance(group_spec, AscendSFAIndexerCacheSpec):
+                raw_parts = raw_cache if isinstance(raw_cache, tuple) else (raw_cache,)
+                total_bytes = sum(part.numel() for part in raw_parts)
+                num_blocks, remainder = divmod(total_bytes, group_spec.page_size_bytes)
+                assert remainder == 0 and num_blocks >= kv_cache_config.num_blocks
+                assert group_spec.block_size % kernel_block_size == 0
+
+                parts_per_block = group_spec.sfa_dcp_replicated_indexer_size * (
+                    group_spec.block_size // kernel_block_size
+                )
+                shape_args = (num_blocks * parts_per_block, kernel_block_size, group_spec.num_kv_heads)
+                shapes = [group.backend.get_kv_cache_shape(*shape_args, group_spec.head_size)]
+                dtypes = [group_spec.dtype]
+                if group_spec.scale_dim:
+                    scale_shape = group.backend.get_kv_cache_shape(*shape_args, group_spec.scale_dim)
+                    if group_spec.cache_sparse_li_c4:
+                        scale_shape = (*scale_shape[:-1], group_spec.scale_dim // 2, 2)
+                    shapes.append(scale_shape)
+                    dtypes.append(group_spec.scale_dtype)
+
+                if isinstance(raw_cache, torch.Tensor) and group_spec.scale_dim:
+                    # Each kernel page contains its keys followed by its scales.
+                    page_bytes = group_spec.page_size_bytes // parts_per_block
+                    kv_caches[layer_name] = tuple(create_cache_component_views(raw_cache, shapes, dtypes, page_bytes))
+                else:
+                    kv_caches[layer_name] = tuple(
+                        part.view(dtype).view(shape)
+                        for part, dtype, shape in zip(raw_parts, dtypes, shapes, strict=True)
+                    )
+                continue
             if getattr(kv_cache_spec, "store_on_host", False):
                 kv_caches[layer_name] = reshape_kv_cache_tensors_for_sparse_kv_offload(
                     raw_cache,

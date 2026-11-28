@@ -2,7 +2,7 @@ from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from importlib.util import find_spec
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import scipy.linalg  # type: ignore
@@ -48,6 +48,8 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapes,
+    RuntimeComponentShape,
     has_requests_to_run_as_prefill,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
@@ -302,6 +304,32 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+    # Keep K and scale as contiguous component planes within each layer slice so
+    # A3/A5 indexer ops and all symmetric/asymmetric PD connectors share one layout.
+    uses_contiguous_cache_components: ClassVar[bool] = True
+
+    @staticmethod
+    def wrap_kv_cache_views(components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
+
+    @staticmethod
+    def get_runtime_shapes(
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe the SFA indexer cache as [kernel_blocks, heads, tokens, *inner, bytes]."""
+        tokens = kernel_block_size or spec.block_size
+        blocks = num_blocks * spec.sfa_dcp_replicated_indexer_size * (spec.block_size // tokens)
+        prefix = (blocks, spec.num_kv_heads, tokens)
+        key_shape: RuntimeComponentShape = (*prefix, spec.head_size * get_dtype_size(spec.dtype))
+        if not spec.scale_dim:
+            return (key_shape,)
+        scale_elem_bytes = get_dtype_size(spec.scale_dtype)
+        if spec.cache_sparse_li_c4:
+            return (key_shape, (*prefix, spec.scale_dim // 2, 2 * scale_elem_bytes))
+        return (key_shape, (*prefix, spec.scale_dim * scale_elem_bytes))
 
     # Bare annotations only: the buffers themselves are registered per instance
     # in ``__init__`` and stay ``None`` until ``process_weights_after_loading``
