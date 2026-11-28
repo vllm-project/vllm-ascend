@@ -1420,6 +1420,23 @@ class NPUWorker(GPUWorker):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
 
+    def probe_forward(self) -> str | None:
+        """Probe a decode forward on the NPU without changing GDN state."""
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner._dummy_run(
+                    self.model_runner.decode_query_len,
+                    uniform_decode=True,
+                    num_active_loras=0,
+                    skip_gdn_state_update=True,
+                )
+            self.synchronize_device()
+        except Exception as exc:
+            logger.exception("Forward probe failed")
+            self.model_runner.kv_connector.set_disabled(False)
+            return repr(exc)
+        return None
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
