@@ -63,7 +63,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -207,7 +207,7 @@ class MooncakeTransferAddressMixin:
                     mamba_type = spec.mamba_type
                     local_projection_widths: tuple[int, ...]
                     remote_projection_widths: tuple[int, ...]
-                    if mamba_type == MambaAttentionBackendEnum.MAMBA1:
+                    if vllm_version_is("0.34.0") and mamba_type == MambaAttentionBackendEnum.MAMBA1:
                         local_projection_widths = (local_shape[1],)
                         remote_projection_widths = (remote_shape[1],)
                     elif mamba_type in (MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN):

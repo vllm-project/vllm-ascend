@@ -168,11 +168,12 @@ class PreemptOffloadScheduler:
     @staticmethod
     def _get_group_has_mamba_conv(kv_cache_config: "KVCacheConfig") -> list[bool]:
         conv_backends = {
-            MambaAttentionBackendEnum.MAMBA1,
             MambaAttentionBackendEnum.MAMBA2,
             MambaAttentionBackendEnum.SHORT_CONV,
             MambaAttentionBackendEnum.GDN_ATTN,
         }
+        if vllm_version_is("0.34.0"):
+            conv_backends.add(MambaAttentionBackendEnum.MAMBA1)
         group_has_mamba_conv: list[bool] = []
         for group in kv_cache_config.kv_cache_groups:
             specs = (

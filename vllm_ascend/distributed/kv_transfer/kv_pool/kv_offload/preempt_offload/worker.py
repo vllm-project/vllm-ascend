@@ -22,7 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -235,8 +235,7 @@ class PreemptOffloadWorker:
             return False
         if spec.mamba_type == MambaAttentionBackendEnum.SHORT_CONV:
             return True
-        if spec.mamba_type in (
-            MambaAttentionBackendEnum.MAMBA1,
+        if (vllm_version_is("0.34.0") and spec.mamba_type == MambaAttentionBackendEnum.MAMBA1) or spec.mamba_type in (
             MambaAttentionBackendEnum.MAMBA2,
             MambaAttentionBackendEnum.GDN_ATTN,
         ):
