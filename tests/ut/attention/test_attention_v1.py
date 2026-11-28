@@ -1073,6 +1073,35 @@ class TestAscendAttentionBackendImpl(TestBase):
         encoder_attention.assert_called_once()
         torch.testing.assert_close(result, encoder_output)
 
+    def test_forward_empty_pcp_rank_updates_cache_without_calling_eager_fia(self):
+        query = torch.zeros(1, 8, 64)
+        output = torch.ones_like(query)
+        kv_cache = (torch.empty(1, 128, 8, 64), torch.empty(1, 128, 8, 64))
+        metadata = AscendMetadata(
+            attn_state=AscendAttentionState.DecodeOnly,
+            actual_seq_lengths_q=[0],
+            seq_lens_list=[0],
+            max_query_len=0,
+            block_tables=torch.zeros(1, 1, dtype=torch.int32),
+            uses_pcp_sharded_layout=True,
+            pcp_local_num_input_tokens=1,
+        )
+
+        with (
+            patch.object(attn_module, "_EXTRA_CTX", MagicMock(capturing=False)),
+            patch.object(attn_module, "using_paged_attention", return_value=False),
+            patch.object(self.impl, "_reshape_and_cache_pcp", return_value=(query, query, query, output)) as cache,
+            patch.object(
+                attn_module.DeviceOperator, "npu_fused_infer_attention_score", return_value=(query[:0], None)
+            ) as fia,
+        ):
+            result = self.impl.forward(self.layer_no_quant, query, query, query, kv_cache, metadata, output)
+
+        cache.assert_called_once_with(query, query, query, kv_cache, metadata, output)
+        fia.assert_not_called()
+        self.assertIs(result, output)
+        torch.testing.assert_close(result, torch.zeros_like(query))
+
     @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")

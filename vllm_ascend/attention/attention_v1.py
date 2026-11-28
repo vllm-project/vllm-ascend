@@ -1335,6 +1335,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         with attention_transfer_window():
+            if attn_metadata.num_actual_tokens == 0:
+                return output.zero_()
+
             num_tokens = query.shape[0]
 
             if (
