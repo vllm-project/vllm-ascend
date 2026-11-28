@@ -1,10 +1,11 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -161,6 +162,52 @@ class TestAscendAttentionBackend(TestBase):
             with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
                 result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
             self.assertEqual(result, (2, 10, 30, 20, 40))
+
+    def test_get_runtime_shapes_and_dtypes(self):
+        spec = FullAttentionSpec(block_size=128, num_kv_heads=4, head_size=64, head_size_v=32, dtype=torch.float16)
+        for layout, kernel_block_size, prefix in (
+            (None, None, (3, 128, 4)),
+            ("HND", 32, (12, 4, 32)),
+            ("LBHNC", 32, (12, 4, 32)),
+        ):
+            with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
+                shapes, dtypes = AscendAttentionBackend.get_runtime_shapes_and_dtypes(spec, 3, None, kernel_block_size)
+                self.assertEqual(shapes, ((*prefix, 64), (*prefix, 32)))
+                self.assertEqual(dtypes, (torch.float16, torch.float16))
+
+    def test_get_runtime_shapes_and_dtypes_fp8(self):
+        spec = FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float8_e4m3fn,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
+            shapes, dtypes = AscendAttentionBackend.get_runtime_shapes_and_dtypes(spec, 3, None)
+        self.assertEqual(shapes, ((3, 128, 4, 64), (3, 128, 4, 64)))
+        self.assertEqual(dtypes, (spec.dtype, spec.dtype))
+
+    def test_get_runtime_shapes_and_dtypes_rejects_invalid_block_sizes(self):
+        spec = FullAttentionSpec(block_size=128, num_kv_heads=4, head_size=64, dtype=torch.float16)
+        for block_size in (0, -1, 48):
+            with self.subTest(block_size=block_size), self.assertRaisesRegex(ValueError, "must divide"):
+                AscendAttentionBackend.get_runtime_shapes_and_dtypes(spec, 3, None, block_size)
+
+    def test_get_runtime_shapes_and_dtypes_rejects_packed_specs(self):
+        spec = FullAttentionSpec(block_size=128, num_kv_heads=4, head_size=64, dtype=torch.float16)
+        for field, value in (("tokens_per_state", 2), ("num_head_slots", 1), ("state_content_bytes", 256)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "one unpacked K/V row"):
+                AscendAttentionBackend.get_runtime_shapes_and_dtypes(replace(spec, **{field: value}), 3, None)
+
+    def test_format_runtime_views_preserves_component_identity_and_order(self):
+        spec = FullAttentionSpec(block_size=128, num_kv_heads=4, head_size=64, dtype=torch.float16)
+        key, value = torch.empty(1), torch.empty(2)
+        views = AscendAttentionBackend.format_runtime_views(spec, [key, value])
+        self.assertIsInstance(views, tuple)
+        self.assertEqual(len(views), 2)
+        self.assertIs(views[0], key)
+        self.assertIs(views[1], value)
 
     def test_swap_blocks(self):
         src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]

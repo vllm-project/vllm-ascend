@@ -45,6 +45,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_config_builder import (
@@ -457,6 +458,56 @@ def test_padded_full_attention_allocation_preserves_backend_behavior(monkeypatch
         raw_cache = raw_caches[name]
         assert isinstance(raw_cache, torch.Tensor)
         assert raw_cache.numel() == 3 * spec.page_size_bytes
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    ["qwen3_5_text", "qwen3_5_moe_text"],
+)
+def test_qwen35_unified_allocator_builds_dense_and_gdn_views(monkeypatch, model_type):
+    num_blocks = 3
+    dense_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=4, dtype=torch.float16)
+    gdn_spec = MambaSpec(block_size=128, shapes=((4,), (2,)), dtypes=(torch.float16, torch.float32))
+    dense_page = dense_spec.page_size_bytes
+    gdn_page = gdn_spec.page_size_bytes
+    pool_size = num_blocks * (dense_page + gdn_page)
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(pool_size, ["dense"], dense_page),
+            replace(_make_kv_cache_tensor(pool_size, ["gdn"], gdn_page), offset=num_blocks * dense_page),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["dense"], kv_cache_spec=dense_spec),
+            KVCacheGroupSpec(layer_names=["gdn"], kv_cache_spec=gdn_spec),
+        ],
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+        kv_transfer_config=None,
+    )
+    layers = {
+        "dense": SimpleNamespace(get_attn_backend=lambda: AscendAttentionBackend),
+        "gdn": SimpleNamespace(get_attn_backend=lambda: AscendGDNAttentionBackend),
+    }
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "NHD")
+
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [128, 128])
+
+    assert isinstance(caches["dense"], tuple)
+    assert isinstance(caches["gdn"], list)
+    key, value = caches["dense"]
+    conv_state, ssm_state = caches["gdn"]
+    assert key.shape == value.shape == (num_blocks, 128, 1, 4)
+    assert conv_state.shape == (num_blocks, 4)
+    assert ssm_state.shape == (num_blocks, 2)
+    assert key.dtype == value.dtype == conv_state.dtype == torch.float16
+    assert ssm_state.dtype == torch.float32
+    assert len({view.untyped_storage().data_ptr() for view in (key, value, conv_state, ssm_state)}) == 1
+    assert conv_state.data_ptr() - key.data_ptr() == num_blocks * dense_page
 
 
 def test_mrv2_mamba_views_skip_physical_page_padding():
@@ -2226,6 +2277,48 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     assert isinstance(cache, torch.Tensor)
     assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
     assert cache.dtype == dtype
+
+
+@pytest.mark.parametrize("padding_bytes", [0, 64])
+def test_unified_allocator_builds_hidden_state_cache_view(monkeypatch, padding_bytes):
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
+
+    name = "draft.cache_only_layers.36"
+    num_blocks = 3
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=3, head_size=8, dtype=torch.bfloat16)
+    if padding_bytes:
+        spec = replace(spec, page_size_padded=spec.page_size_bytes + padding_bytes)
+    offset = 64
+    pitch = spec.page_size_bytes
+    pool_size = offset + num_blocks * pitch
+    descriptor = replace(_make_kv_cache_tensor(pool_size, [name], pitch), offset=offset)
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[descriptor],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+    )
+    backing = torch.zeros(pool_size, dtype=torch.int8)
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: CacheOnlyAttentionBackend)}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda *_: backing)
+
+    cache = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [spec.block_size])[name]
+
+    assert isinstance(cache, torch.Tensor)
+    assert cache.shape == (num_blocks, 3, 16, 8)
+    assert cache.dtype == torch.bfloat16
+    assert cache.stride() == (pitch // cache.element_size(), 16 * 8, 8, 1)
+    assert cache.data_ptr() == backing.data_ptr() + offset
+    cache[1, 2, 3].fill_(1)
+    start = offset + pitch + (2 * 16 + 3) * 8 * cache.element_size()
+    assert torch.count_nonzero(backing[:start]) == 0
+    assert torch.all(backing[start : start + 16].view(cache.dtype) == 1)
+    assert torch.count_nonzero(backing[start + 16 :]) == 0
 
 
 class _PrefillStateBuilder:
