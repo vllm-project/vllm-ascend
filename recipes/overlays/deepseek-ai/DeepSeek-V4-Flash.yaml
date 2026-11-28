@@ -6,37 +6,41 @@ variants:
     label: W8A8 (Ascend A3)
     precision: int8
     vram_minimum_gb: 341
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16× Ascend 910C), using DP2+TP8. Requires --quantization ascend.
+    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800T A3 node (16× Ascend 910C), using DP4+TP4 with expert parallelism. Requires --quantization ascend.
     supported_hardware:
       - ascend_910c
     tp:
-      ascend_910c: 8
-    min_vllm_version: 0.23.0
+      ascend_910c: 4
+    min_vllm_version: 0.30.0
     extra_args:
       - '--data-parallel-size'
-      - '2'
+      - '4'
+      - '--enable-expert-parallel'
       - '--quantization'
       - ascend
       - '--max-num-seqs'
-      - '32'
+      - '64'
       - '--max-num-batched-tokens'
       - '10240'
+      - '--max-model-len'
+      - '1048576'
       - '--gpu-memory-utilization'
       - '0.90'
       - '--block-size'
-      - '128'
+      - '32'
+      - '--attention_config.indexer_kv_dtype'
+      - int8
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
       - '--compilation-config'
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - '--async-scheduling'
       - '--api-server-count'
       - '1'
-      - '--safetensors-load-strategy'
-      - prefetch
       - '--additional-config'
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
     extra_env:
       HCCL_OP_EXPANSION_MODE: AIV
-      HCCL_BUFFSIZE: '2560'
+      HCCL_BUFFSIZE: '1024'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       OMP_PROC_BIND: 'false'
       OMP_NUM_THREADS: '10'
@@ -44,11 +48,15 @@ variants:
       LD_PRELOAD: /usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
       ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
       VLLM_USE_MODELSCOPE: 'True'
+      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: '4096'
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        docker_serve_command: vllm serve
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
   ascend_w8a8_0731:
     model_id: Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
     label: W8A8 0731 (Ascend A2)
@@ -119,10 +127,14 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3'
       ascend_950dt_8x:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3'
     supported_hardware:
       - ascend_950pr_8x
       - ascend_950dt_8x
@@ -132,10 +144,14 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3'
       ascend_950pr_8x:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3'
 meta:
   hardware:
     ascend_950dt_8x: verified
@@ -149,7 +165,9 @@ hardware_overrides:
       OMP_PROC_BIND: 'false'
       OMP_NUM_THREADS: '10'
       HCCL_BUFFSIZE: '1024'
-      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+      # No ASCEND_RT_VISIBLE_DEVICES here: one generation-level list would also
+      # reach the 16-die A3 variant and cut it down to four devices. Each
+      # variant pins its own subset instead.
 hardware_notes:
   ascend_950dt_8x:
     title: vLLM Ascend A5 image required
@@ -165,7 +183,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
+    body: All 16 Ascend 910C dies of one Atlas 800T A3 node run DP4+TP4 with expert parallelism, serving the ModelSlim W8A8 checkpoint from Eco-Tech. The int8 Lightning Indexer KV cache keeps the 1M context inside 64 GB per die. Use quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 (vLLM 0.30.0), set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and pull the weights through ModelScope. Measured on A3 with AISBench GSM8K over 1319 prompts, where MTP k=1 scores 96.44; DSpark k=7 scores 96.59 with a different checkpoint but is not selectable here until the core recipe lists it (vllm-ascend#20563). Everything runs in one vllm serve process, so no vLLM Router is needed; pick the Ascend A3 1P1D preset for the disaggregated lane.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -194,10 +212,13 @@ strategy_hardware:
   single_node_tep:
     npu: unsupported
     ascend_910b: supported
-  # The validated A2 lane is one TP8+EP process, so the DEP shape (and its
-  # vLLM Router companion) is not offered there.
+    ascend_910c: supported
+  # The validated A2 lane is one TP8+EP process and the A3 lane is DP4+TP4 in
+  # one process, so the DEP shape (and its vLLM Router companion) is not offered
+  # on either.
   single_node_dep:
     ascend_910b: unsupported
+    ascend_910c: unsupported
   multi_node_dep:
     npu: unsupported
   pd_cluster:
@@ -214,6 +235,12 @@ strategy_overrides:
           - '8'
         extra_env:
           ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+      ascend_910c:
+        # TEP derives TP from the card count; pin the measured TP4 so the
+        # 16-die A3 node runs DP4+TP4 with expert parallelism.
+        extra_args:
+          - '--tensor-parallel-size'
+          - '4'
   single_node_dep:
     hardware_overrides:
       npu:
@@ -243,28 +270,6 @@ strategy_overrides:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
           - '--additional-config'
           - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
-      # DEP does not read variant.tp. Keep the A3 topology and memory settings
-      # after the generic DEP and NPU layers, which otherwise select DP4 on
-      # four devices and replace the W8A8 variant's A3 settings with A5 values.
-      ascend_910c:
-        extra_env:
-          HCCL_BUFFSIZE: '2560'
-          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-        extra_args:
-          - '--tensor-parallel-size'
-          - '8'
-          - '--data-parallel-size'
-          - '2'
-          - '--block-size'
-          - '128'
-          - '--max-num-seqs'
-          - '32'
-          - '--max-num-batched-tokens'
-          - '10240'
-          - '--gpu-memory-utilization'
-          - '0.90'
-          - '--additional-config'
-          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
 features:
   spec_decoding:
     modes:
@@ -274,12 +279,38 @@ features:
             args:
               - '--speculative-config'
               - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+          ascend_950dt_8x:
+            args:
+              - '--speculative-config'
+              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+          ascend_950pr_8x:
+            args:
+              - '--speculative-config'
+              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
       dspark:
         hardware_overrides:
           npu:
             args:
               - '--speculative-config'
               - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          ascend_950dt_8x:
+            # A5 keeps the generation-level DSpark k=5 now that the exact-GPU
+            # A3 key below carries its own measured value.
+            args:
+              - '--speculative-config'
+              - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          ascend_950pr_8x:
+            args:
+              - '--speculative-config'
+              - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}'
           ascend_910b:
             # The exact-GPU key wins over the generation-level `npu` value.
             # Takes effect once the core recipe lists ascend_w8a8_0731 here.
@@ -322,3 +353,135 @@ presets:
       This preset records the lane that was actually run for this variant on
       `ascend_910b`. It is not evidence for FP8 (Preview), NVFP4 (RedHat),
       single-node DEP, PD, or any multi-node shape.
+  ascend_a3_w8a8_pd:
+    label: "A3 W8A8 1P1D"
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    default: false
+    description: "Two Atlas 800T A3 nodes: one prefill node (DP4 x TP4 with expert parallelism) and one decode node (DP16 x TP1) exchanging KV cache over Mooncake behind the Ascend proxy."
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      kv_offload: 'off'
+      features:
+        spec_decoding: mtp
+    source:
+      label: "vLLM Ascend DeepSeek-V4-Flash tutorial"
+      href: "https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html"
+      key: dsv4-a3-w8a8-pd
+    # The A3 lane runs one DEP pool per node: prefill DP4 x TP4 (16/4) and decode
+    # DP16 x TP1 (16/1) derive from the roles, so the single-node DEP flags in
+    # the variant's extra_args dedupe to the per-role values below.
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 4
+        pp: 1
+        # Prefill runs eager; the variant's FULL_DECODE_ONLY graph config would
+        # contradict --enforce-eager, so drop it for this role only.
+        remove_args:
+          - '--compilation-config'
+        args:
+          - '--seed'
+          - '1024'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--max-num-seqs'
+          - '32'
+          - '--block-size'
+          - '128'
+          - '--enforce-eager'
+          - '--no-disable-hybrid-kv-cache-manager'
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--additional-config'
+          - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
+        env:
+          HCCL_BUFFSIZE: '2560'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_port: '30000'
+            engine_id: '0'
+            kv_connector_extra_config:
+              connectors: null
+              prefill: { dp_size: 4, tp_size: 4 }
+              decode: { dp_size: 16, tp_size: 1 }
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        args:
+          - '--seed'
+          - '1024'
+          - '--max-num-batched-tokens'
+          - '120'
+          - '--max-num-seqs'
+          - '32'
+          - '--block-size'
+          - '128'
+          - '--async-scheduling'
+          - '--no-disable-hybrid-kv-cache-manager'
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+        env:
+          HCCL_BUFFSIZE: '1024'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '1200'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_port: '30100'
+            engine_id: '1'
+            kv_connector_extra_config:
+              connectors: null
+              prefill: { dp_size: 4, tp_size: 4 }
+              decode: { dp_size: 16, tp_size: 1 }
+    runbook: |
+      ## Topology
+
+      One prefill node and one decode node, both 16-die Atlas 800T A3 and both on
+      `quay.io/ascend/vllm-ascend:v0.30.0rc2-a3` with the ModelSlim W8A8-MTP
+      weights pulled through ModelScope. The prefill pool keeps the 1M context
+      with shared-expert DP plus DSA context parallelism and raises
+      `HCCL_BUFFSIZE` to 2560; the decode pool caps `--max-num-batched-tokens` at
+      120, runs full decode graphs, and enables `recompute_scheduler_enable` so
+      the prefill pool rebuilds KV when decode runs out of cache.
+
+      ## Deploy
+
+      Point `HCCL_IF_IP`/`VLLM_HOST_IP` at each node's own address and give both
+      nodes the same management NIC in `HCCL_SOCKET_IFNAME`. The Mooncake hybrid
+      connector listens on 30000 (prefill) and 30100 (decode); open both ports
+      between the two nodes, start both pools, and check `/health` on every
+      endpoint before starting the Ascend proxy.
+
+      ## Verify
+
+      Because the reasoning parser routes the thinking trace to a separate field,
+      allow at least 2048 output tokens when smoke testing the proxy — a short
+      budget ends at `finish_reason=length` with an empty `content`.
