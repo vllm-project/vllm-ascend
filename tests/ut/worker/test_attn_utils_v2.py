@@ -116,14 +116,14 @@ def _spec_compress_ratio(spec) -> int:
 
 @pytest.fixture(autouse=True)
 def default_pa_disabled(monkeypatch):
-    monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "requires_contiguous_kv_cache", lambda *_args, **_kwargs: False)
 
 
 def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
     """Exercise PA allocation policy using actual config and Attention implementations."""
     vllm_config.speculative_config = None
     vllm_config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", attention_utils.requires_contiguous_pa_kv_cache)
+    monkeypatch.setattr(attn_utils, "requires_contiguous_kv_cache", attention_utils.requires_contiguous_kv_cache)
     monkeypatch.setattr(
         attention_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
     )
@@ -141,7 +141,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
         for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True)],
+    + [("c8", True), ("sink", False), ("sink_eager", False)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
@@ -176,6 +176,8 @@ def test_main_allocator_attention_layout(
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
+    if cache_kind in ("sink", "sink_eager"):
+        impl.sinks = torch.zeros(8, dtype=spec.dtype)
     layer = SimpleNamespace(
         get_attn_backend=lambda: SparseAttentionBackend if cache_kind == "full_sparse" else AscendAttentionBackend,
         kv_sharing_target_layer_name=None,
@@ -205,6 +207,8 @@ def test_main_allocator_attention_layout(
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: cache_kind == "sparse")
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
     _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled)
+    if cache_kind == "sink_eager":
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     kv_caches = attn_utils.allocate_kv_cache_main(
         kv_cache_config,
@@ -226,7 +230,7 @@ def test_main_allocator_attention_layout(
     assert second_key.shape == expected_shape
     assert second_value.shape == expected_shape
     block_elements = kernel_block_size * spec.num_kv_heads * spec.head_size
-    if cache_kind == "c8" or (cache_kind in ("full", "mixed") and not pa_enabled):
+    if cache_kind == "c8" or (cache_kind in ("full", "mixed", "sink_eager") and not pa_enabled):
         assert not key_cache.is_contiguous()
         assert not value_cache.is_contiguous()
         assert key_cache.stride(0) == value_cache.stride(0) == 2 * block_elements
@@ -353,7 +357,7 @@ def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, p
         quant_config=None,
     )
     _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled)
-    assert attention_utils.requires_contiguous_pa_kv_cache(layer, vllm_config, attn_spec) == pa_enabled
+    assert attention_utils.requires_contiguous_kv_cache(layer, vllm_config, attn_spec) == pa_enabled
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     raw_caches = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
 

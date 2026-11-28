@@ -74,7 +74,7 @@ from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    requires_contiguous_pa_kv_cache,
+    requires_contiguous_kv_cache,
     supports_strided_mla_cache,
     use_component_major_mla_pd_layout,
 )
@@ -1308,7 +1308,7 @@ def _allocate_kv_cache(
                 if (
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
-                    and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                    and not requires_contiguous_kv_cache(layer, vllm_config, layer_spec)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
