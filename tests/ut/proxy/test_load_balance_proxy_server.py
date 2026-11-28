@@ -82,6 +82,22 @@ def _sse(content: str = "hi", stop_reason: str | None = None) -> bytes:
 DONE = b"data: [DONE]\n\n"
 
 
+def _completion_body(content: str = "hi", stop_reason: str | None = None) -> dict:
+    """A realistic non-streaming completion JSON body (decode backend output)."""
+    return {
+        "id": "x",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"content": content},
+                "finish_reason": "stop",
+                "stop_reason": stop_reason,
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+
+
 def _set_script(port: int, items: list[dict]) -> None:
     httpx.post(
         f"http://127.0.0.1:{port}/__set_script__",
@@ -658,3 +674,301 @@ def test_recompute_detected_when_frame_split_across_chunks(proxy_server):
     # The retry happened, so the retried content is what the client sees.
     assert b"done" in body
     assert b"recomputed" not in body
+
+
+# --------------------------------------------------------------------------- #
+# Tests — non-streaming response shape (Content-Length, single JSON)
+# --------------------------------------------------------------------------- #
+def test_nonstream_response_has_content_length(proxy_server):
+    """Non-streaming returns a complete Response with Content-Length (not chunked).
+
+    Regression test: previously non-streaming used StreamingResponse, sending the
+    body with chunked transfer-encoding and no Content-Length. The fix collects all
+    chunks and returns a single ``Response`` with ``application/json`` + Content-Length.
+    """
+    _set_script(MOCK_DECODE_PORT, [{"kind": "json", "status": 200, "body": _completion_body("hello")}])
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    assert "chunked" not in r.headers.get("transfer-encoding", "").lower()
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert "choices" in body
+    assert body["choices"][0]["message"]["content"] == "hello"
+
+
+def test_nonstream_assembles_fragmented_json(proxy_server):
+    """Non-streaming reassembles a JSON body split across chunks before parsing.
+
+    Regression test for the bug where each byte chunk was parsed individually: a
+    partial JSON chunk raised ``json.JSONDecodeError`` and was dropped, skipping the
+    recomputed/retry logic. The proxy now holds the bytes until a complete document
+    is available (or decodes the tail at EOF).
+    """
+    full = json.dumps(_completion_body("hi")).encode("utf-8")
+    half = len(full) // 2
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [full[:half], full[half:]], "chunk_delay": 0.05}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    body = r.json()
+    assert "choices" in body
+    assert body["choices"][0]["message"]["content"] == "hi"
+
+
+def test_nonstream_4xx_has_content_length(proxy_server):
+    """Non-streaming decode 4xx returns the real status with Content-Length.
+
+    Validates the pre-open error-propagation path is preserved: an initial decode
+    4xx is returned with the real status code (not an empty 200) in a Response that
+    carries Content-Length.
+    """
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {
+                "kind": "json",
+                "status": 400,
+                "body": {"error": {"message": "max_tokens too long", "type": "BadRequestError"}},
+            }
+        ],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(max_tokens=99999, stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 400
+    assert "content-length" in r.headers
+    assert b"max_tokens" in r.content
+
+
+def test_nonstream_handles_sse_frames_with_done(proxy_server):
+    """Non-streaming tolerates SSE framing + a trailing ``[DONE]`` sentinel.
+
+    Even when the upstream decoder happens to speak SSE (``data: ...\\n\\n`` +
+    ``data: [DONE]\\n\\n``), the proxy must still return the single JSON document as
+    a clean ``application/json`` body, without the ``data:`` prefix leaking through.
+    """
+    raw = json.dumps(_completion_body("hi")).encode("utf-8")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {
+                "kind": "stream",
+                "status": 200,
+                "chunks": [b"data: " + raw + b"\n\n", b"data: [DONE]\n\n"],
+            }
+        ],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    body = r.json()
+    assert body["choices"][0]["message"]["content"] == "hi"
+
+
+def test_nonstream_handles_merged_sse_frames(proxy_server):
+    """Non-streaming extracts one JSON document even when two SSE frames merge.
+
+    A single network read can concatenate ``data: {...}\\n\\ndata: [DONE]\\n\\n``
+    into one chunk. Parsing the whole chunk at once fails on the ``[DONE]`` suffix
+    and produces an empty 200; the frame parser splits the two frames instead.
+    """
+    raw = json.dumps(_completion_body("hi")).encode("utf-8")
+    merged = b"data: " + raw + b"\n\ndata: [DONE]\n\n"
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [merged]}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    body = r.json()
+    assert body["choices"][0]["message"]["content"] == "hi"
+
+
+def test_nonstream_retry_clears_sentinel_buffer(proxy_server):
+    """A recomputed attempt must not poison the retry attempt's body.
+
+    The failed attempt returns ``data: {...recomputed...}\\n\\ndata: [DONE]\\n\\n``
+    merged into one chunk. The parser consumes both frames, and the parser is reset
+    at every attempt boundary, so the next decoder's body stays intact. Both proxy
+    variants share this logic.
+    """
+    recomputed_merged = _sse("gen", stop_reason="recomputed") + DONE
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "status": 200, "chunks": [recomputed_merged]},
+            {"kind": "json", "status": 200, "body": _completion_body("ok")},
+        ],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    body = r.json()
+    # The retry attempt's body must be emitted (not discarded by leftover state).
+    # Its content "ok" is appended to the accumulated tokens ("gen" from the
+    # recomputed attempt), which is the established retry semantics.
+    assert body["choices"][0]["message"]["content"] == "genok"
+
+
+@pytest.mark.parametrize(
+    ("chunks", "expected_status"),
+    [
+        pytest.param([b'{"choices":'], 502, id="partial-json"),
+        pytest.param([b""], 502, id="empty-body"),
+        pytest.param([b" \n\t"], 502, id="whitespace-body"),
+        pytest.param([DONE], 502, id="done-only"),
+        pytest.param(
+            [b"data: " + json.dumps(_completion_body("hi")).encode() + b"\n\n" + DONE],
+            200,
+            id="document-plus-done",
+        ),
+    ],
+)
+def test_nonstream_truncated_body_returns_error(
+    proxy_server: str,
+    chunks: list[bytes],
+    expected_status: int,
+) -> None:
+    """Non-streaming decode that ends without a document returns 502, not 200.
+
+    Regression test: a decoder that closes a 200 response without a parseable
+    body (partial JSON, empty, whitespace-only, or a lone ``[DONE]`` sentinel)
+    must not be surfaced to the client as an empty 200. The proxy tracks whether
+    a complete document was received and returns an upstream error when EOF
+    arrives first. A valid document followed by ``[DONE]`` still succeeds.
+    The layerwise variant runs the same matrix in its own test module.
+    """
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": chunks}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == expected_status
+    body = r.json()
+    if expected_status == 502:
+        assert body["error"]["type"] == "upstream_error"
+        assert body["error"]["code"] == "decode_backend_incomplete"
+    else:
+        assert body["choices"][0]["message"]["content"] == "hi"
+
+
+def test_nonstream_recompute_in_unterminated_tail_retries(proxy_server: str) -> None:
+    """A recompute signal in the unterminated trailing frame still retries.
+
+    A backend may close right after its last frame without sending the
+    terminating blank line, so that frame is only decoded by ``flush()`` at EOF.
+    When it carries ``stop_reason="recomputed"`` the proxy must retry instead of
+    returning the partial answer. The layerwise variant covers this in its own
+    test module.
+    """
+    tail = json.dumps(_completion_body("gen", stop_reason="recomputed")).encode("utf-8")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "status": 200, "chunks": [tail]},
+            {"kind": "json", "status": 200, "body": _completion_body("ok")},
+        ],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    # The retry ran and its content is appended to the aborted attempt.
+    assert body["choices"][0]["message"]["content"] == "genok"
+
+
+def test_nonstream_unterminated_usage_frame_merges(proxy_server: str) -> None:
+    """An unterminated usage frame at EOF is merged into the final document.
+
+    A backend may emit a separate usage frame after the completion frame and
+    close without the terminating blank line, so that frame is only decoded by
+    ``flush()``. Its token counts must supersede the ones embedded in the
+    completion frame; previously the flush branch was skipped once a document
+    had been received and the stale counts (completion_tokens=1) were returned.
+    """
+    document = json.dumps(_completion_body("hi")).encode("utf-8") + b"\n\n"
+    usage = json.dumps({"usage": {"prompt_tokens": 5, "completion_tokens": 9}}).encode("utf-8")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [document, usage]}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["choices"][0]["message"]["content"] == "hi"
+    assert body["usage"]["completion_tokens"] == 9
+
+
+def test_nonstream_unterminated_usage_after_metadata_frame(proxy_server: str) -> None:
+    """A choices-less metadata frame followed by an unterminated usage frame.
+
+    The metadata frame populates ``final_document`` before EOF, so the flush
+    merge branch takes the "merge into existing document" path. Previously
+    ``trailing_usage`` was only assigned when the trailing frame carried
+    choices, and the merge branch read it unconditionally — the resulting
+    UnboundLocalError was swallowed and the client got an empty 200.
+    """
+    metadata = json.dumps({"id": "x", "model": MODEL, "created": 1}).encode("utf-8") + b"\n\n"
+    document = json.dumps(_completion_body("hi")).encode("utf-8") + b"\n\n"
+    usage = json.dumps({"usage": {"prompt_tokens": 5, "completion_tokens": 9}}).encode("utf-8")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [metadata, document, usage]}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["choices"][0]["message"]["content"] == "hi"
+    assert body["usage"]["completion_tokens"] == 9

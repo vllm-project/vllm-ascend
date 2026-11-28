@@ -202,6 +202,11 @@ def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
     return b"data: " + chunk + b"\n\n" if is_sse else chunk
 
 
+class IncompleteNonStreamResponseError(RuntimeError):
+    """Raised when a non-streaming decode backend ends its response without a
+    complete JSON document (empty, sentinel-only or truncated body)."""
+
+
 global_args: argparse.Namespace | None = None
 shared_scheduler: "SharedProxyScheduler | None" = None
 runtime: "WorkerRuntime | None" = None
@@ -1156,6 +1161,8 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            received_document = False
+            final_document = None
             frame_parser = SSEFrameParser()
 
             async def release_prefill_kv_once() -> None:
@@ -1172,6 +1179,8 @@ async def handle_completions_impl(api: str, request: Request):
                     # Each decoder attempt emits a self-contained stream, so the
                     # frame buffer must be reset at every attempt boundary.
                     frame_parser = SSEFrameParser()
+                    received_document = False
+                    final_document = None
                     if preopened_gen is not None:
                         # First iteration: consume the decode stream pre-opened by the
                         # caller so initial 4xx/5xx could be returned with the real status.
@@ -1197,15 +1206,19 @@ async def handle_completions_impl(api: str, request: Request):
                         # decoding them, so no frame is dropped.
                         frames = frame_parser.feed(chunk)
                         if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
+                            # No complete frame yet. Streaming clients get the
+                            # raw bytes immediately; a non-streaming reply holds
+                            # them back until a full document arrives (or EOF
+                            # proves it never will).
+                            if stream_flag and chunk:
                                 yield chunk
                             continue
                         for frame in frames:
                             chunk_json = frame.payload
                             is_sse = frame.is_sse
+                            # Non-streaming replies are always bare JSON, even
+                            # when the decoder SSE-wrapped the frame.
+                            emit_sse = is_sse and stream_flag
                             choices = chunk_json.get("choices", [])
                             # A frame is re-encoded only when the proxy has to
                             # rewrite its payload (cached-token injection, or
@@ -1213,12 +1226,23 @@ async def handle_completions_impl(api: str, request: Request):
                             # bytes are forwarded unchanged.
                             out_chunk = chunk
                             if not choices:
-                                if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                    out_chunk = encode_response_chunk(chunk_json, is_sse)
-                                yield out_chunk
+                                if not stream_flag:
+                                    # 非流式：把 usage 等字段合并进 final_document，不 yield
+                                    if final_document is None:
+                                        final_document = dict(chunk_json)
+                                    else:
+                                        for k, v in chunk_json.items():
+                                            if k != "choices":
+                                                final_document[k] = v
+                                elif update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                                    out_chunk = encode_response_chunk(chunk_json, emit_sse)
+                                    yield out_chunk
+                                else:
+                                    yield out_chunk
                                 continue
                             if not stream_flag:
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                received_document = True
+                                # 延迟处理：retry_count 改写可能在后面，合并放在 yield 之前
 
                             choice = choices[0]
                             delta = choice.get("delta") or {}
@@ -1256,15 +1280,97 @@ async def handle_completions_impl(api: str, request: Request):
                                 )
                                 released_kv = False
                                 break
-                            if retry_count > 0 and not stream_flag:
-                                if chat_flag:
-                                    choice["message"]["content"] = generated_token
+                            if not stream_flag:
+                                # 非流式：合并到 final_document 而非 yield 独立 JSON
+                                if retry_count > 0:
+                                    if chat_flag:
+                                        choice["message"]["content"] = generated_token
+                                    else:
+                                        choice["text"] = generated_token
+                                if final_document is None:
+                                    final_document = dict(chunk_json)
                                 else:
-                                    choice["text"] = generated_token
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                    final_document["choices"] = choices
+                                    if "usage" in chunk_json:
+                                        final_document["usage"] = chunk_json["usage"]
+                                continue
                             yield out_chunk
                         if retry:
                             break
+                    if not stream_flag and not retry:
+                        # A backend may close right after the final frame without
+                        # sending the terminating blank line; decode what is left.
+                        trailing = frame_parser.flush()
+                        if trailing is not None:
+                            trailing_json = trailing.payload
+                            trailing_choices = trailing_json.get("choices", [])
+                            trailing_usage = trailing_json.get("usage", {})
+                            if trailing_choices:
+                                trailing_choice = trailing_choices[0]
+                                trailing_delta = trailing_choice.get("delta") or {}
+                                trailing_message = trailing_choice.get("message") or {}
+                                completion_tokens += trailing_usage.get("completion_tokens", 0)
+                                generated_token += (
+                                    trailing_delta.get("content")
+                                    or trailing_message.get("content")
+                                    or trailing_choice.get("text")
+                                    or ""
+                                )
+                                if trailing_choice.get("stop_reason") == "recomputed":
+                                    # The trailing frame is a recompute signal: retry
+                                    # instead of returning a partial answer.
+                                    retry = True
+                                    retry_count += 1
+                                    if chat_flag:
+                                        messages[0]["content"] = (
+                                            origin_prompt
+                                            + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                            if isinstance(origin_prompt, list)
+                                            else (origin_prompt or "") + generated_token
+                                        )
+                                    else:
+                                        req_data["prompt"] = origin_prompt + generated_token
+                                    req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                    tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                                    instance_info = await reassign_instances(
+                                        api,
+                                        req_data,
+                                        tmp_request_length,
+                                        instance_info,
+                                        previous_prefiller_kv_released=released_kv,
+                                    )
+                                    released_kv = False
+                                    continue
+                                if retry_count > 0:
+                                    if chat_flag and trailing_message:
+                                        trailing_choice["message"]["content"] = generated_token
+                                    else:
+                                        trailing_choice["text"] = generated_token
+                                received_document = True
+                            # Merge the trailing frame into final_document even
+                            # when a document was already received: a usage frame
+                            # arriving without the terminating blank line must not
+                            # be dropped at EOF, or the stale token counts embedded
+                            # in the completion frame would win.
+                            if final_document is None:
+                                final_document = trailing_json
+                            else:
+                                if trailing_choices:
+                                    final_document["choices"] = trailing_choices
+                                if trailing_usage:
+                                    final_document["usage"] = trailing_usage
+                        # 无论是主循环累积的 frame 还是 flush 提取的 trailing，
+                        # 非流式下只 yield 一次合并好的完整 JSON
+                        if final_document is not None:
+                            yield encode_response_chunk(final_document, False)
+                        elif not received_document:
+                            # EOF arrived before any complete document: the decode
+                            # backend returned an empty, sentinel-only or truncated
+                            # body. Surface an upstream error instead of an empty 200.
+                            raise IncompleteNonStreamResponseError(
+                                f"decode backend returned no complete non-streaming response "
+                                f"for request {instance_info.request_id}"
+                            )
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1272,6 +1378,10 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.decoder_port,
                     instance_info.request_id,
                 )
+                raise
+            except IncompleteNonStreamResponseError:
+                # Propagate so the caller can answer with a 502 instead of an
+                # empty 200 body.
                 raise
             except Exception as exc:
                 logger.error(
@@ -1286,8 +1396,14 @@ async def handle_completions_impl(api: str, request: Request):
                 released_kv = True
                 request_released = True
 
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream; charset=utf-8")
+        # Non-streaming: assemble the single JSON document and return it with a
+        # Content-Length instead of a chunked streaming response.
+        full_response = b""
+        async for chunk in generate_stream():
+            full_response += chunk
+        return Response(content=full_response, media_type="application/json")
     except Exception as e:
         import traceback
 
@@ -1297,6 +1413,17 @@ async def handle_completions_impl(api: str, request: Request):
         if not request_released and "instance_info" in locals():
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
+        if isinstance(e, IncompleteNonStreamResponseError):
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": str(e),
+                        "type": "upstream_error",
+                        "code": "decode_backend_incomplete",
+                    }
+                },
+            )
         if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
             try:
                 err_body = e.response.json()
