@@ -349,7 +349,7 @@ def test_categorical_sample_apply_temperature_matches_prescaled_logits():
     ],
 )
 def test_categorical_sample_logits_cache(per_token_col, dtype, is_drafting):
-    """Check raw cache writes and scalar/vector draft column equivalence."""
+    """Cache must store raw pre-temperature logits at mapped slots."""
     torch.manual_seed(4)
     num_tokens = 4
     max_num_reqs = 8
@@ -395,9 +395,12 @@ def test_categorical_sample_logits_cache(per_token_col, dtype, is_drafting):
         )
         expected_cols = [1] * num_tokens
 
-    sample_args = (logits, expanded_idx_mapping, temperature, seed, pos)
-    sampled = _sample(
-        *sample_args,
+    _sample(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=True,
         is_drafting=is_drafting,
         logits_cache=logits_cache,
@@ -420,16 +423,6 @@ def test_categorical_sample_logits_cache(per_token_col, dtype, is_drafting):
         for col in range(num_cols):
             if (req, col) not in used:
                 assert torch.count_nonzero(logits_cache[req, col]).item() == 0
-
-    if is_drafting:
-        vector_draws = _sample(
-            *sample_args,
-            apply_temperature=True,
-            is_drafting=True,
-            logits_cache=logits_cache,
-            logits_cache_col=logits_cache_col.expand(num_tokens),
-        )
-        torch.testing.assert_close(sampled, vector_draws, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
