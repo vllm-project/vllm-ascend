@@ -239,7 +239,7 @@ _QK = _QK_TEMPLATE.replace("@LOAD_KV_PANEL@", _QK_KV_LOAD)
 _QK_BLOCKED_KV = _QK_TEMPLATE.replace("@LOAD_KV_PANEL@", _QK_BLOCKED_KV_LOAD)
 
 
-_PV_TEMPLATE = (
+_PV_SCHEDULE_TEMPLATE = (
     """
 {
     constexpr uint32_t pv_l1_k = 256;
@@ -247,37 +247,13 @@ _PV_TEMPLATE = (
     const uint32_t qp_base = 2 * (qsfa_qp_cursor++ % 2);
     for (uint32_t n0 = 0; n0 < qsfa_s2; n0 += qsfa_n_panel) {
         auto accumulator = qsfa_c[(qsfa_c_cursor++ % 2) * qsfa_bank_c];
+@PREFETCH_PV_PANELS@
         for (uint32_t k1 = 0; k1 < qsfa_pv_tokens; k1 += pv_l1_k) {
-            const uint32_t remaining = qsfa_pv_tokens - k1;
-            const uint32_t panel_k = remaining < pv_l1_k ? remaining : pv_l1_k;
-            const uint32_t kv_bank = qsfa_kv_cursor++ % 3;
-            const uint32_t kv_event = qsfa_kv_events[kv_bank];
-            auto v_l1 = qsfa_l1[(4 + kv_bank) * qsfa_bank_l1];
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(kv_event);
-            for (uint32_t k0 = 0; k0 < panel_k; k0 += pv_l0_k) {
-                const uint32_t k_left = panel_k - k0;
-                const uint32_t k = k_left < pv_l0_k ? k_left : pv_l0_k;
-                const uint32_t k_aligned = (k + 15) / 16 * 16;
-@LOAD_VALUE_PANEL@
-            }
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(kv_event);
+@SELECT_V_BANK@
+@QUEUE_V_COPY@
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(kv_event);
-            const uint32_t qp_bank = qp_base + k1 / pv_l1_k;
-            const uint32_t qp_event = qsfa_qp_events[qp_bank];
-@SELECT_P_BANK@
-            if (n0 == 0) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(qp_event);
-                AscendC::Nd2NzParams p_copy{};
-                p_copy.ndNum = 1;
-                p_copy.nValue = qsfa_heads;
-                p_copy.dValue = panel_k;
-                p_copy.srcDValue = qsfa_s2;
-                p_copy.dstNzC0Stride = qsfa_heads;
-                p_copy.dstNzNStride = 1;
-                AscendC::DataCopy(p_l1, probs[qsfa_pv_result_offset + k1], p_copy);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(qp_event);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(qp_event);
-            }
+@SELECT_PROB_BANK@
+@PROB_PANEL_ACTION@
             for (uint32_t k0 = 0; k0 < panel_k; k0 += pv_l0_k) {
                 const uint32_t k_left = panel_k - k0;
                 const uint32_t k = k_left < pv_l0_k ? k_left : pv_l0_k;
@@ -317,6 +293,65 @@ _PV_TEMPLATE = (
 )
 
 
+_PV_SELECT_V_BANK = """\
+            const uint32_t remaining = qsfa_pv_tokens - k1;
+            const uint32_t panel_k = remaining < pv_l1_k ? remaining : pv_l1_k;
+            const uint32_t kv_bank = @KV_BANK@;
+            const uint32_t kv_event = qsfa_kv_events[kv_bank];
+            auto v_l1 = qsfa_l1[(4 + kv_bank) * qsfa_bank_l1];
+"""
+
+_PV_SELECT_PROB_BANK = """\
+            const uint32_t qp_bank = qp_base + k1 / pv_l1_k;
+            const uint32_t qp_event = qsfa_qp_events[qp_bank];
+@SELECT_P_BANK@
+"""
+
+_PV_QUEUE_V_COPY = """\
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(kv_event);
+            for (uint32_t k0 = 0; k0 < panel_k; k0 += pv_l0_k) {
+                const uint32_t k_left = panel_k - k0;
+                const uint32_t k = k_left < pv_l0_k ? k_left : pv_l0_k;
+                const uint32_t k_aligned = (k + 15) / 16 * 16;
+@LOAD_VALUE_PANEL@
+            }
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(kv_event);
+"""
+
+_PV_QUEUE_PROB_COPY = """\
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(qp_event);
+                AscendC::Nd2NzParams p_copy{};
+                p_copy.ndNum = 1;
+                p_copy.nValue = qsfa_heads;
+                p_copy.dValue = panel_k;
+                p_copy.srcDValue = qsfa_s2;
+                p_copy.dstNzC0Stride = qsfa_heads;
+                p_copy.dstNzNStride = 1;
+                AscendC::DataCopy(p_l1, probs[qsfa_pv_result_offset + k1], p_copy);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(qp_event);
+"""
+
+_PV_WAIT_PROB = "                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(qp_event);\n"
+
+_PV_PROB_ON_FIRST_STRIPE = """\
+            if (n0 == 0) {
+@PROB_PANEL_ACTION@
+            }
+"""
+
+_PV_PREFETCH_PANELS = """\
+        // Queue both V panels before MTE1 consumes the first. On the first
+        // output stripe also queue each P panel directly after its V panel.
+        const uint32_t kv_base = qsfa_kv_cursor;
+        qsfa_kv_cursor += (qsfa_pv_tokens + pv_l1_k - 1) / pv_l1_k;
+        for (uint32_t k1 = 0; k1 < qsfa_pv_tokens; k1 += pv_l1_k) {
+@SELECT_V_BANK@
+@QUEUE_V_COPY@
+@QUEUE_PROB_COPY@
+        }
+"""
+
+
 _PV_VALUE_LOAD = """\
                 AscendC::DataCopyParams v_copy{};
                 v_copy.blockCount = qsfa_n_panel / qsfa_c0;
@@ -331,6 +366,47 @@ _PV_BLOCKED_VALUE_LOAD = _PV_VALUE_LOAD.replace(
     "(k1 + k0) * qsfa_combined + n0 * qsfa_n_panel",
 ).replace("qsfa_s2 - k", "qsfa_n_panel - k")
 
+
+def _pv_schedule(value_load, *, prefetch, p_bank="@SELECT_P_BANK@"):
+    select_v_bank = _PV_SELECT_V_BANK.replace(
+        "@KV_BANK@",
+        "(kv_base + k1 / pv_l1_k) % 3" if prefetch else "qsfa_kv_cursor++ % 3",
+    )
+    queue_v_copy = _PV_QUEUE_V_COPY.replace("@LOAD_VALUE_PANEL@", value_load)
+    select_p_bank = _PV_SELECT_PROB_BANK.replace("@SELECT_P_BANK@", p_bank)
+    prefetch_source = ""
+    prob_action = _PV_QUEUE_PROB_COPY + _PV_WAIT_PROB
+    if prefetch:
+        queue_prob_copy = _PV_PROB_ON_FIRST_STRIPE.replace(
+            "@PROB_PANEL_ACTION@\n",
+            indent(select_p_bank, "    ") + _PV_QUEUE_PROB_COPY,
+        )
+        prefetch_source = (
+            _PV_PREFETCH_PANELS.replace("@SELECT_V_BANK@\n", select_v_bank)
+            .replace(
+                "@QUEUE_V_COPY@\n",
+                queue_v_copy,
+            )
+            .replace("@QUEUE_PROB_COPY@\n", queue_prob_copy)
+        )
+        queue_v_copy = ""
+        prob_action = _PV_WAIT_PROB
+    return (
+        _PV_SCHEDULE_TEMPLATE.replace("@PREFETCH_PV_PANELS@\n", prefetch_source)
+        .replace(
+            "@SELECT_V_BANK@\n",
+            select_v_bank,
+        )
+        .replace("@QUEUE_V_COPY@\n", queue_v_copy)
+        .replace(
+            "@SELECT_PROB_BANK@\n",
+            select_p_bank,
+        )
+        .replace("@PROB_PANEL_ACTION@\n", _PV_PROB_ON_FIRST_STRIPE.replace("@PROB_PANEL_ACTION@\n", prob_action))
+    )
+
+
+_PV_TEMPLATE = _pv_schedule("@LOAD_VALUE_PANEL@", prefetch=False)
 _PV = _PV_TEMPLATE.replace("@LOAD_VALUE_PANEL@", _PV_VALUE_LOAD)
 _PV_BLOCKED_KV = _PV_TEMPLATE.replace("@LOAD_VALUE_PANEL@", _PV_BLOCKED_VALUE_LOAD)
 
@@ -360,7 +436,7 @@ def make_cube_lifecycle(T, *, resident_query=False):
     return initialize, finalize
 
 
-def make_cube_stages(T, *, resident_query=False, blocked_kv=False):
+def make_cube_stages(T, *, resident_query=False, blocked_kv=False, pv_l1_prefetch=False):
     """Return QK and PV macros for the fixed 64-head, 512-token exchange.
 
     The prim_func must name its GM Buffers ``query``, ``kv_nz``, ``scores``,
@@ -370,6 +446,7 @@ def make_cube_stages(T, *, resident_query=False, blocked_kv=False):
     The kernel uses the preallocated TileLang L1/L0 banks for this Cube scope.
     Resident Q requires the matching lifecycle and four panels per query row,
     issued in KV slot order 0 through 3.
+    PV L1 prefetch queues both V panels per stripe and loads P on the first stripe.
     """
     qk_source = (
         (_QK_BLOCKED_KV if blocked_kv else _QK)
@@ -382,10 +459,11 @@ def make_cube_stages(T, *, resident_query=False, blocked_kv=False):
             _Q_RESIDENT_RELEASE if resident_query else _Q_PANEL_RELEASE,
         )
     )
-    pv_source = (_PV_BLOCKED_KV if blocked_kv else _PV).replace(
-        "@SELECT_P_BANK@",
-        _P_RESIDENT_QUERY_BANK if resident_query else _P_NATIVE_BANK,
-    )
+    p_bank = _P_RESIDENT_QUERY_BANK if resident_query else _P_NATIVE_BANK
+    if pv_l1_prefetch:
+        pv_source = _pv_schedule(_PV_BLOCKED_VALUE_LOAD, prefetch=True, p_bank=p_bank)
+    else:
+        pv_source = (_PV_BLOCKED_KV if blocked_kv else _PV).replace("@SELECT_P_BANK@", p_bank)
 
     @T.macro
     def qk(query, kv_nz, scores, core, row, kv_slot, score_slot, valid_tokens):

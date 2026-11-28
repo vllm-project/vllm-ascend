@@ -177,19 +177,37 @@ _VECTOR_OUTPUT = """
 
 
 @lru_cache(maxsize=8)
-def _compile_glm54(scale, *, bulk_metadata=False, resident_query=False, blocked_kv=False):
+def _compile_glm54(
+    scale,
+    *,
+    bulk_metadata=False,
+    resident_query=False,
+    blocked_kv=False,
+    output_fused_dma_pv_prefetch=False,
+):
     import tilelang
     from tilelang import language as T
 
-    qk, pv = make_cube_stages(T, resident_query=resident_query, blocked_kv=blocked_kv)
+    qk, pv = make_cube_stages(
+        T,
+        resident_query=resident_query,
+        blocked_kv=blocked_kv,
+        pv_l1_prefetch=output_fused_dma_pv_prefetch,
+    )
     cube_init, cube_drain = make_cube_lifecycle(T, resident_query=resident_query)
-    gather = make_gather_stage(T, bulk_metadata=bulk_metadata, blocked_kv=blocked_kv)
+    gather = make_gather_stage(
+        T,
+        bulk_metadata=bulk_metadata,
+        blocked_kv=blocked_kv,
+        output_fused_dma=output_fused_dma_pv_prefetch,
+    )
     softmax_source = _softmax_source(scale)
     cores = 20
     rows = T.symbolic("query_rows", "int32")
     pages = T.symbolic("pages", "int32")
     batch = T.symbolic("batch", "int32")
     workspace_rows = 128  # Arch22 TND tiling reserves 128 rows per GM exchange slot.
+    gather_out_words = 32 * (512 + 64) // 2 if output_fused_dma_pv_prefetch else 8192
     dtype = "bfloat16"
     passes = {
         tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: False,
@@ -254,8 +272,8 @@ def _compile_glm54(scale, *, bulk_metadata=False, resident_query=False, blocked_
                 )
                 vec_in1 = T.alloc_ub((16384,), "float32")
                 vec_in2 = T.alloc_ub((8192,), "float32")
-                vec_out1 = T.alloc_ub((8192,), "float32")
-                vec_out2 = T.alloc_ub((1024,), "float32")
+                vec_out1 = T.alloc_ub((gather_out_words,), "float32")
+                vec_out2 = T.meta_var(vec_out1) if output_fused_dma_pv_prefetch else T.alloc_ub((1024,), "float32")
                 vec_tmp1 = T.alloc_ub((8192,), "float32")
                 vec_tmp2 = T.alloc_ub((2048,), "float32")
                 gather_valid = T.alloc_ub((2048,), "int32")
@@ -375,6 +393,7 @@ def _run_glm54_mtp5(
     bulk_metadata=False,
     resident_query=False,
     blocked_kv=False,
+    output_fused_dma_pv_prefetch=False,
 ):
     """Run the six-row-per-request, all-2048-indices-valid MTP5 benchmark fixture."""
     if block_i != 512 or not packed_gather:
@@ -399,6 +418,7 @@ def _run_glm54_mtp5(
         bulk_metadata=bulk_metadata,
         resident_query=resident_query,
         blocked_kv=blocked_kv,
+        output_fused_dma_pv_prefetch=output_fused_dma_pv_prefetch,
     )
     return kernel(query, packed, indices, page_table, query_ends, kv_lengths)
 
@@ -408,11 +428,17 @@ qsfa_glm54_mtp5_bulk_metadata = partial(_run_glm54_mtp5, bulk_metadata=True)
 qsfa_glm54_mtp5_resident_query = partial(_run_glm54_mtp5, resident_query=True)
 qsfa_glm54_mtp5_bulk_metadata_resident_query = partial(_run_glm54_mtp5, bulk_metadata=True, resident_query=True)
 qsfa_glm54_mtp5_blocked_kv = partial(_run_glm54_mtp5, blocked_kv=True)
+qsfa_glm54_mtp5_blocked_output_fused_dma_pv_prefetch = partial(
+    _run_glm54_mtp5,
+    blocked_kv=True,
+    output_fused_dma_pv_prefetch=True,
+)
 for entry_point in (
     qsfa_glm54_mtp5,
     qsfa_glm54_mtp5_bulk_metadata,
     qsfa_glm54_mtp5_resident_query,
     qsfa_glm54_mtp5_bulk_metadata_resident_query,
     qsfa_glm54_mtp5_blocked_kv,
+    qsfa_glm54_mtp5_blocked_output_fused_dma_pv_prefetch,
 ):
     entry_point.uses_combined_query = True

@@ -11,12 +11,13 @@ https://mindstudio-docs-2610.readthedocs.io/zh-cn/latest/msprof/docs/en/user_gui
 import argparse
 import json
 import math
-import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
 from statistics import median
+
+import regex as re
 
 HBM_COLUMNS = ("deviceId", "timestampNs", "bandwidth", "hbmId", "type")
 CLOCKS = ("realtime", "monotonic")

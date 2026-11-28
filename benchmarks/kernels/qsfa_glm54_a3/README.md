@@ -40,6 +40,45 @@ The [B1–80 sweep](results/b1-b80.csv) contains paired P50 latency, confidence 
 
 The HBM measurement replays the same captured inputs within each window, so cache reuse can affect physical MBU, particularly at small batch sizes.
 
+
+### Fused Gather DMA and PV prefetch
+
+The opt-in variant ping-pongs the UB output banks and writes the NoPE and RoPE groups in one Gather DMA per chunk. In the first PV output stripe it queues V and P for two K panels in the existing L1 banks before the first MMAD. Later stripes prefetch V and reuse resident P. The variant preserves the MMAD reduction order and the blocked-KV workspace size.
+
+Run the combined candidate against stock Ascend C with the same fixture and software versions:
+
+```bash
+candidate=qsfa_native_reference:qsfa_glm54_mtp5_blocked_output_fused_dma_pv_prefetch
+common=(--candidate "$candidate" --native-impl torch-npu --index-pattern token
+        --context-length 131072 --topk 2048 --heads 64 --rope-dim 64
+        --block-i 512 --packed-gather --warmup 12 --forwards 9 --samples 23)
+
+python check_blocked_kv_boundary.py --candidate "$candidate" \
+    --seed 93211 --native-baseline --partial-cast
+for seed in 93211 93212; do
+    python benchmark.py "${common[@]}" --seed "$seed" --batch 10 --output "combined-b10-$seed"
+done
+python profile_qsfa.py "${common[@]}" --seed 93211 --mode hbm \
+    --profile-samples 4 --batch 10 --output combined-b10-hbm
+python profile_qsfa.py "${common[@]}" --seed 93211 --mode pipe \
+    --profile-samples 5 --batch 10 --output combined-b10-pipe
+
+python benchmark.py "${common[@]}" --seed 93211 --batch $(seq 1 80) --output combined-sweep
+python profile_qsfa.py "${common[@]}" --seed 93211 --mode hbm \
+    --profile-samples 4 --batch $(seq 1 80) --output combined-sweep-hbm
+python export_paired.py --graph combined-sweep/graph.csv --hbm combined-sweep-hbm \
+    --require-full-hbm --output combined-sweep-export
+```
+
+| B10 seed | Ascend C P50 (µs) | TileLang P50 (µs) | Ascend C P95 (µs) | TileLang P95 (µs) | Paired speedup (95% CI) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 93211 | 296.19 | 259.25 | 296.99 | 260.40 | 1.144× (1.135–1.147) |
+| 93212 | 292.74 | 256.43 | 293.45 | 257.69 | 1.144× (1.133–1.145) |
+
+The B10 fixture produces element-wise equal output to stock QSFA in eager and captured graphs, including a boundary with trailing `-1` indices. The independent FP32 reference agrees within the BF16 tolerance. At seed 93211, physical MBU rises from 12.97% to 14.36% and useful MFU from 20.63% to 23.57%. Estimated HBM traffic is 59.54 to 60.13 MB per forward, so the measured HBM bandwidth rises with the replay rate.
+
+The [combined B10 results](results/combined-b10.csv) record the two seeds and the independent hardware counter capture. The [B1–80 comparison](results/combined-b1-b80.csv) includes P50, P95, useful MFU, physical MBU, and output agreement. Across the 80 batches, P50 falls by 0.78–19.39% with a median decrease of 2.80%. The median decrease across B1–10 is 14.28%. P95 falls at all 80 points, with a median decrease of 2.86%. These are synthetic single-operator decode measurements.
+
 ## Attribution
 
 The three `qsfa_native_reference*.py` modules are derived from the CANN Arch22 QSFA implementation and retain the source attribution. They are covered by the [CANN Open Software License Agreement Version 2.0](LICENSES/CANN-Open-Software-License-Agreement-Version-2.0.txt). The benchmark drivers and tests carry their SPDX license identifiers.
