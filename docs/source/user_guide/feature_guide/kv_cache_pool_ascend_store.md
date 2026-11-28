@@ -88,6 +88,8 @@ on the same instances that previously exported the environment variable.
 
 #### Environment Preparation
 
+You can optionally use [kvpool_envcheck](https://github.com/vllm-project/vllm-ascend/tree/main/examples/kvpool_envcheck) to validate the environment before deployment.
+
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
 
     ```bash
@@ -648,6 +650,8 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 #### Environment Preparation
 
+You can optionally use [kvpool_envcheck](https://github.com/vllm-project/vllm-ascend/tree/main/examples/kvpool_envcheck) to validate the environment before deployment.
+
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
 
     ```bash
@@ -1201,6 +1205,8 @@ done
 ### Configuration Examples
 
 #### Environment Preparation
+
+You can optionally use [kvpool_envcheck](https://github.com/vllm-project/vllm-ascend/tree/main/examples/kvpool_envcheck) to validate the environment before deployment.
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
 
