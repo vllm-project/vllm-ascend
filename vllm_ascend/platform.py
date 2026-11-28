@@ -768,6 +768,14 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        spec_config = vllm_config.speculative_config
+        if getattr(spec_config, "draft_lm_head_quantization", None) is not None and hasattr(
+            vllm_config, "draft_lm_head_quantization_config"
+        ):
+            vllm_config.draft_lm_head_quantization_config = (
+                "vllm_ascend.quantization.draft_lm_head.AscendDraftLMHeadQuantizationConfig"
+            )
+
         _normalize_sleep_backend(vllm_config.model_config)
 
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
