@@ -607,12 +607,10 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
     @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)
     def test_sfa_dcp_replicated_indexer_aligns_interleave_to_block_size(
         self,
-        _mock_sparse,
-        _mock_replicated_indexer,
+        _mock_sfa,
         _mock_enable_sp,
     ):
         vllm_config = self.mock_vllm_config()
@@ -633,6 +631,22 @@ class TestNPUPlatform(TestBase):
             "Override cp_kv_cache_interleave_size to 128",
             mock_warning.call_args.args[0],
         )
+
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    def test_glm_kpool_dcp_aligns_interleave_to_cache_page(self, _mock_enable_sp):
+        config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=2176),
+            model_config=SimpleNamespace(
+                architecture="Glm5NextForConditionalGeneration",
+                hf_text_config=SimpleNamespace(index_kpool=4, index_topk=2048),
+            ),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=4, cp_kv_cache_interleave_size=1),
+            kv_transfer_config=None,
+        )
+
+        _validate_sfa_dcp_kv_sp(config)
+
+        assert config.parallel_config.cp_kv_cache_interleave_size == 2176
 
     def test_validate_eplb_config_rejects_weight_offload(self):
         for cpu_gb, group_size in ((1, 0), (0, 2)):

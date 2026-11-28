@@ -270,16 +270,17 @@ def uses_hybrid_kv_cache(scheduler_config: Any, kv_cache_groups: Sequence[Any] |
 def infer_group_block_sizes(
     cache_block_size: int,
     kv_cache_groups: Sequence[Any] | None,
+    dcp_size: int = 1,
 ) -> list[int]:
     if not kv_cache_groups:
-        return [cache_block_size]
+        return [cache_block_size * dcp_size]
 
     block_sizes: list[int] = []
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = next(iter(spec.kv_cache_specs.values()))
-        block_sizes.append(spec.block_size)
+        block_sizes.append(spec.block_size * dcp_size if dcp_size > 1 and spec.dcp_sharded else spec.block_size)
     return block_sizes
 
 

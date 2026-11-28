@@ -255,12 +255,12 @@ def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
 
-def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+def model_uses_sfa_sparse(model_config: Any | None, *, include_kpool: bool = False) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
     if hf_text_config is None:
         return False
-    if model_uses_kpool_indexer(model_config):
+    if not include_kpool and model_uses_kpool_indexer(model_config):
         return False
     return (
         hasattr(hf_text_config, "index_topk")
@@ -281,12 +281,16 @@ def should_reuse_topk(config: Any, layer_id: int) -> bool:
 
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
 
     parallel_config = vllm_config.parallel_config
-    return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
+    return parallel_config.decode_context_parallel_size > 1 and model_uses_sfa_sparse(
+        vllm_config.model_config, include_kpool=True
+    )
 
 
 def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:

@@ -250,6 +250,8 @@ class _FakeKVCacheBlock:
 
 
 class _FakeKVCacheSpec:
+    dcp_sharded = False
+
     def __init__(self, block_size=16, **kwargs):
         self.block_size = block_size
         for key, value in kwargs.items():

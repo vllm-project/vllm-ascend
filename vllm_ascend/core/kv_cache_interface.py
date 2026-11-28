@@ -332,6 +332,25 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendIndexerKPoolSpec(AscendMLAAttentionSpec):
+    """Full indexer history behind the main cache's DCP scheduler block IDs."""
+
+    dcp_replication_size: int = 1
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        # A scheduler block represents one main-KV page on each DCP rank.
+        # Every rank's indexer stores all of those pages after compression.
+        return super().real_page_size_bytes * self.dcp_replication_size
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        replication_sizes = {spec.dcp_replication_size for spec in specs}
+        assert len(replication_sizes) == 1, "KPool caches must have the same DCP replication size."
+        return replace(super().merge(specs), dcp_replication_size=replication_sizes.pop())
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     """KV cache spec for SFA indexer K/scale cache.
 

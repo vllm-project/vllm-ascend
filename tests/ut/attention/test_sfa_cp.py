@@ -1559,6 +1559,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
     def fake_base_init(self, *args, **kwargs) -> None:
         self.dcp_size = 2
         self.kernel_block_size = 128
+        self.nope = False
 
     kv_cache_spec = SimpleNamespace(block_size=128)
     for pcp_size, expected_num_reqs in ((1, 5), (2, 9)):

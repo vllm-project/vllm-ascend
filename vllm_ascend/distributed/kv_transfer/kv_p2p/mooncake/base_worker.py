@@ -34,7 +34,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolSpec,
+    AscendSFAIndexerCacheSpec,
+    is_circular_kv_cache_spec,
+)
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -64,6 +68,15 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def get_indexer_replication_size(spec: KVCacheSpec) -> int:
+    """Number of DCP pieces packed in each indexer page, or zero for other caches."""
+    if isinstance(spec, AscendIndexerKPoolSpec):
+        return spec.dcp_replication_size
+    if isinstance(spec, AscendSFAIndexerCacheSpec):
+        return spec.sfa_dcp_replicated_indexer_size
+    return 0
 
 
 def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
@@ -665,23 +678,17 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
                 layer_names.append(layer_name)
-                layer_block_size = spec.block_size
-                if isinstance(spec, AscendSFAIndexerCacheSpec):
-                    # A replicated SFA indexer stores one physical kernel block
-                    # per DCP rank behind each scheduler block. Publish their
-                    # aggregate token span; replication size 1 deliberately
-                    # remains an ordinary DCP-sharded FA block.
-                    layer_block_size *= spec.sfa_dcp_replicated_indexer_size
-                layer_block_sizes.append(layer_block_size)
+                # Replicated indexers store every DCP piece behind one scheduler
+                # block ID. Publish the full token span addressed by that ID.
+                replication_size = get_indexer_replication_size(spec)
+                layer_block_sizes.append(spec.block_size * max(1, replication_size))
                 group_indices.append(self.layer_name_to_group_index[layer_name])
                 kv_caches_base_addr.append(base_addrs)
                 block_strides_per_layer.append(block_strides)
                 block_lens_per_layer.append(block_lens)
                 block_shapes_per_layer.append(block_shapes)
                 block_size_scales_per_layer.append(block_size_scales)
-                indexer_replication_sizes.append(
-                    spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
-                )
+                indexer_replication_sizes.append(replication_size)
 
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)

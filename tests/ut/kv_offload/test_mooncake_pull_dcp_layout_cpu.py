@@ -116,7 +116,10 @@ def worker():
             "_expand_block_ids",
             "_select_remote_tp_rank",
         },
-        dependencies={"worker_rank_to_dcp_rank": single_pcp_dcp_rank},
+        dependencies={
+            "worker_rank_to_dcp_rank": single_pcp_dcp_rank,
+            "get_indexer_replication_size": lambda spec: getattr(spec, "sfa_dcp_replicated_indexer_size", 0),
+        },
     )
     worker = cls()
     worker.tp_size = 4

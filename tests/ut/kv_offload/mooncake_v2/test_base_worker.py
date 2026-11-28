@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
@@ -383,12 +384,24 @@ def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
 
 
 @pytest.mark.parametrize("replication_size", [1, 2])
+@pytest.mark.parametrize("kpool", [False, True], ids=["sfa", "kpool"])
 def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
     monkeypatch,
     replication_size: int,
+    kpool: bool,
 ) -> None:
-    spec = make_sfa_indexer_spec(block_size=16, replication_size=replication_size)
-    cache = torch.empty((2 * replication_size, 16, 1, 8), dtype=torch.float16)
+    if kpool:
+        spec = AscendIndexerKPoolSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            tokens_per_state=4,
+            dcp_replication_size=replication_size,
+        )
+    else:
+        spec = make_sfa_indexer_spec(block_size=16, replication_size=replication_size)
+    cache = torch.empty((2 * replication_size, 4 if kpool else 16, 1, 8), dtype=torch.float16)
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[

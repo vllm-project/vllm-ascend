@@ -11,6 +11,7 @@ import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from tests.ut.kv_offload.mooncake_v2.helpers import vllm_dcp_ranks_by_worker
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -56,7 +57,7 @@ def producers(worker, monkeypatch):
                 )
             else:
                 spec = Mock(
-                    spec=push_worker.AscendSFAIndexerCacheSpec,
+                    spec=AscendSFAIndexerCacheSpec,
                     dcp_sharded=True,
                     sliding_window=None,
                     is_circular=False,

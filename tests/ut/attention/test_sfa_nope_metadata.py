@@ -26,7 +26,10 @@ def _builder(
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=tp_size, prefill_context_parallel_size=1, pcp_shard_decode_requests=False
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            pcp_shard_decode_requests=False,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=32 if speculative else 4),
         speculative_config=SimpleNamespace(num_speculative_tokens=5) if speculative else None,
@@ -378,7 +381,7 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
             kwargs["ori_sparse_indices"], torch.tensor([[[0, 6, 7, -1]], [[0, 1, 2, -1]]], dtype=torch.int32)
         )
         torch.testing.assert_close(kwargs["ori_topk_length"], metadata.smla_topk_length)
-        assert kwargs["cu_seqlens_q"] is metadata.query_start_loc
+        torch.testing.assert_close(kwargs["cu_seqlens_q"], metadata.query_start_loc)
         return q + 1, torch.empty(0)
 
     monkeypatch.setattr("vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops", lambda: (None, build))
@@ -510,7 +513,7 @@ def test_a5_smla_plans_from_reused_indices_for_the_target(monkeypatch):
     def plan(**kwargs):
         assert kwargs["ori_topk"] == indices.shape[-1]
         assert kwargs["ori_topk_length"].data_ptr() == addresses[1]
-        assert kwargs["cu_seqlens_q"] is metadata.query_start_loc
+        torch.testing.assert_close(kwargs["cu_seqlens_q"], metadata.query_start_loc)
         planned.append(kwargs["ori_topk_length"].clone())
         return torch.full_like(metadata.smla_metadata, len(planned))
 
