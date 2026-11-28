@@ -10,7 +10,8 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
-from vllm_ascend.models.hy_v4_flash import dfly_prepare, dfly_speculator
+from vllm_ascend.models.hy_v4_flash import dfly_ops as dfly_ops
+from vllm_ascend.models.hy_v4_flash import dfly_speculator
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -19,7 +20,7 @@ def test_query_preparation_selects_fusion_by_capability(monkeypatch, supported):
     spec.device = SimpleNamespace(type="npu")
     spec._prepare_query_reference = Mock()
     prepare = Mock(return_value=supported)
-    monkeypatch.setattr(dfly_prepare, "try_prepare_query", prepare)
+    monkeypatch.setattr(dfly_ops, "try_prepare_query", prepare)
     inputs = object()
     spec._prepare_query(inputs, 2, 3)
     prepare.assert_called_once_with(spec, inputs, 2, 3)

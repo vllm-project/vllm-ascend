@@ -79,7 +79,7 @@ def test_ihc_decode_configuration_is_automatic(monkeypatch):
 
 
 def test_native_rms_unsupported_device_uses_reference():
-    from vllm_ascend.models.hy_v4_flash.decode_fusions import native_rms_norm
+    from vllm_ascend.models.hy_v4_flash.attention_ops import native_rms_norm
 
     value = torch.randn(6, 128, dtype=torch.bfloat16)
     norm = torch.nn.RMSNorm(128, eps=1e-6).to(torch.bfloat16)

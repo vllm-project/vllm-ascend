@@ -9,7 +9,8 @@ import pytest
 import torch
 
 from vllm_ascend.hisparse.c8 import pack_c8_components
-from vllm_ascend.models.hy_v4_flash import attention, c8_kvqsfa
+from vllm_ascend.models.hy_v4_flash import attention
+from vllm_ascend.models.hy_v4_flash import c8_attention as c8_attention
 
 
 @pytest.mark.parametrize("other_layer_first", [False, True])
@@ -197,11 +198,11 @@ def test_banded_head_groups_preserve_sink_and_head_order(monkeypatch, heads):
         denominator = (scores - maximum).exp().sum(-1, keepdim=True)
         return context[None], maximum[None], denominator[None]
 
-    monkeypatch.setattr(c8_kvqsfa, "_prepare_banded_c8", lambda *args: (key, value))
-    monkeypatch.setattr(c8_kvqsfa, "_band_mask", lambda *args: None)
+    monkeypatch.setattr(c8_attention, "_prepare_banded_c8", lambda *args: (key, value))
+    monkeypatch.setattr(c8_attention, "_band_mask", lambda *args: None)
     monkeypatch.setattr(torch.npu, "current_stream", lambda *args: SimpleNamespace(npu_stream=0))
-    monkeypatch.setattr(c8_kvqsfa.torch_npu, "npu_fusion_attention", fusion)
-    actual = c8_kvqsfa._attend_c8_banded(query, None, None, 64, len(key), sink, scale, window=3)
+    monkeypatch.setattr(c8_attention.torch_npu, "npu_fusion_attention", fusion)
+    actual = c8_attention._attend_c8_banded(query, None, None, 64, len(key), sink, scale, window=3)
     expected = torch.einsum("hqk,kd->qhd", with_sink(window_logits(query, key), sink), value)
     torch.testing.assert_close(actual, expected)
     assert calls == [16] * (heads // 16)
@@ -209,9 +210,9 @@ def test_banded_head_groups_preserve_sink_and_head_order(monkeypatch, heads):
 
 @pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
 def test_split_window_sink_kernel_writes_each_head_slice():
-    if not c8_kvqsfa.HAS_TRITON or not c8_kvqsfa.is_950():
+    if not c8_attention.HAS_TRITON or not c8_attention.is_950():
         pytest.skip("requires the 950 Triton sink path")
-    from vllm_ascend.models.hy_v4_flash.swa_sink import _write_window_output
+    from vllm_ascend.models.hy_v4_flash.c8_attention import _write_window_output
 
     tokens, heads = 35, 16
     generator = torch.Generator().manual_seed(19)
@@ -234,7 +235,7 @@ def test_split_window_sink_kernel_writes_each_head_slice():
 )
 def test_sparse_kv_preserves_logical_page_order(monkeypatch, heads, queries, layout):
     block_size, length = 64, 513
-    row_bytes = c8_kvqsfa.C8_ROW_BYTES
+    row_bytes = c8_attention.C8_ROW_BYTES
     table = torch.arange(8, -1, -1, dtype=torch.int32)
     # A distinct byte per physical row exposes page reordering and last-page truncation.
     row_ids = torch.arange(9 * block_size).to(torch.uint8)
@@ -256,7 +257,7 @@ def test_sparse_kv_preserves_logical_page_order(monkeypatch, heads, queries, lay
         return q[..., :1], None, None
 
     monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(kv_quant_sparse_flash_attention=sparse))
-    context = c8_kvqsfa.attend_c8_v2(
+    context = c8_attention.attend_c8_v2(
         query, cache, table, block_size, selected, length, torch.zeros(heads), 1.0, compact_prefix=0
     )
     assert context.shape == (queries, heads, 1)

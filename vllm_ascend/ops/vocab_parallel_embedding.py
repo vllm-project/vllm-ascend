@@ -223,7 +223,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
-        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+        from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
 
         vllm_config = get_current_vllm_config()
         model = vllm_config.model_config

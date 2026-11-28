@@ -25,7 +25,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import is_950
 
-from .pd_role import uses_prefill_ops
+from .config import uses_prefill_ops
 
 _CANN_ENGRAM_MAX_TOKENS = 512
 _CANN_RMS_ALIGNMENT = 32
@@ -33,7 +33,7 @@ _CANN_RMS_ALIGNMENT = 32
 
 def _engram_inverse_rms(value, weight, epsilon, use_cann):
     from .attention import get_flash_attention_metadata
-    from .decode_fusions import is_decode_batch
+    from .attention_ops import is_decode_batch
 
     if is_decode_batch(get_flash_attention_metadata()):
         return torch_npu.npu_rms_norm(value, weight, epsilon)[1]
@@ -218,7 +218,7 @@ class FlashNgramHashState(nn.Module):
             and len(query_start_loc) > 1
             and max(np.diff(query_start_loc), default=0) <= 6
         ):
-            from .engram_batch_hash import DecodeHashGraph, batched_hashes
+            from .engram_hash import DecodeHashGraph, batched_hashes
 
             if input_ids.device.type == "npu" and output.device.type == "npu":
                 graphs = getattr(self, "_decode_hash_graphs", None)
@@ -326,7 +326,7 @@ class FlashEmbedding(nn.Module):
     def _allocate_storage(self, shape, dtype, leaf):
         if self._shared_group is not None and shape[0]:
             if not self.map_host_weight:
-                from .engram_shared_cpu import PageableEngramBuffer
+                from .engram_ops import PageableEngramBuffer
 
                 buffer = PageableEngramBuffer(shape, dtype, self._shared_group)
             else:
@@ -440,7 +440,7 @@ class FlashEmbedding(nn.Module):
             set_weight_attrs(self.embedding.weight_scale_inv, {"weight_loader": self._load_shard})
 
     def prefetch_rows(self, hashes):
-        from .engram_prefetch import gather_mapped_rows
+        from .engram_ops import gather_mapped_rows
 
         return gather_mapped_rows(
             hashes,
@@ -564,7 +564,7 @@ class FlashEngram(nn.Module):
 
     def forward(self, hidden, hashes, embedding_rows=None):
         from .attention import get_flash_attention_metadata
-        from .decode_fusions import is_decode_batch
+        from .attention_ops import is_decode_batch
 
         if is_decode_batch(get_flash_attention_metadata()) and hidden.device.type == "npu" and is_950() and HAS_TRITON:
             return self._forward_decode(hidden, hashes, embedding_rows)
@@ -608,7 +608,7 @@ class FlashEngram(nn.Module):
         )
         inverse = None if fuse_inverse else _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
         if use_lookup_kernel and (inverse is None or (inverse.dtype == torch.float32 and inverse.is_contiguous())):
-            from .prefill_ops.engram_norm import apply_lookup_norm
+            from .prefill_ops.fusions import apply_lookup_norm
 
             x = apply_lookup_norm(x, gamma, hidden.dtype, eps, inverse=inverse)
         else:
@@ -635,8 +635,7 @@ class FlashEngram(nn.Module):
 
         # Match CANN reductions for the two full Prefill scheduling buckets.
         if use_fused and x.shape[0] in (2048, 4096) and self._key_gamma is not None:
-            from .prefill_ops.engram_gate import gate_dot, gate_value_inverse
-            from .prefill_ops.small_aiv import engram_gate_residual
+            from .prefill_ops.fusions import engram_gate_residual, gate_dot, gate_value_inverse
 
             dots = tuple(
                 gate_dot(
@@ -664,7 +663,7 @@ class FlashEngram(nn.Module):
             )
 
         if use_batched_norm:
-            from .prefill_ops.engram_norm import engram_batched_dots
+            from .prefill_ops.fusions import engram_batched_dots
 
             keys = (
                 tuple(packed_keys)
@@ -690,7 +689,7 @@ class FlashEngram(nn.Module):
                     and key_norm.weight.is_contiguous()
                     and query_norm.weight.is_contiguous()
                 ):
-                    from .prefill_ops.engram_norm import engram_normalized_dot
+                    from .prefill_ops.fusions import engram_normalized_dot
 
                     dot = engram_normalized_dot(key, query, key_norm.weight, query_norm.weight)
                 else:
@@ -704,8 +703,7 @@ class FlashEngram(nn.Module):
             use_fused and value.dtype == torch.bfloat16 and value.is_contiguous() and 512 <= value.shape[0] <= 4096
         )
         if contiguous_value_norm and simple_dots:
-            from .prefill_ops.engram_norm import engram_value_inverse
-            from .prefill_ops.small_aiv import engram_gate_residual
+            from .prefill_ops.fusions import engram_gate_residual, engram_value_inverse
 
             inverse = engram_value_inverse(value, eps)
             return engram_gate_residual(
@@ -720,7 +718,7 @@ class FlashEngram(nn.Module):
             )
 
         if use_fused:
-            from .prefill_ops.small_aiv import engram_gate_epilogue, engram_gates, engram_residual
+            from .prefill_ops.fusions import engram_gate_epilogue, engram_gates, engram_residual
 
             if simple_dots:
                 gate = engram_gates(dots, gate_scale)
@@ -732,7 +730,7 @@ class FlashEngram(nn.Module):
             scaled = [dot * gate_scale for dot in dots]
             gate = torch.stack([(g.abs().clamp_min(1e-6).sqrt() * g.sign()).sigmoid() for g in scaled], dim=1)
         if contiguous_value_norm:
-            from .prefill_ops.engram_norm import engram_value_inverse
+            from .prefill_ops.fusions import engram_value_inverse
 
             inverse = engram_value_inverse(value, eps)
             return engram_residual(
@@ -757,7 +755,7 @@ class FlashEngram(nn.Module):
 
     def _forward_decode(self, hidden, hashes, embedding_rows=None):
         from .attention import get_flash_attention_metadata
-        from .decode_fusions import is_decode_batch
+        from .attention_ops import is_decode_batch
 
         native_norm = is_decode_batch(get_flash_attention_metadata())
         rows = self.multi_head_embedding(hashes) if embedding_rows is None else embedding_rows
@@ -778,7 +776,7 @@ class FlashEngram(nn.Module):
         local = self.multi_head_embedding
         local_hashes = hashes[:, local.head_start : local.head_end]
         if native_norm:
-            from .engram_fusions import fused_lookup_norm, fused_norm_dot_gate
+            from .engram_ops import fused_lookup_norm, fused_norm_dot_gate
 
             x = fused_lookup_norm(rows, local_hashes, gamma, eps, hidden.dtype).flatten(1)
         else:
@@ -812,7 +810,7 @@ class FlashEngram(nn.Module):
         inverse = _engram_inverse_rms(value, gamma, eps, self.use_cann_inverse_rms)
         scales = packed_scales if packed_scales is not None else torch.stack(list(self.unified_per_hc_scales)).float()
         if native_norm:
-            from .engram_fusions import fused_residual
+            from .engram_ops import fused_residual
 
             return fused_residual(hidden, value, gamma, inverse, gate, scales, hashes)
         signal = gamma * value * inverse

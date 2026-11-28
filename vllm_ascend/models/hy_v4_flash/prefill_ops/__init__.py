@@ -3,12 +3,9 @@
 
 """HY4-Flash Prefill operator implementations."""
 
-from .attention_logits import build_mla_logits
-from .c8_read import gather_c8_qk, gather_c8_rows
-from .c8_write import write_c8_rows
-from .index_pool_cache import copy_pool_keys, read_prefill_pool
-from .index_pool_fp8 import encode_indexpool_fp8
-from .output_gate import gate_dynamic_mx_quant
+from .cache import gather_c8_qk, gather_c8_rows, write_c8_rows
+from .fusions import build_mla_logits, gate_dynamic_mx_quant
+from .indexer import copy_pool_keys, encode_indexpool_fp8, read_prefill_pool
 
 __all__ = [
     "build_mla_logits",

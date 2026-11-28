@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""HY4 Flash config."""
 
 from copy import copy, deepcopy
 
 from vllm.models.hy_v4_flash.configs import SPARSE_ATTENTION
 from vllm.v1.worker.gpu.spec_decode.speculator_config import DraftModelSpeculatorConfig
+
+
+def uses_prefill_ops(vllm_config) -> bool:
+    """Select the optimized operator family for dedicated Prefill instances."""
+    transfer = vllm_config.kv_transfer_config
+    return transfer is not None and transfer.kv_role == "kv_producer"
+
 
 METHOD = "dfly"
 

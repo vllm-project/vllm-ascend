@@ -235,7 +235,7 @@ class FlashDFlySpeculator(DraftModelSpeculator):
 
     def _prepare_query(self, inputs, num_reqs, padded_batch):
         if self.device.type == "npu":
-            from .dfly_prepare import try_prepare_query
+            from .dfly_ops import try_prepare_query
 
             if try_prepare_query(self, inputs, num_reqs, padded_batch):
                 return
@@ -332,7 +332,7 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         ):
             prepared = False
             if num_reqs and self.device.type == "npu":
-                from .dfly_prepare import try_prepare_c8_metadata
+                from .dfly_ops import try_prepare_c8_metadata
 
                 prepared = try_prepare_c8_metadata(
                     index.topk_snapshot,

@@ -3,7 +3,7 @@ import pytest
 import torch
 from vllm.models.hy_v4_flash.reference import hash_ngrams
 
-from vllm_ascend.models.hy_v4_flash.engram_batch_hash import batched_hashes
+from vllm_ascend.models.hy_v4_flash.engram_hash import batched_hashes
 
 
 @pytest.mark.parametrize("lengths", [[0, 0], [1, 6, 0, 3], [6] * 8])

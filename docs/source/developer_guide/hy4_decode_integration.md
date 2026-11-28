@@ -52,11 +52,14 @@ with generic vLLM/Ascend settings.
 | `attention.py` | Backend metadata, projections, cache writes and shared output arithmetic. |
 | `attention_eager.py` | Eager Prefill and Decode, including mixed batches. |
 | `attention_decode.py` | Paged Decode selection, graph execution and incremental IndexPool. |
-| `attention_common.py` | Shared shape limits and head projection arithmetic. |
-| `c8_read.py`, `kv_compaction.py` | Packed C8 readers and stable device-side KV compaction. |
-| `decode_fusions.py`, `precision_attention.py` | Native Decode helpers and FP32 attention fallback. |
-| `engram_hash_triton.py` | Fused Engram hash and position preparation. |
-| `dfly.py`, `dfly_speculator.py` | Draft model and speculative execution. |
+| `attention_ops.py` | Shared geometry, projections, output gates and FP32 Decode attention. |
+| `cache.py`, `c8_attention.py` | Packed C8 cache reads/writes, stable compaction and CANN attention adapters. |
+| `indexer.py` | IndexPool cache, FP8 encoding, selection and paged Decode updates. |
+| `engram.py`, `engram_hash.py`, `engram_ops.py` | Engram layers, hashes, CPU staging and row kernels. |
+| `dfly.py`, `dfly_speculator.py`, `dfly_ops.py` | Draft model, speculative execution and input preparation kernels. |
+| `ihc.py` | HyperConnection layers and fused first-layer preparation. |
+| `model_state.py`, `config.py` | Runner state, graph dispatch, embedding preparation and DFly configuration. |
+| `ops.py`, `prefill_ops/` | Decode and Prefill operator interfaces; Prefill kernels are grouped into cache, Indexer and fusion modules. |
 
 The FP32 fallback retains KV and learned-sink normalization through softmax/PV
 before the final cast. Stable compaction keeps valid rows and scores aligned.

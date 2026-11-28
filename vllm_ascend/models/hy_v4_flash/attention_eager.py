@@ -17,8 +17,8 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 from vllm_ascend.logger import init_logger_ascend
 
-from . import triton_ops
-from .attention_common import (
+from . import ops as triton_ops
+from .attention_ops import (
     BATCH_VERIFY_MAX_QUERIES,
     BATCH_VERIFY_SPARSE_SHAPE,
     BATCH_VERIFY_SWA_SHAPE,
@@ -26,10 +26,11 @@ from .attention_common import (
     MAX_FUSED_C8_READ_ROWS,
     QUERY_CHUNK,
     _head_bmm,
+    logical_positions,
+    reuse_prefill_metadata,
 )
-from .c8_kvqsfa import BANDED_HEADS, attend_c8_v2, attend_c8_window, supports_banded_window
-from .c8_read import supports_c8_qk_heads
-from .prefill_metadata import logical_positions, reuse_prefill_metadata
+from .c8_attention import BANDED_HEADS, attend_c8_v2, attend_c8_window, supports_banded_window
+from .cache import supports_c8_qk_heads
 
 logger = init_logger_ascend(__name__)
 
@@ -261,7 +262,7 @@ class EagerAttentionMixin:
             li_tail = None
             processed_until = start
             if batch_early_window:
-                from .prefill_ops.swa_early import attend_window_chunks
+                from .prefill_ops.fusions import attend_window_chunks
 
                 early_contexts = attend_window_chunks(
                     prefill_query,
@@ -288,7 +289,7 @@ class EagerAttentionMixin:
                 and is_950()
             )
             if early_fusion and use_cann_sparse:
-                from .prefill_ops.early_recall import build_full_recall_rows
+                from .prefill_ops.indexer import build_full_recall_rows
 
                 history_budget = self.indexer.budget
                 ratio = self.indexer.ratio
@@ -401,7 +402,7 @@ class EagerAttentionMixin:
                                 score_pool = fallback_pool[:groups]
                             select_candidates = sparse_candidates
                             if use_cann_sparse:
-                                from .prefill_ops.index_pool_select import select_partial_prefill_pool
+                                from .prefill_ops.indexer import select_partial_prefill_pool
 
                                 select_candidates = select_partial_prefill_pool
                                 q_index = q_index.float()

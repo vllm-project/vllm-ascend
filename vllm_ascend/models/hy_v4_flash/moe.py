@@ -13,8 +13,8 @@ from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 from .attention import get_flash_attention_metadata
-from .decode_fusions import is_decode_batch
-from .pd_role import uses_prefill_ops
+from .attention_ops import is_decode_batch
+from .config import uses_prefill_ops
 
 ROUTER_TILE_ROWS = 64
 

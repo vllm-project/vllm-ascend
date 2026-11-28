@@ -7,13 +7,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.models.hy_v4_flash import (
-    c8_read,
-    decode_fusions,
-    dfly_prepare,
-    dfly_speculator,
-    kv_compaction,
-)
+from vllm_ascend.models.hy_v4_flash import attention_ops as attention_ops
+from vllm_ascend.models.hy_v4_flash import cache as cache_ops
+from vllm_ascend.models.hy_v4_flash import dfly_ops as dfly_ops
+from vllm_ascend.models.hy_v4_flash import dfly_speculator
 
 pytestmark = pytest.mark.skipif(os.environ.get("TRITON_INTERPRET") != "1", reason="requires CPU Triton interpreter")
 
@@ -31,7 +28,7 @@ def test_compact_integer_indices_matches_stable_partition(candidates, dtype):
     # Exercise a non-contiguous row stride, plus repeated values and holes.
     storage = torch.full((7, candidates + 3), -33, dtype=dtype)
     storage[:, :candidates].copy_(values)
-    actual = c8_read.compact_kv_positions(storage[:, :candidates])
+    actual = cache_ops.compact_kv_positions(storage[:, :candidates])
     expected = torch.full_like(values, -1)
     for i, row in enumerate(values):
         valid = row[row >= 0]
@@ -85,7 +82,7 @@ def test_fused_query_matches_reference(batch, padded, mrope_dims, dtype, hidden_
     reference, actual = buffers(), buffers()
     reference._prepare_query_reference(inputs, batch, padded)
     b = actual.input_buffers
-    dfly_prepare._prepare_query_kernel[(padded,)](
+    dfly_ops._prepare_query_kernel[(padded,)](
         b.input_ids,
         b.positions,
         b.is_padding,
@@ -116,7 +113,7 @@ def test_fused_query_matches_reference(batch, padded, mrope_dims, dtype, hidden_
         count if mrope_dims else 0,
         99,
         256,
-        dfly_prepare.HIDDEN_BLOCK,
+        dfly_ops.HIDDEN_BLOCK,
     )
     for name in vars(b):
         torch.testing.assert_close(getattr(b, name), getattr(reference.input_buffers, name), rtol=0, atol=0)
@@ -140,7 +137,7 @@ def test_fused_c8_metadata_overwrites_padding_and_matches_reference(batch, padde
     shape = (padded, width, topk + window + width)
     actual = torch.full(shape, -77, dtype=torch.int64)
     table = torch.full((padded, columns), -77, dtype=torch.int32)
-    dfly_prepare._prepare_c8_metadata_kernel[(padded, width)](
+    dfly_ops._prepare_c8_metadata_kernel[(padded, width)](
         actual,
         table,
         snapshot,
@@ -159,7 +156,7 @@ def test_fused_c8_metadata_overwrites_padding_and_matches_reference(batch, padde
         table.stride(0),
         columns,
         shape[-1],
-        dfly_prepare.PREPARE_BLOCK,
+        dfly_ops.PREPARE_BLOCK,
     )
     expected = dfly_speculator.build_reuse_indices(snapshot[sources], anchors, width, window, active)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -176,19 +173,19 @@ def test_native_context_respects_packed_reader_mask(prepacked):
     sink = torch.zeros(2)
     nope, rope = kv[..., :512].unsqueeze(2), kv[..., 512:].unsqueeze(2)
     if prepacked:
-        nope, rope = kv_compaction.compact_kv_rows(selected, nope, rope)
+        nope, rope = cache_ops.compact_kv_rows(selected, nope, rope)
         mask = torch.tensor([[False, False, True], [True, True, True]])[:, None, None]
-        rows = kv_compaction.CompactKV(nope, rope, mask)
+        rows = cache_ops.CompactKV(nope, rope, mask)
     else:
         rows = (nope, rope, selected.lt(0)[:, None, None])
-    actual = decode_fusions.native_mla_context(
+    actual = attention_ops.native_mla_context(
         query,
         selected,
         rows,
         sink,
         0.04,
     )
-    expected = decode_fusions.native_mla_context(
+    expected = attention_ops.native_mla_context(
         query,
         selected,
         kv,

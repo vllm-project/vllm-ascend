@@ -41,7 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
-from vllm_ascend.models.hy_v4_flash.cache_layout import hy4_required_pages, hy4_transfer_layout
+from vllm_ascend.models.hy_v4_flash.cache import hy4_required_pages, hy4_transfer_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

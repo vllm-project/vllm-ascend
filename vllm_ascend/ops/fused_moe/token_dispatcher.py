@@ -366,7 +366,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 from vllm.triton_utils import HAS_TRITON
 
                 from vllm_ascend.device.device_config import is_950
-                from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+                from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
 
                 self._hy4_prefill_mask = HAS_TRITON and is_950() and uses_prefill_ops(config)
         num_experts_local = kwargs.get("num_local_experts", 0)
@@ -470,7 +470,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             act_quant_type=act_quant_type,
         )
         if fuse_local_mask:
-            from vllm_ascend.models.hy_v4_flash.prefill_ops.small_aiv import mask_local_experts
+            from vllm_ascend.models.hy_v4_flash.prefill_ops.fusions import mask_local_experts
 
             # MXFP8's second expert projection returns BF16 on this dispatch path.
             bf16_combine = quant_type == QuantType.W8A8MXFP and sorted_hidden_states.dtype in (

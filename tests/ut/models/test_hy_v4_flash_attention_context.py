@@ -2,8 +2,8 @@
 import pytest
 import torch
 
-from vllm_ascend.models.hy_v4_flash import decode_fusions
-from vllm_ascend.models.hy_v4_flash.kv_compaction import compact_kv_rows
+from vllm_ascend.models.hy_v4_flash import attention_ops as attention_ops
+from vllm_ascend.models.hy_v4_flash.cache import compact_kv_rows
 
 
 def test_flash_backend_supports_updatable_graph():
@@ -33,7 +33,7 @@ def test_fp32_attention_preserves_kv_and_sink(tuple_kv):
     sink = torch.tensor([0.3, -0.5])
     scale = 0.04
     rows = (kv[..., :512, None].transpose(-1, -2), kv[..., 512:, None].transpose(-1, -2), None) if tuple_kv else kv
-    result = decode_fusions.native_mla_context(
+    result = attention_ops.native_mla_context(
         query,
         selected,
         rows,

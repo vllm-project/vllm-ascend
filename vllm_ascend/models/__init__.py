@@ -8,7 +8,7 @@ except ImportError:
 
 def register_model():
     if register_speculative_method is not None:
-        register_speculative_method("dfly", "vllm_ascend.models.hy_v4_flash.dfly_config.FlashDFlyConfig")
+        register_speculative_method("dfly", "vllm_ascend.models.hy_v4_flash.config.FlashDFlyConfig")
     ModelRegistry.register_model(
         "HYV4FlashForCausalLM",
         "vllm_ascend.models.hy_v4_flash.model:AscendHYV4FlashForCausalLM",

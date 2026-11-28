@@ -48,14 +48,15 @@ from vllm_ascend.device.hardware_profile import (
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows, pack_c8_components
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
-from vllm_ascend.models.hy_v4_flash.cache_layout import PACKED_CACHE_FORMAT
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.fp8_block import AscendFp8BlockLinearMethod
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 from vllm_ascend.utils import attention_calculation_stream, npu_stream_switch
 
-from . import triton_ops
-from .attention_common import (
+from . import ops as triton_ops
+from .attention_decode import DecodeAttentionMixin
+from .attention_eager import EagerAttentionMixin
+from .attention_ops import (
     ACL_FORMAT_ND,
     BF16_QUERY_PROJECTION_LAYER,
     MAX_FUSED_C8_READ_ROWS,
@@ -64,19 +65,16 @@ from .attention_common import (
     MAX_FUSED_OUTPUT_GATE_ELEMENTS,
     POSITION_LANES,
     _head_bmm,
-)
-from .attention_decode import DecodeAttentionMixin
-from .attention_eager import EagerAttentionMixin
-from .attention_fusions import fused_output_gate
-from .decode_fusions import (
+    fused_output_gate,
     is_decode_batch,
     native_indexpool_rope,
     native_mla_context,
     native_rms_norm,
+    reuse_prefill_metadata,
     uses_decode_fusions,
 )
-from .pd_role import uses_prefill_ops
-from .prefill_metadata import reuse_prefill_metadata
+from .cache import PACKED_CACHE_FORMAT
+from .config import uses_prefill_ops
 
 logger = init_logger_ascend(__name__)
 
@@ -168,7 +166,7 @@ def _indexpool_hadamard_basis(device, stream_handle):
 
 
 def _encode_prefill_indexpool_fp8(vectors, *, output_dtype=torch.float32):
-    from .prefill_ops.index_pool_fp8 import round_prefill_fp8_rows
+    from .prefill_ops.indexer import round_prefill_fp8_rows
 
     stream = torch.npu.current_stream(vectors.device)
     basis = _indexpool_hadamard_basis(vectors.device, stream.npu_stream)
@@ -251,7 +249,7 @@ class FlashIndexPool(nn.Module):
             and positions.ndim in (1, 2)
             and (positions.ndim == 1 or (positions.shape[0] == 3 and self.sections))
         ):
-            from .prefill_ops.index_pool_rope import apply_factors, make_factors
+            from .prefill_ops.indexer import apply_factors, make_factors
 
             stream = torch.npu.current_stream(vectors.device).npu_stream
             sections = tuple(self.sections) if self.sections else None
@@ -335,7 +333,7 @@ class FlashIndexPool(nn.Module):
 
     def _encode_fp8(self, vectors, *, full_graph, output_dtype=torch.float32):
         if is_decode_batch(get_flash_attention_metadata()):
-            from .index_pool_fp8 import encode_indexpool_fp8_fused
+            from .indexer import encode_indexpool_fp8_fused
 
             return encode_indexpool_fp8_fused(vectors)
         if (
@@ -387,7 +385,7 @@ class FlashIndexPool(nn.Module):
             return raw.new_empty((0, INDEX_DIM), dtype=torch.float32)
         decode_pool = is_decode_batch(get_flash_attention_metadata())
         if decode_pool:
-            from .index_pool_fusions import pool_norm
+            from .indexer import pool_norm
 
             if not hasattr(self, "_decode_pool_projection"):
                 self._decode_pool_projection = torch.cat(
@@ -417,7 +415,7 @@ class FlashIndexPool(nn.Module):
             and self.key_norm.weight.is_contiguous()
             and 128 <= groups <= 1024
         ):
-            from .prefill_ops.pool_weighted_stats import pool_with_inverse_norm
+            from .prefill_ops.indexer import pool_with_inverse_norm
 
             raw_fp32 = raw.float()
             values = self.key_value_projection(raw_fp32)
@@ -474,7 +472,8 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
         self.decode_index_pages = None
         self.ops = triton_ops
         if self.use_cann_prefill:
-            from . import li_prefill_p0, prefill_ops
+            from . import indexer as li_prefill_p0
+            from . import prefill_ops
 
             self.ops = prefill_ops
             self.li_prefill = li_prefill_p0
@@ -616,7 +615,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
         )
         self._mrope_channel_bits = None
         if self.use_eager_prefill_rotary and HAS_TRITON and getattr(self.rotary_emb, "mrope_interleaved", False):
-            from .prefill_ops.small_aiv import mrope_channel_bits
+            from .prefill_ops.fusions import mrope_channel_bits
 
             self._mrope_channel_bits = mrope_channel_bits(self.rotary_emb.mrope_section)
         self.indexer = (
@@ -775,7 +774,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
                         and rotary_cache.shape[-1] == 64
                         and positions.dtype == torch.int64
                     ):
-                        from .prefill_ops.small_aiv import gather_mrope_factors
+                        from .prefill_ops.fusions import gather_mrope_factors
 
                         cos, sin = gather_mrope_factors(rotary_cache, positions, self._mrope_channel_bits)
                     else:
@@ -900,7 +899,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
             and self.local_heads in (4, 8, 16)
             and (self.nope_dim, self.latent_dim, self.rope_dim) == (192, 512, 64)
         ):
-            from .prefill_ops.small_aiv import pack_attention_projections
+            from .prefill_ops.fusions import pack_attention_projections
 
             q_nope, q_pe, kv_c, k_pe = pack_attention_projections(q, kv, self.rope_dim)
         else:
@@ -1033,7 +1032,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
         if keys is not None and self.incremental_index_pool:
             self._update_index_pool(cache, block_size, meta, keys, positions)
         if self.decode_index_pages is not None:
-            from .index_pool_decode import refresh_pages
+            from .indexer import refresh_pages
 
             for request, length in enumerate(meta.seq_lens):
                 if meta.query_start_loc[request + 1] > meta.query_start_loc[request]:
@@ -1078,7 +1077,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
                 and keys.shape == (num_tokens, INDEX_DIM)
                 and 512 <= num_tokens <= 4096
             ):
-                from .prefill_ops.index_pool_norm import token_key_norm_inverse
+                from .prefill_ops.indexer import token_key_norm_inverse
 
                 index_norm = (norm.weight, token_key_norm_inverse(keys, norm.eps))
             else:
@@ -1164,8 +1163,8 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
             and self.use_fp8_cache
             and 0 <= first_token < end_token <= table.numel() * block_size
         ):
-            from .prefill_ops.index_pool_history import read_index_history
-            from .prefill_ops.paged_cache_copy import supports_paged_cache_copy
+            from .prefill_ops.cache import supports_paged_cache_copy
+            from .prefill_ops.indexer import read_index_history
 
             if supports_paged_cache_copy(cache, table, block_size):
                 return read_index_history(
@@ -1227,14 +1226,14 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
                 for _, first, past, new, count in segments
             )
         ):
-            from .prefill_ops.paged_cache_copy import supports_paged_cache_copy
+            from .prefill_ops.cache import supports_paged_cache_copy
 
             assemble = supports_paged_cache_copy(cache, meta.block_table[segments[0][0]], block_size)
         else:
             assemble = False
 
         if assemble:
-            from .prefill_ops.index_pool_assembly import assemble_index_pool_groups
+            from .prefill_ops.indexer import assemble_index_pool_groups
 
             raw, group_map, history_positions = assemble_index_pool_groups(
                 cache,
@@ -1383,7 +1382,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
             return
         attention_query = query if query_fp32 is None else query_fp32
         if fuse_prefill_logits:
-            from .attention_logits import build_mla_logits
+            from .attention_ops import build_mla_logits
 
             scores = torch.bmm(attention_query.float(), kv_selected.float().transpose(1, 2))
             if torch_npu.get_npu_format(scores) != ACL_FORMAT_ND:

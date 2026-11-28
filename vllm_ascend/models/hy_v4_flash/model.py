@@ -20,12 +20,11 @@ from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 from .attention import AscendHYV4FlashAttention, FlashAttentionBackend
-from .dfly_config import METHOD
+from .config import METHOD, uses_prefill_ops
 from .engram import FlashEngram, FlashNgramHashState
-from .engram_prefetch import PrefetchedEngramRows
+from .engram_ops import PrefetchedEngramRows
 from .ihc import FlashHCHeadLayer, FlashHCLayer
 from .moe import AscendFlashMoE
-from .pd_role import uses_prefill_ops
 
 logger = init_logger_ascend(__name__)
 

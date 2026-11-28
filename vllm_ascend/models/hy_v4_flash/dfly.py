@@ -27,8 +27,8 @@ from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.fp8_block import AscendFp8BlockLinearMethod
 
 from .attention import AscendHYV4FlashAttention
-from .attention_common import _head_bmm
-from .dfly_fusions import compact_draft_c8_rows, dual_rms_concat, gated_residual, rounded_add_rms_norm
+from .attention_ops import _head_bmm
+from .dfly_ops import compact_draft_c8_rows, dual_rms_concat, gated_residual, rounded_add_rms_norm
 
 logger = init_logger_ascend(__name__)
 

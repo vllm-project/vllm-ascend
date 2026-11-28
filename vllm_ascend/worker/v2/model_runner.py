@@ -277,7 +277,7 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         )
 
-        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+        from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
 
         self._hy4_prefill_writes = None
         if (
@@ -1074,7 +1074,7 @@ class NPUModelRunner(GPUModelRunner):
 
         prefill_progress = batch_req_state.num_computed_prefill_tokens_np
         prefill_lens = batch_req_state.prefill_len_np
-        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+        from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
 
         hy4_pure_prefill = (
             os.getenv("HY4_PREFILL_SMALL_OPS") == "1"

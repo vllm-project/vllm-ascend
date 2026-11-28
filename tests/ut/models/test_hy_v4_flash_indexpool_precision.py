@@ -6,15 +6,16 @@ import pytest
 import torch
 from vllm.models.hy_v4_flash.reference import pooled_keys
 
-from vllm_ascend.models.hy_v4_flash import attention, index_pool_fusions
-from vllm_ascend.models.hy_v4_flash.index_pool_select import select_pool_candidates
+from vllm_ascend.models.hy_v4_flash import attention
+from vllm_ascend.models.hy_v4_flash import indexer as indexer_ops
+from vllm_ascend.models.hy_v4_flash.indexer import select_pool_candidates
 
 
 def test_decode_pool_keys_keep_position_encoding(monkeypatch):
     monkeypatch.setattr(attention, "get_flash_attention_metadata", lambda: SimpleNamespace(prefill_reqs=(False,)))
     # Isolate the control flow from the device-only pooling kernel.
     monkeypatch.setattr(
-        index_pool_fusions,
+        indexer_ops,
         "pool_norm",
         lambda raw, projection, ape, gamma, eps: pooled_keys(raw, projection[:128], projection[128:], ape, gamma, eps),
     )

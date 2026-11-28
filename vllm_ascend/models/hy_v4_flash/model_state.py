@@ -1,20 +1,196 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""HY4 Flash model state."""
 
 import os
 
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.triton_utils import triton
+from vllm.logger import logger as graph_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.ops.triton.engram_lookback import _gather_lookback_kernel
+from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
 from vllm_ascend.utils import lmhead_tp_enable
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
-from .aclgraph import FlashAclGraphManager
-from .decode_fusions import uses_decode_fusions
-from .pd_role import uses_prefill_ops
+from .attention_ops import uses_decode_fusions
+from .config import uses_prefill_ops
+
+
+@triton.jit
+def _target_embedding_prepare_kernel(
+    ids,
+    weight,
+    output,
+    ID_STRIDE: tl.constexpr,
+    WEIGHT_ROW: tl.constexpr,
+    WEIGHT_COL: tl.constexpr,
+    OUTPUT_ROW: tl.constexpr,
+    OUTPUT_COL: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    token = tl.load(ids + row * ID_STRIDE).to(tl.int64)
+    token = tl.maximum(token, 0)
+    values = tl.load(weight + token * WEIGHT_ROW + col * WEIGHT_COL, col < HIDDEN, other=0)
+    tl.store(output + row * OUTPUT_ROW + col * OUTPUT_COL, values, col < HIDDEN)
+
+
+def _embedding_eligible(embedding, ids, output):
+    """Metadata-only gate; no device data reads, reductions or uploads."""
+    if type(embedding) is not AscendVocabParallelEmbedding:
+        return False
+    if type(embedding.quant_method) is not UnquantizedEmbeddingMethod:
+        return False
+    if embedding.tp_size != 1 or embedding.token_exchange_group is not None:
+        return False
+    reduce_group = getattr(embedding, "output_reduce_group", None)
+    if reduce_group is not None and reduce_group.world_size != 1:
+        return False
+    weight = embedding.weight
+    return (
+        ids.ndim == 1
+        and output.ndim == weight.ndim == 2
+        and ids.dtype in (torch.int32, torch.int64)
+        and weight.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and output.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and weight.device.type == "npu"
+        and ids.device == weight.device == output.device
+        and output.shape[0] >= ids.numel()
+        and output.shape[1] == weight.shape[1]
+        and weight.shape[0] >= embedding.num_embeddings
+        and ids.stride(0) > 0
+        and min(weight.stride()) > 0
+        and min(output.stride()) > 0
+    )
+
+
+def try_prepare_target_embeddings(state, scheduled_encoder_inputs, input_batch, req_states):
+    """Return preallocated buffer view, or None without touching device state.
+
+    Covers pure decode with no media work, no prompt embeddings, no pruning,
+    no PCP/TP exchange, no quantized/LoRA/custom embedding implementation.
+    Padding rows remain untouched, matching the original prepare_inputs_embeds.
+    """
+    if (
+        scheduled_encoder_inputs
+        or getattr(input_batch, "has_prefill", True)
+        or input_batch.is_dummy
+        or state.prompt_embeds_state is not None
+        or getattr(state, "pcp_context", None) is not None
+    ):
+        return None
+    core = getattr(state.model, "language_model", state.model).model
+    if not getattr(core, "uses_dfly", False):
+        return None
+    embedding = core.embed_tokens
+    if state.supports_mm_inputs:
+        runner = state.encoder_runner
+        if runner.is_realtime or state.mm_pruner is not None:
+            return None
+        output = runner.inputs_embeds
+    else:
+        output = state.inputs_embeds
+    ids = input_batch.input_ids[: input_batch.num_tokens]
+    if not _embedding_eligible(embedding, ids, output):
+        return None
+    # Match AscendModelState.prepare_inputs_embeds's host metadata update.
+    setter = getattr(state.model, "set_embedding_num_tokens_padded", None)
+    if setter is not None:
+        setter(input_batch.num_tokens_after_padding)
+    if ids.numel():
+        _target_embedding_prepare_kernel[(ids.numel(), triton.cdiv(output.shape[1], 256))](
+            ids,
+            embedding.weight,
+            output,
+            ids.stride(0),
+            *embedding.weight.stride(),
+            *output.stride(),
+            output.shape[1],
+            256,
+        )
+    return output[: input_batch.num_tokens_after_padding]
+
+
+class FlashAclGraphManager(ModelAclGraphManager):
+    def capture(self, model, model_state, *args, **kwargs):
+        super().capture(model, model_state, *args, **kwargs)
+        self._short_graphs = {}
+        if not uses_decode_fusions(self.vllm_config):
+            return
+        layers = [
+            module
+            for module in model.modules()
+            if getattr(module, "indexer", None) is not None and hasattr(module, "_short_indexpool_capture")
+        ]
+        if not layers:
+            return
+        self._short_limit = min((layer.indexer.budget + 1) * layer.indexer.ratio for layer in layers)
+        long_graphs = self.graphs
+        self.graphs = {}
+        try:
+            for layer in layers:
+                layer._short_indexpool_capture = True
+            super().capture(model, model_state, *args, **kwargs)
+            self._short_graphs = self.graphs
+        finally:
+            self.graphs = long_graphs
+            for layer in layers:
+                layer._short_indexpool_capture = False
+
+    def _init_candidates(self):
+        super()._init_candidates()
+        decode_graphs = [
+            desc for desc in self._capture_descs.get(CUDAGraphMode.FULL, ()) if desc.uniform_token_count is not None
+        ]
+        self._capture_descs.clear()
+        self._candidates.clear()
+        if decode_graphs:
+            self._capture_descs[CUDAGraphMode.FULL] = decode_graphs
+
+    def dispatch(self, num_reqs, num_tokens, uniform_token_count, num_active_loras, max_query_len=None, num_ubatches=1):
+        if uniform_token_count is not None:
+            desc = super().dispatch(
+                num_reqs, num_tokens, uniform_token_count, num_active_loras, max_query_len, num_ubatches
+            )
+            if desc in self.graphs:
+                return desc
+        return BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_active_loras=num_active_loras,
+            num_ubatches=num_ubatches,
+        )
+
+    def run_fullgraph(self, desc):
+        metadata = self.model_runner.model_state.attn_metadata
+        batch = next(iter(metadata.values()), None) if isinstance(metadata, dict) else None
+        short_graph = getattr(self, "_short_graphs", {}).get(desc)
+        use_short = (
+            short_graph is not None and batch is not None and max(batch.seq_lens, default=0) <= self._short_limit
+        )
+        original = self.graphs[desc]
+        try:
+            if use_short:
+                self.graphs[desc] = short_graph
+            output = super().run_fullgraph(desc)
+        finally:
+            self.graphs[desc] = original
+        graph_logger.info_once(
+            "FULL ACLGraph replay is active for HYV4 Flash target (%d requests, %d query tokens).",
+            desc.num_reqs,
+            desc.num_tokens,
+        )
+        return output
+
 
 logger = init_logger_ascend(__name__)
 
@@ -179,8 +355,6 @@ class FlashModelState(AscendModelState):
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         if self._decode_optimizations:
-            from .target_embedding_triton import try_prepare_target_embeddings
-
             result = try_prepare_target_embeddings(self, scheduled_encoder_inputs, input_batch, req_states)
             if result is not None:
                 return result
@@ -278,7 +452,7 @@ class FlashModelState(AscendModelState):
             )
             and self._decode_optimizations
         ):
-            from .engram_hash_triton import fused_engram_hashes
+            from .engram_hash import fused_engram_hashes
 
             inputs = self.prepare_engram_dummy_inputs(
                 input_batch.num_reqs_after_padding, input_batch.num_tokens_after_padding
@@ -361,7 +535,7 @@ class FlashModelState(AscendModelState):
 
     def _prepare_engram_rows(self, hashes, rows, *, packed_hashes=None):
         if self._decode_optimizations:
-            from .engram_row_prepare import try_prepare_engram_rows
+            from .engram_ops import try_prepare_engram_rows
 
             if try_prepare_engram_rows(self, hashes, rows, packed_hashes):
                 return
@@ -393,7 +567,7 @@ class FlashModelState(AscendModelState):
             device_rows = torch.stack(host_rows).to(hashes.device)
             fused_rows = False
             if self._decode_optimizations:
-                from .engram_row_scatter import scatter_engram_rows
+                from .engram_ops import scatter_engram_rows
 
                 fused_rows = scatter_engram_rows(device_rows, rows)
             if not fused_rows:

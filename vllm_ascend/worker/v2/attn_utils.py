@@ -98,7 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.models.hy_v4_flash.cache_layout import is_hy4_packed_cache
+from vllm_ascend.models.hy_v4_flash.cache import is_hy4_packed_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,

@@ -17,9 +17,9 @@ from vllm.models.hy_v4_flash.reference import (
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows, pack_c8_components
-from vllm_ascend.models.hy_v4_flash.aclgraph import FlashAclGraphManager
 from vllm_ascend.models.hy_v4_flash.attention import AscendHYV4FlashAttention, FlashMetadataBuilder
 from vllm_ascend.models.hy_v4_flash.dfly_speculator import build_reuse_indices
+from vllm_ascend.models.hy_v4_flash.model_state import FlashAclGraphManager
 
 
 def test_flat_vl_config_resolves_architecture_and_per_layer_geometry():

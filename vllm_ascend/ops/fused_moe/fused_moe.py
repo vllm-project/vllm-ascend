@@ -268,7 +268,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         pair_width = getattr(self, "hy4_decode_return_pair", 0)
         if pair_width:
             from vllm_ascend.models.hy_v4_flash.attention import get_flash_attention_metadata
-            from vllm_ascend.models.hy_v4_flash.decode_fusions import is_decode_batch
+            from vllm_ascend.models.hy_v4_flash.attention_ops import is_decode_batch
 
             if is_decode_batch(get_flash_attention_metadata()):
                 # HY4 consumes this pair with native AddRmsNorm. All routed

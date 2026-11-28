@@ -41,10 +41,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
-from vllm_ascend.models.hy_v4_flash.cache_layout import (
-    group_hy4_packed_cache,
-    is_hy4_packed_cache,
-)
+from vllm_ascend.models.hy_v4_flash.cache import group_hy4_packed_cache, is_hy4_packed_cache
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_groups, paired_sfa_pool_bytes
 from vllm_ascend.models.qwen4_exp.cache_config import (
