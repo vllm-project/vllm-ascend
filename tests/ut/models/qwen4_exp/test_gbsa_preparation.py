@@ -185,6 +185,7 @@ def test_pack_wide_positions_and_strided_buffers(dtype):
             requests,
             output,
             *indices.stride(),
+            lengths.stride(0),
             *output.stride(),
             rows,
             3,
