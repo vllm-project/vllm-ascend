@@ -27,13 +27,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import Mooncak
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import plan_layerwise_cache_reuse
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
+    get_cache_views,
     get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.worker.v2 import attn_utils
 
 
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16], ids=["fp8_c8", "bf16"])
-def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
+@pytest.mark.parametrize("query_heads", [1, 64])
+def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype, query_heads):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     packed = dtype == torch.float8_e4m3fn
@@ -72,6 +74,7 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     main = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
+        num_heads=query_heads,
         head_size=656 if packed else 576,
         dtype=dtype,
         cache_sparse_sfa_c8=packed,
@@ -95,9 +98,25 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     builder = AscendKVCacheConfigBuilder()
     groups = builder.get_kv_cache_groups(runtime, specs)
     assert len(groups) == 1 and len(groups[0].layer_names) == 101
+    # Compare the same producer with only shared-buffer reuse disabled.
+    native_transfer = replace(
+        transfer_config,
+        kv_connector_extra_config={**transfer_config.kv_connector_extra_config, "layerwise_num_shared_buffers": None},
+    )
+    native_runtime = SimpleNamespace(**(vars(runtime) | {"kv_transfer_config": native_transfer}))
+    native_groups = builder.get_kv_cache_groups(native_runtime, specs)
+    assert native_groups == groups
+    native_config = builder.get_kv_cache_config_from_groups(native_runtime, native_groups, num_blocks=3)
+    assert plan_layerwise_cache_reuse(native_config, native_runtime) is None
+    assert get_layerwise_reuse_backing_bytes(native_config) is None
+    assert main.page_size_bytes == 128 * (656 if packed else 576 * 2)
+    assert indexer.page_size_bytes == 128 * (132 if packed else 128 * 2)
     bytes_per_block = builder._get_pool_bytes_per_block(runtime, groups)
     assert bytes_per_block == 5 * (main.page_size_bytes + indexer.page_size_bytes)
     config = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    assert main.num_heads == query_heads
+    assert all(t.block_stride == specs[name].page_size_bytes for t in config.kv_cache_tensors for name in t.layers)
+    assert set(get_cache_views(config, specs)) == specs.keys()
     layout = plan_layerwise_cache_reuse(config, runtime)
     assert layout is not None
     assert layout.prefetch_layer_map[10] == (0, 6)
@@ -107,6 +126,9 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     expected_bytes = config.num_blocks * bytes_per_block
     assert get_layerwise_reuse_backing_bytes(config) == expected_bytes
     worker_config = apply_layerwise_kv_cache_plan(config, transfer_config, layout)
+    shared_views = get_cache_views(worker_config, specs, layout.cache_view_sizes)
+    assert set(shared_views) == specs.keys()
+    assert all(0 <= start < end <= expected_bytes for _, start, end in shared_views.values())
 
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     attn_layers = {
@@ -138,6 +160,11 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     (backing,) = allocations
     assert backing.numel() == expected_bytes
     assert all(view.untyped_storage().data_ptr() == backing.data_ptr() for views in caches.values() for view in views)
+    assert all(
+        backing.data_ptr() <= view.data_ptr() < view.data_ptr() + view.nbytes <= backing.data_ptr() + expected_bytes
+        for views in caches.values()
+        for view in views
+    )
     for entries, source_layer in ((main_entries, 6), (indexer_entries, 0)):
         assert [view.data_ptr() for view in caches[entries[10]]] == [
             view.data_ptr() for view in caches[entries[source_layer]]
@@ -162,6 +189,25 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
             assert scale.data_ptr() == key.data_ptr() + key.numel() * key.element_size()
         else:
             assert not scales
+
+    # Run the real allocator with reuse off, preserving the producer role and
+    # specs. The two paths must expose the same native component layouts.
+    native_start = len(allocations)
+    with monkeypatch.context() as native_patch:
+        native_patch.setattr(attn_utils, "get_current_vllm_config", lambda: native_runtime)
+        native_caches = attn_utils.allocate_kv_cache_main(native_config, torch.device("cpu"), None, [128])
+    native_bytes = config.num_blocks * sum(spec.page_size_bytes for spec in specs.values())
+    assert sum(tensor.nbytes for tensor in allocations[native_start:]) == native_bytes
+    assert expected_bytes < native_bytes
+    for name, components in caches.items():
+        original = native_caches[name]
+        assert len(components) == len(original)
+        assert sum(view.nbytes for view in components) == config.num_blocks * specs[name].page_size_bytes
+        for shared, native in zip(components, original, strict=True):
+            assert (shared.shape, shared.dtype, shared.stride()) == (native.shape, native.dtype, native.stride())
+            storage = native.untyped_storage()
+            assert storage.data_ptr() <= native.data_ptr() < native.data_ptr() + native.nbytes
+            assert native.data_ptr() + native.nbytes <= storage.data_ptr() + storage.nbytes()
 
     # Allocate D with the same cache specs and the normal, non-layerwise layout.
     decode_transfer = KVTransferConfig(kv_connector="AscendStoreConnector", kv_role="kv_consumer")
