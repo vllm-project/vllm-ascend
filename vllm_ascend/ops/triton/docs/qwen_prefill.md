@@ -3,8 +3,9 @@
 The batch-one BF16 vision path reads Q and K directly from a contiguous
 token-major QKV projection with head dimension 72. Each program rotates both
 halves of one token plane using the original half-width cosine and sine tables.
-The residual LayerNorm kernel writes both the rounded BF16 residual and the
-normalized result using FP32 reductions.
+The vision block calls the torch-npu binding for CANN aclnnAddLayerNorm with
+additional_output=True. Its first output feeds the MLP and its fourth output
+carries the residual for the following addition.
 
 For contiguous, non-interleaved GDN projections, split_packed_qkvz copies the
 QKV prefix and Z suffix into separate dense outputs in a single launch. This

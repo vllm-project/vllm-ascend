@@ -134,6 +134,7 @@ if HAS_TRITON:
             and sin.is_contiguous()
             and cos.device == sin.device == x.device
             and cos.dtype == sin.dtype == x.dtype
+            and hasattr(torch.ops.npu, "npu_add_layer_norm")
             and isinstance(self.norm2, torch.nn.LayerNorm)
             and self.norm2.normalized_shape == (1152,)
             and self.norm2.weight is not None

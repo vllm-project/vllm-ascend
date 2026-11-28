@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Layout kernels for the batch-one Qwen vision encoder and packed GDN projection."""
+"""Layout and normalization operators for the batch-one Qwen vision encoder and packed GDN projection."""
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -48,29 +48,8 @@ def vision_qk_rope(qkv, cos, sin):
     return out.unbind(0)
 
 
-@triton.jit
-def _add_norm(x, attn, weight, bias, residual, normalized, width: tl.constexpr, eps: tl.constexpr, TILE: tl.constexpr):
-    row = tl.program_id(0).to(tl.int64)
-    col = tl.arange(0, TILE)
-    mask = col < width
-    offset = row * width + col
-    a = tl.load(x + offset, mask, other=0)
-    b = tl.load(attn + offset, mask, other=0)
-    summed = (a.to(tl.float32) + b.to(tl.float32)).to(a.dtype)
-    tl.store(residual + offset, summed, mask)
-    value = summed.to(tl.float32)
-    centered = tl.where(mask, value - tl.sum(value, 0) / width, 0.0)
-    scale = tl.rsqrt(tl.sum(centered * centered, 0) / width + eps)
-    w = tl.load(weight + col, mask, other=0).to(tl.float32)
-    bias_value = tl.load(bias + col, mask, other=0).to(tl.float32)
-    tl.store(normalized + offset, centered * scale * w + bias_value, mask)
-
-
 def vision_add_norm(x, attn, norm):
-    residual = torch.empty_like(x)
-    normalized = torch.empty_like(x)
-    width = x.shape[-1]
-    _add_norm[(x.numel() // width,)](
-        x, attn, norm.weight, norm.bias, residual, normalized, width, norm.eps, triton.next_power_of_2(width)
+    normalized, _, _, residual = torch.ops.npu.npu_add_layer_norm(
+        x, attn, norm.weight, norm.bias, epsilon=norm.eps, additional_output=True
     )
     return residual, normalized

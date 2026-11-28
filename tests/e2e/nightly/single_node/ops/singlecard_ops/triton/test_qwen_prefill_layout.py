@@ -24,8 +24,16 @@ def test_vision_prefill():
         c, s = cos[:, None].float(), sin[:, None].float()
         ref = torch.cat((left * c - right * s, right * c + left * s), dim=-1)
         torch.testing.assert_close(result[0], ref.bfloat16(), atol=0.03125, rtol=0.01)
-    x, attn = torch.randn(2, 11, 1, 1152, **params).unbind()
+
+
+@pytest.mark.parametrize("tokens", [11, 20048, 37836])
+@torch.inference_mode()
+def test_native_vision_add_norm(tokens):
+    params = dict(device="npu", dtype=torch.bfloat16)
+    x, attn = torch.randn(2, tokens, 1, 1152, **params).unbind()
     norm = torch.nn.LayerNorm(1152, eps=1e-6, **params)
+    norm.weight.uniform_(0.75, 1.25)
+    norm.bias.uniform_(-0.25, 0.25)
     residual, normalized = vision_add_norm(x, attn, norm)
     assert torch.equal(residual, x + attn)
     torch.testing.assert_close(normalized, norm(x + attn), atol=0.03125, rtol=0.01)
