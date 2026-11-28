@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -133,18 +132,10 @@ DEEPSEEK_V4_CASE = WeightUpdateModelCase(
 DEEPSEEK_CASES = (DEEPSEEK_V4_CASE,)
 
 
-def _dsv41_engram_args() -> tuple[str, ...]:
-    """``--engram-config`` for the V4.1 lane, or nothing when engram is off.
-
-    Gated because ``EngramConfig.verify_model_config()`` rejects an engram config
-    for a model with no n-gram embeddings, so a lane served from a config with
-    ``engram_layer_ids == []`` must not pass it at all. ``cpu_offload`` stays
-    switchable to tell the host/UVA-backed table apart from a device one.
-    """
-    if os.environ.get("DSV41_ENGRAM", "1") != "1":
-        return ()
-    offload = "true" if os.environ.get("DSV41_ENGRAM_CPU_OFFLOAD", "1") == "1" else "false"
-    return ("--engram-config", f'{{"cpu_offload": {offload}}}')
+# Turning Engram back on needs all of: `engram_layer_ids` pointing at a kept layer,
+# the vocabulary reductions (`engram_vocab_size`, `engram_num_embeddings`), and
+# `("--engram-config", '{"cpu_offload": false}')` in `extra_server_args` - plus the
+# loader change that installs a transferred table (see the scope note above).
 
 
 def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
@@ -156,57 +147,55 @@ def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.devic
     return DeepseekV41WeightSource(case, device)
 
 
-# Engram host-offload coverage. The published V4.1 checkpoint ships two Engram
-# tables of 384M x 256 BF16 rows (`text_config.engram_num_embeddings`), i.e.
-# ~183 GiB each; reloading one must update the registered host range instead of
-# materializing the table on the device, which is the OOM this lane guards.
+# DeepSeek-V4.1 weight-transfer coverage.
 #
-# `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only:
-# `pytest_model_cases` selects a non-matrix case for `npu_ipc` with
-# `packed=False` and drops it from every other lane, so the packed buffer
-# lifecycle cannot mask a reload regression here.
+# TODO(#22162): Engram is off (`engram_layer_ids: []`) until the loader installs a
+# transferred table; serving a synthesised checkpoint instead would only make the
+# lane look green.
 #
-# Scope.  The lane covers the host/UVA table across a level-2 sleep -> wake ->
-# weight transfer -> KV-cache wake cycle, plus the value update of every
-# non-Engram parameter: the payload is regenerated per round, so the post-update
-# generation has to reproduce a reference started from the same payload.
-#
-# It does NOT cover an Engram *value* update, and passing this lane must not be
-# read as evidence that one lands.  `AscendParallelEngramEmbedding._weight_loader`
-# deliberately ignores `loaded_weight` and re-reads the rows from the indexed
-# shard bound by `bind_checkpoint` - that streaming is what keeps a
-# 22.89 GiB-per-rank table off the device - while `iter_full()` regenerates the
-# same fixed-seed payload every round (W0 == W1 == W2) and the oracle compares
-# against the startup reference.  A transfer that never landed therefore still
-# matches.  Covering it needs distinct per-round payloads, a loader that consumes
-# the transferred tensor inside the reload window, and a per-round reference;
-# tracked separately.
-DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
-    id="deepseek-v4.1-flash-engram-cpu-offload",
-    # V4.1 cannot be enumerated through Transformers, so the lane is served from
-    # a local copy of the released config (plus its tokenizer) rather than a repo
-    # id. All 40 layers and the released shape parameters are kept so the
-    # published headers stay authoritative; only the expert count, the engram
-    # vocabulary and the MTP stages are reduced, and that reduction lives in the
-    # model directory's own config.json rather than in ``--hf-overrides``.
-    model=os.environ.get("DSV41_MODEL_DIR", ""),
-    # The reduction lives in that config.json; a nested override would replace the
-    # sub-config (see ``_dsv41_text_config``).
-    hf_overrides={},
-    extra_server_args=(
-        "--tokenizer-mode",
-        "deepseek_v41",
-        # The flag, not the default of ``cpu_offload``, is what enables offload.
-        *_dsv41_engram_args(),
-    ),
+# `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only.
+DEEPSEEK_V41_CASE = WeightUpdateModelCase(
+    id="deepseek-v4.1-flash-bf16-6l",
+    # Served from the published repo like the V4 lanes (config/tokenizer via HF cache).
+    model="deepseek-ai/DeepSeek-V4.1-Flash",
+    # Flat keys: ``DeepseekV41Config`` flattens ``text_config`` before vLLM applies
+    # overrides, so a nested ``{"text_config": {...}}`` would replace the sub-config
+    # instead (see ``_dsv41_text_config``).
+    #
+    # A plain six-layer prefix of the released stack: the payload comes from the
+    # published headers, so a layer promoted to an ``index``/``kv`` *source* would
+    # need ``compressor``/``indexer`` weights only the real sources have. Covers
+    # ratio 0 at 0-1, the first source at 2 and its consumers at 3-5; ratio 1 and
+    # candidate blocks start at layer 20 (21 layers), a nightly-sized lane.
+    hf_overrides={
+        "num_hidden_layers": 6,
+        "compress_ratios": [0, 0, 2, 2, 2, 2],
+        "index_source_layer_ids": [2],
+        "kv_source_layer_ids": [2],
+        "n_routed_experts": 8,
+        "num_nextn_predict_layers": 0,
+        "dspark_noise_token_id": None,
+        # No Engram table: see the scope note above.
+        "engram_layer_ids": [],
+        "max_position_embeddings": 4096,
+        "rope_scaling": {
+            "rope_type": "yarn",
+            "factor": 1.0,
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "original_max_position_embeddings": 4096,
+        },
+        "image_token_id": 0,
+        # The lane is served in bf16; the released descriptor would quantize it.
+        "dtype": "bfloat16",
+        "quantization_config": None,
+    },
+    extra_server_args=("--tokenizer-mode", "deepseek_v41"),
     weight_source_factory=_deepseek_v41_weight_source,
-    skip_reason=(
-        None if os.environ.get("DSV41_MODEL_DIR") else "set DSV41_MODEL_DIR to a DeepSeek-V4.1 checkpoint directory"
-    ),
 )
 
 
-DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
+DEEPSEEK_V41_CASES = (DEEPSEEK_V41_CASE,)
 
 
 DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(

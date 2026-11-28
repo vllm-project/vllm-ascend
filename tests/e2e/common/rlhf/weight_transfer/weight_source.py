@@ -25,7 +25,7 @@ import struct
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -320,20 +320,39 @@ class TensorSpec:
     shape: tuple[int, ...]
 
 
-def _dsv41_text_config(case: Any) -> dict[str, Any]:
-    """The reduced model's own ``text_config``.
+def _model_file(model: str, name: str) -> Path | None:
+    """One of the model's own files, from a local directory or the HF cache."""
+    local = Path(model) / name
+    if local.is_file():
+        return local
+    try:
+        from huggingface_hub import hf_hub_download
 
-    The case's ``hf_overrides`` deliberately is *not* the authority.  vLLM's
-    ``DeepseekV41Config`` flattens the released ``text_config`` onto the
-    top-level config object, so a nested ``{"text_config": {...}}`` override
-    replaces that sub-config instead of merging into it, dropping every field it
-    does not restate — ``num_attention_heads`` among them, which ``ModelConfig``
-    then rejects: "The text_config extracted from the model config does not have
-    ``num_attention_heads``".  Reading the directory the lane is actually served
-    from keeps this source and the server in agreement by construction.
+        return Path(hf_hub_download(model, name))
+    except Exception:  # noqa: BLE001 - the caller decides whether it is required
+        return None
+
+
+@cache
+def _read_model_config(model: str) -> dict[str, Any]:
+    """The model's ``config.json`` as a dict, read once per model."""
+    path = _model_file(model, "config.json")
+    if path is None:
+        raise FileNotFoundError(f"could not read config.json from {model!r}")
+    return json.loads(path.read_text())
+
+
+def _dsv41_text_config(case: Any) -> dict[str, Any]:
+    """The case's effective ``text_config``: the released one, then its overrides.
+
+    Overrides are flat because ``DeepseekV41Config`` flattens ``text_config`` before
+    ``get_config`` applies them; a nested override would replace the sub-config.
     """
-    config = json.loads((Path(case.model) / "config.json").read_text())
-    return config.get("text_config", config)
+    text = dict(_read_model_config(case.model).get("text_config") or {})
+    for key, value in (case.hf_overrides or {}).items():
+        if key in text:
+            text[key] = value
+    return text
 
 
 def _dsv41_engram_table_shapes(text_config: dict[str, Any]) -> dict[str, tuple[int, int]]:
@@ -445,7 +464,8 @@ class DeepseekV41WeightSource(WeightSource):
     The lane keeps every layer and the released ``hidden_size`` / ``head_dim`` /
     ``moe_intermediate_size``, so a surviving tensor has the shape the checkpoint
     gives it; only counts shrink (experts, Engram vocabulary, MTP stages, vision
-    blocks), and that reduction lives in the model directory's own ``config.json``.
+    blocks), and that reduction travels as the case's flat ``hf_overrides`` (see
+    ``_dsv41_text_config``).
     Two deliberate exceptions to "headers are the truth":
 
     * the Engram table's row count is derived from the real ``EngramLayout``
@@ -469,13 +489,8 @@ class DeepseekV41WeightSource(WeightSource):
         self._engram_layer_ids = tuple(text.get("engram_layer_ids") or ())
         self._engram_shapes = _dsv41_engram_table_shapes(text) if self._engram_layer_ids else {}
         self._num_vision_blocks = int(
-            json.loads((Path(case.model) / "config.json").read_text())
-            .get("vision_config", {})
-            .get("num_hidden_layers", 2)
+            _read_model_config(case.model).get("vision_config", {}).get("num_hidden_layers", 2)
         )
-        # The model directory also carries the config and tokenizer the reference
-        # startup-load checkpoint has to reproduce.
-        self._model_dir = Path(case.model)
         self._specs = self._read_layout()
 
     # -- layout -------------------------------------------------------------
@@ -602,7 +617,8 @@ class DeepseekV41WeightSource(WeightSource):
 
         Unlike ``FixedRandomWeightSource`` this shards the tensors behind a
         ``model.safetensors.index.json``: the config and tokenizer come from the
-        lane's own model directory, and a single ``model.safetensors`` is not
+        lane's own model (a directory, or the HuggingFace cache), and a single
+        ``model.safetensors`` is not
         enough once engram is enabled, because the engram preflight rejects
         anything that is not an *indexed* checkpoint — "Engram table
         'layers.N.engram.embed.weight' is not in an indexed safetensors
@@ -618,11 +634,11 @@ class DeepseekV41WeightSource(WeightSource):
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
         for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
-            source = self._model_dir / name
-            if source.exists():
+            source = _model_file(self._case.model, name)
+            if source is not None:
                 shutil.copyfile(source, target / name)
             elif name == "config.json":
-                raise FileNotFoundError(f"{self._case.id}: {source} is required to build the reference")
+                raise FileNotFoundError(f"{self._case.id}: {name} is required to build the reference")
 
         weight_map: dict[str, str] = {}
         total_size = 0
