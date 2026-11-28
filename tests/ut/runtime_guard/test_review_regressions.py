@@ -514,6 +514,56 @@ def test_v12b_logits_finite_decode_rows_still_attributed():
     assert alerts[0].req_id == "b"
 
 
+def test_v12b2_logits_finite_misaligned_without_indices_does_not_guess_req():
+    """nrows != num_reqs and no logits_indices → warn, never req_ids[row].
+
+    Spec-style layout [A, A, B] with NaN on the second A row used to hard-map
+    row=1 → req_ids[1]=B when indices were missing.
+    """
+    from ._helpers import capture_logger_text
+
+    section = {"enabled": True}
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    input_batch = SimpleNamespace(req_ids=["A", "B"])
+    runner = SimpleNamespace(input_batch=input_batch)
+    det = LogitsFiniteDetector(runtime_config=rc, runner=runner)
+
+    logits = torch.randn(3, 8)
+    logits[1, :] = float("nan")
+    with capture_logger_text(
+        "vllm_ascend.observability.runtime_guard.detector.logits_finite",
+        level=logging.WARNING,
+    ) as buf:
+        det.check_all(logits=logits, logits_indices=None, input_batch=input_batch)
+        assert det.check_deferred() == []
+    assert "cannot attribute" in buf.getvalue()
+
+
+def test_v12b3_logits_finite_misaligned_with_indices_maps_correct_req():
+    """Same [A, A, B] layout: indices + qsl attribute the NaN row to A."""
+    section = {"enabled": True}
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    qsl = np.array([0, 2, 3], dtype=np.int64)
+    input_batch = SimpleNamespace(req_ids=["A", "B"], query_start_loc_np=qsl)
+    runner = SimpleNamespace(input_batch=input_batch)
+    det = LogitsFiniteDetector(runtime_config=rc, runner=runner)
+
+    logits = torch.randn(3, 8)
+    logits[1, :] = float("nan")
+    idx = torch.tensor([0, 1, 2], dtype=torch.int64)
+    det.check_all(logits=logits, logits_indices=idx, input_batch=input_batch)
+    alerts = det.check_deferred()
+    assert len(alerts) == 1
+    assert alerts[0].req_id == "A"
+    assert alerts[0].detail.get("logits_row") == 1
+
+
 def test_v12c_logits_finite_alerts_same_step_no_window():
     """Dirty logits alert on the same step's check_deferred (no multi-step OR)."""
     section = {"enabled": True}

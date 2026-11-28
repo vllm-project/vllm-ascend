@@ -359,18 +359,17 @@ class LogitsFiniteDetector(ConfigBackedDetector):
             return []
         skip = skip_req_ids or set()
         nrows = int(row_finite.shape[0]) if row_finite.dim() > 0 else 1
-        # 1:1 decode rows ↔ reqs: no indices D2H. Spec / misaligned: materialize.
-        if num_reqs > 0 and nrows == num_reqs:
-            idx_list: list[int] = []
-        else:
-            idx_list = _materialize_idx_list(logits_indices)
+        # Only treat row↔req as 1:1 when counts match. Spec / misaligned batches
+        # need logits_indices (+ qsl); never guess req_id from the row number.
+        one_to_one = num_reqs > 0 and nrows == num_reqs
+        idx_list: list[int] = [] if one_to_one else _materialize_idx_list(logits_indices)
 
         alerts: list[Incident] = []
         seen_req: set[str] = set()
         unresolved_rows: list[int] = []
         for row_t in bad_rows.tolist():
             row = int(row_t)
-            req_id, req_idx = _row_to_req(row, req_ids, num_reqs, qsl, idx_list)
+            req_id, req_idx = _row_to_req(row, req_ids, num_reqs, qsl, idx_list, one_to_one=one_to_one)
             if not req_id:
                 # A1: unattributable rows → warn only (no guessed / null-req Incident).
                 unresolved_rows.append(row)
@@ -414,21 +413,25 @@ def _row_to_req(
     num_reqs: int,
     qsl: np.ndarray | None,
     idx_list: list[int],
+    *,
+    one_to_one: bool,
 ) -> tuple[str | None, int | None]:
-    req_id: str | None = None
-    req_idx: int | None = None
-    if num_reqs > 0 and row < num_reqs and not idx_list:
-        req_idx = row
-        req_id = req_ids[row] if row < len(req_ids) else None
-    elif qsl is not None and idx_list and row < len(idx_list):
+    """Map a logits row to ``(req_id, req_idx)``, or ``(None, None)`` if unknown.
+
+    Row-index attribution is allowed only when ``one_to_one`` (``nrows ==
+    num_reqs``). Otherwise require ``logits_indices`` + ``query_start_loc``;
+    refuse to guess — a wrong ``req_id`` is worse than skipping the alert.
+    """
+    if one_to_one and row < num_reqs:
+        if row < len(req_ids):
+            return req_ids[row], row
+        return None, None
+    if qsl is not None and idx_list and row < len(idx_list):
         flat = idx_list[row]
         req_idx = req_index_for_flat_token(flat, qsl, num_reqs)
         if req_idx is not None and req_idx < len(req_ids):
-            req_id = req_ids[req_idx]
-    elif num_reqs > 0 and row < len(req_ids):
-        req_idx = row
-        req_id = req_ids[row]
-    return req_id, req_idx
+            return req_ids[req_idx], req_idx
+    return None, None
 
 
 def _materialize_idx_list(logits_indices: torch.Tensor | None) -> list[int]:
