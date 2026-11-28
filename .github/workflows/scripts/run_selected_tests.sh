@@ -6,8 +6,8 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
-# Set to true temporarily to run all selected targets before reporting failure.
-continue_on_error=false
+# The diagnostic workflow keeps running targets and still returns an overall failure.
+continue_on_error="${CI_CONTINUE_SELECTED_TESTS_ON_ERROR:-false}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
