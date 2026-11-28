@@ -23,6 +23,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
+
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,

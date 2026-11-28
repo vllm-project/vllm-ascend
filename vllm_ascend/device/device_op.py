@@ -24,6 +24,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import (
     DeviceAdaptorFamily,
     HardwareCapability,
@@ -34,8 +36,6 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-
-from vllm_ascend.device import utils as device_utils
 from vllm_ascend.quantization.utils import QUANT_DTYPES, resolve_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:

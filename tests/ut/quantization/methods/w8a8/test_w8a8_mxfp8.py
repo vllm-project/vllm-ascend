@@ -3,26 +3,26 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
-from tests.ut.base import TestBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
-from vllm_ascend.weight_switch import WeightSwitchConfig
 
+from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DSDynamicLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 # The MXFP schemes gate on the MX weight format at construction; tests build
 # them on any machine by pinning a profile that reports MXFP8 support.

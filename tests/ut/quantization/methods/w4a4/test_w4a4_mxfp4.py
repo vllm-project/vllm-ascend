@@ -3,12 +3,10 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
-from tests.ut.base import TestBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
+from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.base import AscendMoEScheme
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
@@ -16,7 +14,9 @@ from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicLinearMethod,
     _rename_packed_weight_parameter,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):

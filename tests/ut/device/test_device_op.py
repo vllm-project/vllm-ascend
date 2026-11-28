@@ -5,11 +5,11 @@ from unittest import mock
 import pytest
 import torch
 import torch_npu
+
 from vllm_ascend.attention.indexer import QLIMetadataBuffers, QLIMetadataConfig
+from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-
-from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
