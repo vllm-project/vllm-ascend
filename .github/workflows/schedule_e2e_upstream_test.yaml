@@ -87,7 +87,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
             VLLM_MEDIA_CACHE: /root/.cache/vllm/media
             VLLM_MEDIA_CACHE_TTL_HOURS: 876000
         steps:
@@ -242,7 +242,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
             VLLM_MEDIA_CACHE: /root/.cache/vllm/media
             VLLM_MEDIA_CACHE_TTL_HOURS: 876000
         steps:
