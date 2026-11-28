@@ -54,6 +54,39 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 5. During processing, the P node's scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
 
+##### Messages and Responses through the layerwise proxy
+
+The layerwise example proxy accepts Anthropic Messages and foreground OpenAI
+Responses. With the proxy listening on port 8000 and the same model served on P
+and D, either request can be sent directly to the proxy.
+
+```shell
+curl http://localhost:8000/v1/messages -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+
+curl -N http://localhost:8000/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL","input":"Hello","max_output_tokens":32,"stream":true}'
+```
+
+Replace `MODEL` with the served model name. Both APIs accept `stream: true` for
+SSE and return JSON when streaming is disabled. D allocates the destination
+blocks and calls `/v1/metaserver`. The proxy then sends the same API request to P
+with D's KV metadata, streaming disabled and a one-token output budget. Messages
+uses `max_tokens` and Responses uses `max_output_tokens`.
+
+On a backend `recomputed` stop, the proxy closes the decode attempt, adds its
+text to the first input message (or to a Responses string input), deducts the
+reported output tokens from an explicit budget and starts a fresh D/P exchange.
+The client receives the combined output and the final attempt's usage. Text
+continuation requires a backend that exposes the stop reason. Upstream Responses
+currently omits it. Messages also recognizes a mapped `recomputed` stop sequence
+unless the client explicitly requested that sequence.
+
+Send Responses history in `input`. Background execution, `previous_response_id`
+and server-executed tool loops are unsupported. Client-side function calls and
+reasoning output can be forwarded normally. Recomputing structured output, or
+resuming a Responses input list that starts with a tool result, is unsupported.
+
 ##### Sparse SFA C8 cache transfer
 
 For SFA models, `MooncakeLayerwiseConnector` can transfer the contiguous packed C8 main cache directly. Attention writes the quantized NoPE data, BF16 RoPE data and dynamic scales before recording the cache-write event. The connector waits for that event and copies the bytes without applying the legacy K/V INT8 quantization again. Indexer K and its scale tensor are transferred as separate components of the same physical layer.

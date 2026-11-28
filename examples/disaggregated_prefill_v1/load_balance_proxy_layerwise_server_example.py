@@ -12,6 +12,7 @@
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Supports Anthropic /v1/messages and synchronous OpenAI /v1/responses.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -94,9 +95,10 @@ import json
 import os
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 
 import httpx
+from anyio import CancelScope
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
@@ -107,9 +109,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 
 try:
     # Imported as a package module (tests).
+    from examples.disaggregated_prefill_v1.layerwise_response_protocol import TextContinuation, response_frames
     from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
 except ImportError:
     # Run as a standalone script: the script's own directory is on sys.path.
+    from layerwise_response_protocol import TextContinuation, response_frames
     from sse_frame_parser import SSEFrameParser
 
 logger = init_logger(__name__)
@@ -217,14 +221,17 @@ class ProxyState:
         self.metaserver_params[parent_request_id] = {}
         self.metaserver_ready_events[parent_request_id] = asyncio.Event()
 
-    async def cleanup_request_batch(self, parent_request_id):
+    async def cleanup_request_batch(self, parent_request_id, *, cancel_dispatch=False):
         async with self.metaserver_lock:
             request_ids = self.metaserver_expected_ids.pop(parent_request_id, ())
             for request_id in request_ids:
                 self.req_data_dict.pop(request_id, None)
             self.metaserver_params.pop(parent_request_id, None)
             self.metaserver_ready_events.pop(parent_request_id, None)
-            self.metaserver_dispatch_tasks.pop(parent_request_id, None)
+            dispatch = self.metaserver_dispatch_tasks.pop(parent_request_id, None)
+        if cancel_dispatch and dispatch is not None and not dispatch.done():
+            dispatch.cancel()
+            await asyncio.gather(dispatch, return_exceptions=True)
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -411,10 +418,14 @@ async def send_request_to_service(
     proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
     req_data = req_data.copy()
     req_data["stream"] = False
-    req_data["max_tokens"] = 1
-    req_data["min_tokens"] = 1
-    if "max_completion_tokens" in req_data:
-        req_data["max_completion_tokens"] = 1
+    if endpoint == "/responses":
+        req_data["max_output_tokens"] = 1
+    else:
+        req_data["max_tokens"] = 1
+        if endpoint != "/messages":
+            req_data["min_tokens"] = 1
+            if "max_completion_tokens" in req_data:
+                req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
@@ -479,8 +490,11 @@ async def stream_service_response_with_retry(
 def get_api_request_id(api, req_id, prompt_idx=0):
     if api == "/completions":
         return f"cmpl-{req_id}-{prompt_idx}"
-    elif api == "/chat/completions":
+    elif api in ("/chat/completions", "/messages"):
         return "chatcmpl-" + req_id
+    elif api == "/responses":
+        # ResponsesServing sends the first engine request as <body request_id>_0.
+        return f"resp_{req_id}_0"
 
 
 def get_api_request_ids(api, req_id, req_data):
@@ -495,6 +509,14 @@ def get_api_request_ids(api, req_id, req_data):
     return [get_api_request_id(api, req_id, prompt_idx) for prompt_idx in range(prompt_count)]
 
 
+def remote_prefill_params():
+    return {
+        "do_remote_decode": False,
+        "do_remote_prefill": True,
+        "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
+    }
+
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
@@ -503,11 +525,7 @@ async def _handle_completions(api: str, request: Request):
         request_id = await proxy_state.next_req_id()
         request_ids_api = get_api_request_ids(api, request_id, req_data)
         proxy_state.register_request_batch(request_id, request_ids_api, req_data, request_length, api)
-        req_data["kv_transfer_params"] = {
-            "do_remote_decode": False,
-            "do_remote_prefill": True,
-            "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
-        }
+        req_data["kv_transfer_params"] = remote_prefill_params()
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
         logger.debug("Decoder score: %f", decoder_score)
@@ -649,6 +667,125 @@ async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
 
 
+@asynccontextmanager
+async def _open_layerwise_decode(api, request, request_length):
+    request_id = await proxy_state.next_req_id()
+    body = request.copy()
+    if api == "/responses":
+        # Responses reads its ID from JSON; Messages uses X-Request-Id.
+        body["request_id"] = f"resp_{request_id}"
+    body["kv_transfer_params"] = remote_prefill_params()
+    score = proxy_state.calculate_decode_scores(request_length)
+    idx = proxy_state.select_decoder(score)
+    try:
+        proxy_state.register_request_batch(
+            request_id, get_api_request_ids(api, request_id, body), body, request_length, api
+        )
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
+        async with proxy_state.decoders[idx].client.stream("POST", api, json=body, headers=headers) as response:
+            if not response.is_success:
+                await response.aread()
+            response.raise_for_status()
+            yield response
+    finally:
+        proxy_state.release_decoder(idx, score)
+        with CancelScope(shield=True):
+            await proxy_state.cleanup_request_batch(request_id, cancel_dispatch=True)
+
+
+async def _generate_protocol_response(api, continuation, request_length):
+    failures = 0
+    while True:
+        continuation.begin_attempt()
+        received_frame = False
+        try:
+            async with (
+                _open_layerwise_decode(api, continuation.request, request_length) as response,
+                aclosing(response_frames(response, continuation.streaming)) as frames,
+            ):
+                async for frame in frames:
+                    received_frame = True
+                    output = continuation.forward(frame)
+                    if continuation.recompute:
+                        break
+                    if output is not None:
+                        yield output
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            failures += 1
+            if received_frame or failures >= global_args.max_retries:
+                raise
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
+                raise
+            await asyncio.sleep(global_args.retry_delay * (2 ** (failures - 1)))
+            continue
+        if not continuation.recompute:
+            return
+        failures = 0
+        request_length = len(json.dumps(continuation.request).encode())
+
+
+class LayerwiseProtocolResponse(StreamingResponse):
+    async def stream_response(self, send):
+        # Inspect the first frame before committing status 200. Keep the
+        # iterator inside Starlette's disconnect/cancellation scope throughout.
+        async with aclosing(self.body_iterator) as frames:
+            try:
+                first = await anext(frames, b"")
+            except httpx.HTTPStatusError as exc:
+                self.status_code = exc.response.status_code
+                self.init_headers({"content-type": exc.response.headers.get("content-type", "application/json")})
+                first = exc.response.content
+            except (ValueError, httpx.RequestError) as exc:
+                self.status_code = 502
+                self.init_headers({"content-type": "application/json"})
+                first = json.dumps({"detail": str(exc)}).encode()
+
+            async def content():
+                yield first
+                try:
+                    async for frame in frames:
+                        yield frame
+                except (ValueError, httpx.HTTPError):
+                    logger.exception("Layerwise decode interrupted after response headers were sent")
+
+            self.body_iterator = content()
+            await super().stream_response(send)
+
+
+async def _handle_protocol_request(api, request):
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Expected a JSON request object.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a JSON request object.")
+    if api == "/responses":
+        if body.get("background") or body.get("previous_response_id") is not None:
+            raise HTTPException(400, "Layerwise Responses requires foreground execution and explicit input history.")
+        # A backend-executed tool starts a second engine sub-request whose KV
+        # cannot be produced by replaying the original input on the prefiller.
+        server_tools = ("web_search_preview", "code_interpreter", "container", "mcp")
+        tools = body.get("tools")
+        if isinstance(tools, list) and any(
+            isinstance(tool, dict) and tool.get("type") in server_tools for tool in tools
+        ):
+            raise HTTPException(400, "Layerwise Responses does not support server-executed tools.")
+    continuation = TextContinuation(api, body)
+    chunks = _generate_protocol_response(api, continuation, len(await request.body()))
+    media_type = "text/event-stream" if continuation.streaming else "application/json"
+    return LayerwiseProtocolResponse(chunks, media_type=media_type)
+
+
+@app.post("/v1/messages")
+async def handle_messages(request: Request):
+    return await _handle_protocol_request("/messages", request)
+
+
+@app.post("/v1/responses")
+async def handle_responses(request: Request):
+    return await _handle_protocol_request("/responses", request)
+
+
 @app.get("/healthcheck")
 async def healthcheck():
     return {
@@ -761,6 +898,10 @@ async def metaserver(request: Request):
 
     try:
         await asyncio.shield(dispatch_task)
+    except asyncio.CancelledError:
+        if dispatch_task.cancelled():
+            raise HTTPException(status_code=410, detail="Decode attempt closed before prefill completed") from None
+        raise
     except Exception as error:
         logger.exception("Post metaserver failed for parent request %s", parent_request_id)
         raise HTTPException(status_code=502, detail=str(error)) from error
