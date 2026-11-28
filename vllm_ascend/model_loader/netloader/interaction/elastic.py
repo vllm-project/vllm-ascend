@@ -32,6 +32,9 @@ from ..executor.elastic_load import (
 )
 from ..utils import find_free_port
 
+# Socket timeout in seconds for connection setup and message exchange.
+SOCKET_TIMEOUT_SECONDS = 60
+
 
 def _recv_json_message(sock: socket.socket, max_size: int = 64 * 1024 * 1024) -> dict:
     """Receive one complete JSON object from a TCP socket."""
@@ -131,12 +134,13 @@ class ElasticClient:
             self.server_addr = ip
             self.server_port = port
 
+            sock: socket.socket | None = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(SOCKET_TIMEOUT_SECONDS)
                 logger.info("Start connection to server: %s:%s", self.server_addr, self.server_port)
                 sock.connect((self.server_addr, self.server_port))
                 logger.info("Finish connection to server: %s:%s", self.server_addr, self.server_port)
-                sock.settimeout(60)
 
                 self.s = sock
                 self.ack = self.register(device_id, model_path, tp, pp)
