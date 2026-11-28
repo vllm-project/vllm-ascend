@@ -52,7 +52,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": false}}'
     benchmarks:
       sleep_and_wakeup:
         case_type: curl_cmd
