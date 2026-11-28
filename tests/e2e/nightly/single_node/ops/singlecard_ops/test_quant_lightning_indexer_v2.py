@@ -271,6 +271,32 @@ def test_quant_lightning_indexer_v2_high_physical_page_scale_offset():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A2,
+    reason="Checks that the Ascend A2 package includes the QSLI metadata operator",
+)
+def test_candidate_metadata_is_available_on_a2():
+    query_count, kv_len = 4, 512
+    candidate_lengths = torch.tensor([[32], [24], [16], [8]], dtype=torch.int32, device="npu")
+    metadata = torch.ops._C_ascend.npu_quant_sparse_lightning_indexer_metadata(
+        64,
+        1,
+        128,
+        512,
+        2,
+        candidate_block_length=candidate_lengths,
+        cu_seqlens_q=torch.tensor([0, query_count], dtype=torch.int32, device="npu"),
+        seqused_k=torch.tensor([kv_len], dtype=torch.int32, device="npu"),
+        batch_size=1,
+        max_seqlen_q=query_count,
+        max_seqlen_k=kv_len,
+    )
+    assert metadata.shape == (1024,)
+    assert metadata.dtype == torch.int32
+    assert metadata.device == candidate_lengths.device
+    assert torch.count_nonzero(metadata).item() > 0
+
+
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("query_count", [1, 2, 5])
 @pytest.mark.skipif(

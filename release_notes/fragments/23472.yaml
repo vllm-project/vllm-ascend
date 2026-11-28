@@ -1,0 +1,6 @@
+pr: 23472
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4.1 Flash startup on Ascend A2 when INT8 indexer candidate filtering requires QSLI metadata.
+    model: DeepSeek-V4.1-Flash
+    hardware: [A2]
