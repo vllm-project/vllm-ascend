@@ -90,6 +90,18 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # How the multi-step draft decode loop of speculative decoding is executed
+    # with the v2 model runner. Values:
+    #   "none" (default): upstream behavior. The draft decode loop is eagerly
+    #       executed per step unless the target model replays FULL decode
+    #       graphs, which the "PIECEWISE" target mode used on Ascend never does.
+    #   "piecewise": capture one piecewise ACL graph per draft decode step and
+    #       replay it for each of the num_speculative_tokens - 1 steps.
+    # Only takes effect when num_speculative_tokens > 1 and the target model
+    # does not already replay FULL decode graphs.
+    "VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE": lambda: os.getenv("VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE", "none")
+    .strip()
+    .lower(),
 }
 
 # end-env-vars-definition
