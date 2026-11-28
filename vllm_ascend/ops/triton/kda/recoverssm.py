@@ -226,36 +226,37 @@ def _kda_recoverssm_verify_kernel(
                 final_correction = tl.zeros([BV, BK], tl.float32)
                 boundary_decay = tl.full([BK], 1.0, tl.float32)
                 boundary_correction = tl.zeros([BV, BK], tl.float32)
-                # A5 unrolls the replay so the per-token dependency chain and the
-                # dynamic loop bound drop out, matching the commit kernel's
-                # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
+                # A5 unrolls the replay branchlessly: every token slot issues
+                # its record load under a lane mask instead of behind a
+                # branch, so the scheduler can hoist all SPEC_QUERY_LEN loads
+                # ahead of the accumulation chain and the records' HBM latency
+                # overlaps slot-to-slot instead of serializing. A3 keeps the
+                # runtime bound to bound UB use.
                 if UNROLL_REPLAY:
                     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-                        if reverse_offset < commit_len:
-                            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                                replay_correction_ptr,
-                                replay_kg_ptr,
-                                commit_len - reverse_offset - 1,
-                                offs_k,
-                                offs_v,
-                                mask_k,
-                                mask_v,
-                                stride_correction_pos,
-                                stride_correction_dim,
-                                stride_kg_pos,
-                                stride_kg_dim,
-                                A,
-                                dt_bias,
-                                lower_bound,
-                                boundary_recovery_len,
-                                final_decay,
-                                final_correction,
-                                boundary_decay,
-                                boundary_correction,
-                                K,
-                                USE_LOWER_BOUND,
-                                ALIGN_MODE,
-                            )
+                        final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_replay_step(
+                            replay_correction_ptr,
+                            replay_kg_ptr,
+                            commit_len - reverse_offset - 1,
+                            offs_k,
+                            offs_v,
+                            stride_correction_pos,
+                            stride_correction_dim,
+                            stride_kg_pos,
+                            stride_kg_dim,
+                            A,
+                            dt_bias,
+                            lower_bound,
+                            boundary_recovery_len,
+                            final_decay,
+                            final_correction,
+                            boundary_decay,
+                            boundary_correction,
+                            K,
+                            V,
+                            USE_LOWER_BOUND,
+                            ALIGN_MODE,
+                        )
                 else:
                     for reverse_offset in range(0, tl.minimum(commit_len, SPEC_QUERY_LEN)):
                         final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
@@ -717,6 +718,74 @@ def _accumulate_kda_commit_step(
             boundary_correction,
         )
         boundary_decay *= tl.where(before_boundary, decay, 1.0)
+    return final_decay, final_correction, boundary_decay, boundary_correction
+
+
+@triton.jit
+def _accumulate_kda_replay_step(
+    correction_cache_ptr,
+    kg_cache_ptr,
+    token_offset,
+    offs_k,
+    offs_v,
+    stride_correction_cache_pos,
+    stride_correction_cache_dim,
+    stride_kg_cache_pos,
+    stride_kg_cache_dim,
+    A,
+    dt_bias,
+    lower_bound,
+    boundary_recovery_len,
+    final_decay,
+    final_correction,
+    boundary_decay,
+    boundary_correction,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+    ALIGN_MODE: tl.constexpr,
+):
+    # Branchless twin of _accumulate_kda_commit_step for the fused replay's
+    # static unroll: token slots past the commit length (token_offset < 0)
+    # stay in the instruction stream with lane-masked loads, so no branch
+    # fences the record loads and the scheduler can issue every slot's loads
+    # before the accumulation chain consumes them. A skipped slot is an exact
+    # no-op: its loads read zeros, a zero key normalizes to zero, the fma
+    # folds to the identity, and the decays collapse to 1.0.
+    valid = token_offset >= 0
+    k = tl.load(
+        kg_cache_ptr + token_offset * stride_kg_cache_pos + offs_k * stride_kg_cache_dim,
+        mask=valid & (offs_k < K),
+        other=0.0,
+    ).to(tl.float32)
+    correction = tl.load(
+        correction_cache_ptr
+        + token_offset * stride_correction_cache_pos
+        + offs_v * stride_correction_cache_dim,
+        mask=valid & (offs_v < V),
+        other=0.0,
+    ).to(tl.float32)
+    raw_g = tl.load(
+        kg_cache_ptr + token_offset * stride_kg_cache_pos + (K + offs_k) * stride_kg_cache_dim,
+        mask=valid & (offs_k < K),
+        other=0.0,
+    ).to(tl.float32)
+    normalized_k = _kda_l2_normalize(k)
+    gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+    tl.static_assert(gate.dtype == tl.float32)
+    decay = tl.exp(gate)
+    weighted_k = normalized_k * final_decay
+    final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
+    final_decay *= tl.where(valid, decay, 1.0)
+    if ALIGN_MODE:
+        before_boundary = token_offset < boundary_recovery_len
+        boundary_k = normalized_k * boundary_decay
+        boundary_correction = tl.where(
+            before_boundary,
+            tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
+            boundary_correction,
+        )
+        boundary_decay *= tl.where(before_boundary & valid, decay, 1.0)
     return final_decay, final_correction, boundary_decay, boundary_correction
 
 
