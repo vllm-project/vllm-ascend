@@ -1,0 +1,8 @@
+pr: 22548
+entries:
+  - category: performance
+    text: >-
+      The opt-in A3 RecoverSSM operators support four-token Qwen decode batches
+      without padding to a fixed request count and can apply sigmoid-gated
+      RMSNorm while writing the Verify output.
+    hardware: [A3]
