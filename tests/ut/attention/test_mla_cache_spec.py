@@ -19,10 +19,10 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 @pytest.mark.parametrize(
-    "model_type,num_head_slots,heads",
+    "model_type,num_head_slots,query_heads",
     [
-        ("glm_moe_dsa", None, 1),
-        ("glm_moe_dsa", 2, 2),
+        ("glm_moe_dsa", None, 12),
+        ("glm_moe_dsa", 2, 12),
         ("glm4_moe_lite", None, 12),
         ("glm5_next", None, 12),
         ("glm5_next_text", None, 12),
@@ -30,7 +30,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         ("deepseek_v3", None, 12),
     ],
 )
-def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, num_head_slots, heads):
+def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, num_head_slots, query_heads):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -65,8 +65,8 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, num
     )
     actual = layer.get_kv_cache_spec(config)
     assert isinstance(actual, AscendMLAAttentionSpec)
-    assert actual.num_heads == source.num_heads == 1
-    assert actual.num_query_heads == heads
+    assert actual.num_heads == source.num_heads == (num_head_slots or 1)
+    assert actual.num_query_heads == query_heads
     assert actual.kv_lora_rank == 512
     assert actual.qk_rope_head_dim == 64
     assert layer.num_heads == 12
