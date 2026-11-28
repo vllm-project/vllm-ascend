@@ -346,6 +346,24 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Select C++20 for Triton Ascend runtime extensions
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # Triton Ascend #1411: the installed wheel still compiles npu_utils with C++17.
+          python3 - <<'PY'
+          from importlib.metadata import distribution
+
+          wheel = distribution("triton-ascend")
+          launcher = wheel.locate_file("triton/backends/ascend/utils.py")
+          original = launcher.read_text(encoding="utf-8")
+          flags = 'cc_cmd += ["-std=c++17", "-shared", "-fPIC", "-o", so_path]'
+          if wheel.version != "3.6.0.post2" or original.count(flags) != 1:
+              raise SystemExit("Unexpected Triton Ascend host compiler flags for the Torch 2.14 trial")
+          launcher.write_text(original.replace(flags, flags.replace("c++17", "c++20")), encoding="utf-8")
+          PY
+          printf 'TRITON_CACHE_DIR=%s\n' "$(mktemp -d "$RUNNER_TEMP/triton-torch214.XXXXXX")" >> "$GITHUB_ENV"
+
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
         env:
