@@ -74,7 +74,7 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
-    -e ASCEND_VISIBLE_DEVICES=0 \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=1g \
     -v /root/.cache:/root/.cache \
@@ -224,10 +224,8 @@ Run docker container to start the vLLM server on single-NPU:
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
-    --max-model-len 16384 \
     --host 0.0.0.0 \
     --port $2 \
-    --dtype bfloat16 \
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
@@ -272,7 +270,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "model": "qwen3vl",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -288,7 +286,7 @@ Expected Result:
 The service returns HTTP 200 OK.
 
 ```output
-{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
+{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"qwen3vl","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 ## 7 Accuracy Evaluation
@@ -363,7 +361,7 @@ There are three `vllm bench` subcommands:
 The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct --served-model-name qwen3vl --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After several minutes, you can get the performance evaluation result.

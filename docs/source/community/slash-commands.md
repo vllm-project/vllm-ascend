@@ -91,7 +91,7 @@ multi-node tests, pass a compact JSON map to select paths on each node:
 `--log-path '{"node0":"logs/leader.txt","node1":"/tmp/test-logs"}'`.
 To collect multiple paths from one node, repeat that node in a single
 mapping, for example
-`--log-path '{"node1":"logs/worker.txt","node1":"/tmp/test-logs"}'`.
+`--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
 The equivalent list of single-path entries is also supported:
 `--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
 Multiple paths from one node are placed under `path-1/`, `path-2/`, etc.
@@ -100,6 +100,13 @@ node produces a `nodeN.tar.gz` file in the workflow run's **Artifacts** section.
 Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missing
 paths are reported in the workflow log. System and credential directories
 cannot be selected.
+
+Nightly jobs can also upload paths without `--log-path`. Set a JSON array of
+files or directories in `.github/workflows/configs/log_download_defaults.json`,
+for example `["/root/ascend/log", "/tmp/test-logs"]`. Every node checks the
+same paths and archives the ones that exist locally. Missing configured paths
+are skipped on that node. A `--log-path` request adds paths for that run and
+continues to use the requested node mapping.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 

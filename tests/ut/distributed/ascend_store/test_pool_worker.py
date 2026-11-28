@@ -2224,6 +2224,89 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_called_once_with()
 
+    def test_drain_queued_saves_waits_until_queue_is_empty(self):
+        worker = self._make_worker()
+        request_queue: queue.Queue[str] = queue.Queue()
+        request_queue.put("batch")
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.name = "KVCacheSendingThread"
+        send_thread.request_queue = request_queue
+        send_thread._fatal_error = None
+        send_thread.is_alive.return_value = True
+        entered = threading.Event()
+        send_thread.raise_if_failed.side_effect = entered.set
+        worker.kv_send_thread = send_thread
+
+        done = threading.Event()
+
+        def drain():
+            worker.drain_queued_saves()
+            done.set()
+
+        threading.Thread(target=drain).start()
+        self.assertTrue(entered.wait(2))
+        request_queue.get()
+        request_queue.task_done()
+        self.assertTrue(done.wait(2))
+        self.assertEqual(request_queue.unfinished_tasks, 0)
+
+    def test_drain_queued_saves_raises_when_dead_thread_leaves_work(self):
+        worker = self._make_worker()
+        request_queue: queue.Queue[str] = queue.Queue()
+        request_queue.put("batch")
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.name = "KVCacheSendingThread"
+        send_thread.request_queue = request_queue
+        send_thread._fatal_error = RuntimeError("put failed")
+        send_thread.is_alive.return_value = False
+        worker.kv_send_thread = send_thread
+
+        with self.assertRaisesRegex(RuntimeError, "exited with"):
+            worker.drain_queued_saves()
+
+    def test_drain_queued_saves_raises_when_live_sender_stays_blocked(self):
+        worker = self._make_worker()
+        token_database = MagicMock()
+        token_database.group_block_len = [[1]]
+        send_thread = KVCacheStoreSendingThread(
+            m_store=MagicMock(),
+            token_database=token_database,
+            block_size=16,
+            tp_rank=0,
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_put(_req_meta):
+            started.set()
+            release.wait()
+            send_thread.request_queue.task_done()
+
+        send_thread._handle_request = blocked_put
+        worker.kv_send_thread = send_thread
+        send_thread.start()
+        try:
+            send_thread.request_queue.put("batch")
+            self.assertTrue(started.wait(2))
+            with self.assertRaisesRegex(RuntimeError, "still blocked"):
+                worker.drain_queued_saves(timeout=0.2)
+            self.assertTrue(send_thread.is_alive())
+            self.assertEqual(send_thread.request_queue.unfinished_tasks, 1)
+        finally:
+            release.set()
+            send_thread.request_queue.put(None)
+            send_thread.join(2)
+        self.assertFalse(send_thread.is_alive())
+
+    def test_drain_queued_saves_noop_without_store_send_thread(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = None
+        worker.drain_queued_saves()
+
+        worker.kv_send_thread = MagicMock()
+        worker.drain_queued_saves()
+        worker.kv_send_thread.raise_if_failed.assert_not_called()
+
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 

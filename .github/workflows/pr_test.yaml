@@ -223,6 +223,8 @@ jobs:
               # ready-precise is not escalated to the full suite.
               - '.github/workflows/scripts/test_selector.py'
               - '!**/*.md'
+              # Comment-only patch catalog; editing it does not affect runtime code.
+              - '!vllm_ascend/patch/__init__.py'
               # CI pipeline files: a PR that touches the test selection or
               # execution pipeline itself must run the full suite, because
               # the precise-selection result can no longer be trusted.
@@ -370,7 +372,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.3.0_20261125184600-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.3.0_20261113161300-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
 
   recommend-tests:

@@ -39,7 +39,7 @@ Sequence-parallel input sharding
   -> RMS Norm
   -> Router
   -> all-to-all
-  -> Moe
+  -> MoE
 ```
 
 Different DP ranks may have different numbers of valid tokens. Therefore, the
@@ -96,6 +96,8 @@ so the expected gains are more modest and workload dependent:
 
 ### Matmul reduce-scatter fusion
 
+#### Graph fusion
+
 On supported Ascend devices, enable `fuse_gemm_comms` to fuse a
 sequence-parallel, bias-free row-parallel projection with its token-dimension
 reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
@@ -104,6 +106,44 @@ reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
 ```bash
 --compilation-config '{"pass_config":{"fuse_gemm_comms":true}}'
 ```
+
+#### Layer-level O-projection fusion
+
+MiniMax-M3 and Kimi-K3 instead install a fused custom op on the attention
+O-projection automatically when sequence parallelism is active, so no extra
+switch is required. The op re-evaluates its gates on every forward and falls
+back to the plain MM + reduce-scatter path whenever they are not met; both
+paths return the same SP token shard, so the fallback is transparent.
+
+The current eligibility matrix is:
+
+| Gate | MiniMax-M3 | Kimi-K3 |
+| --- | --- | --- |
+| **Hardware platform** | Atlas A2 products, Atlas A3 products, Ascend 950PR&950DT products | Ascend 950PR&950DT products only |
+| **Hardware capability gate** | `MM_REDUCE_SCATTER_BF16` | `MM_REDUCE_SCATTER_AI_CPU_INFERENCE` |
+| **SP switch** | `use_sequence_parallel=True` | `use_sequence_parallel=True` |
+| **Extra model condition** | None | `use_attn_residuals=True` |
+| **TP size** | {2, 4, 8} | {2, 4, 8, 16, 32, 64} |
+| **Weight precision** | BF16, unquantized | BF16, unquantized |
+| **Input precision** | BF16 | BF16 |
+| **Input shape** | Nonempty 2D tensor | Nonempty 2D tensor |
+| **K dimension** | [256, 65535) | [256, 65535), and the input K must match the weight K |
+| **Token count** | [256, 16384) | No fixed token-count limit |
+| **Communication volume** | Bounded by the token-count limit | `padded_tokens × N × 2B < 4GiB` |
+| **Weight format** | ND format | `weight_nz_mode != 2` |
+| **Weight contiguity** | Must be contiguous | Must be contiguous |
+| **Batch type** | Pure prefill | Pure prefill |
+| **Decode / mixed batch** | Not fused | Not fused |
+| **Pure decode node** | Not supported | Excluded by the dynamic batch gate |
+| **LoRA** | Not supported | Not supported |
+| **Bias** | Not supported | Not supported |
+| **PCP** | PCP = 1 | Excludes `HeadParallelRowLinear` (PCP KDA case) |
+| **DCP** | DCP = 1 | No explicit restriction |
+| **Existing custom op** | Not allowed | Not allowed |
+| **TP sharding contract** | `input_is_parallel=True`, `disable_tp=False` | No explicit restriction |
+| **External RS contract** | `reduce_results=False` | No explicit restriction |
+| **Forward context** | Must exist with nonempty `attn_metadata` | Must satisfy the pure-prefill check |
+| **Underlying interface** | `npu_mm_reduce_scatter_base` | `npu_quant_mm_reduce_scatter` |
 
 ### FlashComm switch (Ascend only)
 

@@ -34,6 +34,7 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 from xlite._C import AttnDSA, AttnMetaV2, AttnMHA, AttnMLA, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -389,6 +390,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.deepstack_num_level = len(getattr(self.hf_vision_config, "deepstack_visual_indexes", []))
         xlite_config.mrope_section = rope_parameters.get("mrope_section", [])
         xlite_config.mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
+        xlite_config.aux_layer_ids = self._resolve_aux_layer_ids()
         self.quantization = vllm_config.quant_config is not None
 
     def _build_model(self) -> None:
@@ -510,6 +512,25 @@ class StandardXliteModel(XliteModelBase):
         if wrong_dims := set(cache.shape[-1] for cache in kv_caches) - set([self.xlite_config.head_dim]):
             raise ValueError(f"xlite: kv_cache dimension mismatch (wrong dims: {', '.join(map(str, wrong_dims))})")
         return [(k_cache, v_cache) for k_cache, v_cache in zip(kv_caches[0::2], kv_caches[1::2])]
+
+    def _resolve_aux_layer_ids(self) -> list[int]:
+        """EAGLE3 aux capture layers from the spec config (or the loaded model's default)."""
+        spec_config = self.vllm_config.speculative_config
+        if spec_config is None or not getattr(self.npu_runner, "use_aux_hidden_state_outputs", False):
+            return []
+        layers = get_eagle3_aux_layers_from_config(spec_config)
+        if not layers:
+            model = self.npu_runner.model
+            get_default_layers = getattr(model, "get_eagle3_default_aux_hidden_state_layers", None)
+            if get_default_layers is None:
+                raise RuntimeError(
+                    f"{type(model).__name__} provides no aux hidden-state layers; set "
+                    "eagle_aux_hidden_state_layer_ids in the speculative config."
+                )
+            layers = get_default_layers()
+        # sorted(set(...)): parity with the native `set_aux_hidden_state_layers`,
+        # which feeds the drafter ascending, deduplicated layer ids.
+        return sorted(set(layers))
 
 
 class QwenMoeXliteModel(StandardXliteModel):
@@ -767,6 +788,15 @@ class XliteWrapper:
         self.hidden_states = torch.empty(
             self.max_tokens, xlite_config.hidden_size, device=self.device, dtype=self.adapter_xlite_model.dtype
         )
+        # One [max_tokens, hidden_size] capture buffer per aux layer baked into the xlite
+        # config (see `StandardXliteModel._build_model_config`); empty = capture disabled.
+        self.aux_hidden_state_layers: tuple[int, ...] = tuple(xlite_config.aux_layer_ids)
+        self.aux_hidden_states: list[torch.Tensor] = [
+            torch.empty(
+                self.max_tokens, xlite_config.hidden_size, device=self.device, dtype=self.adapter_xlite_model.dtype
+            )
+            for _ in self.aux_hidden_state_layers
+        ]
         # Persistent one-token batch for DP dummy runs (`__call__`): constant, allocated once.
         self._dummy_attn_metadata = self._init_dummy_metadata(xlite_config)
 
@@ -779,8 +809,9 @@ class XliteWrapper:
     def __del__(self) -> None:
         self.npu_runner = None  # type: ignore[assignment]
         self.npu_runnable = None  # type: ignore[assignment]
-        self.adapter_xlite_model.npu_runner = None  # type: ignore[assignment]
-        self.adapter_xlite_model.xlite_model = None  # type: ignore[assignment]
+        if getattr(self, "adapter_xlite_model", None) is not None:
+            self.adapter_xlite_model.npu_runner = None  # type: ignore[assignment]
+            self.adapter_xlite_model.xlite_model = None  # type: ignore[assignment]
 
     def __getattr__(self, key: str) -> Any:
         """Proxy unknown attributes to the wrapped runnable model.
@@ -944,6 +975,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=[self.freq_cis],
                 output=h,
+                aux_outputs=self.aux_hidden_states,
                 curr_stream=curr_stream,
             )
         else:
@@ -961,6 +993,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=self.freq_cis,
                 output=h,
+                aux_outputs=self.aux_hidden_states,
                 curr_stream=curr_stream,
                 deepstack_input=xlite_deepstack_input_embeds,
             )
@@ -968,6 +1001,8 @@ class XliteWrapper:
                 _clear_stack := getattr(self.npu_runnable, "_clear_deepstack_input_embeds", None)
             ):
                 _clear_stack(inputs_embeds.size(0))
+        if self.aux_hidden_state_layers:
+            return h[:num_padded_input_tokens], [aux[:num_padded_input_tokens] for aux in self.aux_hidden_states]
         return h[:num_padded_input_tokens]
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | torch.nn.Module:

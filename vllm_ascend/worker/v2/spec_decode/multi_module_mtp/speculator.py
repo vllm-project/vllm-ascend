@@ -33,6 +33,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.spec_decode.mtp import get_mtp_draft_parallel_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
@@ -91,10 +92,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         super().load_model(target_model)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
+        parallel_config = get_mtp_draft_parallel_config(self.vllm_config)
         draft_vllm_config = replace(
             self.vllm_config,
             parallel_config=parallel_config,

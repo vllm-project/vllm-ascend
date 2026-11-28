@@ -23,14 +23,12 @@ import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
-from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
@@ -193,14 +191,8 @@ class NPUWorker(GPUWorker):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # Worker processes receive a pickled VllmConfig, so the platform config
-        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
-        # Ascend V2 model runner overrides so the worker resolves the same
-        # runner version as the engine. Idempotent.
-        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
-        apply_v2_model_runner_config_patch()
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
@@ -243,9 +235,6 @@ class NPUWorker(GPUWorker):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.npugraph_memory_bytes = 0
-        # Buffers and parameters saved before sleep.
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
@@ -254,7 +243,6 @@ class NPUWorker(GPUWorker):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
-        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
@@ -275,9 +263,6 @@ class NPUWorker(GPUWorker):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
-
-    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
-        raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
@@ -371,32 +356,6 @@ class NPUWorker(GPUWorker):
                 except Exception:
                     return
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        # Older supported vLLM versions do not expose the retention option.
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = dict(model.named_parameters())
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
-            if not matches:
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        meta_names = [name for name in names if parameters[name].device.type == "meta"]
-        if meta_names:
-            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
-        self._sleep_saved_parameters.clear()
-
     def set_metrics_level(self, level: str) -> str:
         """Set this worker process's MS metric level. Called by collective RPC."""
         from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
@@ -409,17 +368,9 @@ class NPUWorker(GPUWorker):
         backend = self.sleep_mode_backend
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Level-1 only offloads the weights pool. Persistent metadata such as
-        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
-        # stays resident and does not need a CPU backup.
-        if level == 1:
-            self._sleep_saved_buffers = {}
-            self._sleep_saved_parameters = {}
-        else:
-            model = self.model_runner.model
-            # Level-2 discards the weights pool; retain parameters the sender omits.
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Level 2 keeps everything the weight update does not rewrite; the
+        # allocator backs up mixed/non-parameter weights-pool allocations.
+        discardable = self._discardable_parameters(self.model_runner.model) if level == 2 else set()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -428,7 +379,7 @@ class NPUWorker(GPUWorker):
         self.synchronize_device()
 
         global_te.unregister_buffer()
-        backend.suspend(level)
+        backend.suspend(discardable)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -440,6 +391,21 @@ class NPUWorker(GPUWorker):
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
+
+    def disconnect_kv_transfer_peers(self) -> None:
+        self._drain_store_send_queues()
+        global_te.disconnect_all_peers()
+
+    def _drain_store_send_queues(self) -> None:
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "_connectors", None)
+        targets = children if children is not None else (connector,)
+        for target in targets:
+            drain = getattr(target, "drain_queued_saves", None)
+            if drain is not None:
+                drain()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
@@ -453,18 +419,6 @@ class NPUWorker(GPUWorker):
         self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
             global_te.reregister_buffer()
-
-        # Do not access or consume saved weights when only the KV pool wakes.
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        # Restore the buffers after level 2 sleep
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup

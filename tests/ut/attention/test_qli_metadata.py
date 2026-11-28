@@ -15,8 +15,9 @@ def _metadata_op(**kwargs):
     return torch.stack((kwargs["cu_seqlens_q"][-1], kwargs["seqused_k"].sum().to(torch.int32)))
 
 
-def test_layers_share_one_producer_per_build():
-    config = QLIMetadataConfig(32, 128, 1)
+@pytest.mark.parametrize("quant_mode", [1, 5])
+def test_layers_share_one_producer_per_build(quant_mode):
+    config = QLIMetadataConfig(32, 128, quant_mode)
     buffers = QLIMetadataBuffers(config, 4)
     queries, lengths = torch.tensor([0, 3, 5]), torch.tensor([32, 128])
     op = Mock(side_effect=_metadata_op)
@@ -28,7 +29,7 @@ def test_layers_share_one_producer_per_build():
     torch.testing.assert_close(prepared.query_start_loc, queries.to(torch.int32))
     torch.testing.assert_close(prepared.seq_lens, lengths.to(torch.int32))
     torch.testing.assert_close(prepared.metadata, torch.tensor([5, 160], dtype=torch.int32))
-    assert op.call_args.kwargs["quant_mode"] == 1
+    assert op.call_args.kwargs["quant_mode"] == quant_mode
 
 
 def test_rebuild_refreshes_existing_graph_references_with_new_lengths():
@@ -73,7 +74,7 @@ def test_draft_steps_do_not_overwrite_each_other():
     torch.testing.assert_close(second.metadata, torch.tensor([2, 162], dtype=torch.int32))
 
 
-@pytest.mark.parametrize("change", [{"head_dim": 64}, {"num_heads_q": 64}, {"topk": 1024}])
+@pytest.mark.parametrize("change", [{"head_dim": 64}, {"num_heads_q": 64}, {"topk": 1024}, {"quant_mode": 5}])
 def test_incompatible_layer_cannot_consume_group_metadata(change):
     config = QLIMetadataConfig(32, 128, 1)
     prepared = QLIMetadataBuffers(config, 2).build("target", torch.tensor([0, 1]), torch.tensor([32]), _metadata_op)

@@ -1,0 +1,8 @@
+pr: 22109
+entries:
+  - category: feature
+    text: >-
+      Added experimental HiSparse P/D Pull over MemFabric, allowing Decode to load KV directly from Prefill.
+      To enable this off-by-default feature, set `transfer_backend=memfabric` in `MooncakeConnectorV2`'s
+      `kv_connector_extra_config`.
+      Prefill and Decode must use the same TP size, with PCP=1 on Decode and DCP=1 on Prefill.

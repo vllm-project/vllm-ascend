@@ -132,8 +132,12 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
         assert manager.shard_decode_requests is expected_sharding
 
 
-def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False):
-    config.scheduler_config = SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=64, enable_chunked_prefill=True)
+def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False, batch_capacity=64):
+    config.scheduler_config = SimpleNamespace(
+        enable_chunked_prefill=True,
+        max_num_seqs=8,
+        max_num_batched_tokens=batch_capacity,
+    )
     with (
         patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=SimpleNamespace(rank_in_group=rank)),
         patch("vllm.v1.worker.gpu.pcp_manager.get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
@@ -151,10 +155,10 @@ def _make_factory_pcp_manager(config, rank, *, bind_runner_state=False):
 
 def _make_policy_batch(counts, prefilling):
     counts = np.array(counts, dtype=np.int32)
-    buffers = AscendInputBuffers(max_num_reqs=8, max_num_tokens=64, device=torch.device("cpu"))
+    total = int(counts.sum())
+    buffers = AscendInputBuffers(max_num_reqs=8, max_num_tokens=max(64, total), device=torch.device("cpu"))
     # make_dummy requires at least one token per request. Materialize the
     # scheduled zero-token rows after allocating a valid seed batch.
-    total = int(counts.sum())
     batch = InputBatch.make_dummy(num_reqs=len(counts), num_tokens=max(len(counts), total), input_buffers=buffers)
     batch.num_tokens = batch.num_tokens_after_padding = total
     batch.input_ids = buffers.input_ids[:total]
@@ -264,6 +268,55 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
         if not tokens:
             assert not local.seq_lens.any()
             assert not local.seq_lens_cpu_upper_bound.any()
+
+
+@pytest.mark.parametrize(
+    "length,expected_chunks,expected_charge,expected_peak",
+    [(16, 2, 2, 2), (17, 1, 17, 17), (23, 1, 23, 23), (24, 2, 4, 3), (225, 2, 30, 29), (226, 2, 30, 30)],
+)
+def test_dcp_prefill_chunks_keep_indexer_charge_rank_invariant(length, expected_chunks, expected_charge, expected_peak):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=8, decode_context_parallel_size=8)
+    manager = _make_factory_pcp_manager(config, 0)
+    counts = np.array([length], dtype=np.int32)
+    prefilling = np.array([True])
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == expected_peak
+    for rank in range(8):
+        chunks = list(manager._iter_rank_chunks(rank, counts, prefilling))
+        lengths = [size for _, _, size in chunks]
+        assert len(lengths) == expected_chunks
+        assert min(lengths) > 0
+        assert lengths[0] == max(lengths)
+        assert len(lengths) * max(lengths) == expected_charge
+
+
+def test_dcp_short_prefill_partition_restores_mixed_batch_and_writes_kv_once():
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=8, decode_context_parallel_size=8)
+    # Both decode and the 23-token prefill are replicated. The 225-token
+    # prefill is split into eight 15-token heads, one 14-token tail and seven 13-token tails.
+    batch = _make_policy_batch([1, 23, 225], [False, True, True])
+    scheduled_prefills = np.where(batch.is_prefilling_np, batch.num_scheduled_tokens, 0)
+    batch.prefill_len_np = batch.num_computed_tokens_np + scheduled_prefills
+    local_ids = []
+    for rank in range(8):
+        manager = _make_factory_pcp_manager(config, rank, batch_capacity=batch.num_tokens)
+        with patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu):
+            local = _partition_batch(manager, batch)
+        tail_number = 7 - rank
+        tail_start = 120 + 13 * tail_number + min(tail_number, 1)
+        tail_length = 14 if tail_number == 0 else 13
+        rows = [*range(24), *range(24 + 15 * rank, 24 + 15 * (rank + 1))]
+        rows.extend(range(24 + tail_start, 24 + tail_start + tail_length))
+        assert local.num_tokens == len(rows)
+        assert local.num_tokens_after_padding == 53
+        torch.testing.assert_close(local.input_ids[: local.num_tokens], batch.input_ids[rows])
+        torch.testing.assert_close(local.positions[: local.num_tokens], batch.positions[rows])
+        local_ids.append(local.input_ids.clone())
+
+    gathered = torch.cat(local_ids)
+    torch.testing.assert_close(gathered[manager._hidden_restore_idx], batch.input_ids)
+    torch.testing.assert_close(gathered[manager._gathered_kv_write_mask].sort().values, batch.input_ids)
 
 
 def test_constructor_forwards_decode_sharding_with_release_compatible_arguments():

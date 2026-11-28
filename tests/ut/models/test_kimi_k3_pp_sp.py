@@ -231,6 +231,7 @@ def runtime(monkeypatch):
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
     # BaseModel above models the release's cumulative aux protocol.
     # Native main's centralized relay is covered separately with its real mixin/PPHandler.
+
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -255,6 +256,7 @@ def runtime(monkeypatch):
         # BaseModel models the cumulative release protocol, so the module
         # takes its v0.34.0 path. The native fixture installs the real check.
         "vllm_version_is": lambda _target: True,
+        "spec_decode_needs_target_embed": lambda _: False,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -301,7 +303,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
-        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
+        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP", "_needs_target_embedding"},
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -530,6 +532,32 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
             torch.testing.assert_close(actual, reference_aux)
 
 
+def build_aux_model(runtime, stage, spec_config):
+    namespace, context = runtime
+    context.tp = 2
+    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3, world_size=4)
+    cfg = config(tp=2, pp=4)
+    cfg.model_config.hf_text_config = SimpleNamespace(
+        vocab_size=16,
+        hidden_size=3,
+        num_hidden_layers=8,
+        num_attention_heads=2,
+        attn_res_block_size=2,
+        rms_norm_eps=1e-5,
+    )
+    cfg.speculative_config = spec_config
+    namespace.update(
+        VocabParallelEmbedding=lambda vocab, hidden, **kwargs: nn.Embedding(vocab, hidden),
+        PPMissingLayer=nn.Identity,
+        RMSNorm=lambda *args, **kwargs: nn.Identity(),
+        ReplicatedLinear=lambda *args, **kwargs: nn.Identity(),
+        make_layers=lambda *args, **kwargs: (stage * 2, stage * 2 + 2, nn.ModuleList()),
+    )
+    # AST extraction retains methods only, so supply the production class default.
+    namespace["AscendKimiLinearModel"].dspark_aux_capture_materialized = False
+    return namespace["AscendKimiLinearModel"](vllm_config=cfg)
+
+
 @pytest.mark.parametrize("stage", range(4))
 @pytest.mark.parametrize(
     "draft_type,draft_arch,materialized",
@@ -541,19 +569,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
     ],
 )
 def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, draft_arch, materialized):
-    namespace, context = runtime
-    context.tp = 2
-    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
-    cfg = config(tp=2, pp=4)
-    cfg.model_config.hf_text_config = SimpleNamespace(
-        vocab_size=16,
-        hidden_size=3,
-        num_hidden_layers=8,
-        num_attention_heads=2,
-        attn_res_block_size=2,
-        rms_norm_eps=1e-5,
-    )
-    cfg.speculative_config = (
+    spec_config = (
         SimpleNamespace(
             method="dspark",
             draft_model_config=SimpleNamespace(
@@ -563,18 +579,38 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, dra
         if draft_type is not None
         else None
     )
-    namespace.update(
-        VocabParallelEmbedding=lambda *args, **kwargs: nn.Identity(),
-        PPMissingLayer=nn.Identity,
-        RMSNorm=lambda *args, **kwargs: nn.Identity(),
-        ReplicatedLinear=lambda *args, **kwargs: nn.Identity(),
-        make_layers=lambda *args, **kwargs: (stage * 2, stage * 2 + 2, nn.ModuleList()),
-    )
-    # AST extraction retains methods only, so supply the production class default.
-    namespace["AscendKimiLinearModel"].dspark_aux_capture_materialized = False
-    model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
+    model = build_aux_model(runtime, stage, spec_config)
     assert model.dspark_aux_capture_materialized is materialized
     assert model.use_sequence_parallel is True
+
+
+@pytest.mark.parametrize(
+    "stage,stream,share_embed,materialized,owns_embed",
+    [
+        (0, "hidden_states", False, False, True),
+        (1, "attn_res", True, True, False),
+        (3, None, True, False, True),
+        (3, "attn_res", False, True, False),
+    ],
+)
+def test_dflash_pp_aux_stream_and_embedding(runtime, monkeypatch, stage, stream, share_embed, materialized, owns_embed):
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.models.utils import spec_decode_needs_target_embed
+
+    namespace, context = runtime
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: context.pp)
+    namespace["spec_decode_needs_target_embed"] = spec_decode_needs_target_embed
+    draft_hf = SimpleNamespace()
+    if stream is not None:
+        draft_hf.dflash_config = {"aux_hidden_stream": stream}
+    spec_config = SimpleNamespace(
+        method="dflash",
+        uses_target_hidden_states=True,
+        draft_model_config=SimpleNamespace(hf_config=draft_hf, may_use_target_embed=share_embed),
+    )
+    model = build_aux_model(runtime, stage, spec_config)
+    assert model.dspark_aux_capture_materialized is materialized
+    assert isinstance(model.embed_tokens, nn.Embedding) is owns_embed
 
 
 @pytest.mark.parametrize("owns_embed", [False, True])

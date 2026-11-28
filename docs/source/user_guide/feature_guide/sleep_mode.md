@@ -72,6 +72,11 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
+Sleep-mode CPU backups are retained after wake-up and reused by later sleep
+cycles; they are released when the allocation is discarded or freed. In
+colocated RL deployments this increases host memory usage during active
+inference.
+
 ## Prepare model weights
 
 Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope.
@@ -167,7 +172,7 @@ The following is a simple example of how to use sleep mode.
             "temperature": 0
         }'
 
-    # --- Level 2: discard weights and KV cache ---
+    # --- Level 2: discard parameter-only weights and KV cache ---
     # tags must be in ["weights", "kv_cache"]. After waking weights,
     # reload the checkpoint on every worker before waking kv_cache.
     curl -X POST "http://127.0.0.1:8000/sleep?level=2"
