@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as module
+from vllm_ascend.ops.fused_moe.router import router_factory
 from vllm_ascend.patch.platform import patch_fused_moe
 
 
@@ -91,10 +92,74 @@ def test_capture_configured_before_routing_uses_standalone_map():
     assert not router._use_gating_top_k_with_map
 
 
-@pytest.mark.parametrize("kwargs", [{"scoring_func": "softmax"}, {"scoring_func": "sigmoid"}, {"num_expert_group": 2}])
-def test_unsupported_configuration_falls_back(kwargs):
-    router, logits, _ = make_router(**kwargs)
+def test_grouped_sqrtsoftplus_falls_back():
+    router, logits, _ = make_router(num_expert_group=2)
     assert routing_table_used(router, logits) is None
+
+
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_factory_excludes_unnormalized_sigmoid(renormalize):
+    with (
+        patch.object(router_factory, "get_current_hardware_profile") as profile,
+        patch.object(router_factory, "AscendFusedMoERouter") as fused,
+        patch.object(router_factory, "AscendGroupedTopKRouter") as fallback,
+    ):
+        profile.return_value.supports.return_value = False
+        router = router_factory.create_ascend_fused_moe_router(
+            top_k=2, global_num_experts=2048, scoring_func="sigmoid", renormalize=renormalize
+        )
+    if not renormalize:
+        assert router is fallback.return_value
+        fallback.assert_called_once()
+        fused.assert_not_called()
+    else:
+        assert router is fused.return_value
+        fused.assert_called_once()
+        assert fused.call_args.kwargs["renormalize"] is renormalize
+        fallback.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "scoring_func,renormalize,norm_type", [("softmax", False, 0), ("softmax", True, 0), ("sigmoid", True, 1)]
+)
+@pytest.mark.parametrize("groups,selected_groups", [(1, 1), (8, 4), (8, 8)])
+def test_ordinary_fusion_forwards_native_parameters(scoring_func, renormalize, norm_type, groups, selected_groups):
+    router, logits, table = make_router(
+        scoring_func=scoring_func,
+        renormalize=renormalize,
+        num_expert_group=groups,
+        topk_group=selected_groups,
+    )
+    expected = (torch.ones(3, 2), torch.full((3, 2), 2050, dtype=torch.int32), None)
+    with (
+        patch.object(module, "use_allgather_eplb", return_value=False),
+        patch.object(torch.ops._C_ascend, "moe_gating_top_k_hash", return_value=expected, create=True) as op,
+        patch.object(module.torch_npu, "npu_moe_gating_top_k", create=True) as native,
+        patch.object(torch.ops.vllm, "ascend_eplb_map_to_physical", create=True) as standalone,
+    ):
+        weights, ids = router._select_experts(logits, logits, torch.int64)
+    native.assert_not_called()
+    standalone.assert_not_called()
+    assert weights is expected[0]
+    assert ids.dtype == torch.int64
+    assert torch.all(ids == 2050)
+    kwargs = op.call_args.kwargs
+    assert kwargs["norm_type"] == norm_type
+    assert kwargs["renorm"] == int(renormalize)
+    assert kwargs["group_count"] == groups
+    assert kwargs["k_group"] == selected_groups
+    assert kwargs["expert_replica_routing_table"] is table
+    assert "input_ids" not in kwargs and "tid2eid" not in kwargs and "bias_vl" not in kwargs
+
+
+@pytest.mark.parametrize("reason", ["capture", "no_eplb"])
+def test_ordinary_fusion_eligibility(reason):
+    router, _, _ = make_router(scoring_func="softmax", renormalize=True)
+    if reason == "capture":
+        router.capture_fn = Mock()
+    else:
+        router.eplb_state = None
+    assert not router._can_fuse_gating_map()
 
 
 @pytest.mark.parametrize("allgather", [False, True])

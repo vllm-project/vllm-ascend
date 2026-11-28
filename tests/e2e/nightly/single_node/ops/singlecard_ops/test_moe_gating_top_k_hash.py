@@ -4,7 +4,9 @@
 
 import pytest
 import torch
+import torch_npu
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.distributed.eplb.tensor_ops import build_expert_replica_routing_table
 from vllm_ascend.ops.fused_moe.eplb import map_to_physical_for_ascend
 from vllm_ascend.utils import enable_custom_op
@@ -13,6 +15,181 @@ enable_custom_op()
 
 IMAGE_SENTINEL_LO = 129257
 IMAGE_SENTINEL_COUNT = 5
+
+
+@pytest.mark.parametrize("device", ["meta", "npu"])
+@pytest.mark.parametrize("norm_type,renorm,error", [(3, 0, "norm_type"), (0, 2, "renorm"), (2, 1, "renorm")])
+def test_ordinary_map_rejects_out_of_scope_modes(device, norm_type, renorm, error):
+    logits = torch.empty(3, 256, device=device)
+    table = torch.zeros(7, 256, device=device, dtype=torch.int32)
+    with pytest.raises(RuntimeError, match=error):
+        torch.ops._C_ascend.moe_gating_top_k_hash(
+            logits,
+            k=8,
+            norm_type=norm_type,
+            renorm=renorm,
+            expert_replica_routing_table=table,
+        )
+
+
+@pytest.mark.parametrize("norm_type,renorm", [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_ordinary_map_meta(norm_type, renorm):
+    logits = torch.empty(3, 256, device="meta", dtype=torch.bfloat16)
+    table = torch.empty(7, 256, device="meta", dtype=torch.int32)
+    weights, ids, scores = torch.ops._C_ascend.moe_gating_top_k_hash(
+        logits,
+        k=8,
+        group_count=8,
+        k_group=4,
+        norm_type=norm_type,
+        renorm=renorm,
+        expert_replica_routing_table=table,
+    )
+    assert weights.shape == ids.shape == (3, 8)
+    assert weights.dtype == logits.dtype
+    assert ids.dtype == torch.int32
+    assert scores.shape == logits.shape and scores.dtype == torch.float32
+
+
+@pytest.mark.parametrize("device", ["meta", "npu"])
+@pytest.mark.parametrize(
+    "norm_type,renorm,with_map,extra_input",
+    [(0, 1, False, "input_ids"), (1, 1, False, "tid2eid"), (0, 0, True, "bias_vl"), (1, 0, True, "input_ids")],
+)
+def test_ordinary_routing_rejects_hash_vision_inputs(device, norm_type, renorm, with_map, extra_input):
+    logits = torch.empty(3, 256, device=device)
+    table = torch.zeros(7, 256, device=device, dtype=torch.int32) if with_map else None
+    inputs = {
+        "input_ids": torch.zeros(3, device=device, dtype=torch.int32),
+        "tid2eid": torch.zeros(7, 8, device=device, dtype=torch.int32),
+        "bias_vl": torch.zeros(256, device=device),
+    }
+    with pytest.raises(RuntimeError, match="does not support hash/vision inputs"):
+        torch.ops._C_ascend.moe_gating_top_k_hash(
+            logits,
+            k=8,
+            norm_type=norm_type,
+            renorm=renorm,
+            expert_replica_routing_table=table,
+            **{extra_input: inputs[extra_input]},
+        )
+
+
+@pytest.mark.parametrize("norm_type,renorm", [(0, 0), (0, 1), (1, 0), (1, 1)])
+@pytest.mark.parametrize("groups,selected_groups", [(1, 1), (8, 4)])
+def test_ordinary_map_graph_observes_table_updates(norm_type, renorm, groups, selected_groups):
+    torch.manual_seed(179)
+    # Cross core boundaries and exercise a final partial core.
+    rows, experts = 257, 256
+    logits = torch.randn(rows, experts, device="npu")
+    # Sigmoid renorm=0 with grouped routing and bias must bypass the A3
+    # EKFullLoad kernel, which does not apply the routing table.
+    bias = torch.randn(experts, device="npu") * 0.2
+    table = torch.arange(3 * experts, device="npu", dtype=torch.int32).reshape(3, experts)
+    kwargs = dict(
+        k=8,
+        k_group=selected_groups,
+        group_count=groups,
+        group_select_mode=1,
+        norm_type=norm_type,
+        renorm=renorm,
+        out_flag=False,
+        bias=bias,
+    )
+    expected_weights, logical_ids, _ = torch_npu.npu_moe_gating_top_k(logits, **kwargs)
+
+    def run():
+        return torch.ops._C_ascend.moe_gating_top_k_hash(logits, expert_replica_routing_table=table, **kwargs)
+
+    for _ in range(3):
+        run()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        weights, ids, _ = run()
+    for _ in range(2):
+        table.add_(experts)
+        graph.replay()
+        expected_ids = table[torch.arange(rows, device="npu")[:, None] % 3, logical_ids.long()]
+        torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("experts,top_k", [(256, 8), (512, 10)])
+@pytest.mark.parametrize("rows,period", [(1, 1), (65, 3), (257, 5), (1027, 1023)])
+def test_a5_batched_softmax_map_observes_table_updates(experts, top_k, rows, period):
+    if not is_950():
+        pytest.skip("Batched FP32 softmax is specific to Ascend 950.")
+
+    torch.manual_seed(181)
+    logits = torch.randn(rows, experts, dtype=torch.float32, device="npu")
+    table = torch.arange(period * experts, dtype=torch.int32, device="npu").reshape(period, experts)
+    kwargs = dict(k=top_k, norm_type=0, renorm=1, out_flag=False, eps=1e-20, routed_scaling_factor=1.0)
+    expected_weights, logical_ids, _ = torch_npu.npu_moe_gating_top_k(logits, **kwargs)
+    op = torch.ops._C_ascend.moe_gating_top_k_hash
+    weights, ids, _ = op(logits, **kwargs)
+    torch.testing.assert_close(ids, logical_ids, rtol=0, atol=0)
+    torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+
+    def run():
+        return op(logits, expert_replica_routing_table=table, **kwargs)
+
+    run()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        weights, ids, _ = run()
+    for _ in range(2):
+        table.add_(experts)
+        graph.replay()
+        expected_ids = table[torch.arange(rows, device="npu")[:, None] % period, logical_ids.long()]
+        torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("norm_type,renorm", [(0, 0), (0, 1), (1, 0), (1, 1)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "experts,groups,selected_groups,top_k",
+    [(32, 1, 1, 1), (256, 1, 1, 8), (256, 8, 4, 8), (240, 8, 4, 8), (256, 8, 8, 8), (512, 8, 4, 80), (480, 8, 4, 80)],
+)
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_ordinary_gating_map_matches_cann(norm_type, renorm, dtype, experts, groups, selected_groups, top_k, with_bias):
+    # Cover grouped padding, all-groups selection, and both A5 gather sizes.
+    # 137 rows cross core boundaries and the table period; physical IDs must
+    # never be used for gathering the logical expert scores.
+    torch.manual_seed(173)
+    rows, period = 137, 7
+    logits = torch.randn(rows, experts, dtype=dtype, device="npu")
+    bias = torch.randn(experts, dtype=dtype, device="npu") * 0.2 if with_bias else None
+    table = (torch.arange(period * experts, device="npu").reshape(period, experts) + experts).int()
+    kwargs = dict(
+        k=top_k,
+        k_group=selected_groups,
+        group_count=groups,
+        group_select_mode=1,
+        renorm=renorm,
+        norm_type=norm_type,
+        out_flag=True,
+        routed_scaling_factor=1.7,
+        eps=1e-20,
+        bias=bias,
+    )
+    expected_weights, logical_ids, expected_scores = torch_npu.npu_moe_gating_top_k(logits, **kwargs)
+    unmapped_weights, unmapped_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(logits, **kwargs)
+    actual_weights, physical_ids, actual_scores = torch.ops._C_ascend.moe_gating_top_k_hash(
+        logits, expert_replica_routing_table=table, **kwargs
+    )
+    separate_ids = map_to_physical_for_ascend(logical_ids, table)
+    expected_ids = table[torch.arange(rows, device="npu")[:, None] % period, logical_ids.long()]
+    torch.testing.assert_close(unmapped_ids, logical_ids, rtol=0, atol=0)
+    torch.testing.assert_close(separate_ids, expected_ids, rtol=0, atol=0)
+    torch.testing.assert_close(physical_ids, separate_ids, rtol=0, atol=0)
+    tolerance = {torch.float32: 1e-6, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
+    # A5 mapped/unmapped softmax uses different reduction implementations.
+    torch.testing.assert_close(actual_weights, unmapped_weights, rtol=tolerance, atol=1e-7)
+    torch.testing.assert_close(actual_weights, expected_weights, rtol=tolerance, atol=1e-7)
+    torch.testing.assert_close(actual_scores, expected_scores, rtol=1e-5, atol=1e-7)
 
 
 def _reference(

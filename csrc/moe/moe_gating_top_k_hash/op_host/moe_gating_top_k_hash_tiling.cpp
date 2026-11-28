@@ -110,7 +110,7 @@ public:
     // 4、计算高阶API的TilingData
     ge::graphStatus DoLibApiTiling() ;
     // 5、计算TilingKey
-    uint64_t GetTilingKey() const ;
+    uint64_t GetTilingKey();
     // 6、计算Workspace 大小
     ge::graphStatus GetWorkspaceSize() ;
     // 7、保存Tiling数据
@@ -258,13 +258,15 @@ ge::graphStatus MoeGatingTopKHashTilingBase::CheckAttr()
                      GROUP_SELECT_MODE_SUM, GROUP_SELECT_MODE_MAX),
                 return ge::GRAPH_FAILED);
 
-    OPS_ERR_IF(moeGatingTopKTilingData_.get_routingTableRows() > 0 &&
-                   (groupCount_ != 1 || normType_ != NORM_TYPE_SOFTPLUS),
-               OPS_LOG_E(context_, "Fused EPLB mapping requires ungrouped sqrtsoftplus routing"),
+    OPS_ERR_IF((normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID) &&
+                   (renorm_ == 1 || moeGatingTopKTilingData_.get_routingTableRows() > 0) &&
+                   (inputIdsShape_ != nullptr || tid2eidShape_ != nullptr || addBiasVl_),
+               OPS_LOG_E(context_, "Softmax/sigmoid renorm=1 or fused mapping does not support hash/vision inputs"),
                return ge::GRAPH_FAILED);
 
-    OPS_ERR_IF(renorm_ != RENORM_NO,
-                OPS_LOG_E(context_, "renorm is: %ld, but currently only support %ld.", renorm_, RENORM_NO),
+    OPS_ERR_IF(renorm_ != RENORM_NO &&
+                   !(renorm_ == 1 && (normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID)),
+                OPS_LOG_E(context_, "renorm must be 0, or 1 for softmax/sigmoid"),
                 return ge::GRAPH_FAILED);
 
     OPS_ERR_IF(expertCount_ % groupCount_ != 0,
@@ -632,12 +634,12 @@ ge::graphStatus MoeGatingTopKHashTilingBase::PostTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-uint64_t MoeGatingTopKHashTilingBase::GetTilingKey() const
+uint64_t MoeGatingTopKHashTilingBase::GetTilingKey()
 {
-    // DeepSeekV3排序对齐高性能场景
+    // EKFullLoad does not apply the EPLB routing table.
     if (expertCount_ == 256 && groupCount_ == 8 && kGroup_ == 4 && k_ <= 32 && addBias_ &&
         groupSelectMode_ == GROUP_SELECT_MODE_SUM && renorm_ == RENORM_NO && normType_ == NORM_TYPE_SIGMOID &&
-        !outFlag_) {
+        !outFlag_ && moeGatingTopKTilingData_.get_routingTableRows() == 0) {
         // DeepSeekV3排序对齐高性能场景
         return TILING_KEY_EXPERTNUM_GROUPNUM_ALIGN_HIGH_PERF;
     } else if (groupCount_ == 1 || groupCount_ == expertCount_ || kGroup_ == groupCount_) {

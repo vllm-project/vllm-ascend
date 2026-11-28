@@ -182,7 +182,9 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX(bool u
         eventIdSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
         SetFlag<HardEvent::S_V>(eventIdSToV);
         WaitFlag<HardEvent::S_V>(eventIdSToV);
-        Muls(xNormTensor, xNormTensor, 1.0f / sumValue, expertCount_);
+        Duplicate(xInLocalTensor, sumValue, expertCount_);
+        PipeBarrier<PIPE_V>();
+        Div(xNormTensor, xNormTensor, xInLocalTensor, expertCount_);
         PipeBarrier<PIPE_V>();
     } else {
         LocalTensor<float> calcNormTmpTensor = calcTmpBuf_.Get<float>();
@@ -284,7 +286,9 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::SelectTopKExper
     Gather(yOutTensor, xNormTensor, topKExpertIdWithByte.template ReinterpretCast<uint32_t>(), static_cast<uint32_t>(0),
            k_);
 
-    if (tilingData_->normType == NORM_TYPE_SIGMOID || tilingData_->normType == NORM_TYPE_SOFTPLUS) {
+    // Sigmoid/sqrtsoftplus always normalize selected scores; softmax requires renorm=1.
+    if (tilingData_->normType == NORM_TYPE_SIGMOID || tilingData_->normType == NORM_TYPE_SOFTPLUS ||
+        (tilingData_->normType == NORM_TYPE_SOFTMAX && tilingData_->renorm == 1)) {
         LocalTensor<float> maxValueTensor = calcTmpBuf_.Get<float>();
         LocalTensor<float> tmpTensor = calcTmpBuf_.Get<float>()[BLOCK_BYTES];
         PipeBarrier<PIPE_V>();

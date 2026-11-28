@@ -270,13 +270,20 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckAttr()
              groupExpertCount, groupSelectMode_),
         return ge::GRAPH_FAILED);
 
+    OPS_ERR_IF((normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID) &&
+                   (renorm_ == 1 || moeGatingTopKTilingData_.get_routingTableRows() > 0) &&
+                   (inputIdsShape_ != nullptr || tid2eidShape_ != nullptr || addBiasVl_),
+               OPS_LOG_E(context_, "Softmax/sigmoid renorm=1 or fused mapping does not support hash/vision inputs"),
+               return ge::GRAPH_FAILED);
+
     OPS_ERR_IF(moeGatingTopKTilingData_.get_routingTableRows() > 0 &&
-                   (groupCount_ != 1 || normType_ != NORM_TYPE_SOFTPLUS),
+                   normType_ == NORM_TYPE_SOFTPLUS && groupCount_ != 1,
                OPS_LOG_E(context_, "Fused EPLB mapping requires ungrouped sqrtsoftplus routing"),
                return ge::GRAPH_FAILED);
 
-    OPS_ERR_IF(renorm_ != RENORM_NO,
-                OPS_LOG_E(context_, "renorm is: %ld, but currently only support %ld.", renorm_, RENORM_NO),
+    OPS_ERR_IF(renorm_ != RENORM_NO &&
+                   !(renorm_ == 1 && (normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID)),
+                OPS_LOG_E(context_, "renorm must be 0, or 1 for softmax/sigmoid"),
                 return ge::GRAPH_FAILED);
 
     OPS_ERR_IF(normType_ != NORM_TYPE_SOFTMAX && normType_ != NORM_TYPE_SIGMOID && normType_ != NORM_TYPE_SOFTPLUS,

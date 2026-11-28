@@ -30,8 +30,8 @@ namespace MoeGatingTopKHashRegbaseNS
     constexpr int32_t CONSTANT_THREE = 3;
     constexpr int32_t CONSTANT_FOUR = 4;
     constexpr int32_t CONSTANT_EIGHT = 8;
+    constexpr int64_t SOFTMAX_BATCH_ROWS = 4;
     constexpr uint32_t VL_FLOAT_SIZE = VECTOR_REG_WIDTH / sizeof(float);
-    constexpr MicroAPI::DivSpecificMode mode = {MicroAPI::MaskMergeMode::ZEROING, true};
 
     template <typename T, typename  U1, typename U2>
     class MoeGatingTopKHashRegbase
@@ -48,6 +48,16 @@ namespace MoeGatingTopKHashRegbaseNS
         __aicore__ inline void CopyInX(int64_t progress);
         __aicore__ inline void ComputeX(int64_t row);
         __aicore__ inline void ComputeSoftmax();
+        __aicore__ inline void ComputeSoftmaxRow(LocalTensor<float> xInLocalTensor);
+        __aicore__ inline void TopKComputeRow(LocalTensor<T> yTensor, LocalTensor<int32_t> expertIdxTensor);
+        __aicore__ inline void ProcessSoftmaxBatch();
+        __aicore__ inline bool CanBatchSoftmax() const
+        {
+            return IsSameType<T, float>::value && tilingData_->normType == 0 && tilingData_->outFlag == 0 &&
+                groupCount_ == 1 && expertCount_ == expertCountAlign_ && !hasBias_ && !hasBiasVl_ && !hashFlag_ &&
+                tilingData_->renorm == 1 && eps_ >= 0 && eps_ <= 1e-20f && k_ <= VL_FLOAT_SIZE && expertCount_ <= 1024;
+        }
+        __aicore__ inline void ComputeOrdinarySoftmax(LocalTensor<float> dst, LocalTensor<float> src);
         __aicore__ inline void ComputeSigmoid();
         __aicore__ inline void ComputeSoftplus();
         __aicore__ inline void CopyOutXNorm(int64_t progress);
@@ -209,8 +219,72 @@ namespace MoeGatingTopKHashRegbaseNS
         }
     }
 
+    template <typename T, typename U1, typename U2>
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeOrdinarySoftmax(
+        LocalTensor<float> dst, LocalTensor<float> src)
+    {
+        // Match CANN ops-transformer 66881f9a's ordinary without-group softmax:
+        // max, exp sum, then division.
+        // The input's padded expert slots have already been filled with -inf.
+        uint32_t size = expertCountAlign_;
+        uint16_t loops = static_cast<uint16_t>(CeilDiv(size, VL_FLOAT_SIZE));
+        __local_mem__ float *srcAddr = (__local_mem__ float *)src.GetPhyAddr();
+        __local_mem__ float *dstAddr = (__local_mem__ float *)dst.GetPhyAddr();
+        __VEC_SCOPE__
+        {
+            RegTensor<float> x, acc, maxVal, maxBcast, expVal, sumVal, sumBcast, negInf;
+            MicroAPI::MaskReg mask = MicroAPI::CreateMask<float>();
+            MicroAPI::MaskReg all = MicroAPI::CreateMask<float>();
+            MicroAPI::Duplicate(acc, *((float *)&MIN_FP32), all);
+            MicroAPI::Duplicate(negInf, *((float *)&MIN_FP32), all);
+            uint32_t remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                LoadOneTensorForDtypeT<float>(srcAddr, x, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Select<float>(x, x, negInf, mask);
+                MicroAPI::Max(acc, acc, x, all);
+            }
+            MicroAPI::Reduce<MicroAPI::ReduceType::MAX, float, float, MicroAPI::MaskMergeMode::ZEROING>(
+                maxVal, acc, all);
+            MicroAPI::Duplicate(maxBcast, maxVal, all);
+
+            MicroAPI::Duplicate(acc, 0.0f, all);
+            remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                MicroAPI::Duplicate(expVal, 0.0f, all);
+                LoadOneTensorForDtypeT<float>(srcAddr, x, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Sub(expVal, x, maxBcast, mask);
+                MicroAPI::Exp(expVal, expVal, mask);
+                MicroAPI::Add(acc, acc, expVal, all);
+                MicroAPI::DataCopy(dstAddr + i * VL_FLOAT_SIZE, expVal, mask);
+            }
+            MicroAPI::Reduce<MicroAPI::ReduceType::SUM, float, float, MicroAPI::MaskMergeMode::ZEROING>(
+                sumVal, acc, all);
+            MicroAPI::Duplicate(sumBcast, sumVal, all);
+
+            MicroAPI::LocalMemBar<MicroAPI::MemType::VEC_STORE, MicroAPI::MemType::VEC_LOAD>();
+            remaining = size;
+            for (uint16_t i = 0; i < loops; ++i) {
+                mask = MicroAPI::UpdateMask<float>(remaining);
+                LoadOneTensorForDtypeT<float>(dstAddr, expVal, mask, i * VL_FLOAT_SIZE);
+                MicroAPI::Div(expVal, expVal, sumBcast, mask);
+                MicroAPI::DataCopy(dstAddr + i * VL_FLOAT_SIZE, expVal, mask);
+            }
+        }
+        PipeBarrier<PIPE_V>();
+    }
+
     template <typename T, typename  U1, typename U2>
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeSoftmax()
+    {
+        auto xInLocalTensor = xInQueue_.DeQue<float>();
+        ComputeSoftmaxRow(xInLocalTensor);
+        xInQueue_.FreeTensor(xInLocalTensor);
+    }
+
+    template <typename T, typename U1, typename U2>
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeSoftmaxRow(LocalTensor<float> xInLocalTensor)
     {
         LocalTensor<float> xSoftmaxTensor = xSigmoidBuf_.Get<float>();
         LocalTensor<float> xBiasTensor = xBiasBuf_.Get<float>();
@@ -220,7 +294,6 @@ namespace MoeGatingTopKHashRegbaseNS
         uint32_t perGroupExpertCount0 = perGroupExpertCount_;
         uint32_t perGroupExpertCountAlign0 = perGroupExpertCountAlign_;
         uint16_t groupCount0 = groupCount_;
-        LocalTensor<float> xInLocalTensor = xInQueue_.DeQue<float>();
         if constexpr (!IsSameType<T, float>::value)
         {
             Cast(xInLocalTensor, xInLocalTensor[expertCountAlign_].template ReinterpretCast<T>(), RoundMode::CAST_NONE,
@@ -239,12 +312,17 @@ namespace MoeGatingTopKHashRegbaseNS
                       (perGroupExpertCountAlign_ * sizeof(float)) / BLOCK_BYTES);
         }
 
-        SoftMaxShapeInfo softmaxShapeInfo;
-        softmaxShapeInfo.srcM = 1;
-        softmaxShapeInfo.srcK = groupCount_ * perGroupExpertCountAlign_;
-        softmaxShapeInfo.oriSrcM = 1;
-        softmaxShapeInfo.oriSrcK = groupCount_ * perGroupExpertCountAlign_;
-        SoftMax<float, true, false>(xSoftmaxTensor, xInLocalTensor, tilingData_->softmaxTilingData, softmaxShapeInfo);
+        if (groupCount_ == 1 && tilingData_->routingTableRows > 0) {
+            PipeBarrier<PIPE_V>();
+            ComputeOrdinarySoftmax(xSoftmaxTensor, xInLocalTensor);
+        } else {
+            SoftMaxShapeInfo softmaxShapeInfo;
+            softmaxShapeInfo.srcM = 1;
+            softmaxShapeInfo.srcK = groupCount_ * perGroupExpertCountAlign_;
+            softmaxShapeInfo.oriSrcM = 1;
+            softmaxShapeInfo.oriSrcK = groupCount_ * perGroupExpertCountAlign_;
+            SoftMax<float, true, false>(xSoftmaxTensor, xInLocalTensor, tilingData_->softmaxTilingData, softmaxShapeInfo);
+        }
 
         __local_mem__ float *softmaxOutAddr = (__local_mem__ float *)xSoftmaxTensor.GetPhyAddr();
         __local_mem__ int32_t *indexOutAddr = (__local_mem__ int32_t *)indexTensor.GetPhyAddr();
@@ -320,7 +398,6 @@ namespace MoeGatingTopKHashRegbaseNS
                 }
             }
         }
-        xInQueue_.FreeTensor(xInLocalTensor);
     }
 
     template <typename T, typename  U1, typename U2>
@@ -368,7 +445,7 @@ namespace MoeGatingTopKHashRegbaseNS
                     MicroAPI::Muls(vreg1, vregInFp32, static_cast<float>(-1), preg0);
                     MicroAPI::Exp(vreg2, vreg1, preg0);
                     MicroAPI::Adds(vreg3, vreg2, static_cast<float>(1), preg0);
-                    MicroAPI::Div<float, &mode>(vregSigmoidResult, vregOne, vreg3, preg0);
+                    MicroAPI::Div(vregSigmoidResult, vregOne, vreg3, preg0);
                     // add bias
                     MicroAPI::Add(vregBiasResult, vregSigmoidResult, vregBiasFp32, preg0);
                     // 使用Arange生成排序索引, 起始值为i乘每个循环的veclen
@@ -377,17 +454,20 @@ namespace MoeGatingTopKHashRegbaseNS
                     MicroAPI::DataCopy(addBiasOutAddr + i * VL_FLOAT_SIZE, vregBiasResult, preg0);
                     MicroAPI::DataCopy(indexOutAddr + i * VL_FLOAT_SIZE, vregIndex, preg0);
                 }
-                MicroAPI::LocalMemBar<MicroAPI::MemType::VEC_STORE, MicroAPI::MemType::VEC_STORE>();
-
-                // pad min fp32
-                RegTensor<float> vregPad;
-                MicroAPI::UnalignReg u0;
-                MicroAPI::Duplicate(vregPad, *((float *)&MIN_FP32));
-                for (uint16_t i = 0; i < groupCount0; i++)
+                if (perGroupExpertCountAlign0 != perGroupExpertCount0)
                 {
-                    auto padUbAddr = addBiasOutAddr + i * perGroupExpertCountAlign0 + perGroupExpertCount0;
-                    MicroAPI::DataCopyUnAlign(padUbAddr, vregPad, u0, perGroupExpertCountAlign0 - perGroupExpertCount0);
-                    MicroAPI::DataCopyUnAlignPost(padUbAddr, u0, 0);
+                    MicroAPI::LocalMemBar<MicroAPI::MemType::VEC_STORE, MicroAPI::MemType::VEC_STORE>();
+
+                    // pad min fp32
+                    RegTensor<float> vregPad;
+                    MicroAPI::UnalignReg u0;
+                    MicroAPI::Duplicate(vregPad, *((float *)&MIN_FP32));
+                    for (uint16_t i = 0; i < groupCount0; i++)
+                    {
+                        auto padUbAddr = addBiasOutAddr + i * perGroupExpertCountAlign0 + perGroupExpertCount0;
+                        MicroAPI::DataCopyUnAlign(padUbAddr, vregPad, u0, perGroupExpertCountAlign0 - perGroupExpertCount0);
+                        MicroAPI::DataCopyUnAlignPost(padUbAddr, u0, 0);
+                    }
                 }
             }
         }
@@ -420,24 +500,27 @@ namespace MoeGatingTopKHashRegbaseNS
                     MicroAPI::Muls(vreg1, vregInFp32, static_cast<float>(-1), preg0);
                     MicroAPI::Exp(vreg2, vreg1, preg0);
                     MicroAPI::Adds(vreg3, vreg2, static_cast<float>(1), preg0);
-                    MicroAPI::Div<float, &mode>(vregSigmoidResult, vregOne, vreg3, preg0);
+                    MicroAPI::Div(vregSigmoidResult, vregOne, vreg3, preg0);
                     // 使用Arange生成排序索引, 起始值为i乘每个循环的veclen
                     MicroAPI::Arange(vregIndex, static_cast<int32_t>(i * VL_FLOAT_SIZE));
                     MicroAPI::DataCopy(sigmoidOutAddr + i * VL_FLOAT_SIZE, vregSigmoidResult, preg0);
                     MicroAPI::DataCopy(addBiasOutAddr + i * VL_FLOAT_SIZE, vregSigmoidResult, preg0);
                     MicroAPI::DataCopy(indexOutAddr + i * VL_FLOAT_SIZE, vregIndex, preg0);
                 }
-                MicroAPI::LocalMemBar<MicroAPI::MemType::VEC_STORE, MicroAPI::MemType::VEC_STORE>();
-
-                // pad inf
-                RegTensor<float> vregPad;
-                MicroAPI::UnalignReg u0;
-                MicroAPI::Duplicate(vregPad, *((float *)&MIN_FP32));
-                for (uint16_t i = 0; i < groupCount0; i++)
+                if (perGroupExpertCountAlign0 != perGroupExpertCount0)
                 {
-                    auto padUbAddr = addBiasOutAddr + i * perGroupExpertCountAlign0 + perGroupExpertCount0;
-                    MicroAPI::DataCopyUnAlign(padUbAddr, vregPad, u0, perGroupExpertCountAlign0 - perGroupExpertCount0);
-                    MicroAPI::DataCopyUnAlignPost(padUbAddr, u0, 0);
+                    MicroAPI::LocalMemBar<MicroAPI::MemType::VEC_STORE, MicroAPI::MemType::VEC_STORE>();
+
+                    // pad inf
+                    RegTensor<float> vregPad;
+                    MicroAPI::UnalignReg u0;
+                    MicroAPI::Duplicate(vregPad, *((float *)&MIN_FP32));
+                    for (uint16_t i = 0; i < groupCount0; i++)
+                    {
+                        auto padUbAddr = addBiasOutAddr + i * perGroupExpertCountAlign0 + perGroupExpertCount0;
+                        MicroAPI::DataCopyUnAlign(padUbAddr, vregPad, u0, perGroupExpertCountAlign0 - perGroupExpertCount0);
+                        MicroAPI::DataCopyUnAlignPost(padUbAddr, u0, 0);
+                    }
                 }
             }
         }
@@ -633,7 +716,18 @@ namespace MoeGatingTopKHashRegbaseNS
     template <typename T, typename  U1, typename U2>
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::TopKCompute()
     {
-        LocalTensor<float> xBiasTensor = xBiasBuf_.Get<float>();
+        LocalTensor<T> yTensor = yOutQueue_.AllocTensor<T>();
+        LocalTensor<int32_t> expertIdxTensor = expertIdxOutQueue_.AllocTensor<int32_t>();
+        TopKComputeRow(yTensor, expertIdxTensor);
+        yOutQueue_.EnQue(yTensor);
+        expertIdxOutQueue_.EnQue<int32_t>(expertIdxTensor);
+    }
+
+    template <typename T, typename U1, typename U2>
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::TopKComputeRow(
+        LocalTensor<T> yTensor, LocalTensor<int32_t> expertIdxTensor)
+    {
+        LocalTensor<float> xBiasTensor = CanBatchSoftmax() ? xSigmoidBuf_.Get<float>() : xBiasBuf_.Get<float>();
         LocalTensor<float> sortedInGroupTensor = sortedInGroupBuf_.Get<float>(); // 组内排序的结果, 后续归并需要
         LocalTensor<float> tmpLocal = finalSortBuffer_.Get<float>();
 
@@ -641,8 +735,6 @@ namespace MoeGatingTopKHashRegbaseNS
                           perGroupExpertCountAlign_ * groupCount_ / ONE_REPEAT_SORT_NUM);
 
         LocalTensor<float> xSigmoidTensor = xSigmoidBuf_.Get<float>();
-        LocalTensor<T> yTensor = yOutQueue_.AllocTensor<T>();
-        LocalTensor<int32_t> expertIdxTensor = expertIdxOutQueue_.AllocTensor<int32_t>();
 
         LocalTensor<int32_t> sortedInGroupTensorCast = sortedInGroupTensor.template ReinterpretCast<int32_t>();
 
@@ -673,9 +765,6 @@ namespace MoeGatingTopKHashRegbaseNS
                                            routedScalingFactor_);
             }
         }
-
-        yOutQueue_.EnQue(yTensor);
-        expertIdxOutQueue_.EnQue<int32_t>(expertIdxTensor);
     }
 
     template <typename T, typename  U1, typename U2>
@@ -1116,7 +1205,9 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        const bool useSortedScores = CanBatchSoftmax();
+
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1144,7 +1235,11 @@ namespace MoeGatingTopKHashRegbaseNS
 
                 MicroAPI::MaskReg preg0 = MicroAPI::UpdateMask<uint32_t>(k);
                 MicroAPI::DataCopy<uint32_t, MicroAPI::LoadDist::DIST_DINTLV_B32>(vreg0, vreg1, mrgSortAddr);
-                MicroAPI::DataCopyGather(vreg2, inputAddr, vreg1, preg0);
+                if (useSortedScores) {
+                    vreg2 = (RegTensor<float> &)vreg0;
+                } else {
+                    MicroAPI::DataCopyGather(vreg2, inputAddr, vreg1, preg0);
+                }
                 MicroAPI::ReduceSum(vreg3, vreg2, preg0);
                 MicroAPI::Adds(vreg3, vreg3, eps, preg0);
                 MicroAPI::Duplicate(vreg4, vreg3, preg0);
@@ -1168,7 +1263,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1261,7 +1356,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1334,7 +1429,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1501,8 +1596,6 @@ namespace MoeGatingTopKHashRegbaseNS
     {
         tilingData_ = tilingData;
         pipe_ = tPipe;
-        eplbMap_.Init(routingTable, tilingData_->routingTableRows,
-                      tilingData_->expertCount, tilingData_->k, pipe_);
         blockIdx_ = GetBlockIdx();
         if (blockIdx_ == GetBlockNum() - 1)
         {
@@ -1545,9 +1638,11 @@ namespace MoeGatingTopKHashRegbaseNS
         // init queue
         int32_t expertGroupAlign = groupCount_ * perGroupExpertCountAlign_;
         int32_t groupAlign = static_cast<int32_t>(CeilAlign(groupCount_, ONE_REPEAT_SORT_NUM));
-        pipe_->InitBuffer(xInQueue_, CONSTANT_TWO, expertGroupAlign * sizeof(float) * (sizeof(float) / sizeof(T)));
-        pipe_->InitBuffer(yOutQueue_, CONSTANT_TWO, AlignBytes(k_, sizeof(T)));
-        pipe_->InitBuffer(expertIdxOutQueue_, CONSTANT_TWO, AlignBytes(k_, sizeof(int32_t)));
+        uint32_t batchRows = CanBatchSoftmax() ? SOFTMAX_BATCH_ROWS : 1;
+        eplbMap_.Init(routingTable, tilingData_->routingTableRows, expertCount_, k_, pipe_, batchRows);
+        pipe_->InitBuffer(xInQueue_, CONSTANT_TWO, batchRows * expertGroupAlign * sizeof(float) * (sizeof(float) / sizeof(T)));
+        pipe_->InitBuffer(yOutQueue_, CONSTANT_TWO, batchRows * AlignBytes(k_, sizeof(T)));
+        pipe_->InitBuffer(expertIdxOutQueue_, CONSTANT_TWO, batchRows * AlignBytes(k_, sizeof(int32_t)) + VECTOR_REG_WIDTH);
         pipe_->InitBuffer(outOutQueue_, CONSTANT_TWO, expertGroupAlign * sizeof(float));
 
         pipe_->InitBuffer(biasBuf_, expertGroupAlign * sizeof(T));
@@ -1563,13 +1658,66 @@ namespace MoeGatingTopKHashRegbaseNS
         pipe_->InitBuffer(sortedGroupBuf_, groupAlign * sizeof(float) * 2);
     }
 
+    template <typename T, typename U1, typename U2>
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ProcessSoftmaxBatch()
+    {
+        const int64_t yStride = AlignBytes(k_, sizeof(T)) / sizeof(T);
+        const int64_t idStride = AlignBytes(k_, sizeof(int32_t)) / sizeof(int32_t);
+        const uint32_t yBytes = k_ * sizeof(T);
+        const uint32_t idBytes = k_ * sizeof(int32_t);
+        indexTensor = indexBuffer_.Get<uint32_t>();
+        ArithProgression(indexTensor.ReinterpretCast<int32_t>(), 0, 1, expertCount_);
+        for (int64_t begin = 0; begin < curCoreRowCount_; begin += SOFTMAX_BATCH_ROWS) {
+            uint16_t rows = static_cast<uint16_t>(Min(SOFTMAX_BATCH_ROWS, curCoreRowCount_ - begin));
+            auto x = xInQueue_.AllocTensor<float>();
+            DataCopy(x.template ReinterpretCast<T>(), xGm_[begin * expertCount_],
+                     static_cast<uint32_t>(rows * expertCount_));
+            xInQueue_.EnQue(x);
+            x = xInQueue_.DeQue<float>();
+            auto weights = yOutQueue_.AllocTensor<T>();
+            auto ids = expertIdxOutQueue_.AllocTensor<int32_t>();
+            for (int64_t row = 0; row < rows; ++row) {
+                ComputeOrdinarySoftmax(xSigmoidBuf_.Get<float>(), x[row * expertCount_]);
+                TopKComputeRow(weights[row * yStride], ids[row * idStride]);
+            }
+            eplbMap_.ApplyBatch(ids, begin + tilingData_->perCoreRowCount * blockIdx_, rows, idStride);
+            yOutQueue_.EnQue(weights);
+            expertIdxOutQueue_.EnQue(ids);
+            weights = yOutQueue_.DeQue<T>();
+            ids = expertIdxOutQueue_.DeQue<int32_t>();
+            DataCopyPad(yGm_[begin * k_], weights,
+                        DataCopyExtParams{rows, yBytes, static_cast<uint32_t>((yStride * sizeof(T) - yBytes) / BLOCK_BYTES), 0, 0});
+            DataCopyPad(expertIdxGm_[begin * k_], ids,
+                        DataCopyExtParams{rows, idBytes, static_cast<uint32_t>((idStride * sizeof(int32_t) - idBytes) / BLOCK_BYTES), 0, 0});
+            yOutQueue_.FreeTensor(weights);
+            expertIdxOutQueue_.FreeTensor(ids);
+            xInQueue_.FreeTensor(x);
+        }
+    }
+
     template <typename T, typename  U1, typename U2>
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::Process()
     {
         CopyInBias();
         CopyInVisionBias();
+        if (CanBatchSoftmax()) {
+            ProcessSoftmaxBatch();
+            return;
+        }
         if (kGroup_ == groupCount_ || groupCount_ == expertCount_)
         {
+            if constexpr (IsSameType<T, float>::value) {
+                if (tilingData_->normType == 1 && tilingData_->outFlag == 0 && !hashFlag_ && !hasBiasVl_ &&
+                    groupCount_ == 1 && expertCount_ == expertCountAlign_) {
+                    for (int64_t row = 0; row < curCoreRowCount_; ++row) {
+                        CopyInX(row);
+                        ComputeSigmoid();
+                        TopKCompute();
+                        CopyOut(row);
+                    }
+                    return;
+                }
+            }
             CopyInX(0);
             for (int64_t row = 1; row < curCoreRowCount_; row++)
             {

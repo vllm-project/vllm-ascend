@@ -95,7 +95,7 @@ extern "C" __global__ __aicore__ void moe_gating_top_k_hash(GM_ADDR x, GM_ADDR b
         GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashTilingData, tilingData, tiling);
         const MoeGatingTopKHashTilingData *__restrict t = &tilingData;
         MoeGatingTopKHashGenerlized<DTYPE_X> op;
-        op.Init(x, bias, y, expertIdx, out, userWS, t, &tPipe);
+        op.Init(x, bias, routingTable, y, expertIdx, out, userWS, t, &tPipe);
         op.Process();
     }
     #if defined(__DAV_C310__)
