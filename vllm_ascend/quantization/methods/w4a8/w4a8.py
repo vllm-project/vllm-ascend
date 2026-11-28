@@ -517,7 +517,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
-        if mlp_compute_input.activation in (MoEActivation.SITU, MoEActivation.SITU.value):
+        if mlp_compute_input.activation == MoEActivation.SITU:
             hidden_states, out_scale = self._apply_gmm1_situ_quant(
                 x=hidden_states,
                 weight=w1 if self.use_expert_weight_list else w1[0],
