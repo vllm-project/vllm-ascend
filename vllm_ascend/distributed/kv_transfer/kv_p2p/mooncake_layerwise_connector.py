@@ -1422,7 +1422,10 @@ class MooncakeLayerwiseConnectorWorker:
             is_mla = isinstance(layer_kv_cache_spec, MLAAttentionSpec)
             sparse_sfa_c8 = is_mla and bool(getattr(layer_kv_cache_spec, "cache_sparse_sfa_c8", False))
             sparse_sfa_turboquant = is_mla and bool(getattr(layer_kv_cache_spec, "cache_sparse_sfa_turboquant", False))
-            if sparse_sfa_turboquant:
+            # MXFP4 is also one packed uint8 tensor, but its in-page layout is
+            # owned by the SFA FP4 writer, not by this connector.
+            sparse_sfa_fp4 = is_mla and bool(getattr(layer_kv_cache_spec, "cache_sparse_sfa_fp4", False))
+            if sparse_sfa_turboquant or sparse_sfa_fp4:
                 raise NotImplementedError(
                     "Mooncake layerwise connector does not support packed SFA main KV caches other than C8."
                 )

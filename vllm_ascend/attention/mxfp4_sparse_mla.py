@@ -16,6 +16,7 @@ error only when the mode is actually used.
 from __future__ import annotations
 
 from functools import lru_cache
+from importlib import import_module
 
 import torch
 
@@ -32,18 +33,25 @@ FP4_METADATA_QUANT_MODE = 1
 
 @lru_cache(maxsize=1)
 def _fp4_ops():
+    """Resolve the ops through torch's registered cann_ops_transformer namespace.
+
+    The Python package is imported for its registration side effect only, the
+    same contract the DSA mixed-quant adapters use.
+    """
     try:
-        import cann_ops_transformer as ops
-    except ImportError as exc:  # pragma: no cover - depends on the toolkit
+        import_module("cann_ops_transformer")
+        namespace = torch.ops.cann_ops_transformer
+        return (
+            namespace.kv_compress_epilog,
+            namespace.mixed_quant_sparse_flash_mla,
+            namespace.mixed_quant_sparse_flash_mla_metadata,
+        )
+    except (ImportError, AttributeError) as exc:  # pragma: no cover - depends on the toolkit
         raise RuntimeError(
-            "The GLM-5.3-Flash FP4 KV cache requires cann_ops_transformer from "
-            "the matching CANN/ops-transformer package (CANN 1126 or newer)."
+            "The GLM-5.3-Flash MXFP4 KV cache requires the kv_compress_epilog and "
+            "MixedQuantSparseFlashMla ops from a matching ops-transformer package "
+            "(CANN 1126 or newer)."
         ) from exc
-    return (
-        ops.kv_compress_epilog,
-        ops.mixed_quant_sparse_flash_mla,
-        ops.mixed_quant_sparse_flash_mla_metadata,
-    )
 
 
 def write_fp4_kv_cache(cache: torch.Tensor, values: torch.Tensor, slots: torch.Tensor) -> None:
