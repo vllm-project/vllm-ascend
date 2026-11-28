@@ -71,7 +71,9 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
     )
     desc = SimpleNamespace(num_tokens=1, uniform_token_count=1)
     capture = Mock(side_effect=lambda *a, **k: not manager.has_prefill)
-    graph = SimpleNamespace(device=binding.device, _capture_descs={"full": [desc]}, _candidates={}, capture=capture)
+    graph = SimpleNamespace(
+        device=binding.device, _capture_descs={"full": [desc]}, _candidates={}, capture=capture, run_fullgraph=Mock()
+    )
     manager.prepare_graph_capture(graph, lambda: True)
     assert graph.capture("model", progress_bar_desc="test") is True
     capture.assert_called_once_with("model", progress_bar_desc="test")
@@ -124,11 +126,11 @@ def test_partial_transfer_failure_cannot_publish_residency(
     copy = acl.rt.memcpy_async
     copies = []
 
-    def fail_second_expert(*args):
+    def fail_second_copy(*args):
         copies.append(args)
-        return 1 if len(copies) == len(binding.adapter.output_names) + 1 else copy(*args)
+        return 1 if len(copies) == 2 else copy(*args)
 
-    monkeypatch.setattr(acl.rt, "memcpy_async", fail_second_expert)
+    monkeypatch.setattr(acl.rt, "memcpy_async", fail_second_copy)
     exit_worker = Mock(side_effect=SystemExit(1))
     monkeypatch.setattr(os, "_exit", exit_worker)
     if graph_callback:
@@ -141,7 +143,7 @@ def test_partial_transfer_failure_cannot_publish_residency(
         with pytest.raises(RuntimeError, match="asynchronous expert host copy failed"):
             binding.load_resident(slots, loads)
         exit_worker.assert_not_called()
-    assert len(copies) == len(binding.adapter.output_names) + 1
+    assert len(copies) == 2
     assert native_runtime.calls[-1] == "sync"
     assert binding.slot_to_expert == before
     torch.testing.assert_close(binding.mapping.host_map, host_map)

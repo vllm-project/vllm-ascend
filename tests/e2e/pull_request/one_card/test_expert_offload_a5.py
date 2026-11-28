@@ -177,6 +177,8 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
 class _ExpertOffloadAudit(TypedDict):
     steps: list[dict[str, bool | int | str]]
     replays: int
+    prefetches: int
+    prefetch_after_replay: int
 
 
 class ExpertOffloadAuditWorker:
@@ -190,8 +192,20 @@ class ExpertOffloadAuditWorker:
         assert manager is not None
         if action == "install":
             assert manager.bindings
-            audit: _ExpertOffloadAudit = {"steps": [], "replays": 0}
+            audit: _ExpertOffloadAudit = {"steps": [], "replays": 0, "prefetches": 0, "prefetch_after_replay": 0}
             runner._expert_offload_test_audit = audit
+            pool = manager.full_pool
+            assert len(pool.buffers) == 2
+            load_buffer = pool._load
+
+            def observed_prefetch(binding, slot, *, stream=None):
+                if stream is not None:
+                    audit["prefetches"] += 1
+                    if audit["replays"]:
+                        audit["prefetch_after_replay"] += 1
+                return load_buffer(binding, slot, stream=stream)
+
+            pool._load = observed_prefetch
             prepare = runner._prepare_inputs_impl
 
             def observed_prepare(scheduler_output, batch_req_state, batch_desc):
@@ -217,6 +231,11 @@ class ExpertOffloadAuditWorker:
         snapshot = {
             "steps": list(audit["steps"]),
             "replays": audit["replays"],
+            "prefetches": audit["prefetches"],
+            "prefetch_after_replay": audit["prefetch_after_replay"],
+            "pool_addresses": [
+                {name: tensor.data_ptr() for name, tensor in buffer.items()} for buffer in manager.full_pool.buffers
+            ],
             "capture_sizes": list(runner.cudagraph_manager.capture_sizes),
             "layer_names": [binding.layer_name for binding in bindings],
             "loaded": all(binding.host_store.prepared for binding in bindings),
@@ -242,7 +261,7 @@ def use_mrv2(monkeypatch):
 def tiny_checkpoint(tmp_path_factory):
     """Write ordinary HF shards with real packed MXFP weights and E8M0 scales."""
     root = tmp_path_factory.mktemp("mxfp4-qwen3-moe")
-    hidden, intermediate, experts, layers, vocab = 256, 256, 8, 2, 256
+    hidden, intermediate, experts, layers, vocab = 256, 256, 8, 3, 256
     config = Qwen3MoeConfig(
         vocab_size=vocab,
         hidden_size=hidden,
@@ -347,11 +366,19 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
     )
     try:
         before = llm.collective_rpc("expert_offload_test_audit", args=("install",))[0]
-        actual = _generate_batches(llm, batches)
+        actual = _generate_batches(llm, batches[:1])
+        replayed = llm.collective_rpc("expert_offload_test_audit", args=("snapshot",))[0]
+        assert replayed["replays"] > before["replays"]
+        actual += _generate_batches(llm, batches[1:])
         after = llm.collective_rpc("expert_offload_test_audit", args=("snapshot",))[0]
-        assert before["loaded"] and len(before["layer_names"]) == 2
+        assert before["loaded"] and len(before["layer_names"]) == 3
         assert set(before["capture_sizes"]) == {1, 2}
         assert after["addresses"] == before["addresses"]
+        assert len(before["pool_addresses"]) == 2
+        assert before["pool_addresses"][0] != before["pool_addresses"][1]
+        assert after["pool_addresses"] == before["pool_addresses"]
+        assert after["prefetches"] > 0
+        assert after["prefetch_after_replay"] > replayed["prefetch_after_replay"]
         assert after["replays"] > 0
         assert any(step["prefill"] for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "FULL" for step in after["steps"])

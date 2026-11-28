@@ -238,13 +238,22 @@ class LayerOffloadBinding:
 
 
 class FullExpertPool:
-    """One reusable full layer shared by the manager's homogeneous expert layers."""
+    """Reuse two full-layer buffers, prefetching on a separate stream."""
 
     def __init__(self):
         self.tensors: dict[str, torch.Tensor] = {}
+        self.buffers: list[dict[str, torch.Tensor]] = []
+        self.owners: list[LayerOffloadBinding | None] = []
+        self.bindings: list[LayerOffloadBinding] = []
+        self.load_stream = None
+        self.compute_stream = None
+        self.inflight = False
+        self.has_prefill = True
+        self.graph_residency_pending = False
 
     def allocate(self, bindings) -> None:
-        first_binding, *remaining_bindings = bindings
+        self.bindings = list(bindings)
+        first_binding, *remaining_bindings = self.bindings
         expert_layout = self._expert_layout(first_binding)
         for binding in remaining_bindings:
             if self._expert_layout(binding) != expert_layout:
@@ -253,9 +262,16 @@ class FullExpertPool:
                     f"{binding.layer_name} differs from {first_binding.layer_name}"
                 )
         # Allocate in the scheme's native format, including scale strides.
-        self.tensors = first_binding.adapter.allocate_weights(
-            first_binding.host_store, first_binding.num_experts, first_binding.device
-        )
+        self.buffers = [
+            first_binding.adapter.allocate_weights(
+                first_binding.host_store, first_binding.num_experts, first_binding.device
+            )
+            for _ in range(2)
+        ]
+        self.tensors = self.buffers[0]
+        if first_binding.device.type == "npu":
+            self.load_stream = torch.npu.Stream(device=first_binding.device)
+        self.owners = [None] * len(self.buffers)
 
     @staticmethod
     def _expert_layout(binding):
@@ -277,15 +293,64 @@ class FullExpertPool:
             },
         )
 
+    def set_batch_phase(self, has_prefill):
+        if not has_prefill:
+            # Decode can replace resident bytes that a look-ahead copy still reads.
+            self.drain()
+        self.has_prefill = has_prefill
+
+    def drain(self):
+        if self.inflight:
+            assert self.load_stream is not None
+            self.load_stream.synchronize()
+            self.inflight = False
+
     def load_layer(self, binding):
+        if binding.device.type == "npu":
+            # Join graph callbacks before reading their resident bytes and slot map.
+            if binding.manager.graph_streams and self.graph_residency_pending:
+                torch.npu.synchronize(binding.device)
+                self.graph_residency_pending = False
+            compute = torch.npu.current_stream(binding.device)
+            if self.compute_stream is not None and self.compute_stream != compute:
+                compute.wait_stream(self.compute_stream)
+            if self.inflight:
+                compute.wait_stream(self.load_stream)
+            self.compute_stream = compute
+
+        index = self.bindings.index(binding)
+        slot = index % len(self.buffers)
+        self._load(binding, slot)
+        following = index + 1
+        if self.load_stream is not None and self.has_prefill and following < len(self.bindings):
+            # Snapshot past computation before the caller submits this layer's
+            # MoE. Load the next layer into the other buffer concurrently.
+            if self.owners[1 - slot] is not self.bindings[following]:
+                self.load_stream.wait_stream(self.compute_stream)
+                self.inflight = True
+                self._load(self.bindings[following], 1 - slot, stream=self.load_stream)
+        return self.buffers[slot]
+
+    def _load(self, binding, slot, *, stream=None):
+        if self.owners[slot] is binding:
+            return
+        resident_ids = set(binding.slot_to_expert)
+        host_loads = tuple(
+            (expert_id, expert_id) for expert_id in range(binding.num_experts) if expert_id not in resident_ids
+        )
+        # Invalidate before submission: even a partial transfer destroys the old layer.
+        self.owners[slot] = None
         TorchExpertTransfer.copy_experts(
             binding.adapter,
             binding.host_store,
-            self.tensors,
-            tuple((expert_id, expert_id) for expert_id in range(binding.num_experts)),
+            self.buffers[slot],
+            host_loads,
             binding.device,
+            resident_weights=binding.resident,
+            resident_loads=tuple(enumerate(binding.slot_to_expert)),
+            stream=stream,
         )
-        return self.tensors
+        self.owners[slot] = binding
 
 
 class ExpertOffloadManager:
@@ -295,9 +360,16 @@ class ExpertOffloadManager:
         self.bindings: dict[str, LayerOffloadBinding] = {}
         self.full_pool = FullExpertPool()
         self.comm_methods = {}
-        self.has_prefill = True
         self.graph_load_stream = None
         self.graph_streams = set()
+
+    @property
+    def has_prefill(self):
+        return self.full_pool.has_prefill
+
+    @has_prefill.setter
+    def has_prefill(self, value):
+        self.full_pool.set_batch_phase(value)
 
     def capture_stream(self, _desc):
         # Use the actual NPU stream rather than torch_cuda_wrapper's CUDA cache.
@@ -345,9 +417,17 @@ class ExpertOffloadManager:
             self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)
             graph_manager._capture_stream = self.capture_stream
             graph_manager.capture = partial(self.capture, graph_manager.capture)
+            graph_manager.run_fullgraph = partial(self.run_fullgraph, graph_manager.run_fullgraph)
+
+    def run_fullgraph(self, replay_fn, *args, **kwargs):
+        # A prompt tail can replay a decode graph even when has_prefill is True.
+        self.full_pool.drain()
+        self.full_pool.graph_residency_pending = True
+        return replay_fn(*args, **kwargs)
 
     def capture(self, capture_fn, *args, **kwargs):
         self.has_prefill = False
+        self.full_pool.graph_residency_pending = True
         return capture_fn(*args, **kwargs)
 
     def initialize(self, model) -> None:
