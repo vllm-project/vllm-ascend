@@ -503,6 +503,10 @@ def apply_static_rows_to_model(
     ep_size: int,
     ep_rank: int,
     device: torch.device,
+    *,
+    log_state: Any | None = None,
+    model_config: Any | None = None,
+    model_name: str | None = None,
 ) -> set[int] | None:
     p2l_cpu = torch.tensor(rows, dtype=torch.long)
     l2p_cpu, rep_cpu = _upstream_eplb_state.compute_logical_maps(p2l_cpu, moe_model.num_logical_experts)
@@ -514,16 +518,26 @@ def apply_static_rows_to_model(
     l2p = l2p_cpu.to(device=device, dtype=torch.long)
     rep = rep_cpu.to(device=device, dtype=torch.long)
     load_buf = torch.zeros((len(rows), p2l_cpu.shape[1]), dtype=torch.int32, device=device)
-    record_off = torch.zeros((), dtype=torch.bool, device=device)
-    unpadded = [torch.zeros((), dtype=torch.int32, device=device)]
+    record_off = torch.zeros((), dtype=torch.bool, device=device) if log_state is None else None
+    unpadded = [torch.zeros((), dtype=torch.int32, device=device)] if log_state is None else None
     slots_per_rank = p2l_cpu.shape[1] // ep_size
     start = ep_rank * slots_per_rank
     for idx, (layer, row) in enumerate(zip(moe_model.moe_layers, rows)):
         slot_slice = row[start : start + slots_per_rank]
         layer._static_logical_to_local_slot = {eid: slot for slot, eid in enumerate(slot_slice)}
         layer.set_eplb_state(idx, load_buf, l2p, rep)
-        if layer.eplb_state is not None:
+        if log_state is None and layer.eplb_state is not None:
             layer.eplb_state.should_record_tensor = record_off
             layer.eplb_state.num_unpadded_tokens_tensors = unpadded
             layer.eplb_state.load_recording_enabled = False
+    if log_state is not None:
+        log_state.register_static_log_model(
+            moe_model,
+            model_config,
+            load_buf,
+            p2l_cpu.to(device=device, dtype=torch.long),
+            l2p,
+            rep,
+            model_name=model_name,
+        )
     return {eid for row in rows for eid in row[start : start + slots_per_rank]} if ep_size > 1 else None

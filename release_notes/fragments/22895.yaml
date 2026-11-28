@@ -6,6 +6,7 @@ entries:
       `eplb_config.expert_placement_path` under `--additional-config`: expert
       weights are loaded directly according to a `version: 1` placement
       snapshot JSON at startup, keeping expert-replica routing active without
-      EPLB communicators, runtime load recording, or weight migration. Pipeline
-      parallelism and registered MoE speculative drafts with EPLB enabled are
-      supported (requires `--enable-eplb`).
+      EPLB communicators or weight migration, and skipping runtime load
+      recording unless `log_balancedness=true` is enabled in `--eplb-config`.
+      Pipeline parallelism and registered MoE speculative drafts with EPLB
+      enabled are supported (requires `--enable-eplb`).

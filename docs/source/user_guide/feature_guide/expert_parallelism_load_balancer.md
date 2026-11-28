@@ -136,8 +136,10 @@ omit it or set it to `stair` to run STAIR.
 `eplb_config.mode="static"` loads expert weights directly into the physical
 slots specified by a `version: 1` placement snapshot JSON during checkpoint
 loading, then keeps fixed expert-replica routing without EPLB communicators,
-staging buffers, runtime load collection, or weight migration. `--enable-eplb`
-is still required because it controls the router and expert slot allocation.
+staging buffers, or weight migration. Runtime load recording is skipped by
+default and only runs on scheduled logging steps when `log_balancedness=true`
+is enabled in `--eplb-config`. `--enable-eplb` is still required because it
+controls the router and expert slot allocation.
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \

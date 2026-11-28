@@ -14,7 +14,11 @@ from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
     is_mixture_of_experts,
 )
-from vllm.v1.worker.gpu.eplb_utils import EPLBController, draft_model_supports_eplb
+from vllm.v1.worker.gpu.eplb_utils import (
+    EPLBController,
+    draft_model_supports_eplb,
+    eplb_draft_model_name,
+)
 
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
@@ -74,6 +78,9 @@ class AscendEPLBController(EPLBController):
             stair_config,
         )
         self._load_collection_phase_matched = True
+        self._static_log_balancedness = self.mode == "static" and bool(
+            getattr(parallel_config.eplb_config, "log_balancedness", False)
+        )
         self._snapshot: dict[str, Any] | None = None
         self._draft_bound = False
 
@@ -84,10 +91,14 @@ class AscendEPLBController(EPLBController):
         self._draft_bound = False
         ACTIVE_STATIC_LOAD.set(None)
         ACTIVE_STATIC_CONTROLLER.set(self if self.parallel_config.enable_eplb and self.mode == "static" else None)
-        if self.parallel_config.enable_eplb and self.mode != "static":
-            self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
-            if self.expert_placement_path is not None:
-                self.state.enable_placement_export(self.expert_placement_path)
+        if self.parallel_config.enable_eplb:
+            if self.mode != "static":
+                self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
+                if self.expert_placement_path is not None:
+                    self.state.enable_placement_export(self.expert_placement_path)
+            elif self._static_log_balancedness:
+                self.state = AscendEplbState(self.parallel_config, self.device)
+                self.state.static_mode = True
 
     def bind_model_for_static_load(self, model: nn.Module, vllm_config: Any, model_config: Any) -> None:
         ACTIVE_STATIC_LOAD.set(None)
@@ -96,6 +107,7 @@ class AscendEPLBController(EPLBController):
         moe_model = get_mixture_of_experts_model(model)
         ep_group = get_ep_group()
         if getattr(vllm_config.load_config, "load_format", None) == "dummy":
+            self.state = None
             if moe_model is not None and list(getattr(moe_model, "moe_layers", ())):
                 initial = list(
                     _eplb_state.EplbState.build_initial_global_physical_to_logical_map(
@@ -123,8 +135,17 @@ class AscendEPLBController(EPLBController):
                 raise RuntimeError("Static EPLB draft model cannot load before the target snapshot")
             rows = slice_static_role_rows(self._snapshot, "draft", moe_model, ep_group.cpu_group)
             local_ids = apply_static_rows_to_model(
-                moe_model, rows, ep_group.world_size, ep_group.rank_in_group, self.device
+                moe_model,
+                rows,
+                ep_group.world_size,
+                ep_group.rank_in_group,
+                self.device,
+                log_state=self.state,
+                model_config=model_config,
+                model_name=eplb_draft_model_name(model_config),
             )
+            if self.state is not None:
+                self._has_registered_models = True
             self._draft_bound = True
             ACTIVE_STATIC_LOAD.set((True, local_ids))
             return
@@ -140,13 +161,21 @@ class AscendEPLBController(EPLBController):
         rows = slice_static_role_rows(self._snapshot, "target", moe_model, ep_group.cpu_group, pp_group, pp_rank)
         if rows:
             local_ids = apply_static_rows_to_model(
-                moe_model, rows, ep_group.world_size, ep_group.rank_in_group, self.device
+                moe_model,
+                rows,
+                ep_group.world_size,
+                ep_group.rank_in_group,
+                self.device,
+                log_state=self.state,
+                model_config=model_config,
             )
+            if self.state is not None:
+                self._has_registered_models = True
             ACTIVE_STATIC_LOAD.set((True, local_ids))
 
     def maybe_register_model(self, model: nn.Module, model_config: Any, *args, **kwargs) -> bool:
         if self.mode == "static":
-            return False
+            return bool(self.state is not None and self._has_registered_models)
         return super().maybe_register_model(model, model_config, *args, **kwargs)
 
     def maybe_register_speculator(
@@ -156,6 +185,9 @@ class AscendEPLBController(EPLBController):
         load_dummy_weights: bool,
     ) -> bool:
         if self.mode == "static":
+            if self.state is not None and self._draft_bound and speculator is not None and not load_dummy_weights:
+                speculator.set_eplb_state(self.state)
+                return True
             return False
         # The upstream controller checks target EPLB, which can differ from
         # the replicated draft's setting.
@@ -228,8 +260,10 @@ class AscendEPLBController(EPLBController):
                 state.allgather_record_tensor.fill_(-1)
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-            should_record = is_sampling and self._load_collection_phase_matched
+            phase_matched = True if self.mode == "static" else self._load_collection_phase_matched
+            should_record = is_sampling and phase_matched
             state.should_record_tensor.fill_(should_record)
+            state._should_record_value = should_record
             state._is_load_sampling_step = is_sampling
             state._should_collect_local_load = should_record
             if should_record and not supports_allgather:

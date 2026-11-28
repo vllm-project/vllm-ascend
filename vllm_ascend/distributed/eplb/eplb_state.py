@@ -4,6 +4,7 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -294,6 +295,7 @@ class AscendEplbState(_eplb_state.EplbState):
         self._configured_policy = policy
         if policy is not None:
             self.policy = policy
+        self.static_mode = False
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
@@ -310,7 +312,45 @@ class AscendEplbState(_eplb_state.EplbState):
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
         if self.device_index is None:
-            self.device_index = torch.accelerator.current_device_index()
+            with suppress(RuntimeError):
+                self.device_index = torch.accelerator.current_device_index()
+
+    def register_static_log_model(
+        self,
+        model: Any,
+        model_config: Any,
+        load_buf: torch.Tensor,
+        p2l: torch.Tensor,
+        l2p: torch.Tensor,
+        rep: torch.Tensor,
+        model_name: str | None = None,
+    ) -> None:
+        self.static_mode, self.is_async = True, False
+        self.expert_rearrangement_step_interval = sys.maxsize
+        ubatches = max(1, int(getattr(self.parallel_config, "num_ubatches", 1) or 1))
+        unpadded = [torch.zeros((), dtype=torch.int32, device=self.device) for _ in range(ubatches)]
+        self._propagate_shared_tensors(model, unpadded)
+        if self.should_record_tensor is not None:
+            self.should_record_tensor.fill_(False)
+        self._should_record_value = False
+        self.model_states[hash_config_cached(model_config)] = _eplb_state.EplbModelState(
+            physical_to_logical_map=p2l,
+            physical_to_logical_map_buffer=p2l,
+            logical_to_physical_map=l2p,
+            logical_replica_count=rep,
+            expert_load_pass=load_buf,
+            expert_load_pass_buffer=load_buf,
+            expert_load_window=load_buf.unsqueeze(0).clone(),
+            last_expert_load=torch.empty((0, 0), dtype=torch.int64, device=self.device),
+            model_name=model_name or model_config.model,
+            model=model,
+            expert_buffer=None,
+            rebalanced=False,
+            eplb_stats=None,
+            device_index=self.device_index,
+            communicator=None,  # type: ignore[arg-type]
+            num_unpadded_tokens_tensors=unpadded,
+        )
 
     @property
     def uses_custom_load_stats(self) -> bool:
@@ -819,7 +859,7 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        if self._suspended:
+        if self._suspended or getattr(self, "static_mode", False):
             return None
         use_custom_async_stats = (
             self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats
