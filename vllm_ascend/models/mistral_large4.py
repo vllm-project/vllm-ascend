@@ -63,6 +63,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -413,6 +414,16 @@ class AscendMistralIndexer(MistralIndexer):
     ) -> None:
         super().__init__(vllm_config, config, spec, topk_indices_buffer, prefix)
         self.indexer_use_rope = spec.indexer_use_rope
+        quant_config = vllm_config.quant_config
+        if quant_config is not None and quant_config.get_name() == "ascend":
+            self.wk_weights_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                [self.head_dim, self.n_head],
+                bias=False,
+                quant_config=quant_config,
+                disable_tp=True,
+                prefix=f"{prefix}.wk_weights_proj",
+            )
         prepare_indexer_for_ascend(self, config)
 
         def _get_attn_backend():
@@ -863,6 +874,51 @@ class MistralLarge4MixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
+_MXFP8_BLOCK_SIZE = 32
+_E8M0_EXPONENT_BIAS = 127
+_DENSE_KV_PROJECTIONS = (".attention.wkv_a_with_mqa", ".attention.wkv_b")
+
+
+def _restore_mxfp8_kv_projections(weights):
+    """Restore MXFP8 KV projections for the dense MLA prolog and absorption."""
+    pending: dict[str, tuple[str, torch.Tensor]] = {}
+    for name, tensor in weights:
+        projection, _, field = name.rpartition(".")
+        is_mxfp8_weight = field == "weight" and tensor.dtype == torch.float8_e4m3fn
+        if not projection.endswith(_DENSE_KV_PROJECTIONS) or not (is_mxfp8_weight or field == "weight_scale"):
+            yield name, tensor
+            continue
+
+        # Weight and scale may come from different shards or in either order.
+        previous = pending.pop(projection, None)
+        if previous is None:
+            pending[projection] = (field, tensor)
+            continue
+        previous_field, previous_tensor = previous
+        if field == previous_field:
+            raise ValueError(f"Duplicate MXFP8 tensor for {projection}: {field}")
+        weight, scale = (tensor, previous_tensor) if is_mxfp8_weight else (previous_tensor, tensor)
+        if (
+            weight.ndim != 2
+            or weight.shape[1] % _MXFP8_BLOCK_SIZE
+            or scale.shape != (weight.shape[0], weight.shape[1] // _MXFP8_BLOCK_SIZE)
+            or scale.dtype != torch.uint8
+        ):
+            raise ValueError(
+                f"Invalid MXFP8 weight or E8M0 scale for {projection}: "
+                f"weight {tuple(weight.shape)}, scale {tuple(scale.shape)} ({scale.dtype})"
+            )
+
+        # ModelSlim stores the E8M0 exponent bytes in a uint8 tensor.
+        blocks = weight.to(device="cpu", dtype=torch.float32).unflatten(-1, (-1, _MXFP8_BLOCK_SIZE))
+        exponents = scale.to(device="cpu", dtype=torch.int32) - _E8M0_EXPONENT_BIAS
+        restored = torch.ldexp(blocks, exponents.unsqueeze(-1)).flatten(-2).to(torch.bfloat16)
+        yield f"{projection}.weight", restored
+
+    if pending:
+        raise ValueError(f"Incomplete MXFP8 KV projection weight and scale pairs: {sorted(pending)}")
+
+
 @support_torch_compile
 class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM, MistralLarge4MixtureOfExperts):
     """Mistral Large 4 with the Ascend paths adopted after construction.
@@ -904,6 +960,9 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM, MistralLarge4Mixt
         return AscendModelState
 
     def load_weights(self, weights):
+        quant_config = get_current_vllm_config().quant_config
+        if quant_config is not None and quant_config.get_name() == "ascend":
+            weights = _restore_mxfp8_kv_projections(weights)
         loaded = super().load_weights(weights)
         # Mistral owns a shared MistralRotaryEmbedding rather than one of the
         # classes replaced by vLLM-Ascend's RoPE registry. Publish its final
