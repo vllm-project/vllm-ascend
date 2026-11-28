@@ -293,50 +293,64 @@ Note that the prefiller nodes and the decoder nodes may have different configura
 
 ## Example proxy for Distributed DP Server
 
-In the PD separation scenario, we need a proxy to distribute requests. Execute the following commands to enable the example proxy:
+In the PD separation scenario, a proxy is needed to distribute requests between the prefiller and decoder DP engines. An example implementation is provided in
+[`examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+
+Each DP engine is addressed individually, so the command line takes one host and one port per engine: the n-th entry of `--prefiller-hosts` belongs to the n-th entry of `--prefiller-ports`. For the 4P+4D layout used above (2 prefiller engines per node on ports 9000–9001, 16 decoder engines per node on ports 9000–9015), build the lists first:
 
 ```shell
+# 4 prefiller nodes x 2 DP engines (ports 9000, 9001)
+PREFILL_HOSTS=""; PREFILL_PORTS=""
+for h in 192.0.0.1 192.0.0.2 192.0.0.3 192.0.0.4; do
+  for p in 9000 9001; do
+    PREFILL_HOSTS="$PREFILL_HOSTS $h"
+    PREFILL_PORTS="$PREFILL_PORTS $p"
+  done
+done
+
+# 4 decoder nodes x 16 DP engines (ports 9000..9015)
+DECODER_HOSTS=""; DECODER_PORTS=""
+for h in 192.0.0.5 192.0.0.6 192.0.0.7 192.0.0.8; do
+  for p in {9000..9015}; do
+    DECODER_HOSTS="$DECODER_HOSTS $h"
+    DECODER_PORTS="$DECODER_PORTS $p"
+  done
+done
+
 python load_balance_proxy_server_example.py \
-  --port 8000 \
-  --host 0.0.0.0 \
-  --prefiller-hosts \
-    192.0.0.1 \
-    192.0.0.2 \
-    192.0.0.3 \
-    192.0.0.4 \
-  --prefiller-hosts-num \
-    2 2 2 2 \
-  --prefiller-ports \
-    9000 9000 9000 9000 \
-  --prefiller-ports-inc \
-    2 2 2 2\
-  --decoder-hosts \
-    192.0.0.5 \
-    192.0.0.6 \
-    192.0.0.7 \
-    192.0.0.8 \
-  --decoder-hosts-num \
-    16 16 16 16 \
-  --decoder-ports  \
-    9000 9000 9000 9000 \
-  --decoder-ports-inc \
-    16 16 16 16
+  --host 0.0.0.0 --port 8000 \
+  --prefiller-hosts $PREFILL_HOSTS --prefiller-ports $PREFILL_PORTS \
+  --decoder-hosts $DECODER_HOSTS --decoder-ports $DECODER_PORTS
 ```
 
-|Parameter  | meaning |
-| --- | --- |
-| --port | Proxy service Port |
-| --host | Proxy service Host IP|
-| --prefiller-hosts | Hosts of prefiller nodes |
-| --prefiller-hosts-num | Number of repetitions for prefiller node hosts |
-| --prefiller-ports | Ports of prefiller nodes |
-| --prefiller-ports-inc | Number of increments for prefiller node ports |
-| --decoder-hosts | Hosts of decoder nodes |
-| --decoder-hosts-num | Number of repetitions for decoder node hosts |
-| --decoder-ports | Ports of decoder nodes |
-| --decoder-ports-inc | Number of increments for decoder node ports |
+!!! note
+    `--prefiller-hosts-num` and `--prefiller-ports-inc`, used by earlier revisions of this example, have been removed. Every backend endpoint must now be listed explicitly.
 
-You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py).
+| Parameter | Meaning |
+| --- | --- |
+| `--port` | Proxy service port |
+| `--host` | Proxy service host IP |
+| `--prefiller-hosts` / `--prefiller-ports` | Prefiller DP engine endpoints, one port per host |
+| `--decoder-hosts` / `--decoder-ports` | Decoder DP engine endpoints, one port per host |
+| `--workers` | Number of uvicorn workers; the scheduling state is shared across them |
+| `--enable-prefill-affinity` | Route a conversation to a stable prefiller by rendezvous hashing so its prefix cache is reused; decode stays load balanced |
+| `--max-retries` / `--retry-delay` | Retry budget per backend and the exponential backoff base |
+| `--log-level` | Log verbosity |
+
+Backends can be added or removed at runtime without restarting the proxy:
+
+```shell
+curl -X POST http://127.0.0.1:8000/instances/add \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "prefill", "instances": ["192.0.0.1:9002"]}'
+
+curl -X POST http://127.0.0.1:8000/instances/remove \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "decode", "instances": "192.0.0.8:9015"}'
+```
+
+Removing an instance while requests are still in flight only taints it: it keeps its place in the
+rotation until the in-flight requests drain, so a running request is not cut off.
 
 ## Benchmark
 
