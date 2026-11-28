@@ -16,8 +16,9 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 | --- | --- | --- |
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |
+| W4A8 dynamic quantization (per-channel) | Supported | Supported (AllGather in graph mode, All-to-All in eager mode) |
 
-Other MoE quantization methods, Fused MC2, and EPLB are not supported with LoRA.
+Other MoE quantization methods (including per-group W4A8 and weights with antiquant offsets), routed-expert MoE LoRA under data parallelism (`data_parallel_size > 1`), Fused MC2, and EPLB are not supported with LoRA (`data_parallel_size > 1` skips MoE expert wrapping so attention and shared-expert adapters can still run while rejecting expert adapter weights on load).
 
 ## LoRA Parameters
 
@@ -67,6 +68,41 @@ vllm serve /path/to/Qwen3.5-27B \
 ```
 
 To use the fully sharded path, add `--fully-sharded-loras` on the same command.
+
+### DeepSeek-V4.1
+
+This path enables language-model LoRA projections (`wq_a`, `wq_b`, `wkv`, `wo_a`, `wo_b`, `gate_up_proj`, `down_proj`, and shared experts) on DeepSeek-V4.1:
+
+- HF text-backbone `.attn.`, `.ffn.`, `.w1.`, `.w2.`, and `.w3.` names map onto `self_attn`, `mlp`, `gate_proj`, `down_proj`, and `up_proj` and re-root under `language_model.`. Vision and aligner modules stay frozen and are excluded.
+- Unmatched adapter keys emit a `WARNING` when the adapter is loaded so typos or mismatched 2D/3D MoE key layouts are surfaced immediately instead of failing silently.
+- **MoE adapter formats**:
+    - **2D per-expert keys (default)**: e.g. `model.layers.<L>.mlp.experts.<E>.{gate_proj,up_proj,down_proj}.lora_{A,B}.weight` or HF-spelled `model.layers.<L>.ffn.experts.<E>.{w1,w2,w3}.lora_{A,B}.weight`.
+    - **3D fused expert keys**: e.g. `model.layers.<L>.mlp.experts.base_layer.lora_{A,B}.weight` and `model.layers.<L>.mlp.experts.lora_{A,B}.weight`. Because DeepSeek-V4.1 uses 2D routed expert weights, loading a 3D fused MoE adapter requires launching the server with `--enable-mixed-moe-lora-format` and setting `"is_3d_lora_weight": true` in `--lora-modules` (or the dynamic load request).
+- **Graph capture & parallel mode**:
+    - LoRA with expert parallelism uses AllGather when ACL graph capture is enabled and All-to-All under `--enforce-eager`. MC2 and Fused MC2 are not supported.
+    - Because `vllm_ascend/platform.py` defaults `VLLM_USE_BREAKABLE_CUDAGRAPH` to `"0"`, set `VLLM_USE_BREAKABLE_CUDAGRAPH=1` when running LoRA under `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`.
+    - Under `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, ACL graph decode replay is **partially enabled**: decoder-step ACL graph replay is active, while Ascend decoder bounded replay is disabled because LoRA token mappings must follow the active replay batch.
+- **Quantization & constraints**:
+    - W4A8 MoE LoRA requires per-channel weight scales without antiquant offsets or EPLB. On 8-way TP, W4A8 MoE checkpoints require `--enable-expert-parallel` so the grouped-matmul K dimension satisfies the kernel alignment constraint.
+    - Active `wo_a` adapters require a single local output-projection group per rank (`n_local_groups == 1`), no fine-grained output-projection TP, and `--fully-sharded-loras` left off. Under unsupported topologies (`n_local_groups != 1`, fine-grained o_proj TP, or `--fully-sharded-loras`), Ascend skips wrapping `wo_a` at startup so non-`wo_a` adapters can still start and serve while rejecting adapters that contain `wo_a` weights on load with `NotImplementedError`.
+    - Routed-expert MoE LoRA requires `data_parallel_size=1` (TP and TP + EP are supported). Under `data_parallel_size > 1`, Ascend skips wrapping `MoERunner` layers so default-config (`--enable-lora` without explicit `experts` targets) attention and shared-expert adapters can still start and serve; loading an adapter containing routed-expert weights is rejected explicitly with `NotImplementedError` because adapters are loaded and evicted independently per DP rank from local requests, so cross-DP expert routing cannot guarantee adapter residency on receiving expert ranks (explicitly targeting `experts` via `--lora-target-modules` under `DP > 1` fails at startup). Under `DP=1`, layers with no active expert slot skip MoE LoRA delta kernels. To preserve zero-delta numerical equivalence and dispatch/combine dtype consistency between base and adapter requests in a LoRA-enabled engine, shared experts and LoRA-capable quantized MoE stay on the linear-wrapper / floating-point unfused quantization boundary path whenever an adapter is loaded on those layers.
+- **Latency & throughput characteristics**:
+    - Enabling `--enable-lora` routes wrapped base linear layers (including shared experts) through unfused LoRA wrappers instead of fused base kernels, adding a fixed structural decode overhead (~19–23% measured on Atlas A3 W4A8 for both attention-only and MoE adapters, independent of adapter weights).
+    - Always compare base vs adapter latency inside the **same LoRA-enabled engine** (rather than against a separate non-LoRA engine, which runs different base/shared-expert fused kernels) and report exact decode conditions (output length, batch size, and graph/bounded-replay mode).
+
+Set `WEIGHTS_DIR` and `ADAPTER_ROOT` to compatible local artifacts before launching:
+
+```bash
+VLLM_USE_BREAKABLE_CUDAGRAPH=1 vllm serve "${WEIGHTS_DIR}" \
+    --served-model-name deepseek-lora \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --quantization ascend --enable-lora --max-loras 1 --max-lora-rank 8 \
+    --lora-modules "adapter=${ADAPTER_ROOT}" \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_fused_mc2":0}'
+```
+
+For eager validation, replace `--compilation-config ...` with `--enforce-eager`. Verify base requests, a zero adapter, and a non-zero adapter with identical prompts and sampling parameters.
 
 ### Request
 

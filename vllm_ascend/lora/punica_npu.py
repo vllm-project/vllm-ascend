@@ -11,6 +11,32 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+def _expand_with_dtype_guard(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    y_offset: int,
+    y_slice_size: int,
+    add_inputs: bool,
+    run_expand: Callable[[torch.Tensor, torch.Tensor, int, bool], object],
+) -> None:
+    """Invoke a LoRA expand kernel with strict weight-to-output dtype parity."""
+    x_fp32 = x if x.dtype == torch.float32 else x.to(torch.float32)
+    if y.dtype == weight.dtype:
+        run_expand(y, x_fp32, y_offset, add_inputs)
+        return
+    # Ascend expand kernels launch in y.dtype and read weight using the same
+    # element type; stage into a weight-matched buffer on fp32 or cross-half/bf16.
+    op_dtype = weight.dtype if weight.dtype in (torch.half, torch.bfloat16) else torch.bfloat16
+    delta = torch.zeros((y.size(0), y_slice_size), dtype=op_dtype, device=y.device)
+    run_expand(delta, x_fp32, 0, True)
+    target = y[:, y_offset : y_offset + y_slice_size]
+    if add_inputs:
+        target.add_(delta.to(y.dtype))
+    else:
+        target.copy_(delta.to(y.dtype))
+
+
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
 class PunicaWrapperNPU(PunicaWrapperBase):
@@ -62,6 +88,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             and not self.lora_config.fully_sharded_loras
         )
         self._single_lora_mask = None
+        self.active_lora_slots: set[int] | None = None
         self._wrapper_id = next(_LORA_WRAPPER_IDS)
         _LORA_WRAPPERS[self._wrapper_id] = self
         if self._single_lora_slot:
@@ -107,7 +134,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
-        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        # mapping.index_mapping holds request LoRA IDs (0 means base), not resolved slots.
+        request_ids = {lora_id for lora_id in mapping.index_mapping if lora_id > 0}
+        self.no_lora = not request_ids
+        self.active_lora_slots = {slot for slot, lora_id in enumerate(lora_index_to_id) if lora_id in request_ids}
 
     def _shrink_prefill(
         self,
@@ -234,7 +264,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
-        expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+        if self._use_sgmv() and self.no_lora:
+            return
+        _expand_with_dtype_guard(
+            y,
+            x,
+            w_t_all,
+            y_offset,
+            y_slice_size,
+            add_inputs,
+            lambda out, inp, offset, add_in: expand_slice_fun(out, inp, w_t_all, offset, y_slice_size, add_in),
+        )
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
         """
@@ -247,6 +287,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
+        if w_t_all.is_floating_point() and x.dtype != w_t_all.dtype:
+            x = x.to(w_t_all.dtype)
         shrink_fun: Callable = self._shrink_prefill if self._use_sgmv() else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
@@ -341,9 +383,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
+        if self._use_sgmv() and self.no_lora:
+            return
         expand_fun: Callable = self._expand_prefill if self._use_sgmv() else self._expand_decode
-        x = x.to(torch.float32)
-        expand_fun(y, x, lora_b_stacked, add_inputs)
+        _expand_with_dtype_guard(
+            y,
+            x,
+            lora_b_stacked,
+            0,
+            y.size(1),
+            add_inputs,
+            lambda out, inp, _offset, add_in: expand_fun(out, inp, lora_b_stacked, add_in),
+        )
 
     def add_lora_linear(
         self,
@@ -465,7 +516,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             a_mat = packed_lora_a[0, 0]
             b_mat = packed_lora_b[0, 0]
 
-        shrink = torch.matmul(x, a_mat.transpose(0, 1)).mul_(adapter_mask)
+        x_in = x if x.dtype == a_mat.dtype else x.to(a_mat.dtype)
+        shrink = torch.matmul(x_in, a_mat.transpose(0, 1)).mul_(adapter_mask)
         if scale != 1.0:
             shrink.mul_(scale)
         delta = torch.matmul(shrink, b_mat)
@@ -507,35 +559,53 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         on input shapes, never on values, so this stays graph-capturable.
 
         Rows are already one-token-per-row (top_k_num=1). Each row needs the
-        LoRA slot for (lora_id, expert_id), so we fold both into a single
+        LoRA slot for ``(lora_id, expert_id)``, so we fold both into a single
         gather index into a ``[max_loras * num_experts, ...]`` view of the
-        existing per-(lora, expert) weight stacks:
+        per-(lora, expert) weight stacks:
             combined_idx[row] = lora_id[row] * num_experts + expert_id[row]
         or -1 when the row has no active adapter, mirroring the -1 sentinel
-        ``PunicaWrapperBase.token_lora_indices`` already uses. bgmv_shrink/
-        bgmv_expand skip any row whose index is negative (leaving the
-        zero-initialized shrink buffer / unmodified ``y`` in place), so
-        inactive rows get a zero delta for free -- no Python-level branching
-        needed.
+        ``PunicaWrapperBase.token_lora_indices`` already uses. When
+        ``enable_moe_shared_loras=True`` collapses ``w13`` ``lora_A`` or
+        ``w2`` ``lora_B`` to a single shared slot (``shape[1] == 1``), those
+        shared factors index solely by ``lora_id[row]`` instead of multiplying
+        by ``num_experts``. bgmv_shrink/bgmv_expand skip any row whose index
+        is negative (leaving the zero-initialized shrink buffer / unmodified
+        ``y`` in place), so inactive rows get a zero delta for free -- no
+        Python-level branching needed.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config, fully_sharded
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
+        if not lora_a_stacked or not lora_b_stacked:
+            return
+        assert len(lora_a_stacked) == len(lora_b_stacked)
         if token_lora_mapping is None:
             token_lora_mapping = self.token_lora_indices
 
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
         expert_idx = expert_ids.view(-1).to(torch.long)
-        num_experts = lora_a_stacked[0].shape[1]
+        num_experts = max(max(a.shape[1], b.shape[1]) for a, b in zip(lora_a_stacked, lora_b_stacked, strict=True))
+        for a, b in zip(lora_a_stacked, lora_b_stacked, strict=True):
+            assert a.shape[1] in (1, num_experts) and b.shape[1] in (1, num_experts), (
+                f"Unexpected MoE LoRA expert dimension: a.shape[1]={a.shape[1]}, "
+                f"b.shape[1]={b.shape[1]}, num_experts={num_experts}."
+            )
 
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-        combined_idx = torch.where(
-            enabled,
-            lora_idx_safe * num_experts + expert_idx,
-            torch.full_like(token_lora_mapping, -1),
-        ).contiguous()
+        num_slots = adapter_enabled.numel()
+        if num_slots == 0:
+            return
+        lora_mapping = token_lora_mapping.to(torch.long)
+        lora_idx_safe = lora_mapping.clamp(min=0, max=num_slots - 1)
+        valid_slot = (lora_mapping >= 0) & (lora_mapping < num_slots)
+        valid_expert = (expert_idx >= 0) & (expert_idx < num_experts)
+        enabled = valid_slot & valid_expert & adapter_enabled[lora_idx_safe].bool()
+        inactive = torch.full_like(lora_mapping, -1)
+        per_expert_idx = torch.where(enabled, lora_idx_safe * num_experts + expert_idx, inactive).contiguous()
+        has_shared_factor = num_experts > 1 and any(
+            a.shape[1] == 1 or b.shape[1] == 1 for a, b in zip(lora_a_stacked, lora_b_stacked, strict=True)
+        )
+        shared_idx = torch.where(enabled, lora_idx_safe, inactive).contiguous() if has_shared_factor else per_expert_idx
 
         # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
         # so the shrink buffer is fp32.
@@ -543,23 +613,52 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
 
         cur_offset = offset
-        for slice_idx in range(len(lora_a_stacked)):
-            # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
+        for a, b in zip(lora_a_stacked, lora_b_stacked, strict=True):
+            # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts_or_1, rank/*, *].
             # Flattening the leading two dims turns "gather by (lora, expert)"
             # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
-            a = lora_a_stacked[slice_idx]
-            b = lora_b_stacked[slice_idx]
             out_size = b.shape[-2]
-            a_flat = a.view(-1, rank, a.shape[-1])
-            b_flat = b.view(-1, out_size, rank)
+            a_flat = a.view(-1, a.shape[-2], a.shape[-1])
+            b_flat = b.view(-1, out_size, b.shape[-1])
+            shrink_idx = shared_idx if a.shape[1] == 1 else per_expert_idx
+            expand_idx = shared_idx if b.shape[1] == 1 else per_expert_idx
 
-            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+            x_in = x2d if not a_flat.is_floating_point() or x2d.dtype == a_flat.dtype else x2d.to(a_flat.dtype)
+            self.bgmv_shrink(x_in, a_flat, shrink_out, shrink_idx, 1.0)
 
             delta = shrink_out
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            def _run_expand_slice(
+                out: torch.Tensor,
+                inp: torch.Tensor,
+                slice_off: int,
+                add_in: bool,
+                *,
+                b_w: torch.Tensor = b_flat,
+                e_idx: torch.Tensor = expand_idx,
+                slice_len: int = out_size,
+            ) -> None:
+                self.bgmv_expand_slice(
+                    inp,
+                    b_w,
+                    out,
+                    e_idx,
+                    slice_off,
+                    slice_len,
+                    add_inputs=add_in,
+                )
+
+            _expand_with_dtype_guard(
+                y2d,
+                delta,
+                b_flat,
+                cur_offset,
+                out_size,
+                True,
+                _run_expand_slice,
+            )
             cur_offset += out_size
 
     def add_lora_logits(
@@ -606,19 +705,19 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if buffer is None:
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        if y.dtype in (torch.half, torch.bfloat16):
-            self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
-        else:
-            # Ascend bgmv_expand only writes half/bf16 outputs. Compute
-            # the LoRA delta into a workspace of the weight dtype (matching
-            # the kernel's output dtype) and merge it back, so fp32
-            # classification outputs (classifier LoRA, #53555) work on
-            # vLLM main without quantizing the base logits.
-            op_dtype = lora_b_stacked.dtype
-            delta = torch.zeros(y.shape, dtype=op_dtype, device=y.device)
-            self.bgmv_expand(buffer, lora_b_stacked, delta, indices, add_inputs=True)
-            y.add_(delta.to(y.dtype))
+        x_in = x
+        if lora_a_stacked.is_floating_point() and x.dtype != lora_a_stacked.dtype:
+            x_in = x.to(lora_a_stacked.dtype)
+        self.bgmv_shrink(x_in, lora_a_stacked, buffer, indices, scale)
+        _expand_with_dtype_guard(
+            y,
+            buffer,
+            lora_b_stacked,
+            0,
+            y.size(1),
+            True,
+            lambda out, inp, _offset, add_in: self.bgmv_expand(inp, lora_b_stacked, out, indices, add_inputs=add_in),
+        )
 
         y = y.view_as(y_org)
 

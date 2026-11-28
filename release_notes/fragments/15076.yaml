@@ -1,0 +1,22 @@
+pr: 15076
+entries:
+  - category: feature
+    text: >-
+      Added LoRA support for DeepSeek-V4.1 language-model attention, shared-expert,
+      and routed-expert projections with `--enable-lora` under `data_parallel_size=1`
+      (TP and TP+EP, with `--additional-config '{"enable_fused_mc2":0}'` for EP),
+      covering per-channel W4A8 quantized MoE across `FULL_DECODE_ONLY` ACL graph
+      capture and `--enforce-eager`.
+    highlight: true
+    model: deepseek-v4.1
+    hardware: [A3]
+  - category: feature
+    text: >-
+      Extended Ascend MoE LoRA to support per-channel W4A8 dynamic quantization,
+      fused 3D MoE adapters (`--enable-mixed-moe-lora-format` with
+      `is_3d_lora_weight: true`), unmatched adapter-key warnings, and scoped
+      `data_parallel_size > 1` handling that skips routed-expert wrapping so
+      attention and shared-expert adapters can still start when attention topology
+      constraints are met while rejecting routed-expert adapter loads with
+      `NotImplementedError`.
+    hardware: [A2, A3]

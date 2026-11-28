@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 QUANT_MOE = "vllm_ascend.lora.quant_moe"
+MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 
 
 def _make_input(**overrides) -> MoEMlpComputeInput:
@@ -91,7 +93,11 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_all2all", return_value=routing) as recover_all2all,
         patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = comm_type
         output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
@@ -162,7 +168,11 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
         patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
         patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
         output, output_event = quant_apply_mlp_with_moe_lora(
@@ -194,12 +204,18 @@ def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, enable_eplb, mes
 
 
 def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        split_lora_indices=torch.tensor([0]),
+        permuted_lora_indices=torch.tensor([0]),
+        exchanged_lora_indices=torch.empty((0,), dtype=torch.long),
+    )
     mlp_input = _make_input(
         hidden_states=torch.empty(0, 4, dtype=torch.bfloat16),
         group_list=torch.zeros(2, dtype=torch.int64),
         expanded_row_idx=None,
         topk_ids=None,
-        lora_context=SimpleNamespace(use_ep=True),
+        lora_context=lora_context,
     )
     event = object()
     stream = SimpleNamespace(record_event=Mock(return_value=event))
@@ -207,7 +223,11 @@ def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
         patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dynamic_quant,
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLTOALL
         output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
@@ -216,6 +236,9 @@ def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
     assert output_event is event
     stream.record_event.assert_called_once_with()
     dynamic_quant.assert_not_called()
+    assert not hasattr(lora_context, "split_lora_indices")
+    assert not hasattr(lora_context, "permuted_lora_indices")
+    assert not hasattr(lora_context, "exchanged_lora_indices")
 
 
 def test_registered_backend_requires_float_input() -> None:
@@ -236,7 +259,7 @@ def test_registered_backend_requires_float_input() -> None:
 def test_unregistered_quantized_moe_lora_fails_fast() -> None:
     with pytest.raises(NotImplementedError, match="no implementation registered"):
         validate_quant_moe_lora_activation_input(
-            quant_type=QuantType.W4A8,
+            quant_type=QuantType.W4A16,
             hidden_states=torch.randn(2, 4),
             dynamic_scale=None,
         )
@@ -251,7 +274,7 @@ def test_duplicate_quant_moe_lora_registration_is_rejected() -> None:
 
 
 def test_validate_skips_when_backend_has_no_activation_check() -> None:
-    impl = QuantMoELoRAImpl(apply=lambda *_args, **_kwargs: None, validate_activation_input=None)
+    impl = QuantMoELoRAImpl(apply=lambda *_args, **_kwargs: (torch.empty(0), None), validate_activation_input=None)
     with patch(f"{QUANT_MOE}._get_quant_moe_lora_impl", return_value=impl):
         validate_quant_moe_lora_activation_input(
             quant_type=QuantType.W8A8,
@@ -333,7 +356,11 @@ def test_dynamic_int8_lora_applies_topk_scales_before_down_proj() -> None:
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
         patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
         patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
@@ -374,3 +401,276 @@ def test_mc2_comm_type_is_unsupported() -> None:
         extra_ctx.moe_comm_type = MoECommType.MC2
         with pytest.raises(NotImplementedError, match="AllGather TP"):
             quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_input())
+
+
+def _make_w4a8_input(**overrides) -> MoEMlpComputeInput:
+    overrides.setdefault("layer", SimpleNamespace())
+    return _make_input(quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True), **overrides)
+
+
+def _make_w4a8_method(**weight_overrides) -> Mock:
+    weights = dict(
+        w1=[torch.ones(1, 4, 3, dtype=torch.int32)],
+        w2=[torch.ones(1, 3, 2, dtype=torch.int32)],
+        w1_scale=[torch.ones(1, 6)],
+        w2_scale=[torch.ones(1, 4)],
+        w1_scale_bias=[torch.ones(1, 6)],
+        w2_scale_bias=[torch.ones(1, 4)],
+    )
+    weights.update(weight_overrides)
+    qm = Mock()
+    qm.get_mlp_weights.return_value = MoEWeights(**weights)
+    qm.get_mlp_group_list.return_value = (torch.tensor([1, 1], dtype=torch.int64), 1)
+    return qm
+
+
+def test_w4a8_lora_injects_boundaries_and_ep_routing() -> None:
+    q_in, s_in = torch.ones(2, 4, dtype=torch.int8), torch.ones(2)
+    q_act, s_act = torch.ones(2, 3, dtype=torch.int8), torch.ones(2)
+    gate_up, act, down = (
+        torch.randn(2, 6, dtype=torch.bfloat16),
+        torch.randn(2, 3, dtype=torch.bfloat16),
+        torch.randn(2, 4, dtype=torch.bfloat16),
+    )
+    routing, event = (torch.tensor([0, 1]), torch.tensor([0, 1])), object()
+    stream = Mock(record_event=Mock(return_value=event))
+    mlp_input, quant_method = _make_w4a8_input(), _make_w4a8_method()
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)),
+        patch.object(DeviceOperator, "npu_dynamic_quant", side_effect=[(q_in, s_in), (q_act, s_act)]) as dq,
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [down]], create=True) as gmm,
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=act),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as w2,
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+    ):
+        output, out_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input, quant_method=quant_method)
+    assert output is down and out_event is event and dq.call_count == 2
+    weights, gmm1, gmm2 = (
+        quant_method.get_mlp_weights.return_value,
+        gmm.call_args_list[0].kwargs,
+        gmm.call_args_list[1].kwargs,
+    )
+    assert (
+        gmm1["weight"] is weights.w1
+        and gmm1["bias"] is weights.w1_scale_bias
+        and gmm1["x"][0] is q_in
+        and gmm1["per_token_scale"][0] is s_in
+    )
+    assert gmm1["scale"][0].shape == (1, 1, 6) and gmm1["scale"][0].dtype == weights.w2_scale[0].dtype
+    assert (
+        gmm2["weight"] is weights.w2
+        and gmm2["bias"] is weights.w2_scale_bias
+        and gmm2["x"][0] is q_act
+        and gmm2["scale"][0].shape == (1, 4)
+    )
+    w13.assert_called_once_with(
+        mlp_input.lora_context, gate_up_out=gate_up, hidden_states=mlp_input.hidden_states, lora_routing=routing
+    )
+    w2.assert_called_once_with(mlp_input.lora_context, down_out=down, silu_out=act, lora_routing=routing)
+
+    ep_ctx = SimpleNamespace(
+        use_ep=True,
+        ep_rank=1,
+        local_num_experts=2,
+        top_k=1,
+        replicated_batch=True,
+        gathered_lora_indices=torch.tensor([-1, 0], dtype=torch.long),
+    )
+    ep_in = _make_w4a8_input(
+        hidden_states=torch.randn(2, 4, dtype=torch.bfloat16),
+        expanded_row_idx=torch.tensor([-1, 0], dtype=torch.int32),
+        topk_ids=torch.tensor([[0], [3]], dtype=torch.int32),
+        lora_context=ep_ctx,
+    )
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)),
+        patch.object(DeviceOperator, "npu_dynamic_quant", side_effect=[(q_in, s_in), (q_act, s_act)]) as ep_dq,
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [down]], create=True) as ep_gmm,
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=act),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as ep_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as ep_w2,
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+    ):
+        assert quant_apply_mlp_with_moe_lora(mlp_compute_input=ep_in, quant_method=quant_method)[0] is down
+        e_rows, l_rows = ep_w13.call_args.kwargs["lora_routing"]
+        assert (
+            int(e_rows[0]) == 1
+            and l_rows.tolist() == [0, -1]
+            and ep_w2.call_args.kwargs["lora_routing"][1].tolist() == [0, -1]
+        )
+        ep_dq.side_effect, ep_gmm.side_effect, ep_ctx.replicated_batch = [(q_in, s_in)], [[gate_up]], False
+        with pytest.raises(NotImplementedError, match="data_parallel_size > 1"):
+            quant_apply_mlp_with_moe_lora(mlp_compute_input=ep_in, quant_method=quant_method)
+
+
+@pytest.mark.parametrize(
+    ("mlp_input", "quant_method", "exc", "match"),
+    [
+        (
+            _make_input(
+                quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=False), layer=SimpleNamespace()
+            ),
+            _make_w4a8_method(),
+            ValueError,
+            "per-channel",
+        ),
+        (_make_w4a8_input(), None, NotImplementedError, "quantization method"),
+        (_make_w4a8_input(layer=None), _make_w4a8_method(), AssertionError, "routed-expert layer"),
+        (
+            _make_w4a8_input(),
+            _make_w4a8_method(
+                w1=[torch.ones(1, 4, 3, dtype=torch.int32)] * 2,
+                w2=[torch.ones(1, 3, 2, dtype=torch.int32)] * 2,
+                w1_scale=[torch.ones(1, 6)] * 2,
+                w2_scale=[torch.ones(1, 4)] * 2,
+            ),
+            NotImplementedError,
+            "per-expert tensor lists",
+        ),
+    ],
+)
+def test_w4a8_lora_rejects_invalid_inputs(mlp_input, quant_method, exc, match) -> None:
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)),
+        pytest.raises(exc, match=match),
+    ):
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input, quant_method=quant_method)
+
+
+def test_w4a8_all2all_empty_rank_situ_and_method_apply() -> None:
+    lora_ctx = SimpleNamespace(
+        use_ep=True,
+        split_lora_indices=torch.tensor([0]),
+        permuted_lora_indices=torch.tensor([0]),
+        exchanged_lora_indices=torch.empty((0,), dtype=torch.long),
+    )
+    mlp_in = _make_w4a8_input(
+        hidden_states=torch.empty(0, 4, dtype=torch.bfloat16),
+        group_list=torch.zeros(2, dtype=torch.int64),
+        expanded_row_idx=None,
+        topk_ids=None,
+        lora_context=lora_ctx,
+    )
+    event = object()
+    stream = SimpleNamespace(record_event=Mock(return_value=event))
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLTOALL)),
+        patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dq,
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+    ):
+        out, out_evt = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_in, quant_method=_make_w4a8_method())
+    assert out is mlp_in.hidden_states and out_evt is event and not hasattr(lora_ctx, "exchanged_lora_indices")
+    stream.record_event.assert_called_once_with()
+    dq.assert_not_called()
+
+    gate_up = torch.randn(2, 8)
+    g, u = gate_up.chunk(2, dim=-1)
+    torch.testing.assert_close(
+        _apply_moe_activation(
+            gate_up, MoEActivation.SITU, 0.0, 1.0, 0.0, activation_situ_beta=4.0, activation_situ_linear_beta=25.0
+        ),
+        (4.0 * torch.tanh(g / 4.0) * torch.sigmoid(g)) * (25.0 * torch.tanh(u / 25.0)),
+    )
+
+    from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
+
+    method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+    method.use_expert_weight_list, method.is_per_channel_weight = False, True
+    sentinel_ctx, comm = object(), Mock(fused_experts=Mock(return_value="done"))
+    layer = SimpleNamespace(
+        ascend_expert_map=None,
+        global_redundant_expert_num=0,
+        ascend_mc2_mask=None,
+        apply_router_weight_on_input=False,
+        ascend_pertoken_scale=None,
+        activation="silu",
+        _ascend_moe_lora_context=sentinel_ctx,
+    )
+    with (
+        patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX", SimpleNamespace(moe_comm_method=comm)),
+        patch("vllm_ascend.quantization.methods.w4a8.w4a8.build_fused_experts_input", return_value="built") as build,
+    ):
+        assert (
+            method.apply(cast(Any, layer), torch.randn(2, 4), torch.ones(2, 1), torch.zeros(2, 1), None, None) == "done"
+        )
+    assert build.call_args.kwargs["lora_context"] is sentinel_ctx and comm.fused_experts.call_args.kwargs == dict(
+        fused_experts_input="built", quant_method=method
+    )
+
+
+@pytest.mark.parametrize("quant_type", [QuantType.W8A8, QuantType.W4A8])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("is_empty", [False, True])
+def test_quant_moe_lora_honors_maybe_record_event_setting(
+    quant_type: QuantType,
+    overlap: bool,
+    is_empty: bool,
+) -> None:
+    hidden_states = torch.empty(0, 4, dtype=torch.bfloat16) if is_empty else torch.randn(2, 4, dtype=torch.bfloat16)
+    lora_ctx = SimpleNamespace(
+        use_ep=is_empty,
+        split_lora_indices=torch.tensor([0]),
+        permuted_lora_indices=torch.tensor([0]),
+        exchanged_lora_indices=torch.tensor([0]),
+        gathered_lora_indices=torch.tensor([0]),
+    )
+    if quant_type == QuantType.W4A8:
+        mlp_input = _make_w4a8_input(hidden_states=hidden_states, lora_context=lora_ctx)
+        quant_method = _make_w4a8_method()
+    else:
+        mlp_input = _make_input(hidden_states=hidden_states, lora_context=lora_ctx)
+        quant_method = None
+
+    event = object()
+    stream = Mock(record_event=Mock(return_value=event))
+    gate_up = torch.randn(2, 6, dtype=torch.bfloat16)
+    act = torch.randn(2, 3, dtype=torch.bfloat16)
+    down = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)),
+        patch(
+            f"{MOE_MLP}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=overlap),
+        ),
+        patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            side_effect=[
+                (torch.ones(2, 4, dtype=torch.int8), torch.ones(2)),
+                (torch.ones(2, 3, dtype=torch.int8), torch.ones(2)),
+            ],
+        ),
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [down]], create=True),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=act),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
+    ):
+        _, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input, quant_method=quant_method)
+
+    if overlap:
+        assert output_event is event
+        stream.record_event.assert_called_once_with()
+    else:
+        assert output_event is None
+        stream.record_event.assert_not_called()
+    if is_empty:
+        for field in ("split_lora_indices", "permuted_lora_indices", "exchanged_lora_indices", "gathered_lora_indices"):
+            assert not hasattr(lora_ctx, field)
