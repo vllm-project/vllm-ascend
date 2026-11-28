@@ -1,11 +1,7 @@
 # Serving: GLM5.3-Flash.md ordinary A3 PD, PR #23368 at 5fa7ec2b9f83.
 # Two A3 hosts (16 logical devices each): P DP1/TP1/PCP16, D DP16/TP1.
-# RP3 A3 release table: P row151, PD row177, D low row170, D high row162.
-# D high row161 is a stable subset (876 requests / 7590.3374 tokens/s);
-# row162's embedded raw report is the FULL 1168-request run / 6728.6846.
-# Keep full-run statistics throughout. Throughput gates retain the 0.95 factor;
-# TTFT/TPOT are reported, with no absolute latency gate.
-# Initial RP3 references are not measurements of this newer serving recipe.
+# Each throughput baseline is the lower full-run measurement for that phase
+# from Nightly runs 45960404038 and 46093654568. The pass threshold is 95%.
 # P/out1 and warmed-prefix D/out1024 both still use the PD proxy.
 # Reuse public datasets and the standard AISBench streaming request config.
 # Resolve the node-0 proxy through the same LWS DNS as external DP routing.
@@ -14,7 +10,6 @@
 # Public data is approximately 16K content tokens, not exact RP3 input bytes.
 # The prefix0 dataset has 500 unique rows; prefix100 has 1000 identical rows.
 # Cap PD/high-load D requests at those counts; AISBench does not extend slices.
-# RP3 references remain provisional and need calibration for these datasets.
 # Retain existing Flash AIME2025 accuracy settings (not an RP3 accuracy claim).
 test_name: GLM-5.3-Flash-W8A8-A3-ALL-COMBINED
 model: Eco-Tech/GLM-5.3-Flash-w8a8
@@ -240,7 +235,7 @@ benchmarks:
     max_out_len: 1
     batch_size: 56
     request_rate: 0.8
-    input_throughput_baseline: 13095.38
+    input_throughput_baseline: 13061.6992
     input_throughput_threshold: 0.95
   reset_before_pd_16k_warmup:
     case_type: curl_cmd
@@ -278,7 +273,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 56
     request_rate: 0.8
-    baseline: 802.5278
+    baseline: 801.9039
     threshold: 0.95
   reset_before_decode_16k_low_latency_warmup:
     case_type: curl_cmd
@@ -307,7 +302,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 56
     request_rate: 0
-    baseline: 2434.936
+    baseline: 2764.1277
     threshold: 0.95
   reset_before_decode_16k_high_throughput_warmup:
     case_type: curl_cmd
@@ -336,7 +331,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 292
     request_rate: 0
-    baseline: 6728.6846
+    baseline: 7484.2864
     threshold: 0.95
   reset_before_acc_aime2025:
     case_type: curl_cmd
