@@ -388,7 +388,7 @@ vLLM Ascend revision.
     can use RPC port `12321`. Within each group, all ranks must use the same
     DP master IP and RPC port.
 
-    ##### Prepare the 950DT DP Launcher
+    ##### Prepare the 950DT DP Launcher {: #prepare-the-950dt-dp-launcher}
 
     On both nodes, create a working directory inside the container:
 
@@ -902,7 +902,7 @@ vLLM Ascend revision.
     For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
     launcher and proxy endpoints to match that topology.
 
-    #### 5.2.1.1 Prepare the DP Launcher
+    #### 5.2.1.1 Prepare the DP Launcher {: #5211-prepare-the-dp-launcher}
 
     Save the following script from the [official example](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
     as `launch_online_dp.py` on both nodes, beside the node's `run_dp_template.sh`.

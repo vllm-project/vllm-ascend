@@ -230,8 +230,8 @@ msgid ""
 msgstr ""
 "本文档中提到的“PD 分离部署”仅作为示例/参考设计提供，用于演示以分离模式部署 Prefill 和 Decode 的基本流程。不建议在生产环境中使用。"
 
-msgid "#### 5.2.1.1 Prepare the DP Launcher"
-msgstr "#### 5.2.1.1 准备 DP 启动器"
+msgid "#### 5.2.1.1 Prepare the DP Launcher {: #5211-prepare-the-dp-launcher}"
+msgstr "#### 5.2.1.1 准备 DP 启动器 {: #5211-prepare-the-dp-launcher}"
 
 msgid "#### 5.2.1.2 Start the Prefill Node"
 msgstr "#### 5.2.1.2 启动 Prefill 节点"
@@ -644,8 +644,8 @@ msgstr ""
 "`multistream_engram_overlap` 使用辅助 NPU 流将 Engram 准备（哈希计算、表查找以及 DP/TP "
 "交换）与模型计算重叠。"
 
-msgid "##### Prepare the 950DT DP Launcher"
-msgstr "##### 准备 950DT DP 启动器"
+msgid "##### Prepare the 950DT DP Launcher {: #prepare-the-950dt-dp-launcher}"
+msgstr "##### 准备 950DT DP 启动器 {: #prepare-the-950dt-dp-launcher}"
 
 msgid "On both nodes, create a working directory inside the container:"
 msgstr "在两个节点上，在容器内创建工作目录："
