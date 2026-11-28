@@ -38,7 +38,7 @@ at the selected vLLM Ascend commit.
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
 for the complete support matrix and the
-[Feature_Guide](../../user_guide/feature_guide/index.md) for feature
+[Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
 Deployment examples include DSpark speculative decoding and
