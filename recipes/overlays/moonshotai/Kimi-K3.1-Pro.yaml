@@ -1,0 +1,195 @@
+# Source: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#51-pd-deployment
+meta:
+  hardware:
+    ascend_950dt: supported
+
+variants:
+  ascend_mxfp:
+    model_id: Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp
+    precision: mxfp4
+    label: MXFP (Ascend)
+    # About 1525 GB of ModelScope safetensors plus 20% headroom.
+    vram_minimum_gb: 1831
+    supported_hardware: [ascend_950dt]
+    supported_features: [tool_calling, reasoning, spec_decoding]
+    description: ModelSlim W4A8 MXFP checkpoint for Ascend 950DT. Requires --quantization ascend.
+    extra_args: ['--quantization', ascend]
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    install:
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5
+        note: Pull this Ubuntu-based image on each Ascend 950DT host.
+      pip: false
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5
+        docker_serve_command: vllm serve
+
+strategy_hardware:
+  single_node_tp:
+    ascend_950dt: unsupported
+  single_node_tep:
+    ascend_950dt: unsupported
+  multi_node_tp:
+    ascend_950dt: unsupported
+  pd_cluster:
+    ascend_950dt: supported
+
+strategy_min_gpus:
+  ascend_950dt: 32
+
+features:
+  spec_decoding:
+    hardware_overrides:
+      ascend_950dt:
+        args:
+          - '--speculative-config'
+          - '{"method":"dspark","model":"/root/.cache/huggingface/kimi-k3.1-pro-dspark","num_speculative_tokens":3,"draft_sample_method":"greedy","enforce_eager":false,"kv_cache_dtype":"auto"}'
+
+presets:
+  ascend_a5_mxfp_4p4d:
+    label: 950DT MXFP 4P4D
+    hardware: ascend_950dt
+    strategy: pd_cluster
+    variants: [ascend_mxfp]
+    default: true
+    description: >-
+      Eight hosts with eight NPUs per host. Each pool uses DP4 / TP8 / PP1
+      with one external DP rank per host. Decode also uses DCP8.
+      The context limit is 140,000 tokens.
+    source:
+      label: vLLM Ascend Kimi-K3.1-Pro PD deployment tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#51-pd-deployment
+      key: kimi-k31-pro-950dt-4p4d
+    select:
+      frontend: python
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: 'off'
+      features:
+        tool_calling: true
+        reasoning: true
+        spec_decoding: true
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--served-model-name'
+      - kimi-k3.1-pro
+      - '--allowed-local-media-path'
+      - /
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load":true,"num_threads":128}'
+      - '--enable-expert-parallel'
+      - '--max-num-seqs'
+      - '64'
+      - '--max-model-len'
+      - '140000'
+      - '--enable-prefix-caching'
+      - '--kv-cache-dtype'
+      - fp8
+      - '--attention_config.indexer_kv_dtype'
+      - fp8
+      - '--tokenizer-mode'
+      - kimi_k3
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-encoder-tp-mode'
+      - data
+      - '--block-size'
+      - '1536'
+      - '--cp-kv-cache-interleave-size'
+      - '1536'
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7'
+      # Use the runtime default instead of the base PD recipe's NIXL layout.
+      VLLM_SSM_CONV_STATE_LAYOUT: SD
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+      ASCEND_LOCAL_COMM_RES: $ASCEND_LOCAL_COMM_RES
+      VLLM_RPC_TIMEOUT: '3600000'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+      HCCL_EXEC_TIMEOUT: '2040'
+      HCCL_CONNECT_TIMEOUT: '1200'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '10'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      TASK_QUEUE_ENABLE: '1'
+      HCCL_OP_EXPANSION_MODE: CCU_SCHED
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+    json_args:
+      '--speculative-config':
+        draft_tensor_parallel_size: 8
+    roles:
+      prefill:
+        nodes: 4
+        parallelism: dep
+        tp: 8
+        pp: 1
+        args:
+          - '--port'
+          - '8000'
+          - '--data-parallel-rpc-port'
+          - '12320'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_mlapo":false,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":0,"enable_force_eplb":false}'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '2000'
+        json_args:
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_port: 30100
+      decode:
+        nodes: 4
+        parallelism: dep
+        tp: 8
+        pp: 1
+        args:
+          - '--port'
+          - '8001'
+          - '--data-parallel-rpc-port'
+          - '12321'
+          - '--decode-context-parallel-size'
+          - '8'
+          - '--max-num-batched-tokens'
+          - '768'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true}}'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '800'
+        json_args:
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_port: 30300
+    runbook: |
+      Set `PREFILL_NODE_1` through `PREFILL_NODE_4` and `DECODE_NODE_1`
+      through `DECODE_NODE_4` to the corresponding data-network IPs.
+      Set `IFACE_NAME` to the host's data interface and export
+      `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` before starting each worker.
+
+      Stage the [950DT target checkpoint](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp)
+      and a compatible Kimi-K3.1-Pro DSpark draft on all hosts. Place the draft
+      at `~/.cache/huggingface/kimi-k3.1-pro-dspark` on each host so it is visible
+      at the generated path inside the container. For a local target directory,
+      mount it at the same container path on every host and use that path in each
+      worker command.
+
+      Start the first host in each pool as its DP coordinator, then start the
+      remaining ranks. Each host serves HTTP. Prefill uses API port 8000 and
+      DP RPC port 12320. Decode uses API port 8001 and DP RPC port 12321.
+      Once all eight APIs are healthy, start the Ascend Router and send a
+      request with model `kimi-k3.1-pro`.
