@@ -601,18 +601,19 @@ def test_random_request_unions(capture):
 
 
 @pytest.mark.parametrize("graph_producer,shared_group", [(False, True), (True, False)])
-def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared_group, record_property):
+def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared_group, record_property, monkeypatch):
     from types import SimpleNamespace
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+    from vllm.distributed import parallel_state
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.hisparse import runtime
     from vllm.v1.hisparse.runtime import HiSparseCacheHandle, PagedCacheView
     from vllm.v1.hisparse.types import SparseKVRowMirror
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
-    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, _DirectMirrorSources
+    from vllm_ascend.hisparse.connector import HiSparseConnector
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+    from vllm_ascend.hisparse.worker import AscendHiSparseConnectorWorker
 
     width, block, gpu_blocks, host_blocks = 656, 128, 5, 3
     page = block * width
@@ -639,7 +640,18 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
     )
     backend = AscendHiSparseBackend()
     host_rows = host_blocks * block
-    payload, registered = runtime.allocate_pinned_host_pool(len(names) * host_rows * width)
+    max_num_reqs = sum(count for _, count in spans)
+    worker_config = SimpleNamespace(
+        kv_transfer_config=None,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        num_lookahead_tokens=1,
+        kernel_config=SimpleNamespace(enable_jit_warmup=False),
+    )
+    cache_config = SimpleNamespace(hisparse_shared_host_pool=False)
+    host_pool = runtime.HiSparseHostPool(worker_config, cache_config)
+    payload = host_pool.allocate(len(names) * host_rows * width)
+    registered = host_pool.registered
+    assert registered is not None
     graph = None
     worker = None
     try:
@@ -651,7 +663,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
         cpu_source = (byte + (byte // stride) * 19 + ((byte % stride) // page) * 31).to(torch.uint8)
         source = cpu_source.to("npu")
         staging = source.clone()
-        states = torch.zeros(1, dtype=torch.int32, device=source.device)
+        states = torch.arange(max_num_reqs, dtype=torch.int32, device=source.device)
         written = torch.tensor(
             [m.destination_start + j for m in mirrors for j in range(m.num_rows)],
             dtype=torch.int32,
@@ -671,6 +683,9 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
                 block_size=block,
             )
             owner = SimpleNamespace(
+                host_pool=host_pool,
+                device=source.device,
+                max_num_reqs=max_num_reqs,
                 resident_source_index=group,
                 request_state_indices=states,
                 hot_backing=source,
@@ -698,27 +713,33 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             )
             for owner in [leader, *followers]:
                 owner.index_group = index_group
-        worker = HiSparseConnectorWorker.__new__(HiSparseConnectorWorker)
-        worker.backend, worker._initialized = backend, False
-        worker.vllm_config = SimpleNamespace(
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
-            num_lookahead_tokens=1,
-            kernel_config=SimpleNamespace(enable_jit_warmup=False),
-            compilation_config=SimpleNamespace(
-                static_forward_context={
-                    name: SimpleNamespace(hisparse_cache=handle) for name, handle in zip(names, handles)
-                }
-            ),
+        worker_config.compilation_config = SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(hisparse_cache=handle) for name, handle in zip(names, handles)
+            }
         )
-        worker.initialize(handles, list(names), 1, host_blocks, source.device, [registered])
-        sources = _DirectMirrorSources.bind(worker, SimpleNamespace(draft_attn_layer_names={"draft"}))
-        assert sources is not None
+        worker = AscendHiSparseConnectorWorker(worker_config, cache_config)
+        worker.initialize(handles, list(names), max_num_reqs, host_blocks, source.device, host_pool.pinned)
         connector = HiSparseConnector.__new__(HiSparseConnector)
         connector.connector_worker = worker
         inner = ActiveKVConnector.__new__(ActiveKVConnector)
         inner.kv_connector, inner._disabled = connector, False
+        monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: 0)
+        # This transport-only test supplies the row mirrors without a scheduler.
+        monkeypatch.setattr(inner, "pre_forward", lambda *args, **kwargs: None)
         output_stream = torch.Stream(device=source.device)
-        proxy = HostMirrorConnector(inner, worker, output_stream, sources)
+        proxy = overlap_target_host_mirror(
+            SimpleNamespace(
+                kv_connector=inner,
+                speculator=SimpleNamespace(draft_attn_layer_names={"draft"}),
+                output_copy_stream=output_stream,
+            )
+        )
+        assert isinstance(proxy, HostMirrorConnector)
+        scheduler_output = SimpleNamespace(has_sync_kv_loads=True)
+        input_batch = SimpleNamespace(
+            has_prefill=False, num_tokens=written.numel(), num_tokens_after_padding=written.numel()
+        )
         values = torch.full((written.numel(), width), 237, dtype=torch.uint8, device=source.device)
         valid = torch.tensor([written.numel()], dtype=torch.int32, device=source.device)
         if graph_producer:
@@ -730,7 +751,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
         pending_observed = 0
         for change in (1, 3, 7):
             proxy.begin_execution(True)
-            proxy._eligible_forward = True  # Fixed decode metadata for this transport-only test.
+            proxy.pre_forward(scheduler_output, input_batch, attn_metadata={})
             worker._set_row_mirrors(mirrors)
             for handle in handles:
                 handle.num_actual_tokens = handle.num_decode_tokens = written.numel()

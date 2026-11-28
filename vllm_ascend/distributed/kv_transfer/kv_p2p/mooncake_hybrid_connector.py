@@ -57,6 +57,7 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
+    split_if_not_byte_contiguous,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -99,6 +100,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     num_blocks: int
     block_lens: list[int]
     ssm_sizes: tuple[int, int]
+    block_strides: list[int]
     local_ip: str = ""
 
 
@@ -505,6 +507,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_block_lens: dict[str, dict[int, list[int]]] = SizedDict()
+        self.remote_block_strides: dict[str, dict[int, list[int]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -902,6 +906,8 @@ class KVCacheRecvingThread(threading.Thread):
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
             local_kv_caches_base_addrs_all = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            remote_block_lens = self.remote_block_lens[remote_engine_id][remote_handshake_port]
+            remote_block_strides = self.remote_block_strides[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
         # support MTP layer kv transfer
         if self.vllm_config.speculative_config is not None:
@@ -912,6 +918,19 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = local_kv_caches_base_addrs_all[
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
+        local_start = first_layer_index * num_cache_per_layer
+        local_end = end_layer_index * num_cache_per_layer
+        local_block_lens = self.block_len_per_addr[local_start:local_end]
+        local_block_strides = self.block_stride_per_addr[local_start:local_end]
+        if not (
+            len(local_kv_caches_base_addrs)
+            == len(remote_kv_caches_base_addrs)
+            == len(local_block_lens)
+            == len(local_block_strides)
+            == len(remote_block_lens)
+            == len(remote_block_strides)
+        ):
+            raise ValueError("Dense Mooncake P/D cache geometry is incomplete.")
         logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
@@ -921,11 +940,28 @@ class KVCacheRecvingThread(threading.Thread):
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
-            block_len = self.block_len_per_addr[k]
-            inner_block_len = block_len // tp_num_need_pulls
-            for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
-                src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
-                dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
+            block_len = local_block_lens[k]
+            block_stride = local_block_strides[k]
+            remote_block_stride = remote_block_strides[k]
+            inner_block_len, remainder = divmod(block_len, tp_num_need_pulls)
+            if (
+                remainder
+                or inner_block_len <= 0
+                or remote_block_lens[k] != inner_block_len
+                or block_stride < block_len
+                or remote_block_stride < inner_block_len
+            ):
+                raise ValueError("Dense Mooncake P/D cache geometry is incompatible.")
+            transfer_remote_ids, transfer_local_ids = split_if_not_byte_contiguous(
+                grouped_remote_block_ids,
+                grouped_local_block_ids,
+                src_block_stride=remote_block_stride,
+                dst_block_stride=block_stride,
+                block_len=inner_block_len,
+            )
+            for remote_block_id, local_block_id in zip(transfer_remote_ids, transfer_local_ids):
+                src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
+                dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
                 length = inner_block_len * len(local_block_id)
                 src_list.append(src)
                 dst_list.append(dst)
@@ -1105,6 +1141,8 @@ class KVCacheRecvingThread(threading.Thread):
             with self.remote_metadata_lock:
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+                self.remote_block_lens[engine_id][remote_handshake_port] = agent_meta.block_lens
+                self.remote_block_strides[engine_id][remote_handshake_port] = agent_meta.block_strides
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1812,8 +1850,6 @@ class MooncakeConnectorWorker:
         self.block_len_per_addr: list[int] = []
         self.block_stride_per_addr: list[int] = []
         self.addr_group_idx: list[list[int]] = []
-        ptrs = []
-        lengths = []
         if not self.use_hybrid:
             for layer_name, kv_cache_tuple in kv_caches.items():
                 if isinstance(kv_cache_tuple, (list, tuple)) is False:
@@ -1822,12 +1858,18 @@ class MooncakeConnectorWorker:
                     tensor_num_blocks = single_kv_cache.shape[0]
                     block_size_scale = tensor_num_blocks // self.num_blocks
                     block_shape = single_kv_cache.shape[1:]
+                    element_size = single_kv_cache.element_size()
+                    physical_block_len = element_size * math.prod(block_shape)
+                    physical_block_stride = single_kv_cache.stride(0) * element_size
+                    if not single_kv_cache[0].is_contiguous() or (
+                        block_size_scale > 1 and physical_block_stride != physical_block_len
+                    ):
+                        raise ValueError("Dense Mooncake requires contiguous data within each logical block.")
+                    self.block_stride_per_addr.append(physical_block_stride * block_size_scale)
                     self.block_len_per_addr.append(
                         single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                     )
                     self.kv_caches_base_addr.append(single_kv_cache.data_ptr())
-                    ptrs.append(single_kv_cache.data_ptr())
-                    lengths.append(single_kv_cache.element_size() * math.prod(single_kv_cache.shape))
         elif self.use_mamba:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
@@ -1881,13 +1923,12 @@ class MooncakeConnectorWorker:
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
-        if self.use_hybrid:
-            register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
-            validate_register_region_count(register_regions)
-            ptrs = register_regions.ptrs
-            lengths = register_regions.lengths
-
-        global_te.register_buffer(ptrs, lengths)
+        # Dense K/V views can share an interleaved backing allocation too.
+        # Keep logical addresses above for transfer metadata, but register each
+        # configured storage once, including the full physical stride span.
+        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
@@ -1896,6 +1937,7 @@ class MooncakeConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_addr,
+            block_strides=self.block_stride_per_addr,
             ssm_sizes=self._mamba_ssm_size,
             local_ip=get_ip(),
         )

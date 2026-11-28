@@ -94,7 +94,7 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
             for group in groups
         ]
     local_specs = {name: specs[name] for group in groups for name in group.layer_names}
-    return paired_sfa_cache_config(config, groups, 0), local_specs
+    return paired_sfa_cache_config(config, groups, num_blocks=NUM_BLOCKS), local_specs
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])

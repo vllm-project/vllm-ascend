@@ -1,0 +1,15 @@
+pr: 22244
+entries:
+  - category: breaking
+    text: >-
+      Removed the retired Model Runner V1 EPLB controls (`DYNAMIC_EPLB`,
+      `EXPERT_MAP_RECORD`, and legacy `additional_config.eplb_config` fields
+      such as `dynamic_eplb`, `expert_map_path`, `expert_map_record_path`, and
+      `num_redundant_experts`) along with the V1 MS Service Metric `eplb:*`
+      hotness and update-duration metrics. Leaving legacy
+      `additional_config.eplb_config` fields set logs a warning and ignores
+      them without enabling EPLB, while `DYNAMIC_EPLB` and `EXPERT_MAP_RECORD`
+      have no effect; migrate to `--enable-eplb` and `--eplb-config` (with
+      `additional_config.eplb_config` supporting `load_collection_phase` and
+      `stair_config`). Existing Model Runner V2 EPLB configurations continue to
+      work unchanged.

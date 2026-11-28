@@ -102,15 +102,15 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
         pytest.MonkeyPatch.context() as monkeypatch,
     ):
         monkeypatch.setattr(
-            kv_cache_config_builder,
-            "_upstream_get_kv_cache_config_from_groups",
+            kv_cache_config_builder.DefaultKVCacheConfigBuilder,
+            "get_kv_cache_config_from_groups",
             lambda *a, **k: config,
         )
         monkeypatch.setattr(kv_cache_config_builder, "is_deepseek_v41_cache", lambda *a, **k: False)
         monkeypatch.setattr(kv_cache_config_builder, "_get_glm5_next_cache_layout", lambda *a, **k: None)
         monkeypatch.setattr(kv_cache_config_builder, "_is_deepseek_v4_groups", lambda *a, **k: False)
         physical = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
-            vllm_config, config.kv_cache_groups, 1
+            vllm_config, config.kv_cache_groups, num_blocks=1
         )
     assert physical.dspark_context_group_ids == (0,)
     assert physical.dspark_draft_only_group_ids == ()

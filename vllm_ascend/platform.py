@@ -47,7 +47,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -750,15 +749,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default. Feature validation is
-        # left to upstream.
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default runner selection.
-        apply_v2_model_runner_config_patch()
-
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
@@ -822,6 +812,7 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config)
+        _validate_direct_reload_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -1303,15 +1294,6 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         additional_config = dict(additional_config)
         additional_config["eplb_config"] = eplb_config
         vllm_config.additional_config = additional_config
-    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false"
-    ).lower() in ("true", "1"):
-        logger.warning(
-            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-            "additional_config.eplb_config supports only %s.",
-            sorted(_V2_EPLB_CONFIG_FIELDS),
-        )
     load_collection_phase = eplb_config.get("load_collection_phase", "all")
     # Disabled drafts inherit this target-only setting but never collect
     # EPLB load. Keep target validation strict and preserve other checks.
@@ -1334,6 +1316,19 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             upstream_eplb_config.use_async = True
         if vllm_config.parallel_config.enable_elastic_ep:
             raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
+
+
+def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
+    if (
+        getattr(envs_vllm, "VLLM_RELOAD_MODE", None) == "direct"
+        and ascend_config.enable_fused_mc2
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.is_moe
+    ):
+        raise ValueError(
+            "Direct weight reload does not support fused MC2 or MegaMoE. "
+            "Set enable_fused_mc2=0 or use VLLM_RELOAD_MODE=layerwise."
+        )
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:

@@ -272,9 +272,15 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         patch.object(kv_cache_config_builder, "is_deepseek_v41_cache", return_value=False),
         patch.object(kv_cache_config_builder, "_get_glm5_next_cache_layout", return_value=None),
         patch.object(kv_cache_config_builder, "_is_deepseek_v4_groups", return_value=False),
-        patch.object(kv_cache_config_builder, "_upstream_get_kv_cache_config_from_groups", return_value=kv_config),
+        patch.object(
+            kv_cache_config_builder.DefaultKVCacheConfigBuilder,
+            "get_kv_cache_config_from_groups",
+            return_value=kv_config,
+        ),
     ):
-        result = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(config, kv_config.kv_cache_groups, 0)
+        result = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
+            config, kv_config.kv_cache_groups, num_blocks=0
+        )
     assert result.dspark_draft_only_group_ids == (0, 3)
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0, 3)

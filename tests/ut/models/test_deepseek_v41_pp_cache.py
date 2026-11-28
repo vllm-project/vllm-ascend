@@ -21,6 +21,7 @@ from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41 import model as v41_model
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
+    get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     make_cache_groups,
 )
@@ -321,7 +322,9 @@ def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monk
             # Also cover stage-local backbone grouping used for profiling.
             stage_groups.append(make_cache_groups(group_cache_specs(local)))
         for groups in stage_groups:
-            planned = get_deepseek_v41_kv_cache_config(planner, groups, 10**7)
+            planned = get_deepseek_v41_kv_cache_config(
+                planner, groups, num_blocks=10**7 // get_deepseek_v41_pool_bytes_per_block(groups)
+            )
             _, views = allocate_cache_views(planned)
             assert set(views) == set(local)
             assert draft_names.intersection(views) == (draft_names if end == 40 else set())
