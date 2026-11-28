@@ -1,5 +1,8 @@
 # Load balance proxy session affinity
 
+For image-grid forwarding in multimodal PD deployments, see
+[Forwarding image grids to decode](image_grid_forwarding.md).
+
 The `load_balance_proxy_server_example.py` proxy can keep a multi-turn
 conversation on the same prefill endpoint to reuse its prefix cache. Enable
 this optional policy with `--enable-prefill-affinity`:

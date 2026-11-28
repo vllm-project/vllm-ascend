@@ -1,0 +1,11 @@
+pr: 23580
+entries:
+  - category: performance
+    text: >-
+      Added optional image-grid forwarding for Qwen3.6 requests served as
+      qwen3.6-35b through the PD example proxy, avoiding repeated image decoding
+      and pixel preprocessing on decode. This uses Mooncake Connector metadata
+      from prefill and requires a compatible metadata-capable KV consumer. Requests
+      with unavailable or invalid grid metadata continue using original images.
+    model: qwen3.6
+    hardware: [A5]
