@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from ..utils import super_kernel_scope, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -133,16 +133,6 @@ class ACLGraphWrapper:
         self.attn_backend = None
         self.draft_model_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
-
-    def set_update_stream(self, update_stream):
-        self.update_stream = update_stream
-
-    def set_attn_backend(self, attn_backend):
-        self.attn_backend = attn_backend
-
-    def update_draft_model_metadata(self, draft_model_metadata: list[dict[str, Any]]):
-        # This has been prepared for the update full graph of MRV1.
-        self.draft_model_metadata = draft_model_metadata
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -257,15 +247,6 @@ class ACLGraphWrapper:
                 )
                 logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
-            # here we always use weak ref for the workspaces
-            # to save memory
-            global _graph_params
-            global _draft_graph_params
-            global _draft_graph_prefill_params
-            weak_ref_workspaces(_graph_params)
-            weak_ref_workspaces(_draft_graph_params)
-            weak_ref_workspaces(_draft_graph_prefill_params)
-
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
@@ -300,147 +281,17 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
-            self._updatable_graph_replay(forward_context, entry.aclgraph)
-        else:
-            entry.aclgraph.replay()
+        if self.runtime_mode == CUDAGraphMode.FULL:
+            assert self.update_stream is not None
+            if _EXTRA_CTX.is_draft_model:
+                resolved_tasks = entry.aclgraph.resolve_tasks(SharedSource(self.draft_model_metadata))
+            else:
+                resolved_tasks = entry.aclgraph.resolve_tasks(ContextSource(forward_context.attn_metadata))
+            if self.enable_enpu:
+                entry.aclgraph.update(self.update_stream, resolved_tasks)
+                entry.aclgraph.replay()
+            else:
+                entry.aclgraph.replay()
+                entry.aclgraph.update(self.update_stream, resolved_tasks)
         logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
-
-    def _updatable_graph_replay(
-        self,
-        forward_context,
-        graph: UpdatableGraph,
-    ):
-        assert self.update_stream is not None
-        if _EXTRA_CTX.is_draft_model:
-            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_model_metadata))
-        else:
-            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
-        if self.enable_enpu:
-            graph.update(self.update_stream, resolved_tasks)
-            graph.replay()
-        else:
-            graph.replay()
-            graph.update(self.update_stream, resolved_tasks)
-
-
-def weak_ref_workspaces(params):
-    if params is None:
-        return
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is None:
-            continue
-        params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
-
-
-def update_full_graph_params(
-    attn_backend,
-    update_stream,
-    forward_context,
-    num_tokens,
-    vllm_config,
-    speculative_config=None,
-    draft_attn_metadatas=None,
-):
-    if use_updatable_graph(attn_backend):
-        return
-
-    # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
-    # AssertionError outside set_current_vllm_config(); the SFA backend
-    # resolution in get_impl_cls() needs the config.
-    from vllm.config import set_current_vllm_config
-
-    with set_current_vllm_config(vllm_config):
-        impl_cls = attn_backend.get_impl_cls()
-        impl_cls.update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
-
-
-@dataclass
-class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
-
-
-_graph_params: GraphParams | None = None
-
-
-def set_graph_params(aclgraph_capture_sizes: list[int]):
-    global _graph_params
-    if _graph_params is not None:
-        raise ValueError("Graph parameters have already been set!")
-    _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
-
-
-def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
-
-
-def get_graph_params():
-    return _graph_params
-
-
-_draft_graph_params: GraphParams | None = None
-
-
-def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        raise ValueError("DraftGraph parameters have already been set!")
-    _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
-
-
-def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
-
-
-def get_draft_graph_params():
-    return _draft_graph_params
-
-
-_draft_graph_prefill_params: GraphParams | None = None
-
-
-def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
-    global _draft_graph_prefill_params
-    if _draft_graph_prefill_params is not None:
-        raise ValueError("DraftGraph preill parameters have already been set!")
-    _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
-
-
-def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_prefill_params
-    if _draft_graph_prefill_params is not None:
-        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
-
-
-def get_draft_graph_prefill_params():
-    return _draft_graph_prefill_params

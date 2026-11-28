@@ -75,36 +75,8 @@ class AclGraphSleepWakeupManager:
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
 
-    @staticmethod
-    def clear_attention_workspaces(params) -> None:
-        if params is None:
-            return
-        for num_tokens in params.workspaces:
-            params.workspaces[num_tokens] = None
-
     @classmethod
-    def clear_all_attention_workspaces(cls) -> None:
-        cls.clear_attention_workspaces(acl_graph._graph_params)
-        cls.clear_attention_workspaces(acl_graph._draft_graph_params)
-        cls.clear_attention_workspaces(acl_graph._draft_graph_prefill_params)
-
-    @staticmethod
-    def reset_graph_params(params) -> None:
-        if params is None:
-            return
-        for graph_field in fields(params):
-            attr_dict = getattr(params, graph_field.name, None)
-            if not isinstance(attr_dict, MutableMapping):
-                continue
-            for num_tokens, value in attr_dict.items():
-                if isinstance(value, list):
-                    attr_dict[num_tokens] = []
-
-    @classmethod
-    def reset_all_graph_params(cls) -> None:
-        cls.reset_graph_params(acl_graph._graph_params)
-        cls.reset_graph_params(acl_graph._draft_graph_params)
-        cls.reset_graph_params(acl_graph._draft_graph_prefill_params)
+    def reset_graph(cls) -> None:
         for wrapper in list(acl_graph._acl_graph_wrappers):
             wrapper.concrete_aclgraph_entries.clear()
             wrapper.first_run_finished = False
@@ -120,8 +92,7 @@ class AclGraphSleepWakeupManager:
             manager._graphs_captured = False
 
     def sleep(self) -> None:
-        self.clear_all_attention_workspaces()
-        self.reset_all_graph_params()
+        self.reset_graph()
         self.reset_model_runner_graph_manager(self._model_runner_getter())
 
     def wakeup(self, tags: list[str] | None = None) -> None:

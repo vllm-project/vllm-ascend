@@ -583,17 +583,6 @@ class AscendQSAImpl(AttentionImplBase[Any]):
             request_plan,
         )
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        """QSA replay parameters live in persistent buffers; nothing to rebind."""
-
 
 class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     # FULL_DECODE_ONLY captures the standard GBSA path.

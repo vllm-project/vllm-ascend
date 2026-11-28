@@ -367,19 +367,6 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # Paged HND/BNBD storage: [num_blocks, num_kv_heads, block_size, head_dim].
         return _uses_hnd_kv_cache(self.vllm_config)
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        # The metadata builder updates FA3 inputs and device tiling in place
-        # before replay; no host-side attention tasks need to be updated.
-        pass
-
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,

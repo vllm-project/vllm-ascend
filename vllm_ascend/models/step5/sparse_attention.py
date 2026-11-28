@@ -969,17 +969,3 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
                     token_offset=start,
                 )
         return output
-
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        # This backend's graph-visible state is refreshed by the metadata builder each step
-        # (copy_ into the addresses baked at capture); the impl itself owns
-        # no graph-private tensors, so there is nothing to update here.
-        pass

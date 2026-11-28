@@ -622,7 +622,7 @@ class AscendModelState(DefaultModelState):
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
             else None
         )
-        # attn_metadata is needed when update_full_graph_params, but no way can get it now.
+        # attn_metadata is needed when update full graph params, but no way can get it now.
         # Temporarily store it in model_state.
         self.block_tables = block_tables
         self.slot_mappings = slot_mappings
