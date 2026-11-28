@@ -15,7 +15,6 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -100,10 +99,10 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
-        attn_backend = list(self.speculator.attn_backends.values())[0]
-        if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
-            # Length preparation and FlashAttn tiling run inside the graph,
-            # reading the draft's persistent device buffers on every replay.
+        backends = list(self.speculator.attn_backends.values())
+        attn_backend = backends[0]
+        # DSpark shares this manager. Device-metadata backends need no FIA task update.
+        if all(not getattr(backend, "requires_graph_task_update", True) for backend in backends):
             return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,

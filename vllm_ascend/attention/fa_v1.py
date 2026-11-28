@@ -53,6 +53,9 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
 
 
 class AscendFlashAttentionBackend(AscendAttentionBackend):
+    # Replay reads device metadata; FIA host task updates are unnecessary.
+    requires_graph_task_update = False
+
     @staticmethod
     def get_supported_head_sizes():
         # Logical 192-wide heads use zero padding to the native 256-wide kernel.

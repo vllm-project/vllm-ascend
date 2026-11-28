@@ -21,11 +21,13 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -2108,8 +2110,15 @@ def _uses_step5_fa3(config) -> bool:
 
 def _uses_minimax_fa3(config) -> bool:
     """Keep unrelated models and drafts on their configured attention backend."""
+    from vllm.compilation import backends
+
     architectures = config.model_config.hf_config.architectures or ()
     spec = config.speculative_config
+    if getattr(backends, "model_tag", None) == "dspark_head" and spec is not None:
+        # DSpark's loader retains the target ModelConfig in VllmConfig and
+        # passes the draft ModelConfig separately to get_model().
+        draft = spec.draft_model_config
+        architectures = draft.architectures or () if draft is not None else ()
     target = getattr(spec, "target_model_config", None)
     target_hf = getattr(target, "hf_config", None)
     draft_architectures = {
@@ -2118,12 +2127,18 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3DSparkModel",
         "Qwen3OmniDSparkModel",
     }
-    return (
+    if not (
         FlashAttentionNpu3Model.MINIMAX in get_current_hardware_profile().flash_attn_npu_3_models
         and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
-    )
+    ):
+        return False
+    # Both loader layouts need device-only long-context capture support.
+    try:
+        return Version(version("flash_attn_npu")) >= Version("0.5.1.post1")
+    except (PackageNotFoundError, InvalidVersion):
+        return False
 
 
 def _uses_qwen_fa3(config: VllmConfig) -> bool:

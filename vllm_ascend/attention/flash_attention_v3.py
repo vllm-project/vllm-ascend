@@ -50,6 +50,9 @@ def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
 
 
 class AscendFlashAttentionBackend(AttentionBackend):
+    # Replay reads device metadata; FIA host task updates are unnecessary.
+    requires_graph_task_update = False
+
     accept_output_buffer = True
     # Both model runners use the attention layer's cache-update contract.
     # FA3 writes K/V inside forward, before reading the paged cache.
@@ -299,16 +302,27 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             scheduler_metadata=scheduler_metadata,
         )
 
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendFlashAttentionMetadata:
+        # Uniform draft graphs use their own query width (DSpark can use K,
+        # rather than the target's K+1). Register the actual captured token
+        # bucket so replay updates the same tiling storage the graph reads.
+        # Otherwise an unconfigured bucket allocates a fresh tiling tensor
+        # on each build while the graph retains its capture-time metadata.
+        num_tokens = common_attn_metadata.num_input_tokens or common_attn_metadata.num_actual_tokens
+        self.capture_sizes.add(num_tokens)
+        return self.build(0, common_attn_metadata)
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: Enum | None = None,
     ) -> AscendFlashAttentionMetadata:
-        # Ascend speculative proposers use this entry point. The main model
-        # runner uses the inherited build_for_cudagraph_capture, which also
-        # calls build directly. FA3 uses paged attention for all scheduling
-        # states, so neither capture path needs to consume attn_state.
-        return self.build(0, common_attn_metadata)
+        # Older Ascend proposers use this spelling. Keep both capture entry
+        # points on the same graph-storage registration path.
+        return self.build_for_cudagraph_capture(common_attn_metadata)
 
 
 class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
