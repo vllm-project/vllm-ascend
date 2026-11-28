@@ -801,9 +801,9 @@ active.
 
 ## Configuration Parameters
 
-- `num_speculative_tokens` sets the draft length `K`. Some checkpoints supply
-    it through `n_predict`.
-- Set `model` inside `speculative_config` for methods that load a separate
-    draft checkpoint. Use a local path or a checkpoint ID.
-- Set `draft_tensor_parallel_size` to 1 or the target TP size, subject to the
-    drafter's requirements.
+| Parameter | Type | Default | Required | Allowed values and meaning |
+| --- | --- | --- | --- | --- |
+| `method` | `str` | `None` | When the method cannot be inferred | Speculative decoding method. See [Use Cases](#use-cases) for supported methods. |
+| `model` | `str` | `None` | When separate draft or assistant weights cannot be resolved automatically | Local path or checkpoint ID for the draft or assistant model. |
+| `num_speculative_tokens` | `int` | `None` | When the draft length cannot be inferred | Positive number of draft tokens to generate per step (`K`). Some checkpoints supply it through `n_predict`. |
+| `draft_tensor_parallel_size` | `int` | `None` | No | Tensor parallel size of the draft model. Set to `1` or the target TP size, subject to the drafter's requirements. |
