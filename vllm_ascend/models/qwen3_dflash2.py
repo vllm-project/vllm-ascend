@@ -439,7 +439,7 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
             names.append(inner.layer_name if inner is not None else attn.layer_name)
         return names
 
-    def post_process(self, vllm_config: VllmConfig, *, target_model=None) -> None:
+    def post_process(self, vllm_config: VllmConfig, *, target_model) -> None:
         if get_rotation_path(vllm_config) is None:
             return
         if not hasattr(self.model, "fc"):

@@ -276,7 +276,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             scale=getattr(self.config, "logit_scale", 1.0),
         )
 
-    def post_process(self, vllm_config: VllmConfig, *, target_model=None) -> None:
+    def post_process(self, vllm_config: VllmConfig, *, target_model) -> None:
         align_draft_weights(self, self.model.context_proj, vllm_config, target_model=target_model)
 
     def configure_target_aux_hidden_capture(self, target_model: nn.Module) -> None:

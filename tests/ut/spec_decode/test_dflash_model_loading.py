@@ -147,8 +147,9 @@ def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, met
         calls.append("get_model")
         return draft
 
-    def post_process(config):
+    def post_process(config, *, target_model):
         assert config is draft_config
+        assert target_model is target
         assert_target_active()
         calls.append("post_process")
 

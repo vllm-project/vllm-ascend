@@ -163,7 +163,7 @@ def _release_target_embedding_after_rotation(target_model, vllm_config):
 
 
 @torch.no_grad()
-def align_draft_weights(model, projection, vllm_config, *, target_model=None):
+def align_draft_weights(model, projection, vllm_config, *, target_model):
     """Align draft inputs with the rotated target without modifying shared weights."""
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is not None:
@@ -205,5 +205,5 @@ def align_draft_weights(model, projection, vllm_config, *, target_model=None):
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
-        if name == "embed_tokens" and rotation is not None and target_model is not None:
+        if name == "embed_tokens" and rotation is not None:
             _release_target_embedding_after_rotation(target_model, vllm_config)
