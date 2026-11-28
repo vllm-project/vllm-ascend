@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -746,33 +746,106 @@ def _reshape_combined_attention_kv_cache(
     dtype: torch.dtype,
     page_stride_bytes: int,
     num_blocks_per_kv_block: int = 1,
+    *,
+    v_shape: tuple[int, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create block-strided K/V views over padded physical pages."""
     if len(kv_cache_shape) != 5 or kv_cache_shape[0] != 2:
         raise ValueError("Combined Attention cache must have shape [K/V, blocks, block_size, heads, dim].")
+    k_shape = kv_cache_shape[1:]
+    actual_v_shape = k_shape if v_shape is None else v_shape
+    if len(actual_v_shape) != 4 or actual_v_shape[:-1] != k_shape[:-1]:
+        raise ValueError(f"Combined Attention V cache shape {actual_v_shape} must match K leading dims {k_shape[:-1]}.")
     dtype_size = get_dtype_size(dtype)
     if page_stride_bytes % dtype_size:
         raise ValueError("Physical Attention page is not aligned to its dtype.")
 
-    hidden_size = math.prod(kv_cache_shape[2:])
+    k_elements = math.prod(k_shape[1:])
+    v_elements = math.prod(actual_v_shape[1:])
     if num_blocks_per_kv_block < 1:
         raise ValueError("The number of kernel blocks per KV block must be positive.")
     if page_stride_bytes % (num_blocks_per_kv_block * dtype_size):
         raise ValueError("Padded combined Attention pages must split into dtype-aligned kernel blocks.")
     kernel_stride_bytes = page_stride_bytes // num_blocks_per_kv_block
-    if kernel_stride_bytes < 2 * hidden_size * dtype_size:
+    if kernel_stride_bytes < (k_elements + v_elements) * dtype_size:
         raise ValueError("Physical Attention page is too small for its kernel blocks.")
-    dense_strides = [math.prod(kv_cache_shape[dim + 1 :]) for dim in range(len(kv_cache_shape))]
-    combined_cache = torch.as_strided(
-        raw_cache.view(dtype),
-        size=kv_cache_shape,
-        stride=(
-            hidden_size,
-            kernel_stride_bytes // dtype_size,
-            *dense_strides[2:],
-        ),
+    kernel_stride_elements = kernel_stride_bytes // dtype_size
+    typed_raw = raw_cache.view(dtype)
+    if actual_v_shape == k_shape:
+        dense_strides = [math.prod(kv_cache_shape[dim + 1 :]) for dim in range(len(kv_cache_shape))]
+        combined_cache = torch.as_strided(
+            typed_raw,
+            size=kv_cache_shape,
+            stride=(
+                k_elements,
+                kernel_stride_elements,
+                *dense_strides[2:],
+            ),
+        )
+        return combined_cache[0], combined_cache[1]
+
+    def _inner_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+        strides = [1] * len(shape)
+        for dim in range(len(shape) - 2, 0, -1):
+            strides[dim] = strides[dim + 1] * shape[dim + 1]
+        return tuple(strides[1:])
+
+    k_cache = torch.as_strided(typed_raw, size=k_shape, stride=(kernel_stride_elements, *_inner_strides(k_shape)))
+    v_cache = torch.as_strided(
+        typed_raw[k_elements:],
+        size=actual_v_shape,
+        stride=(kernel_stride_elements, *_inner_strides(actual_v_shape)),
     )
-    return combined_cache[0], combined_cache[1]
+    return k_cache, v_cache
+
+
+@dataclass(frozen=True)
+class _DenseKVSplitRecord:
+    storage_ptr: int
+    span_start: int
+    span_end: int
+    layer_name: str
+    k_rel_end: int
+    v_rel_start: int
+    total: int
+
+
+def _validate_shared_backing_dense_kv_splits(records: Sequence[_DenseKVSplitRecord]) -> None:
+    """Verify overlapping dense attention raw spans keep non-overlapping K and V splits."""
+    by_storage: dict[int, list[_DenseKVSplitRecord]] = {}
+    for record in records:
+        if record.storage_ptr != 0 and record.total > 0:
+            by_storage.setdefault(record.storage_ptr, []).append(record)
+
+    for storage_records in by_storage.values():
+        if len(storage_records) < 2:
+            continue
+        sorted_records = sorted(storage_records, key=lambda rec: (rec.span_start, rec.span_end))
+        clusters: list[list[_DenseKVSplitRecord]] = []
+        current_cluster: list[_DenseKVSplitRecord] = []
+        current_max_end = -1
+        for rec in sorted_records:
+            if not current_cluster or rec.span_start < current_max_end:
+                current_cluster.append(rec)
+                current_max_end = max(current_max_end, rec.span_end)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [rec]
+                current_max_end = rec.span_end
+        if current_cluster:
+            clusters.append(current_cluster)
+
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            common_total = math.lcm(*(rec.total for rec in cluster))
+            max_k_end = max(rec.k_rel_end * (common_total // rec.total) for rec in cluster)
+            min_v_start = min(rec.v_rel_start * (common_total // rec.total) for rec in cluster)
+            if max_k_end > min_v_start:
+                layer_list = ", ".join(rec.layer_name for rec in cluster)
+                raise ValueError(
+                    f"Shared backing dense KV cache layers [{layer_list}] have incompatible K/V split offsets."
+                )
 
 
 def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
@@ -1617,6 +1690,7 @@ def _reshape_kv_cache_v2(
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
+    dense_kv_splits: list[_DenseKVSplitRecord] = []
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
@@ -2073,6 +2147,28 @@ def _reshape_kv_cache_v2(
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
                 kv_caches[layer_name] = (k_cache, v_cache)
+                if (
+                    not isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec))
+                    and raw_k_tensor.untyped_storage().data_ptr() == raw_v_tensor.untyped_storage().data_ptr()
+                ):
+                    storage_ptr = raw_k_tensor.untyped_storage().data_ptr()
+                    k_start = raw_k_tensor.data_ptr() - storage_ptr
+                    k_end = k_start + raw_k_tensor.numel() * raw_k_tensor.element_size()
+                    v_start = raw_v_tensor.data_ptr() - storage_ptr
+                    v_end = v_start + raw_v_tensor.numel() * raw_v_tensor.element_size()
+                    span_start = min(k_start, v_start)
+                    span_end = max(k_end, v_end)
+                    dense_kv_splits.append(
+                        _DenseKVSplitRecord(
+                            storage_ptr=storage_ptr,
+                            span_start=span_start,
+                            span_end=span_end,
+                            layer_name=layer_name,
+                            k_rel_end=k_end - span_start,
+                            v_rel_start=v_start - span_start,
+                            total=span_end - span_start,
+                        )
+                    )
             else:
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
@@ -2087,6 +2183,23 @@ def _reshape_kv_cache_v2(
                         k_dtype,
                         page_stride_bytes,
                         num_blocks_per_kv_block,
+                        v_shape=v_shape,
+                    )
+                    storage_ptr = raw_cache.untyped_storage().data_ptr()
+                    span_start = raw_cache.data_ptr() - storage_ptr
+                    span_end = span_start + raw_cache.numel() * raw_cache.element_size()
+                    k_slot_bytes = math.prod(k_shape[1:]) * get_dtype_size(k_dtype)
+                    v_slot_bytes = math.prod(v_shape[1:]) * get_dtype_size(v_dtype)
+                    dense_kv_splits.append(
+                        _DenseKVSplitRecord(
+                            storage_ptr=storage_ptr,
+                            span_start=span_start,
+                            span_end=span_end,
+                            layer_name=layer_name,
+                            k_rel_end=k_slot_bytes,
+                            v_rel_start=k_slot_bytes,
+                            total=k_slot_bytes + v_slot_bytes,
+                        )
                     )
                 kv_caches[layer_name] = (k_cache, v_cache)
                 logger.debug(
@@ -2099,6 +2212,7 @@ def _reshape_kv_cache_v2(
                     v_cache.is_contiguous(),
                 )
 
+    _validate_shared_backing_dense_kv_splits(dense_kv_splits)
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
     return kv_caches
