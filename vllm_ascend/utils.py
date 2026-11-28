@@ -1292,6 +1292,62 @@ def weak_ref_tensors(tensors: Any) -> Any:
     return tensors
 
 
+@lru_cache(maxsize=1)
+def _get_aclrt_use_stream_res():
+    """Lazily resolve libascendcl::aclrtUseStreamResInCurrentThread (CANN 9+)."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL("libascendcl.so")
+        fn = lib.aclrtUseStreamResInCurrentThread
+        fn.argtypes = [ctypes.c_void_p]
+        fn.restype = ctypes.c_int
+        return fn
+    except (OSError, AttributeError):
+        return None
+
+
+def _raw_npu_stream_handle(stream: Any) -> int:
+    raw = getattr(stream, "npu_stream", 0)
+    return raw if type(raw) is int and raw != 0 else 0
+
+
+class _NpuStreamSwitchContext:
+    """Switch NPU stream and keep CANN thread-local stream resource limits in sync.
+
+    Custom C++ EXEC_NPU_CMD ops in vllm-ascend run host tiling without calling
+    aclrtUseStreamResInCurrentThread(acl_stream), so entering/exiting a
+    core-limited auxiliary stream would otherwise leak stale AIV/AIC core limits
+    into subsequent custom ops on the caller's stream.
+    """
+
+    __slots__ = ("_stream_ctx", "_target_raw", "_prev_raw", "_use_stream_res")
+
+    def __init__(self, target_stream: torch.npu.Stream, target_raw: int, use_stream_res):
+        self._stream_ctx = torch.npu.stream(target_stream)
+        self._target_raw = target_raw
+        self._prev_raw = 0
+        self._use_stream_res = use_stream_res
+
+    def __enter__(self):
+        self._prev_raw = _raw_npu_stream_handle(torch.npu.current_stream())
+        entered = self._stream_ctx.__enter__()
+        if self._target_raw != self._prev_raw:
+            rc = self._use_stream_res(self._target_raw)
+            if rc != 0:
+                logger.warning_once("aclrtUseStreamResInCurrentThread(target_stream) returned %d", rc)
+        return entered
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return self._stream_ctx.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            if self._prev_raw and self._prev_raw != self._target_raw:
+                rc = self._use_stream_res(self._prev_raw)
+                if rc != 0:
+                    logger.warning_once("aclrtUseStreamResInCurrentThread(prev_stream) returned %d", rc)
+
+
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     """
     Switch to the target stream if enabled is True.
@@ -1300,7 +1356,11 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     if not enabled:
         return nullcontext()
     assert target_stream is not None
-    return torch.npu.stream(target_stream)
+    target_raw = _raw_npu_stream_handle(target_stream)
+    use_stream_res = _get_aclrt_use_stream_res() if target_raw else None
+    if use_stream_res is None:
+        return torch.npu.stream(target_stream)
+    return _NpuStreamSwitchContext(target_stream, target_raw, use_stream_res)
 
 
 def create_hccl_pg_options(group_name: str):

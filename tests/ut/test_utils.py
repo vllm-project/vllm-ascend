@@ -1040,3 +1040,133 @@ def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, dra
     monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
     monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: False)
     assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model=draft) is draft
+
+
+def test_npu_stream_switch_disabled_returns_nullcontext():
+    from contextlib import nullcontext
+
+    ctx = utils.npu_stream_switch(None, enabled=False)
+    assert isinstance(ctx, nullcontext)
+    with ctx:
+        pass
+
+
+def test_npu_stream_switch_cpu_stub_delegates_without_current_stream(monkeypatch):
+    stub_stream = SimpleNamespace(npu_stream=0)
+    entered: list[object] = []
+
+    class _FakeStreamCtx:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            entered.append(("enter", self.stream))
+            return self.stream
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            entered.append(("exit", self.stream))
+            return False
+
+    monkeypatch.setattr(torch.npu, "stream", _FakeStreamCtx)
+    monkeypatch.setattr(
+        torch.npu,
+        "current_stream",
+        lambda: pytest.fail("current_stream() must not be called for CPU stub npu_stream == 0"),
+    )
+    with utils.npu_stream_switch(stub_stream):
+        pass
+    assert entered == [("enter", stub_stream), ("exit", stub_stream)]
+
+
+@pytest.mark.parametrize("bad_handle", [mock.MagicMock(), True, False, "0x1234", None])
+def test_npu_stream_switch_skips_non_int_handles(monkeypatch, bad_handle):
+    fake_stream = SimpleNamespace(npu_stream=bad_handle)
+    calls: list[int] = []
+
+    class _FakeStreamCtx:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self.stream
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    monkeypatch.setattr(torch.npu, "stream", _FakeStreamCtx)
+    monkeypatch.setattr(utils, "_get_aclrt_use_stream_res", lambda: lambda h: calls.append(h) or 0)
+    with utils.npu_stream_switch(fake_stream):
+        pass
+    assert calls == []
+
+
+def test_npu_stream_switch_syncs_tls_entry_and_exit_including_on_exception(monkeypatch):
+    main_stream = SimpleNamespace(npu_stream=0x1111)
+    aux_stream = SimpleNamespace(npu_stream=0x2222)
+    trace: list[tuple] = []
+
+    class _FakeStreamCtx:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            trace.append(("stream_enter", self.stream.npu_stream))
+            return self.stream
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            trace.append(("stream_exit", self.stream.npu_stream))
+            return False
+
+    def _use_res(handle: int) -> int:
+        trace.append(("use_res", handle))
+        return 0
+
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(torch.npu, "stream", _FakeStreamCtx)
+    monkeypatch.setattr(utils, "_get_aclrt_use_stream_res", lambda: _use_res)
+
+    with utils.npu_stream_switch(aux_stream):
+        trace.append(("body",))
+    assert trace == [
+        ("stream_enter", 0x2222),
+        ("use_res", 0x2222),
+        ("body",),
+        ("stream_exit", 0x2222),
+        ("use_res", 0x1111),
+    ]
+
+    trace.clear()
+    with pytest.raises(RuntimeError, match="boom"), utils.npu_stream_switch(aux_stream):
+        trace.append(("body_err",))
+        raise RuntimeError("boom")
+    assert trace == [
+        ("stream_enter", 0x2222),
+        ("use_res", 0x2222),
+        ("body_err",),
+        ("stream_exit", 0x2222),
+        ("use_res", 0x1111),
+    ]
+
+
+def test_npu_stream_switch_same_stream_fast_path_skips_c_calls(monkeypatch):
+    main_stream = SimpleNamespace(npu_stream=0x1111)
+    same_alias = SimpleNamespace(npu_stream=0x1111)
+    calls: list[int] = []
+
+    class _FakeStreamCtx:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self.stream
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(torch.npu, "stream", _FakeStreamCtx)
+    monkeypatch.setattr(utils, "_get_aclrt_use_stream_res", lambda: lambda h: calls.append(h) or 0)
+
+    with utils.npu_stream_switch(same_alias):
+        pass
+    assert calls == []
