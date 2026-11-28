@@ -332,3 +332,23 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    ("start", "prompt", "width", "expected"),
+    [
+        (11776, 14757, 2981, 2944),  # Save the fifth page before the suffix.
+        (11776, 14720, 2944, 2944),  # The previous replay checkpoint is already available.
+        (14720, 14757, 37, 37),  # Finish prefill after materializing its checkpoint.
+        (14756, 14757, 6, 6),  # Preserve the speculative verifier window.
+    ],
+)
+def test_sparse_mooncake_materializes_bulk_replay_checkpoint(start, prompt, width, expected):
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
+    transfer = scheduler.vllm_config.kv_transfer_config
+    transfer.kv_connector = "AscendStoreConnector"
+    transfer.kv_role = "kv_both"
+    transfer.get_from_extra_config = lambda key, default: default
+    scheduler.block_size = 2944
+    request = _request(num_computed_tokens=start, num_prompt_tokens=prompt, num_tokens=prompt)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=width) == expected
