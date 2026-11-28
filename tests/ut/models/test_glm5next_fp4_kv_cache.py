@@ -67,3 +67,17 @@ def test_mxfp4_one_token_page_uses_packed_row():
         cache_dtype_str="mxfp4",
     )
     assert spec.page_size_bytes == FP4_ROW_BYTES
+
+
+def test_mxfp4_dtype_resolves_to_uint8_storage():
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    from vllm_ascend.core.kv_cache_dtype_handlers import Mxfp4AscendHandler
+
+    handler = Mxfp4AscendHandler()
+    assert handler.name == "mxfp4"
+    assert handler.torch_dtype() is torch.uint8
+    assert handler.quant_mode() == KVQuantMode.CUSTOM
+    # The launcher and worker resolve the CLI value through this table.
+    assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4"] is torch.uint8
