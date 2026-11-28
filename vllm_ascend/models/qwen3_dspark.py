@@ -6,6 +6,10 @@ from vllm_ascend.models.quarot_utils import align_draft_weights
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
+    # SupportsEagleBase supplies this via the Qwen3 MRO; restate the sharing
+    # contract explicitly. A checkpoint-owned embedding sets the instance flag.
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

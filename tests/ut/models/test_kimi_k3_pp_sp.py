@@ -71,7 +71,12 @@ class IntermediateTensors:
 
 def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM"):
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(architectures=[architecture]),
+            # The provisioning predicate's vocab gate reads get_vocab_size().
+            get_vocab_size=lambda: 16,
+        ),
+        load_config=SimpleNamespace(load_format="auto"),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
@@ -232,6 +237,15 @@ def runtime(monkeypatch):
     # BaseModel above models the release's cumulative aux protocol.
     # Native main's centralized relay is covered separately with its real mixin/PPHandler.
 
+    def fake_spec_decode_needs_target_embed(vllm_config):
+        # Mirror the upstream predicate's stage/may-use verdict. The real
+        # upstream predicate is exercised by test_kimi_k3_target_embedding.py.
+        spec = vllm_config.speculative_config
+        if spec is None or not spec.uses_target_hidden_states or not spec.draft_model_config.may_use_target_embed:
+            return False
+        pp = context.pp
+        return getattr(pp, "world_size", 1) > 1 and pp.is_last_rank
+
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -251,12 +265,13 @@ def runtime(monkeypatch):
         "is_forward_context_available": lambda: True,
         "get_forward_context": lambda: context.forward,
         "get_pp_group": lambda: context.pp,
+        "spec_decode_needs_target_embed": fake_spec_decode_needs_target_embed,
+        "get_rotation_path": lambda _: None,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
         # BaseModel models the cumulative release protocol, so the module
         # takes its v0.34.0 path. The native fixture installs the real check.
         "vllm_version_is": lambda _target: True,
-        "spec_decode_needs_target_embed": lambda _: False,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -303,7 +318,13 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
-        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP", "_needs_target_embedding"},
+        {
+            "AscendKimiLinearModel",
+            "AscendKimiDecoderLayer",
+            "AscendKimiMLP",
+            "_needs_target_embedding",
+            "_draft_needs_target_embed",
+        },
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -545,6 +566,7 @@ def build_aux_model(runtime, stage, spec_config):
         attn_res_block_size=2,
         rms_norm_eps=1e-5,
     )
+    cfg.model_config.get_vocab_size = lambda: 16
     cfg.speculative_config = spec_config
     namespace.update(
         VocabParallelEmbedding=lambda vocab, hidden, **kwargs: nn.Embedding(vocab, hidden),
@@ -572,8 +594,12 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, dra
     spec_config = (
         SimpleNamespace(
             method="dspark",
+            uses_target_hidden_states=True,
             draft_model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch])
+                may_use_target_embed=True,
+                architectures=[draft_arch],
+                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch]),
+                get_vocab_size=lambda: 16,
             ),
         )
         if draft_type is not None
@@ -611,6 +637,7 @@ def test_dflash_pp_aux_stream_and_embedding(runtime, monkeypatch, stage, stream,
     model = build_aux_model(runtime, stage, spec_config)
     assert model.dspark_aux_capture_materialized is materialized
     assert isinstance(model.embed_tokens, nn.Embedding) is owns_embed
+    assert model._draft_embed_provisioned is False
 
 
 @pytest.mark.parametrize("owns_embed", [False, True])

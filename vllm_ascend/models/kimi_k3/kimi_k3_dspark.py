@@ -9,7 +9,7 @@ from dataclasses import replace
 import torch
 from torch import nn
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -47,6 +47,12 @@ from vllm_ascend.models.kimi_k3.kimi_k3 import (
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
+
+
+def _should_own_checkpoint_embedding() -> bool:
+    """Whether target PP>1 requires the draft's checkpoint-owned embedding."""
+    in_single_pp_stage = getattr(parallel_state, "in_single_pp_stage", None)
+    return get_pp_group().world_size > 1 or (in_single_pp_stage is not None and in_single_pp_stage())
 
 
 def _uses_causal_draft_attention(config) -> bool:
@@ -169,9 +175,9 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
                 )
             )
         self.embed_tokens: nn.Module | None = None
-        # The draft config used for construction reports PP=1; query the real
-        # PP group, the same signal maybe_share_target_embed uses.
-        if get_pp_group().world_size > 1:
+        # v0.34 exposes the target PP group during draft loading; vLLM main
+        # replaces it with single_pp_stage. Both signals mean target PP>1.
+        if _should_own_checkpoint_embedding():
             # PP stages after the first cannot alias the target's stage-0
             # embedding; own the frozen copy shipped in the draft checkpoint.
             self.embed_tokens = VocabParallelEmbedding(
@@ -265,7 +271,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head: nn.Module | None = None
-        self._owns_embed_tokens = get_pp_group().world_size > 1
+        self._owns_embed_tokens = _should_own_checkpoint_embedding()
         if self._owns_embed_tokens:
             # The draft runs on the last PP stage, where the target embedding
             # (stage 0) cannot be aliased. Declare ownership so the loader's

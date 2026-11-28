@@ -1026,9 +1026,50 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return prefix_sum, block_residual, hidden_states
 
 
+def _draft_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether a DSpark draft needs a target embedding provisioned on this stage.
+
+    The upstream predicate owns the config/hidden-state/stage/may-use checks.
+    The remaining gates exclude shards with no consumer: the Kimi K3 MLA draft
+    owns a checkpoint embedding, drafts with a larger vocab skip the share
+    check, and QuaRot rebuilds a rotated private copy. Draft TP is deliberately
+    not gated: sharing and the align fallback use the worker's single TP group.
+    """
+    if not spec_decode_needs_target_embed(vllm_config):
+        return False
+    draft_model_config = vllm_config.speculative_config.draft_model_config
+    # Use the registry-normalized architectures, not the raw hf_config copy.
+    draft_architectures = draft_model_config.architectures or ()
+    if "K3DSparkModel" in draft_architectures:
+        return False
+    if draft_model_config.get_vocab_size() > vllm_config.model_config.get_vocab_size():
+        return False
+    return get_rotation_path(vllm_config) is None
+
+
 def _needs_target_embedding(vllm_config: VllmConfig) -> bool:
-    """Whether this PP stage must own the target input embedding."""
-    return get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config)
+    """Whether this PP stage must own the target input embedding.
+
+    DSpark adds Ascend consumption gates; other speculators keep upstream's verdict.
+    """
+    if get_pp_group().is_first_rank:
+        return True
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.method == "dspark":
+        return _draft_needs_target_embed(vllm_config)
+    return spec_decode_needs_target_embed(vllm_config)
+
+
+def _embed_weight_loaded(loaded_params: set[str]) -> bool:
+    """Whether a loaded-params set contains the target input embedding weight.
+
+    Only the unquantized ``.weight`` name counts. MTP-layer copies under
+    ``layers.N`` are not the target's input embedding.
+    """
+    return any(
+        (name == "embed_tokens.weight" or name.endswith(".embed_tokens.weight")) and ".layers." not in name
+        for name in loaded_params
+    )
 
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
@@ -1113,7 +1154,8 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         self.use_sequence_parallel = parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
 
-        if _needs_target_embedding(vllm_config):
+        needs_target_embedding = _needs_target_embedding(vllm_config)
+        if needs_target_embedding:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1121,6 +1163,20 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        # DFlash2 may also provision through the upstream predicate; only a
+        # DSpark allocation enters the DSpark fill/fail-fast protocol.
+        self._draft_embed_provisioned = (
+            needs_target_embedding
+            and not get_pp_group().is_first_rank
+            and spec_config is not None
+            and spec_config.method == "dspark"
+        )
+        # ShardedStateLoader writes parameters directly and rejects missing
+        # keys itself; only the model.load_weights path needs fill tracking.
+        self._embed_fill_check_required = self._draft_embed_provisioned and vllm_config.load_config.load_format not in (
+            "sharded_state",
+            "runai_streamer_sharded",
+        )
 
         topk_indices_buffer = (
             torch.empty(
@@ -1282,6 +1338,12 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        # AutoWeightsLoader may split target loading into several invocations;
+        # record the fill across them. The DSpark share wrapper checks the
+        # final state before the draft aliases the shard.
+        if getattr(self, "_embed_fill_check_required", False) and not getattr(self, "_embed_shard_filled", False):
+            if _embed_weight_loaded(loaded_params):
+                self._embed_shard_filled = True
         return loaded_params | standalone_gate_params
 
     def forward(

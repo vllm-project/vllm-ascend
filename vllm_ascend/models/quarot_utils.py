@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from torch import nn
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 
 from vllm_ascend.utils import (
@@ -140,18 +140,31 @@ def align_draft_weights(model, projection, vllm_config):
         weight = projection.weight
         weight.copy_(process_weight(weight.cpu(), rotation).to(weight.device))
     else:
-        if get_pp_group().world_size == 1:
+        in_single_pp_stage = getattr(parallel_state, "in_single_pp_stage", None)
+        if get_pp_group().world_size == 1 and not (in_single_pp_stage is not None and in_single_pp_stage()):
             return
         # PP stages past the first cannot alias the target's stage-0
         # embedding; load this rank's vocab shard from the target
-        # checkpoint unrotated so the draft owns its copy.
+        # checkpoint unrotated so the draft owns its copy. The embedding is
+        # skipped when the load-time share already placed the target shard
+        # (identity marker below); the lm_head stays skipped on every unrotated
+        # path because it can still alias the target's last-stage module.
         rotation = None
         weight = projection.weight
     target_config = vllm_config.model_config.hf_text_config
+    shared_target_embed = getattr(model, "_shared_target_embed", None)
     for owner, name, layer_cls, weight_names, own_flag in (
         (model.model, "embed_tokens", VocabParallelEmbedding, TARGET_EMBED_WEIGHT_NAMES, "has_own_embed_tokens"),
         (model, "lm_head", ParallelLMHead, TARGET_LM_HEAD_WEIGHT_NAMES, "has_own_lm_head"),
     ):
+        # Only the exact module recorded by a successful share skips fallback
+        # loading. Checkpoint-owned embeddings keep their existing own_flag.
+        if (
+            name == "embed_tokens"
+            and shared_target_embed is not None
+            and getattr(owner, name, None) is shared_target_embed
+        ):
+            continue
         if getattr(model, own_flag, False):
             continue
         if rotation is None and name != "embed_tokens":
