@@ -9,8 +9,8 @@ from vllm_ascend.models.qwen4_exp.gbsa_union import build_qsa_union_inputs_from_
 from vllm_ascend.utils import enable_custom_op
 
 pytestmark = pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Requires Ascend A3/A5",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 
 
