@@ -2,7 +2,7 @@
 
 ## v0.34.0rc1 - 2026.11.30
 
-This is the first release candidate of vLLM Ascend v0.34.0, aligned with upstream vLLM v0.34.0. This model-focused release brings performance and serving improvements for **DS-V4.1-Flash-552B**, **MiniMax-M3.1-Flash**, and **Qwen3.8-Flash-Next-180B**, and adds support for **Step-5-preview** on 950DT products and **Kimi-K3.1-Pro** on A3 and 950DT products. It also improves context parallelism, speculative decoding, quantized communication, and KV Cache Pool reliability. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.34.0rc1/) to get started.
+This is the first release candidate of vLLM Ascend v0.34.0, aligned with upstream vLLM v0.34.0. This model-focused release brings performance and serving improvements for **DS-V4.1-Flash-552B**, **MiniMax-M3.1-Flash**, and **Qwen3.8-Flash-Next-180B**, and adds support for **Step-5-preview** on 950DT products and **Kimi-K3.1-Pro** on A3 and 950DT products. It also improves context parallelism, speculative decoding, quantized communication, and KV Cache Pool reliability. Please follow the [official documentation](../getting_started/quick_start.md) to get started.
 
 The table below describes the model and hardware scope of this release. Features are hardware- and deployment-specific; follow the linked model guide for checkpoint selection and supported combinations.
 
