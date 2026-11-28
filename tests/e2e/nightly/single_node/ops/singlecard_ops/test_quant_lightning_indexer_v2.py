@@ -16,8 +16,12 @@ import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F4
 
 enable_custom_op()
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor  # noqa: E402
-from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths  # noqa: E402
+from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor  # noqa: E402
+from vllm_ascend.ops.triton.sharded_indexer import (  # noqa: E402
+    build_local_key_lengths,
+    build_local_lengths,
+    pack_local_candidates,
+)
 
 
 @torch.inference_mode()
@@ -450,15 +454,16 @@ def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
 
 
 @pytest.mark.parametrize(
-    "arch,enable_dcp",
+    "arch,enable_dcp,initialize_outputs",
     [
-        pytest.param(AscendDeviceType.A3, False, id="a3-int8"),
-        pytest.param(AscendDeviceType.A3, True, id="a3-int8-dcp"),
-        pytest.param(AscendDeviceType.A5, False, id="a5-fp8"),
+        pytest.param(AscendDeviceType.A3, False, True, id="a3-int8"),
+        pytest.param(AscendDeviceType.A3, True, True, id="a3-int8-dcp"),
+        pytest.param(AscendDeviceType.A3, True, False, id="a3-int8-dcp-no-fill"),
+        pytest.param(AscendDeviceType.A5, False, True, id="a5-fp8"),
     ],
 )
 @torch.inference_mode()
-def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
+def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp, initialize_outputs):
     """Compare paged QLI indices and scores with the operator's CPU formula."""
     if get_ascend_device_type() != arch:
         pytest.skip(f"requires {arch.name} NPU")
@@ -469,7 +474,8 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         pytest.skip("requires QLI v2 custom operators")
 
     generator = torch.Generator().manual_seed(20878)
-    rows, heads, width, page, topk = 2, 64, 128, 128, 64
+    rows, heads, width, page, topk = (3 if enable_dcp else 2), 64, 128, 128, 64
+    active_rows = 2
     world, rank, interleave = (2, 1, 8) if enable_dcp else (1, 0, 1)
     global_length = 1001 if enable_dcp else 1024
     local_positions = [index for index in range(global_length) if (index // interleave) % world == rank]
@@ -496,7 +502,7 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
     query, key = query_cpu.npu(), key_cpu.npu()
     weights, query_scale = weights_cpu.npu(), query_scale_cpu.npu()
     key_scale = key_scale_cpu.npu()
-    cu_seqlens_q = torch.tensor([0, rows], dtype=torch.int32, device="npu")
+    cu_seqlens_q = torch.tensor([0, active_rows], dtype=torch.int32, device="npu")
     seqused_k = torch.tensor([local_length], dtype=torch.int32, device="npu")
     block_table = block_table_cpu.to(torch.int32).unsqueeze(0).npu()
     dcp = (
@@ -531,20 +537,38 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         **common,
         **dcp,
     )
-    indices, values = ops.npu_quant_lightning_indexer_v2(
-        query,
-        key,
-        weights,
-        query_scale,
-        key_scale,
-        topk,
-        quant_mode,
-        block_table=block_table,
-        metadata=metadata,
-        return_value=1,
-        **common,
-        **dcp,
-    )
+    if enable_dcp:
+        indices, values = BaseDeviceAdaptor.indexer_select_dcp_candidates(
+            query,
+            weights,
+            key,
+            key_scale.unsqueeze(-1),
+            block_table,
+            cu_seqlens_q,
+            seqused_k,
+            query_scale,
+            global_seq_lens=dcp["causal_seqlens_kv_global"],
+            cp_world=world,
+            cp_rank=rank,
+            cp_interleave=interleave,
+            qli_metadata=metadata,
+            topk=topk,
+            initialize_outputs=initialize_outputs,
+        )
+    else:
+        indices, values = ops.npu_quant_lightning_indexer_v2(
+            query,
+            key,
+            weights,
+            query_scale,
+            key_scale,
+            topk,
+            quant_mode,
+            block_table=block_table,
+            metadata=metadata,
+            return_value=1,
+            **common,
+        )
 
     logical_keys = logical_key.reshape(-1, width)[:local_length].float()
     dots = torch.einsum("qhd,kd->qhk", query_cpu.float(), logical_keys)
@@ -558,11 +582,40 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
     if quant_mode == 1:
         scores = scores.bfloat16().float()
 
+    assert values.dtype == torch.bfloat16
     indices_cpu = indices.cpu().reshape(rows, topk).long()
     values_cpu = values.cpu().reshape(rows, topk).float()
-    assert values.dtype == (torch.bfloat16 if quant_mode == 1 else torch.float32)
-    for row in range(rows):
-        visible_end = global_length - rows + row + 1
+    if enable_dcp:
+        if initialize_outputs:
+            assert (indices_cpu[active_rows:] == -1).all()
+            assert torch.isneginf(values_cpu[active_rows:]).all()
+        # Without Fill, raw padding has no defined contents. Only the masked
+        # packed output must contain sentinels; live rows must remain exact.
+        visible_lengths = torch.tensor(
+            [
+                sum(position < global_length - active_rows + row + 1 for position in local_positions)
+                for row in range(active_rows)
+            ]
+            + [0] * (rows - active_rows),
+            dtype=torch.int32,
+            device="npu",
+        )
+        packed = pack_local_candidates(
+            indices,
+            values,
+            world,
+            rank,
+            interleave,
+            visible_lengths=None if initialize_outputs else visible_lengths,
+        ).cpu()
+        assert (packed[active_rows:, :, 0] == -1).all()
+        assert torch.isneginf(packed[active_rows:, :, 1].contiguous().view(torch.float32)).all()
+        local_ids = indices_cpu[:active_rows].int()
+        global_ids = (local_ids // interleave * world + rank) * interleave + local_ids % interleave
+        assert torch.equal(packed[:active_rows, :, 0], global_ids)
+        assert torch.equal(packed[:active_rows, :, 1], values_cpu[:active_rows].contiguous().view(torch.int32))
+    for row in range(active_rows):
+        visible_end = global_length - active_rows + row + 1
         visible = sum(position < visible_end for position in local_positions)
         expected = scores[row, :visible].topk(topk).values
         selected = indices_cpu[row]
@@ -575,6 +628,92 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
             atol=2e-3,
         )
         torch.testing.assert_close(values_cpu[row], scores[row, selected], rtol=2e-2, atol=2e-3)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="INT8 QLI DCP requires Ascend A3",
+)
+@pytest.mark.parametrize("topk", [64, 2048])
+@torch.inference_mode()
+def test_quant_lightning_indexer_v2_bf16_no_fill_replay(topk):
+    """Compare no-Fill QLI + pack with initialized QLI and an exact CPU oracle."""
+    torch.npu.set_device(0)
+    world, rank, interleave, rows, heads, width, page = 2, 1, 8, 4, 64, 128, 128
+    query = torch.ones(rows, heads, width, dtype=torch.int8, device="npu")
+    # Score for local token i is exactly i+1: (128*(i+1)/1024)*(1/8)*64.
+    key = torch.arange(1, page + 1, dtype=torch.int32).clamp_max(127).to(torch.int8)
+    key = key[:, None].expand(page, width).contiguous().reshape(1, page, 1, width).npu()
+    weights = torch.ones(rows, heads, dtype=torch.float16, device="npu")
+    query_scale = torch.full_like(weights, 1 / 8)
+    key_scale = torch.ones(1, page, 1, 1, dtype=torch.float16, device="npu")
+    starts = torch.tensor([0, 2], dtype=torch.int32, device="npu")
+    global_length = torch.tensor([128], dtype=torch.int32, device="npu")
+    local_length = torch.empty(1, dtype=torch.int32, device="npu")
+    visible = torch.empty(rows, dtype=torch.int32, device="npu")
+    table = torch.zeros(1, 1, dtype=torch.int32, device="npu")
+    dcp = dict(global_seq_lens=global_length, cp_world=world, cp_rank=rank, cp_interleave=interleave)
+
+    def run(initialize_outputs):
+        build_local_lengths(global_length, starts[1:], local_length, visible, world, rank, interleave)
+        metadata = BaseDeviceAdaptor.build_indexer_local_metadata(
+            starts, local_length, num_heads_q=heads, head_dim=width, topk=topk, **dcp
+        )
+        indices, scores = BaseDeviceAdaptor.indexer_select_dcp_candidates(
+            query,
+            weights,
+            key,
+            key_scale,
+            table,
+            starts,
+            local_length,
+            query_scale,
+            qli_metadata=metadata,
+            topk=topk,
+            initialize_outputs=initialize_outputs,
+            **dcp,
+        )
+        packed = pack_local_candidates(
+            indices,
+            scores,
+            world,
+            rank,
+            interleave,
+            visible_lengths=None if initialize_outputs else visible,
+        )
+        return indices, scores, packed
+
+    def check(actual, length, active):
+        assert actual[1].dtype == torch.bfloat16
+        # This reference path retains Fill and does not use the row mask.
+        reference = run(True)[2].cpu()
+        assert torch.equal(actual[2].cpu(), reference)
+        global_ids = (torch.arange(topk) // interleave * world + rank) * interleave + torch.arange(topk) % interleave
+        for row in range(rows):
+            count = int((global_ids < length - active + row + 1).sum()) if row < active else 0
+            ids = reference[row, :, 0]
+            values = reference[row, :, 1].contiguous().view(torch.float32)
+            valid = ids >= 0
+            assert int(valid.sum()) == count
+            assert torch.equal(ids[valid].sort().values.long(), global_ids[:count])
+            assert torch.equal(values[valid].sort().values, torch.arange(1, count + 1).float())
+            assert (ids[~valid] == -1).all() and torch.isneginf(values[~valid]).all()
+
+    for _ in range(3):
+        result = run(False)
+    check(result, 128, 2)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run(False)
+    # Exercise empty local history, fewer active queries, then live rows again.
+    for length, active in ((8, 2), (32, 1), (128, 2)):
+        global_length.fill_(length)
+        starts[1:].fill_(active)
+        captured[0].fill_(0)
+        captured[1].fill_(123)
+        graph.replay()
+        check(captured, length, active)
+    graph.reset()
 
 
 @pytest.mark.skipif(

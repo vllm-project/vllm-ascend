@@ -29,6 +29,9 @@ SPEC_REUSE_RULES = MappingProxyType(
     {
         "glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES",
         "glm_moe_dsa": "vllm_ascend.models.glm5next.cache_reuse.GLM_DSA_SPEC_REUSE_RULES",
+        "deepseek_v4": "vllm_ascend.models.deepseek_v4.cache_reuse.DEEPSEEK_V4_SPEC_REUSE_RULES",
+        "qwen4_exp": "vllm_ascend.models.qwen4_exp.cache_reuse.QWEN4_EXP_SPEC_REUSE_RULES",
+        "qwen4_exp_text": "vllm_ascend.models.qwen4_exp.cache_reuse.QWEN4_EXP_SPEC_REUSE_RULES",
     }
 )
 
@@ -57,9 +60,13 @@ def get_layerwise_ascend_store_config(kv_transfer_config: Any) -> dict[str, Any]
     elif connector_name not in store_connectors:
         return None
 
-    if extra_config.get("use_layerwise", False):
-        return extra_config
-    return None
+    if not extra_config.get("use_layerwise", False):
+        return None
+    if extra_config.get("layerwise_num_shared_buffers") is not None:
+        assert getattr(kv_transfer_config, "kv_role", None) == "kv_producer", (
+            "Layerwise shared-buffer KV reuse requires kv_role=kv_producer"
+        )
+    return extra_config
 
 
 def get_layerwise_gva_config(kv_transfer_config: Any) -> dict[str, Any] | None:
@@ -294,6 +301,12 @@ def plan_layerwise_cache_reuse(
     layout = planner.build()
     if not layout.has_layer_reuse:
         return None
+    backend_name = str(extra_config.get("backend", "mooncake")).strip().lower()
+    if backend_name != "memcache":
+        raise ValueError(
+            "Layerwise shared-buffer offload requires the memcache backend. "
+            "Set backend to 'memcache' or remove layerwise_num_shared_buffers."
+        )
 
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]

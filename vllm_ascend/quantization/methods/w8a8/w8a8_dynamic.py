@@ -218,7 +218,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -432,11 +431,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         w1, w1_scale, _, _ = self._get_mlp_weights(layer)
         activation = mlp_compute_input.activation
         fusion = mlp_compute_input.fusion
-        dynamic_eplb = mlp_compute_input.dynamic_eplb
         is_swigluoai_uninterleave = activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
         is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
 
-        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation):
+        if _custom_gmm_swiglu_enabled(fusion, self.use_expert_weight_list, activation):
             # eplb branch
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                 x=hidden_states,

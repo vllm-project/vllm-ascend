@@ -387,7 +387,7 @@ def test_build_remote_layout_rejects_missing_local_layer() -> None:
 
 def test_expand_block_ids_and_round_robin_candidate_selection() -> None:
     assert MooncakePullRecvingThread._expand_block_ids([3, 5], 2) == [6, 7, 10, 11]
-    assert MooncakePullRecvingThread._select_remote_tp_rank([2, 3, 4], 4) == 3
+    assert make_thread()._select_remote_tp_rank([2, 3, 4], 4) == 3
 
 
 def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica() -> None:
@@ -686,6 +686,52 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     )
 
     assert result == [(0, [10, 11], [20, 21])]
+
+
+@pytest.mark.parametrize(
+    "remote_prompt_len,local_prompt_len,remote_start,unhashed_start,scale",
+    [
+        (17, 18, 0, 0, 1),  # Short prompt: no tail clipping.
+        (128, 129, 3, 0, 2),  # Tail begins after the local uncached suffix.
+        (128, 129, 3, 3, 1),  # Matching suffix boundaries.
+        (128, 129, 3, 7, 2),  # Only the final producer page is missing locally.
+        (129, 130, 3, 4, 2),  # Extra retention crosses a page before the local suffix.
+        (129, 130, 4, 9, 1),  # No uncached producer pages remain.
+    ],
+)
+def test_compute_sliding_window_tail_preserves_logical_positions(
+    remote_prompt_len, local_prompt_len, remote_start, unhashed_start, scale
+) -> None:
+    thread = make_thread()
+    remote_end = (remote_prompt_len + 15) // 16
+    local_end = (local_prompt_len + 15) // 16
+    local_full = list(range(100, 100 + local_end))
+    remote_tail = list(range(200 + remote_start, 200 + remote_end))
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [[0]],
+        1,
+        0,
+        16,
+        16,
+        local_full[unhashed_start:],
+        local_full,
+        remote_tail,
+        local_prompt_len,
+        remote_prompt_len,
+        unhashed_start * 16,
+        scale,
+        scale,
+        make_sliding_spec(),
+        0,
+        remote_interleave_size=16,
+    )
+
+    logical_pages = range(max(unhashed_start, remote_start), min(local_end, remote_end))
+    expected_local = [(100 + page) * scale + offset for page in logical_pages for offset in range(scale)]
+    expected_remote = [(200 + page) * scale + offset for page in logical_pages for offset in range(scale)]
+    assert result == [(0, expected_local, expected_remote)]
 
 
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
@@ -1210,23 +1256,27 @@ def test_recoverssm_pcp8_producer_reassembles_all_cache_contents_on_tp1_consumer
 
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     thread = make_thread(engine=MagicMock())
-    thread._append_spec_transfer_addresses = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda **kwargs: (
-            kwargs["src_list"].append(1000),
-            kwargs["dst_list"].append(2000),
-            kwargs["length_list"].append(128),
-        )
-    )
+    post_read = MagicMock()
+
+    def append_addresses(**kwargs):
+        kwargs["src_list"].append(1000)
+        kwargs["dst_list"].append(2000)
+        kwargs["length_list"].append(128)
+        return post_read
+
+    thread._append_spec_transfer_addresses = MagicMock(side_effect=append_addresses)  # type: ignore[method-assign]
     remote = make_pp_metadata()
     entries = {0: {(0, 0): [("request", [1], [2])]}}
 
     thread.engine.batch_transfer_sync_read.return_value = 0
     thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
     thread.engine.batch_transfer_sync_read.assert_called_once_with("10.0.0.1:9000", [1000], [2000], [128])
+    post_read.assert_called_once_with()
 
     thread.engine.batch_transfer_sync_read.return_value = -1
     with pytest.raises(RuntimeError, match="transfer failed"):
         thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    post_read.assert_called_once_with()
 
 
 def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:
@@ -1598,54 +1648,66 @@ def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remo
     assert not src and not dst and not lengths
 
 
-def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
-    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+@pytest.mark.parametrize(
+    "local_strides,remote_strides,block_lengths",
+    [
+        ([128, 128], [128, 128], [128, 128]),
+        ([256, 256], [384, 384], [128, 128]),
+        ([128, 256, 256, 256], [128, 384, 384, 384], [128, 128, 64, 128]),
+    ],
+)
+def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers(
+    local_strides, remote_strides, block_lengths
+) -> None:
+    layer_names = [f"layer.{i}" for i in range(len(local_strides))]
     thread = make_thread(
-        layer_names=["layer.0", "layer.1"],
-        kv_cache_specs=[spec],
-        kv_caches_base_addr=[[1000], [2000]],
-        block_strides=[[128], [128]],
-        block_lens=[[128], [128]],
+        layer_names=layer_names,
+        kv_cache_specs=[MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)],
+        kv_caches_base_addr=[[1000 * (i + 1)] for i in range(len(layer_names))],
+        block_strides=[[stride] for stride in local_strides],
+        block_lens=[[length] for length in block_lengths],
     )
     remote = make_pp_metadata(
-        layer_names=["layer.0", "layer.1"],
-        block_strides=[[128], [128]],
-        block_lens=[[128], [128]],
-        tp_base_addrs={0: [[5000], [6000]]},
+        layer_names=layer_names,
+        block_strides=[[stride] for stride in remote_strides],
+        block_lens=[[length] for length in block_lengths],
+        tp_base_addrs={0: [[5000 + 1000 * i] for i in range(len(layer_names))]},
     )
-    transfer_entries = [
-        ("request-a", [1, 2], [3, 4]),
-        ("request-b", [3, 5], [5, 8]),
-    ]
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
-
-    with patch.object(
-        pull_worker,
-        "group_concurrent_contiguous",
-        wraps=group_concurrent_contiguous,
-    ) as mock_group:
-        thread._append_spec_transfer_addresses(
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            {(0, 0): transfer_entries, (1, 1): transfer_entries},
-            remote,
-            src,
-            dst,
-            lengths,
-        )
-
-    assert mock_group.call_count == 2
-    mock_group.assert_any_call([1, 2], [3, 4])
-    mock_group.assert_any_call([3, 5], [5, 8])
-    assert src == [1128, 1384, 1640, 2128, 2384, 2640]
-    assert dst == [5384, 5640, 6024, 6384, 6640, 7024]
-    assert lengths == [256, 128, 128, 256, 128, 128]
+    modes = {local == remote == length for local, remote, length in zip(local_strides, remote_strides, block_lengths)}
+    # Same request IDs, different blocks: caches must not survive the call.
+    for shift in (0, 100):
+        requests = [
+            ("request-a", [1 + shift, 2 + shift], [3 + 2 * shift, 4 + 2 * shift]),
+            ("request-b", [3 + shift, 5 + shift], [5 + 2 * shift, 8 + 2 * shift]),
+        ]
+        src: list[int] = []
+        dst: list[int] = []
+        lengths: list[int] = []
+        with patch.object(
+            thread, "_prepare_block_transfer_ranges", wraps=thread._prepare_block_transfer_ranges
+        ) as group:
+            thread._append_spec_transfer_addresses(
+                0, 0, 0, 1, 1, 1, {(i, i): requests for i in range(len(layer_names))}, remote, src, dst, lengths
+            )
+        assert group.call_count == len(requests) * len(modes)
+        for _, local_ids, remote_ids in requests:
+            for coalesce in modes:
+                group.assert_any_call(local_ids, remote_ids, coalesce)
+        expected_src: list[int] = []
+        expected_dst: list[int] = []
+        expected_lengths: list[int] = []
+        for layer, (local_stride, remote_stride, length) in enumerate(
+            zip(local_strides, remote_strides, block_lengths)
+        ):
+            local_ids, remote_ids, counts = (
+                ([1, 3, 5], [3, 5, 8], [2, 1, 1])
+                if local_stride == remote_stride == length
+                else ([1, 2, 3, 5], [3, 4, 5, 8], [1, 1, 1, 1])
+            )
+            expected_src.extend(1000 * (layer + 1) + (block + shift) * local_stride for block in local_ids)
+            expected_dst.extend(5000 + 1000 * layer + (block + 2 * shift) * remote_stride for block in remote_ids)
+            expected_lengths.extend(count * length for count in counts)
+        assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
 
 
 @pytest.mark.parametrize("remote_pcp", [False, True])
@@ -1842,9 +1904,9 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         fake_register,
     )
     monkeypatch.setattr(
-        pull_worker,
-        "MooncakePullRecvingThread",
-        fake_thread,
+        pull_worker.MooncakePullConnectorWorker,
+        "receiving_thread_cls",
+        staticmethod(fake_thread),
     )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))
 
@@ -2728,3 +2790,41 @@ def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkey
         finally:
             if not pending.done():
                 pending.set_result(None)
+
+
+@pytest.mark.parametrize("coalesce", [False, True])
+@pytest.mark.parametrize(
+    "local_ids,remote_ids", [([], []), ([7], [3]), ([1, 2, 5, 6], [4, 5, 9, 11]), ([8, 3, 4], [2, 7, 8])]
+)
+def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
+    thread = make_thread()
+    local_base, remote_base = 2**63 + 1024, 2**63 + 4096
+    local_stride, remote_stride, size = (128, 128, 128) if coalesce else (256, 384, 64)
+    groups = (
+        group_concurrent_contiguous(local_ids, remote_ids)
+        if coalesce
+        else ([[block] for block in local_ids], [[block] for block in remote_ids])
+    )
+    expected = (
+        [local_base + group[0] * local_stride + 16 for group in groups[0]],
+        [remote_base + group[0] * remote_stride + 32 for group in groups[1]],
+        [len(group) * size for group in groups[0]],
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+    thread._append_block_transfer_addresses(
+        thread._prepare_block_transfer_ranges(local_ids, remote_ids, coalesce),
+        local_base,
+        remote_base,
+        local_stride,
+        remote_stride,
+        size,
+        src,
+        dst,
+        lengths,
+        16,
+        32,
+    )
+    assert (src, dst, lengths) == expected
+    assert all(type(value) is int for column in (src, dst, lengths) for value in column)

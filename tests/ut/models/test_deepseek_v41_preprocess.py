@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,7 +13,39 @@ import torch_npu
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
+
+
+@pytest.mark.parametrize("case", ["mxfp8", "bf16", "main_bf16", "index_bf16", "other_shape", "unpacked", "gather"])
+def test_indexer_qw_selection(monkeypatch, case):
+    from vllm_ascend.models.deepseek_v41 import indexer
+
+    config = SimpleNamespace(
+        hidden_size=6144 if case == "other_shape" else 5120,
+        q_lora_rank=1280,
+        index_n_heads=32,
+        index_head_dim=128,
+        qk_rope_head_dim=64,
+        index_topk=2048,
+    )
+    mx = Mock(spec=AscendW8A8MXFP8DynamicLinearMethod, group_size=32, dynamic_mx_quant_scale_alg=0)
+    main_q = CVLinearWrapper(
+        SimpleNamespace(quant_method=None if case in ("bf16", "main_bf16") else mx, gather_output=case == "gather")
+    )
+    index_q = SimpleNamespace(quant_method=None if case in ("bf16", "index_bf16") else SimpleNamespace(quant_method=mx))
+    weights_proj = SimpleNamespace(weight=torch.empty(0, dtype=torch.bfloat16))
+    monkeypatch.setattr(indexer, "ReplicatedLinear", Mock(side_effect=[index_q, weights_proj]))
+    monkeypatch.setattr(
+        indexer.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None if case == "unpacked" else True
+    )
+    monkeypatch.setattr(indexer, "register_indexer_warmup", Mock())
+    monkeypatch.setattr(indexer._QUANTIZE_INDEXER_QUERY_KERNEL, "register_warmup", Mock())
+    kernel = Mock()
+    module = SimpleNamespace(indexer_prologue_qw=kernel) if case == "mxfp8" else None
+    monkeypatch.setitem(sys.modules, "ops.indexer_prologue_qw_vllm", module)
+
+    layer = indexer.DeepseekV41Indexer(config, False, None, "indexer", 4, main_q_projection=main_q)
+    assert layer.fused_prologue_qw is (kernel if case == "mxfp8" else None)
 
 
 def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
@@ -198,7 +231,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
     impl_class = dsa_v41.AscendDSAV41Impl
     impl = impl_class.__new__(impl_class)
     impl.multistream_dsv4_dsa_overlap = overlap
-    impl.role = SimpleNamespace(is_kv_source=False, has_long_context=False)
+    impl.role = SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False)
 
     expected_qr = attn.q_norm(qa(hidden))
     expected_q = qb(expected_qr).unflatten(-1, (2, 4))

@@ -378,8 +378,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -473,8 +471,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -514,11 +510,52 @@ class TestNPUWorker(TestBase):
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
-        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(("weights",))
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(
+            ("weights", "runtime", "cudagraph"), set()
+        )
         self.assertEqual(mock_mem_get_info.call_count, 2)
         # sleep() brackets the transition: one barrier before the baseline memory
         # snapshot, one after the optional RL extra cleanup and before the unmap.
         self.assertEqual(mock_synchronize_device.call_count, 2)
+
+    @patch("vllm_ascend.worker.worker.global_te")
+    @patch("vllm_ascend.worker.worker.get_kv_transfer_group")
+    @patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True)
+    def test_disconnect_drains_store_before_peers(self, _has_group, get_group, mock_global_te):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        order: list[str] = []
+        store = MagicMock()
+        store.drain_queued_saves.side_effect = lambda: order.append("drain")
+        p2p = MagicMock(spec=["wait_for_save"])
+        connector = MagicMock()
+        connector._connectors = [p2p, store]
+        get_group.return_value = connector
+        mock_global_te.disconnect_all_peers.side_effect = lambda: order.append("disconnect")
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.disconnect_kv_transfer_peers()
+
+        self.assertEqual(order, ["drain", "disconnect"])
+
+    @patch("vllm_ascend.worker.worker.global_te")
+    @patch("vllm_ascend.worker.worker.get_kv_transfer_group")
+    @patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True)
+    def test_disconnect_skips_peers_when_drain_fails(self, _has_group, get_group, mock_global_te):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        store = MagicMock()
+        store.drain_queued_saves.side_effect = RuntimeError("send queue stuck")
+        connector = MagicMock()
+        connector._connectors = [store]
+        get_group.return_value = connector
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        with self.assertRaisesRegex(RuntimeError, "send queue stuck"):
+            worker.disconnect_kv_transfer_peers()
+        mock_global_te.disconnect_all_peers.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
@@ -552,8 +589,6 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
-            worker._sleep_saved_buffers = {}
-            worker._sleep_saved_parameters = {}
             worker.sleep_wakeup_manager = MagicMock()
             _attach_sleep_backend(worker)
             # Test wake_up method
@@ -588,8 +623,6 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
         worker.model_runner = SimpleNamespace(model=MagicMock())
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["kv_cache"])
@@ -676,8 +709,6 @@ class TestNPUWorker(TestBase):
             quant_config=None,
             speculative_config=SimpleNamespace(method="mtp"),
         )
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["weights"])

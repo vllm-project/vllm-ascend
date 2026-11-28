@@ -46,6 +46,7 @@ from .helpers import (
     make_full_spec,
     make_mamba_spec,
     make_request,
+    make_sliding_spec,
     make_transfer_metadata,
 )
 
@@ -570,6 +571,43 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     )
 
     assert result == ([10, 11], [20, 21])
+
+
+@pytest.mark.parametrize(
+    "prompt_len,extra_retained_tokens,expected",
+    [
+        (17, 0, [100, 101]),
+        (128, 0, [103, 104, 105, 106, 107]),
+        (129, 0, [104, 105, 106, 107, 108]),
+        (128, 3, [102, 103, 104, 105, 106, 107]),
+        # Replay needs token 63 (page 3); the ordinary window starts in page 4.
+        (129, 3, [103, 104, 105, 106, 107, 108]),
+    ],
+)
+def test_pull_publishes_swa_tail_after_trimming_speculative_blocks(prompt_len, extra_retained_tokens, expected) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.group_unique_specs = [[replace(make_sliding_spec(), extra_retained_tokens=extra_retained_tokens)]]
+    assert scheduler._get_transfer_block_ids((list(range(100, 112)),), prompt_len) == (expected,)
+
+
+@pytest.mark.parametrize("extra_retained_tokens,first_block", [(0, 107), (80, 106)])
+def test_pull_swa_tail_covers_all_windows_in_uniform_group(extra_retained_tokens, first_block) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [
+        [
+            replace(make_sliding_spec(), extra_retained_tokens=extra_retained_tokens),
+            replace(make_sliding_spec(), sliding_window=128),
+        ],
+        [make_full_spec()],
+    ]
+    blocks = (list(range(100, 120)), list(range(200, 220)))
+    assert scheduler._get_transfer_block_ids(blocks, 256) == (list(range(first_block, 116)), list(range(200, 216)))
+    # The shared base helper still supplies complete positional tables to push.
+    assert MooncakeBaseConnectorScheduler._get_transfer_block_ids(scheduler, blocks, 256) == (
+        list(range(100, 116)),
+        list(range(200, 216)),
+    )
 
 
 def test_get_num_new_matched_tokens_records_local_prefix() -> None:

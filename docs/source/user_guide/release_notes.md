@@ -49,7 +49,7 @@ PR references marked with **†** were merged into the v0.30.0 release branch be
 - Preserved the GLM V1 SP token layout through PP and DSA-CP. [#18929](https://github.com/vllm-project/vllm-ascend/pull/18929) [#18671](https://github.com/vllm-project/vllm-ascend/pull/18671)
 - Reduced KV Pool lookup and reachable-mask overhead, cached layer-invariant masked block runs across layers, and skipped invisible KPool page-table loads. [#18837](https://github.com/vllm-project/vllm-ascend/pull/18837) [#18245](https://github.com/vllm-project/vllm-ascend/pull/18245) [#18576](https://github.com/vllm-project/vllm-ascend/pull/18576)
 - Used BF16 router GEMM with FP32 accumulation and fused shared W8A8 MXFP activation quantization in MoE. [#18820](https://github.com/vllm-project/vllm-ascend/pull/18820) [#18678](https://github.com/vllm-project/vllm-ascend/pull/18678)
-- Enabled fused MiniMax sparse prepare through 256K tokens and fused MiniMax-M3 A3 index TopK helpers. [#18660](https://github.com/vllm-project/vllm-ascend/pull/18660) [#18323](https://github.com/vllm-project/vllm-ascend/pull/18323)
+- Enabled fused MiniMax sparse prepare through 256k tokens and fused MiniMax-M3 A3 index TopK helpers. [#18660](https://github.com/vllm-project/vllm-ascend/pull/18660) [#18323](https://github.com/vllm-project/vllm-ascend/pull/18323)
 - Reduced QKV layout copies for FLA attention, and offloaded Qwen3.5-VL image preprocessing to the NPU. [#18727](https://github.com/vllm-project/vllm-ascend/pull/18727) [#18443](https://github.com/vllm-project/vllm-ascend/pull/18443)
 - Used activation exchange for PCP decode O projection in DSA, and optimized the hc_pre kernels. [#18537](https://github.com/vllm-project/vllm-ascend/pull/18537) [#18347](https://github.com/vllm-project/vllm-ascend/pull/18347)
 
@@ -446,7 +446,7 @@ The following features are deprecated or subject to change:
 ### Known Issues
 
 - Kimi K3 DSpark speculative decoding has a low draft acceptance rate for long input sequences, reducing the expected performance benefit. [#15237](https://github.com/vllm-project/vllm-ascend/issues/15237)
-- DeepSeek-V4-Flash may show a performance regression for 128K-input/1K-output workloads when pooling is enabled, especially for single-prefix requests. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649)
+- DeepSeek-V4-Flash may show a performance regression for 128k-input/1k-output workloads when pooling is enabled, especially for single-prefix requests. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649)
 - Qwen3-32B W8A8/QuaRot may show a small performance regression in PD-disaggregated or pooling-enabled scenarios on v0.26.0rc. [#15295](https://github.com/vllm-project/vllm-ascend/issues/15295)
 - DeepSeek-V3.1 may hang or fail during PD-disaggregated serving and high-concurrency PD-mixed inference. These scenarios are outside the supported export-model scope. [#14911](https://github.com/vllm-project/vllm-ascend/issues/14911)
 - Qwen3-235B-A22B W8A8 and Qwen3-235B W4A8 may show lower performance than the baseline in some A3 PD-mixed aclgraph scenarios. [#15296](https://github.com/vllm-project/vllm-ascend/issues/15296)
@@ -454,8 +454,8 @@ The following features are deprecated or subject to change:
 - Qwen3.6-27B DFlash with mixed sliding-window and full attention requires the V2 model runner. [#15650](https://github.com/vllm-project/vllm-ascend/issues/15650)
 - DeepSeek-V3.2-W8A8 may show a partial performance regression in A3 single-node mixed deployment. [#15651](https://github.com/vllm-project/vllm-ascend/issues/15651)
 - DeepSeek-V4 sleep mode with `sleep_mode_extra_cleanup` may fail to recover after wakeup. Sleep mode is mainly intended for training scenarios. [#15648](https://github.com/vllm-project/vllm-ascend/issues/15648)
-- KV pooling may cause a small single-prefix performance regression in some long-context workloads, including DeepSeek-V4-Flash 128K-1K and Qwen3-32B A2 PD-mixed scenarios. Investigation is ongoing. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) [#15295](https://github.com/vllm-project/vllm-ascend/issues/15295) [#12234](https://github.com/vllm-project/vllm-ascend/issues/12234)
-- MiniMax-M2.7 W8A8 shows a performance regression in the A3 single-node scenario. The 128K-input/1K-output double-node result also fell below the baseline threshold, but more samples are needed to determine whether it is a persistent regression or normal performance variation. [#15658](https://github.com/vllm-project/vllm-ascend/issues/15658)
+- KV pooling may cause a small single-prefix performance regression in some long-context workloads, including DeepSeek-V4-Flash 128k-1k and Qwen3-32B A2 PD-mixed scenarios. Investigation is ongoing. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) [#15295](https://github.com/vllm-project/vllm-ascend/issues/15295) [#12234](https://github.com/vllm-project/vllm-ascend/issues/12234)
+- MiniMax-M2.7 W8A8 shows a performance regression in the A3 single-node scenario. The 128k-input/1k-output double-node result also fell below the baseline threshold, but more samples are needed to determine whether it is a persistent regression or normal performance variation. [#15658](https://github.com/vllm-project/vllm-ascend/issues/15658)
 
 ## v0.23.0 - 2026.08.16
 
@@ -1675,7 +1675,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 - The performance of Qwen3-next has been improved. [#5664](https://github.com/vllm-project/vllm-ascend/pull/5664) [#5984](https://github.com/vllm-project/vllm-ascend/pull/5984) [#5765](https://github.com/vllm-project/vllm-ascend/pull/5765)
 - The CPU bind logic and performance has been improved. [#5555](https://github.com/vllm-project/vllm-ascend/pull/5555)
 - Merge Q/K split to simplify AscendApplyRotaryEmb for better performance. [#5799](https://github.com/vllm-project/vllm-ascend/pull/5799)
-- Add Matmul Allreduce Rmsnorm fusion Pass. It's disabled by default. Set `fuse_allreduce_rms=True` in `--additional_config` to enable it. [#5034](https://github.com/vllm-project/vllm-ascend/pull/5034)
+- Add Matmul Allreduce Rmsnorm fusion Pass. It's disabled by default. Set `fuse_allreduce_rms=True` in `--additional-config` to enable it. [#5034](https://github.com/vllm-project/vllm-ascend/pull/5034)
 - Optimize rope embedding with triton kernel for huge performance gain. [#5918](https://github.com/vllm-project/vllm-ascend/pull/5918)
 - support advanced apply_top_k_top_p without top_k constraint. [#6098](https://github.com/vllm-project/vllm-ascend/pull/6098)
 - Parallelize Q/K/V padding in AscendMMEncoderAttention for better performance. [#6204](https://github.com/vllm-project/vllm-ascend/pull/6204)
@@ -1899,7 +1899,6 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 - DeepSeek 3.2 doesn't work with chat template. It because that vLLM v0.12.0 doesn't support it. We'll support in the next v0.13.0rc1 version.
 - DeepSeek 3.2 doesn't work with high concurrency in some case. We'll fix it in next release. [#4996](https://github.com/vllm-project/vllm-ascend/issues/4996)
 - We notice that bf16/fp16 model doesn't perform well. This is mainly because `VLLM_ASCEND_ENABLE_NZ` is enabled by default. Please set `VLLM_ASCEND_ENABLE_NZ=0` to disable it. We'll add the auto detection mechanism in next release.
-- speculative decode method `suffix` doesn't work. We'll fix it in next release. You can pick this commit to fix the issue: [#5010](https://github.com/vllm-project/vllm-ascend/issues/5010)
 
 ## v0.11.0rc3 - 2025.12.03
 
@@ -2047,7 +2046,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - The performance of Qwen3 MoE model is improved with rope ops update. [#2571](https://github.com/vllm-project/vllm-ascend/pull/2571)
 - Fix the weight load error for RLHF case. [#2756](https://github.com/vllm-project/vllm-ascend/pull/2756)
 - Add warm_up_atb step to speed up the inference. [#2823](https://github.com/vllm-project/vllm-ascend/pull/2823)
-- Fixed the aclgraph steam error for moe model. [#2827](https://github.com/vllm-project/vllm-ascend/pull/2827)
+- Fixed the aclgraph stream error for moe model. [#2827](https://github.com/vllm-project/vllm-ascend/pull/2827)
 
 ### Known Issues
 
@@ -2365,7 +2364,7 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 
 - Pooling model works with V1 engine now. You can take a try with Qwen3 embedding model [#1359](https://github.com/vllm-project/vllm-ascend/pull/1359).
 - The performance on Atlas 300I series has been improved. [#1591](https://github.com/vllm-project/vllm-ascend/pull/1591)
-- aclgraph mode works with Moe models now. Currently, only Qwen3 Moe is well tested. [#1381](https://github.com/vllm-project/vllm-ascend/pull/1381)
+- aclgraph mode works with MoE models now. Currently, only Qwen3 MoE is well tested. [#1381](https://github.com/vllm-project/vllm-ascend/pull/1381)
 
 ### Core
 
@@ -2566,7 +2565,7 @@ This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [
 
 - Upgrade CANN version to 8.1.RC1 to support chunked prefill and automatic prefix caching (`--enable_prefix_caching`) when V1 is enabled [#747](https://github.com/vllm-project/vllm-ascend/pull/747)
 - Optimize Qwen2 VL and Qwen 2.5 VL [#701](https://github.com/vllm-project/vllm-ascend/pull/701)
-- Improve Deepseek V3 eager mode and graph mode performance, now you can use --additional_config={'enable_graph_mode': True} to enable graph mode. [#598](https://github.com/vllm-project/vllm-ascend/pull/598) [#719](https://github.com/vllm-project/vllm-ascend/pull/719)
+- Improve Deepseek V3 eager mode and graph mode performance, now you can use --additional-config={'enable_graph_mode': True} to enable graph mode. [#598](https://github.com/vllm-project/vllm-ascend/pull/598) [#719](https://github.com/vllm-project/vllm-ascend/pull/719)
 
 ### Core
 

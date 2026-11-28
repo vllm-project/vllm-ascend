@@ -99,69 +99,74 @@ CRITICAL RULES — violations will cause the translation to be rejected:
    - 'vLLM Ascend' → 'vLLM Ascend'
    - 'vllm-ascend' → 'vllm-ascend'
    - vLLM, CANN, Huawei, Atlas, etc..
+9. Preserve the EXACT leading spaces of every line after a "\n" in msgid.
+   These spaces encode Markdown nesting (tabs, ordered/unordered list items,
+   nested code fences). Never trim, never re-wrap, never normalize them.
+   Example: msgid "...\n       Keep the remaining flags ..." must produce
+   msgstr "....\n       保留其余标志 ..." with the same 7-space indent.
 
 --- CONTENT THAT SHOULD NOT BE TRANSLATED ---
-9. DO NOT translate contributor names, GitHub usernames, or dates.
+10. DO NOT translate contributor names, GitHub usernames, or dates.
    These should be copied verbatim from msgid to msgstr.
    Example: "Xiyuan Wang [@wangxiyuan] 2025-01-15" → keep as-is.
 
-10. Translate text in all table header rows. Preserve row order, indentation,
+11. Translate text in all table header rows. Preserve row order, indentation,
     separators, URLs, code, and identifiers.
     Keep || (merged columns), ^^ (merged rows), and | | (a blank cell) unchanged.
     Example: "| Model | Graph Mode ||" → "| 模型 | 图模式 ||".
     Example: "|:-----------:|:-----:|:-----:|" → keep as-is.
 
-11. DO NOT translate code identifiers, variable names, CLI flags, or shell
+12. DO NOT translate code identifiers, variable names, CLI flags, or shell
     commands. Copy them verbatim.
     Example: "--data-parallel-size" → keep as-is.
     Example: "vllm serve /path/to/model" → keep as-is.
 
-12. DO NOT translate URLs, email addresses, or paths.
+13. DO NOT translate URLs, email addresses, or paths.
     Copy them verbatim from msgid to msgstr.
 
 --- TERMINOLOGY (MUST TRANSLATE) ---
 
-13. standalone 'Ascend' → '昇腾'
-14. '950PR&950DT Products' → 'Ascend 950PR&950DT系列产品'
-15. '950DT Products'       → 'Ascend 950DT系列产品'
-16. '950PR Products'       → 'Ascend 950PR系列产品'
-17. 'Atlas A2 Products'    → 'Atlas A2系列产品'
-18. 'Atlas A3 Products'    → 'Atlas A3系列产品'
-19. 'Atlas 850E SuperPoD (Air-Cooled)'    → 'Atlas 850E 风冷超节点'
+14. standalone 'Ascend' → '昇腾'
+15. '950PR&950DT Products' → 'Ascend 950PR&950DT系列产品'
+16. '950DT Products'       → 'Ascend 950DT系列产品'
+17. '950PR Products'       → 'Ascend 950PR系列产品'
+18. 'Atlas A2 Products'    → 'Atlas A2系列产品'
+19. 'Atlas A3 Products'    → 'Atlas A3系列产品'
+20. 'Atlas 850E SuperPoD (Air-Cooled)'    → 'Atlas 850E 风冷超节点'
 
 --- MkDocs MATERIAL EXTENSIONS ---
-20. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+21. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
     in English. Only translate the title text after type.
     Example: msgid "!!! note" → msgstr "!!! note"
     Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-21. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
+22. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
     "???+" marker, the type keyword, and quote syntax unchanged. The "+"
     means expanded by default and MUST NOT be added or removed. Translate only
     the title text inside quotes.
     Example: msgid "??? note \\"Click here...\\"" → msgstr "??? note \\"点击这里...\\""
     Example: msgid "???+ warning \\"Important\\"" → msgstr "???+ warning \\"重要\\""
 
-22. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+23. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
     Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
 
 
 --- TRANSLATION QUALITY ---
-23. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+24. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
     literal translation.
-24. Use standard Chinese technical terminology consistently.
-25. For markdown links [text](url): translate the display text in [] but keep
+25. Use standard Chinese technical terminology consistently.
+26. For markdown links [text](url): translate the display text in [] but keep
     the URL in () exactly as-is.
     Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-26. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+27. For headings: translate the heading text but KEEP the "#" / "##" / "###"
     prefix exactly as in the msgid.
     Example: msgid "# Quick Start" → msgstr "# 快速开始"
     Example: msgid "## Overview" → msgstr "## 概述"
-27. DO NOT add "#, fuzzy" markers.
-28. If a msgid is purely structural (symbols, code, file paths only), copy it
+28. DO NOT add "#, fuzzy" markers.
+29. If a msgid is purely structural (symbols, code, file paths only), copy it
     verbatim to msgstr.
-29. Never invent or guess content. If unsure about a term, leave it in English.
+30. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
 
