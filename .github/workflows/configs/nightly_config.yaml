@@ -11,6 +11,9 @@
 a2:
   single_node:
     test_config:
+      - name: kvtc-ops-a2
+        os: linux-aarch64-a2b3-1
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_kvtc_ops.py
       # YAML-driven tests
       - name: qwen3-vl-32b-instruct-w8a8
         os: linux-aarch64-a2b3-4
