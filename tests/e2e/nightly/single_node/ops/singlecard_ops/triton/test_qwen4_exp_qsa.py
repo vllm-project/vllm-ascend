@@ -288,7 +288,7 @@ def test_qsa_request_page_table_graph_replay(query_width):
 
     cases = [(uniform, [153, 201, 279]), (uniform, [259, 131, 0])]
     if query_width == 3:
-        cases.extend([([2, 4, 3], [199, 267, 130]), ([4, 5, 0], [145, 249, 0])])
+        cases.extend([([2, 4, 3], [199, 267, 130]), ([4, 5, 0], [145, 249, 0]), ([2, 3, 4], [145, 249, 0])])
     for step, (counts, lengths) in enumerate(cases, 1):
         pages.copy_(torch.arange(9, dtype=torch.int32).roll(step).reshape(3, 3))
         query.copy_(torch.randn_like(query))

@@ -115,6 +115,9 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         """Bind length consumers once, after target and draft KV initialization."""
         from vllm_ascend.models.qwen4_exp.cpu_length_sync import can_skip_qwen_cpu_length_sync
 
+        draft_model = getattr(getattr(runner, "speculator", None), "model", None)
+        if isinstance(draft_model, nn.Module):
+            self.qsa_prepared_input_adapter.register_model(draft_model)
         self._skip_spec_cpu_length_sync = False
         if not can_skip_qwen_cpu_length_sync(runner):
             return

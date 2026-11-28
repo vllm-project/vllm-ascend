@@ -287,3 +287,56 @@ def test_request_page_table_requires_packed_queries(pad_size, starts, grouped):
     else:
         assert not hasattr(meta, "qsa_request_cu_q")
     assert not hasattr(builder.build_for_cudagraph_capture(common), "qsa_request_cu_q")
+
+
+@pytest.mark.parametrize(
+    "starts,valid",
+    [
+        ([0, 3, 6], True),
+        ([0, 6, 6], True),
+        ([0, 3, 5], False),
+        ([1, 3, 6], False),
+        ([0, 4, 3], False),
+    ],
+)
+def test_full_graph_query_offsets_require_padded_request_span(starts, valid):
+    source = MODEL_DIR / "qsa.py"
+    builder_cls = next(
+        n
+        for n in ast.parse(source.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "AscendQSAMetadataBuilder"
+    )
+
+    class Base:
+        def build(self, _, common, *args, **kwargs):
+            return SimpleNamespace(
+                block_table=common.block_table_tensor,
+                num_actual_tokens=common.num_actual_tokens,
+            )
+
+    namespace: dict[str, Any] = dict(
+        Any=Any,
+        _qsa_full_graph_replay=SimpleNamespace(get=lambda: True),
+        upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
+        AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
+        CommonAttentionMetadata=object,
+        torch=torch,
+        build_qsa_request_plan=lambda *args: ("prefill-plan",),
+    )
+    exec(compile(ast.Module(body=[builder_cls], type_ignores=[]), str(source), "exec"), namespace)
+    builder = namespace["AscendQSAMetadataBuilder"]()
+    boundaries = torch.tensor(starts, dtype=torch.int32)
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False, False]),
+        num_reqs=2,
+        num_actual_tokens=6,
+        graph_pad_size=-1,
+        block_table_tensor=torch.zeros(2, 4, dtype=torch.int32),
+        query_start_loc_cpu=boundaries,
+        query_start_loc=boundaries,
+    )
+    meta = builder.build(0, common)
+    if valid:
+        assert meta.qsa_graph_query_offsets is boundaries
+    else:
+        assert not hasattr(meta, "qsa_graph_query_offsets")

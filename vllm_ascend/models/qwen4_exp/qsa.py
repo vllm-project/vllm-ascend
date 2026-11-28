@@ -567,7 +567,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
                 seq_lens,
                 output[:num_tokens],
                 query_start_loc=cu_q,
-                max_query_len=attn_metadata.max_query_len if cu_q is not None else 1,
+                max_query_len=max(attn_metadata.max_query_len, 1) if cu_q is not None else 1,
                 prepared_metadata=getattr(
                     attn_metadata,
                     "qsa_gbsa_metadata",
@@ -695,7 +695,20 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
         metadata.qsa_request_plan = None
         if pcp_context is None and (for_capture or full_graph_mode):
-            metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
+            if for_capture:
+                metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
+            else:
+                n = common_attn_metadata.num_reqs
+                starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
+                if (
+                    n > 0
+                    and n == metadata.block_table.shape[0]
+                    and len(starts) == n + 1
+                    and starts[0] == 0
+                    and starts[-1] == metadata.num_actual_tokens
+                    and all(end >= start for start, end in zip(starts, starts[1:]))
+                ):
+                    metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
         if for_capture or full_pcp_graph:
             return metadata
         phases = common_attn_metadata.is_prefilling
