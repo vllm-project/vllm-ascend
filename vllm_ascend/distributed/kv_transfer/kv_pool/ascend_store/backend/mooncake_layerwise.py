@@ -11,6 +11,7 @@ from copy import copy
 from typing import Any
 
 from vllm.config.utils import hash_config
+from vllm.distributed.utils import get_pp_indices
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
@@ -47,10 +48,18 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     model = vllm_config.model_config
     partitions = []
     previous_end = 0
+    pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
     for stage in range(parallel.pipeline_parallel_size):
-        stage_config = copy(parallel)
-        stage_config.rank = stage * parallel.tensor_parallel_size
-        start, end = model.get_layers_start_end_indices(stage_config)
+        if pcp_size > 1:
+            # vLLM 0.33.0 derives the PP stage from rank // TP, ignoring PCP.
+            # Fixed upstream: https://github.com/vllm-project/vllm/pull/65539
+            # TODO: Remove with BaseKVPoolWorker's PP/PCP workaround once vLLM
+            # 0.33.0 support is dropped.
+            start, end = get_pp_indices(model.get_total_num_hidden_layers(), stage, parallel.pipeline_parallel_size)
+        else:
+            stage_config = copy(parallel)
+            stage_config.rank = stage * parallel.tensor_parallel_size
+            start, end = model.get_layers_start_end_indices(stage_config)
         if start != previous_end or end <= start:
             raise ValueError("Mooncake PP requires contiguous, nonempty model layer partitions")
         partitions.append((start, end))

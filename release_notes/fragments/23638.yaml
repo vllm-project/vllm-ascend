@@ -1,0 +1,15 @@
+pr: 23638
+entries:
+  - category: feature
+    text: >-
+      Mooncake layerwise KV pooling now supports --prefill-context-parallel-size
+      greater than 1 with enable_kvpp=true and load_async=false for non-hybrid
+      MLA/SFA models. Each TP x PCP owner stores its assigned layers, and a
+      cached prefix can be reused once all required shards are available.
+      Use matching TP, PP, and PCP sizes on the producer and consumer.
+  - category: breaking
+    text: >-
+      With KVPP enabled, Mooncake layerwise and Memcache whole-block pooling
+      now reject configurations at startup if any PP stage has fewer target
+      layers than TP x PCP owners. Reduce TP, PCP, or PP so that every owner
+      has at least one target layer in each stage.

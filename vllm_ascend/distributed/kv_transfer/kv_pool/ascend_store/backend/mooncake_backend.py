@@ -338,10 +338,8 @@ class MooncakeBackend(Backend):
                 "Mooncake block-key layerwise supports PCP or DCP, not both; unsupported "
                 f"prefill_context_parallel_size={pcp_size}, decode_context_parallel_size={dcp_size}"
             )
-        if (pcp_size > 1 or dcp_size > 1) and (getattr(vllm_config, "additional_config", None) or {}).get(
-            "enable_kvpp", False
-        ):
-            raise ValueError("Mooncake layerwise context parallelism does not support enable_kvpp layer-sharded caches")
+        if dcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
+            raise ValueError("Mooncake layerwise DCP does not support enable_kvpp layer-sharded caches")
         if dcp_size > 1:
             mooncake_layerwise.validate_dcp_groups(kv_cache_config)
             model_config = getattr(vllm_config, "model_config", None)
