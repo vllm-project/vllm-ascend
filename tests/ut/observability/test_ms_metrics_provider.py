@@ -165,6 +165,7 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -298,6 +299,12 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
 
     assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
     metrics.record_metric.assert_not_called()
+
+    lifecycle = _load_feature_handlers(monkeypatch, "test_rl_lifecycle_symbol_hooks", "rl_lifecycle")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
+    assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():

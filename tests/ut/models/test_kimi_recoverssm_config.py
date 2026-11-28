@@ -128,19 +128,12 @@ def test_recoverssm_without_transfer_allows_dim_first_layout(monkeypatch):
     validate_request_indexed_kda_recoverssm(make_config())
 
 
-@pytest.mark.parametrize(
-    ("connector", "role", "prefix", "message"),
-    [
-        ("OtherConnector", "kv_consumer", False, "MooncakeConnectorV2 or MooncakePullConnector"),
-    ],
-)
-def test_recoverssm_rejects_unverified_transfer(connector, role, prefix, message):
+@pytest.mark.parametrize("connector", ["MultiConnector", "DecodeBenchConnector"])
+def test_recoverssm_accepts_additional_kv_connectors(connector, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
     config = make_config()
-    config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role=role)
-    config.cache_config.enable_prefix_caching = prefix
-    config.cache_config.mamba_cache_mode = "align" if prefix else "none"
-    with pytest.raises(ValueError, match=message):
-        validate_request_indexed_kda_recoverssm(config)
+    config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
+    validate_request_indexed_kda_recoverssm(config)
 
 
 @pytest.mark.parametrize("text_config_cls", [KimiLinearConfig, KimiK31TextConfig])
