@@ -32,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreKVEvents,
     LookupKeyServer,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import (
+    SHUTDOWN_JOIN_TIMEOUT_S,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
 # isort: on
@@ -154,10 +157,8 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 class TestLookupKeyServer(unittest.TestCase):
     def test_structured_response_and_reset(self):
-        from msgspec import ValidationError
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
 
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
@@ -170,34 +171,50 @@ class TestLookupKeyServer(unittest.TestCase):
                 patch(module + ".zmq.Context"),
             ):
                 config = MagicMock()
+                config.parallel_config.data_parallel_rank = 0
+                config.parallel_config.data_parallel_index = 0
                 config.kv_transfer_config.kv_connector_extra_config = {}
                 worker = MagicMock()
                 worker.lookup_scheduler.return_value = result
                 socket = make_socket.return_value
                 encoder = MsgpackEncoder()
-                socket.recv_multipart.side_effect = [
-                    [b"lookup", (48).to_bytes(4, "big"), *encoder.encode([0, 1]), bytes(4), *encoder.encode(["hash"])],
-                    [b"reset"],
-                    ZMQError("receive failed"),
-                ]
+                server_holder: dict[str, LookupKeyServer] = {}
+                calls = {"count": 0}
+
+                def receive(*_args, _calls=calls, _encoder=encoder, _server_holder=server_holder, **_kwargs):
+                    _calls["count"] += 1
+                    if _calls["count"] == 1:
+                        return [
+                            b"lookup",
+                            (48).to_bytes(4, "big"),
+                            *_encoder.encode([0, 1]),
+                            bytes(4),
+                            *_encoder.encode(["hash"]),
+                        ]
+                    if _calls["count"] == 2:
+                        return [b"reset"]
+                    _server_holder["server"].running = False
+                    raise ZMQError("receive failed")
+
+                socket.recv_multipart.side_effect = receive
                 poller.return_value.poll.return_value = [(socket, 1)]
-                LookupKeyServer(worker, config)
+                server = LookupKeyServer(worker, config)
+                server_holder["server"] = server
                 thread.call_args.kwargs["target"]()
                 response = socket.send_multipart.call_args_list[0].args[0]
                 self.assertEqual(
                     MsgpackDecoder().decode(response),
-                    [result.hit_length, [list(b) for b in result.tail_key_boundaries]],
+                    {
+                        "version": 1,
+                        "status": "ok",
+                        "hit_tokens": result.hit_length,
+                        "tail_key_boundaries": [
+                            [boundary.group_id, boundary.num_tokens] for boundary in result.tail_key_boundaries
+                        ],
+                    },
                 )
-                socket.send_multipart.assert_called_with([b"\x01"])
+                self.assertEqual(socket.send_multipart.call_args_list[1].args[0], [b"\x01"])
                 worker.reset_store.assert_called_once_with()
-                client = LookupKeyClient(config)
-                socket.recv_multipart.side_effect = None
-                socket.recv_multipart.return_value = response
-                self.assertEqual(client.lookup(48, [b"hash"], [0, 1]), result)
-                socket.recv_multipart.return_value = [b"\x00"]
-                with self.assertRaises(ValidationError):
-                    client.lookup(48, [b"hash"])
-                client.close()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.threading.Thread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Poller")
@@ -241,9 +258,17 @@ class TestLookupKeyServer(unittest.TestCase):
         server.decoder.decode.side_effect = [[0], ["hash"]]
         target = mock_thread_cls.call_args.kwargs["target"]
 
+        server.encoder = MagicMock()
+        server.encoder.encode.return_value = [b"error-envelope"]
+
         target()
 
-        mock_socket.send_multipart.assert_called_once_with([b"\x00"])
+        # Exactly one reply for the failed handler, and it is the envelope.
+        mock_socket.send_multipart.assert_called_once_with([b"error-envelope"], copy=False)
+        # The receive fault arrived while running was already cleared, so no
+        # reply and no handle churn; loop exit releases the REP once.
+        self.assertEqual(mock_make_socket.call_count, 1)
+        self.assertEqual(mock_socket.send_multipart.call_count, 1)
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -264,7 +289,9 @@ class TestLookupKeyServer(unittest.TestCase):
         server.close()
 
         self.assertFalse(server.running)
-        thread.join.assert_called_once_with()
+        # One join, and it carries a timeout: an in-flight backend call may keep
+        # the daemon thread alive, but close() itself must return.
+        thread.join.assert_called_once_with(SHUTDOWN_JOIN_TIMEOUT_S)
 
 
 class TestAscendStoreConnector(unittest.TestCase):
@@ -382,8 +409,12 @@ class TestAscendStoreConnector(unittest.TestCase):
             kv_cache_config=MagicMock(),
         )
         mock_scheduler_cls.assert_called_once()
-        self.assertIsNone(connector.get_kv_connector_stats())
-        mock_scheduler_cls.return_value.get_stats.assert_not_called()
+        # The scheduler-side client owns the lookup-RPC counters, so the scheduler
+        # object has to report them: vLLM calls this method on the SCHEDULER connector
+        # as well and aggregates the result into the worker stats.
+        stats = mock_scheduler_cls.return_value.get_stats.return_value
+        self.assertIs(connector.get_kv_connector_stats(), stats)
+        mock_scheduler_cls.return_value.get_stats.assert_called_once()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
