@@ -153,6 +153,21 @@ def test_all_sources_required_and_error_is_reported(worker):
     assert result.finished_recving == result.failed_recving == {"d-request"}
 
 
+def test_receive_waits_for_both_pipeline_stages_and_all_pcp_ranks(worker):
+    worker.start_load_kv(metadata())
+    ranks = [(pp, pcp, 0) for pp in range(2) for pcp in range(8)]
+    # Deliver every DONE except the second stage's page owner.
+    ranks.remove((1, 0, 0))
+    for rank in ranks:
+        send(worker, dict(completion(), producer_sizes=[2, 8, 1], producer_rank=rank))
+    assert not worker.get_transfer_results().finished_recving
+
+    send(worker, dict(completion(), producer_sizes=[2, 8, 1], producer_rank=[1, 0, 0]))
+    result = finish(worker)
+    assert result.finished_recving == {"d-request"}
+    assert not result.failed_recving
+
+
 @pytest.mark.parametrize("failure", ["write", "timeout", "dispatch_timeout"])
 def test_receive_failure_finishes_request_and_keeps_service_running(worker, failure):
     worker.start_load_kv(metadata())

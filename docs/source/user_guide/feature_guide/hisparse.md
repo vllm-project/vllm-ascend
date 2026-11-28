@@ -174,3 +174,52 @@ A request served from the local prefix cache may leave both counters unchanged.
 
 To fall back to local computation after an external load fails, set
 `kv_load_failure_policy=recompute` in `--kv-transfer-config`.
+
+## Layerwise Prefill KV offload with HiSparse Decode
+
+For SFA, Prefill can combine the AscendStore Memcache backend with the
+Mooncake V2 layerwise proxy. Start Memcache and configure its store as in
+[Layerwise Prefill offload](layerwise_and_sparse_kv_cache_offloading.md).
+Use eager Prefill and matching TP sizes with DCP=1 on both endpoints.
+Decode uses PP=PCP=1. Prefill can use pipeline parallelism, and can use
+PCP with TP=1. Each Prefill PP stage sends its own layers and only one
+PCP replica sends each replicated page.
+
+Prefill `--kv-transfer-config` for a 950 deployment:
+
+```json
+{
+  "kv_connector": "MultiConnector", "kv_role": "kv_producer",
+  "kv_connector_extra_config": {"connectors": [
+    {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": 31300,
+     "kv_connector_extra_config": {"use_layerwise": true, "transfer_backend": "memfabric",
+                                   "memfabric_transfer_protocol": "device_urma"}},
+    {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer",
+     "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true,
+                                   "layerwise_num_shared_buffers": 3, "layerwise_independent_layers": [0]}}
+  ]}
+}
+```
+
+On Decode enable `hisparse_config` in the attention configuration and use
+the following `--kv-transfer-config`. Size `host_pool_gib` for the workload.
+
+```json
+{
+  "kv_connector": "MultiConnector", "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {"connectors": [
+    {"kv_connector": "HiSparseConnector", "kv_role": "kv_consumer",
+     "kv_connector_extra_config": {"host_pool_gib": 32}},
+    {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": 31400,
+     "kv_connector_extra_config": {"use_layerwise": true, "transfer_backend": "memfabric",
+                                   "memfabric_transfer_protocol": "device_urma"}}
+  ]}
+}
+```
+
+Route requests through the D-first layerwise proxy. AscendStore restores
+external prefix hits into the Prefill layer slot before attention. Mooncake
+sends the ready layer from that slot and its WRITE completion gates slot
+reuse. Decode publishes its Host Source for Main KV and its NPU Indexer.
+With a shared Host pool only TP rank 0 publishes the Host Source. The normal
+Mooncake DONE path reports completion to the Decode scheduler.

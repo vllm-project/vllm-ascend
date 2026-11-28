@@ -5,15 +5,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
     _HiSparsePDWorker,
     _HiSparsePullThread,
+    _MemFabricPushWorker,
     validate_hisparse_pd_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullConnectorWorker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import MooncakePushConnectorWorker
 
 from .helpers import make_full_spec
 
@@ -239,22 +241,25 @@ def test_memfabric_layout_validation_distinguishes_p_and_d():
 
 
 @pytest.mark.parametrize(
-    "extra,protocol",
+    "extra,protocol,server_role",
     [
-        ({}, "device_urma"),
-        ({"memfabric_transfer_protocol": "device_rdma"}, "device_rdma"),
-        ({"memfabric_transfer_protocol": "sdma"}, "sdma"),
+        ({}, "device_urma", "Prefill"),
+        ({"memfabric_transfer_protocol": "device_rdma"}, "device_rdma", "Prefill"),
+        ({"memfabric_transfer_protocol": "sdma"}, "sdma", "Prefill"),
+        ({"use_layerwise": True, "memfabric_transfer_protocol": "device_urma"}, "device_urma", "Decode"),
     ],
 )
 @pytest.mark.parametrize("is_consumer,role", [(False, "Prefill"), (True, "Decode")])
-def test_memfabric_worker_configures_direct_engine(monkeypatch, extra, protocol, is_consumer, role):
+def test_memfabric_worker_configures_direct_engine(monkeypatch, extra, protocol, server_role, is_consumer, role):
     worker = _HiSparsePDWorker.__new__(_HiSparsePDWorker)
     worker.kv_transfer_config = NS(kv_connector_extra_config=extra, is_kv_consumer=is_consumer)
     worker.side_channel_host = "192.0.2.1"
     monkeypatch.setattr(torch.npu, "current_device", lambda: 3)
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.global_memfabric_te") as engine:
         assert worker._get_transfer_engine(None) is engine.get_transfer_engine.return_value
-        engine.configure.assert_called_once_with(role=role, device_id=3, transfer_protocol=protocol)
+        engine.configure.assert_called_once_with(
+            role=role, device_id=3, transfer_protocol=protocol, store_server_role=server_role
+        )
         engine.get_transfer_engine.assert_called_once_with("192.0.2.1")
 
 
@@ -288,3 +293,84 @@ def test_pull_unpacks_flat_component_major_mla_slot():
     assert local == [106, 110]
     assert peer == [1006, 1010]
     assert sizes == [4, 2]
+
+
+def test_push_pcp_sends_each_prefill_stage_once(monkeypatch):
+    names = ["main.0", "main.1", "indexer.0", "indexer.1"]
+    decode_worker = NS(layer_indices=set(range(len(names))))
+    decode_stage = NS(
+        layer_names=names,
+        hisparse_host_layers=("main.0", "main.1"),
+        metadata_by_pcp_rank={0: NS(metadata_by_tp_rank={0: decode_worker})},
+    )
+    remote = NS(tp_size=1, pp_size=1, pcp_size=1, dcp_size=1, metadata_by_pp_rank={0: decode_stage})
+    monkeypatch.setattr(MooncakePushConnectorWorker, "_get_remote_metadata", lambda *_: remote)
+    monkeypatch.setattr(MooncakePushConnectorWorker, "_get_layer_dcp_sizes", lambda *_: (1, 1))
+    worker = _MemFabricPushWorker.__new__(_MemFabricPushWorker)
+    worker.tp_size, worker.pp_size, worker.pcp_size, worker.dcp_size = 1, 2, 8, 1
+    worker.tp_rank = 0
+    worker.kvpp_layer_owners = {}
+    worker.kv_cache_specs = [MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=656, dtype=torch.uint8)]
+    writes = []
+    for stage in range(2):
+        worker._layer_indices = {f"main.{stage}": 0, f"indexer.{stage}": 1}
+        worker.layer_name_to_spec_index = dict.fromkeys(worker._layer_indices, 0)
+        assert worker._get_remote_metadata({}) is remote
+        for pcp_rank in range(worker.pcp_size):
+            worker.pcp_rank = pcp_rank
+            for name in worker._layer_indices:
+                if worker._get_transfer_partition(name, remote, (0, 0, 0)) is not None:
+                    writes.append((stage, pcp_rank, name))
+    assert writes == [(0, 0, "main.0"), (0, 0, "indexer.0"), (1, 0, "main.1"), (1, 0, "indexer.1")]
+
+    worker.pp_size = 1
+    with pytest.raises(ValueError, match="stage layers"):
+        worker._get_remote_metadata({})
+    worker.pp_size = 2
+    worker._layer_indices["foreign"] = 2
+    with pytest.raises(ValueError, match="stage layers"):
+        worker._get_remote_metadata({})
+    worker.tp_size = remote.tp_size = 2
+    with pytest.raises(ValueError, match="Prefill PCP requires TP=1"):
+        worker._get_remote_metadata({})
+
+
+@pytest.mark.parametrize("packed,width", [(False, 3), (True, 3), (True, 656)])
+def test_push_writes_only_valid_host_rows(packed, width):
+    worker = _MemFabricPushWorker.__new__(_MemFabricPushWorker)
+    tokens = 4
+    page_bytes = tokens * width
+    page_stride = page_bytes + 4
+    target = ctypes.create_string_buffer(bytes([255]) * (3 * page_stride))
+    nope = bytes(range(16))
+    rope = bytes(range(80, 88))
+    rows = [nope[2 * i : 2 * i + 2] + rope[i : i + 1] + bytes([i + 16]) * (width - 3) for i in range(8)]
+    buffers = (
+        [ctypes.create_string_buffer(b"".join(rows))]
+        if packed
+        else [ctypes.create_string_buffer(nope), ctypes.create_string_buffer(rope)]
+    )
+    worker._layer_indices = {"main": 0}
+    worker.layer_name_to_spec_index = {"main": 0}
+    worker.kv_cache_specs = [NS(block_size=tokens)]
+    worker.vllm_config = NS(model_config=NS())
+    worker.transfer_metadata = NS(
+        kv_caches_base_addr=[[ctypes.addressof(buf) for buf in buffers]],
+        block_lens=[[page_bytes] if packed else [8, 4]],
+        block_strides=[[page_bytes] if packed else [8, 4]],
+        block_shapes=[[(tokens, width)] if packed else [(tokens, 2), (tokens, 1)]],
+        layer_block_sizes=[tokens],
+        block_size_scales=[[1]],
+    )
+    pp = NS(
+        layer_names=["main"], hisparse_host_layers=("main",), block_lens=[[page_bytes]], block_strides=[[page_stride]]
+    )
+    dest = NS(kv_caches_base_addr=[[ctypes.addressof(target)]])
+    req = NS(local_block_ids=(1, 0), remote_block_ids=(2, 1), start_token=2, end_token=5)
+    addresses = worker._get_write_addresses(NS(layer_name="main", requests=[req]), pp, dest)
+    for src, dst, size in zip(*addresses, strict=True):
+        ctypes.memmove(dst, src, size)
+    expected = bytearray([255] * (3 * page_stride))
+    expected[2 * page_stride + 2 * width : 2 * page_stride + 4 * width] = rows[6] + rows[7]
+    expected[page_stride : page_stride + width] = rows[0]
+    assert target.raw[: len(expected)] == expected

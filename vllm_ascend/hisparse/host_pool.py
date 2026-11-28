@@ -310,7 +310,7 @@ def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
         if child.get("kv_connector") != "MooncakeConnectorV2" or child.get("kv_role") not in ("kv_consumer", "kv_both"):
             continue
         extra = child.get("kv_connector_extra_config") or {}
-        if extra.get("transfer_backend") == "memfabric" and not extra.get("use_layerwise", False):
+        if extra.get("transfer_backend") == "memfabric":
             return True
     return False
 
