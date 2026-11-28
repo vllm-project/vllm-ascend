@@ -1648,6 +1648,38 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 
 Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
 
+### Per-Request Offload Limits
+
+`AscendStoreConnector` honors `kv_transfer_params.max_offload_tokens` on individual requests to limit how many prefix tokens can be written (offloaded) to the external KV Pool. This control applies across all supported backends (`mooncake`, `memcache`, and `yuanrong`), covering Prefill saves, Decode saves when `save_decode_cache=true`, fine-grained prefix boundary/tail offloads, and DSpark companion prefix saves. External KV Pool lookups and loads (both synchronous and `load_async=true`) are not limited by `max_offload_tokens`, so requests can still reuse previously stored prefixes whose length exceeds the offload limit.
+
+| `max_offload_tokens` Value | Offload (Write) Behavior | Lookup / Load Behavior |
+| :--- | :--- | :--- |
+| `0` | Disables offloading KV cache from this request to the external pool (`0` blocks saved). | Normal external prefix lookup and load. |
+| Positive integer (e.g., `2048`) | Caps writes to the prefix within `max_offload_tokens`, rounded down to complete transfer blocks (`block_size`, or the LCM of cacheable group block sizes for hybrid KV caches). Limits smaller than one complete transfer block save `0` blocks. Trailing partial-block saves (`last_block_gva`) are suppressed while a limit is active. | Normal external prefix lookup and load across all cached prefix tokens, even if the hit exceeds `max_offload_tokens`. |
+| `null` or omitted | Uncapped; uses the default offload behavior. | Normal external prefix lookup and load. |
+| Invalid value (e.g., boolean `true`/`false`, negative integer, float, string, or non-integer object) | Logs a warning (`max_offload_tokens must be a non-negative int, got ...; ignoring`) and falls back to uncapped writes without failing the request. | Normal external prefix lookup and load. |
+
+Example OpenAI Completions API request limiting external KV offloading to `2048` tokens (set `"max_offload_tokens": 0` to disable offloading for a request while keeping reads enabled):
+
+```shell
+curl -s http://localhost:8100/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3",
+        "prompt": "Hello. I have a question. The president of the United States is",
+        "max_completion_tokens": 200,
+        "temperature": 0.0,
+        "kv_transfer_params": {
+            "max_offload_tokens": 2048
+        }
+    }'
+```
+
+Notes and constraints:
+
+- When invoking vLLM's Python engine directly, pass the parameter through `SamplingParams(..., extra_args={"kv_transfer_params": {"max_offload_tokens": 2048}})`. Passing `kv_transfer_params` over HTTP requires a vLLM API server build that forwards `kv_transfer_params` to the engine.
+- **`layerwise_offload` interaction**: When shared HBM buffer reuse (`layerwise_offload`, enabled via `use_layerwise=true` with `layerwise_num_shared_buffers`) is active, subsequent execution steps depend on full-step saves to reload overwritten HBM pages. In this mode, `AscendStoreConnector` logs a warning (`Ignoring max_offload_tokens=... for request ... because layerwise buffer reuse requires full saves`) and ignores `max_offload_tokens` to protect inference correctness. Standard layerwise transfers (`use_layerwise=true` without `layerwise_offload`) honor `max_offload_tokens` normally.
+
 ## FAQ
 
 For common environment, installation, and general parameter issues, see the [Public FAQ](../../faqs.md). This chapter only covers issues specific to this feature.

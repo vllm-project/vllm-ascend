@@ -825,6 +825,9 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
 
     def _store_boundary_puts(self, req_meta: ReqMeta) -> bool:
         """Store complete pages/checkpoints under their exact boundary keys."""
+        cap = req_meta.max_offload_tokens
+        if cap == 0:
+            return True
         current_event = req_meta.current_event
         # A boundary value is a complete physical page/checkpoint, keyed by
         # its logical hash boundary. Never slice a head-major page by bytes.
@@ -833,6 +836,8 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
         boundary_values = {}
         assert req_meta.boundary_puts is not None
         for group, block, boundary in req_meta.boundary_puts:
+            if cap is not None and boundary > cap:
+                continue
             if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
                 raise ValueError("Invalid Core boundary-state handoff")
             index = boundary // self.token_database.hash_block_size - 1
@@ -844,6 +849,8 @@ class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
             if not addrs or len(addrs) != len(sizes):
                 raise ValueError("Boundary state has no transferable buffers")
             boundary_values[key] = (addrs, sizes)
+        if not boundary_values:
+            return True
         keys = list(boundary_values)
         missing_indices = self._get_missing_indices(keys)
         if not missing_indices:

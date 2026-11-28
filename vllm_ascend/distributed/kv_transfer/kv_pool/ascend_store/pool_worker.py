@@ -1559,7 +1559,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
             requested_group_ids = request.kv_cache_group_ids or [0]
-            token_len = request.token_len_chunk
+            token_len = request.target_token_len
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):

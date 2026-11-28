@@ -1,0 +1,4 @@
+pr: 23194
+entries:
+  - category: feature
+    text: Added support for per-request `kv_transfer_params.max_offload_tokens` in `AscendStoreConnector`, allowing users to disable external writes (`0`) or cap offloaded prefix tokens to whole cache blocks without limiting prefix lookups or loads.
