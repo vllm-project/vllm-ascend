@@ -167,5 +167,6 @@ configuration rather than the runner input or sampling interface.
 | [step5/gated_scale.py](step5/gated_scale.py) | Step5 head-wise attention gate: sigmoid + broadcast multiply fused on the caller's offset-0 gate base. [Operator documentation](docs/step5_gated_scale.md) |
 | [step5/indexer_qkz_norm_rope.py](step5/indexer_qkz_norm_rope.py) | Step5 sparse-indexer Q/K norm + NeoX RoPE with Z passthrough and e4m3-at-store quantization. [Operator documentation](docs/step5_indexer_qkz_norm_rope.md) |
 | [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
+| [strided_mla_prefill_gather.py](strided_mla_prefill_gather.py) | Chunked MLA prefill history gather. [Operator documentation](docs/strided_mla_prefill_gather.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |

@@ -525,6 +525,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "enable_balanced_flash_mla": false,
             "kv_trace": {"enabled": false, "action": "log"},
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
@@ -660,6 +661,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    enable_balanced_flash_mla: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"

@@ -11,6 +11,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.worker.v2 import aclgraph_utils
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
     CudaGraphManager,
@@ -39,6 +40,37 @@ def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
 
 def _query_shape(query_len):
     return {"decode_query_lens": {query_len: 8}}
+
+
+@pytest.mark.parametrize("has_host_updates", [False, True])
+def test_target_graph_replay_updates_only_registered_tasks(monkeypatch, has_host_updates):
+    manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
+    manager.update_stream = MagicMock()
+    desc = object()
+    graph = MagicMock(tasks=[object()] if has_host_updates else [])
+    resolved_tasks = (object(),)
+    graph.resolve_tasks.return_value = resolved_tasks
+    manager.graphs = {desc: graph}
+    metadata = {"layer": object()}
+    output = object()
+    replay = MagicMock(return_value=output)
+    current_stream = MagicMock(return_value=object())
+    monkeypatch.setattr(aclgraph_utils, "UpdatableGraph", MagicMock)
+    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "run_fullgraph", replay)
+    monkeypatch.setattr(aclgraph_utils.torch.npu, "current_stream", current_stream)
+
+    assert manager._updatable_graph_replay(desc, metadata) is output
+
+    replay.assert_called_once_with(desc)
+    if has_host_updates:
+        graph.resolve_tasks.assert_called_once_with(aclgraph_utils.ContextSource(metadata))
+        manager.update_stream.wait_stream.assert_called_once_with(current_stream.return_value)
+        graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
+    else:
+        current_stream.assert_not_called()
+        manager.update_stream.wait_stream.assert_not_called()
+        graph.resolve_tasks.assert_not_called()
+        graph.update.assert_not_called()
 
 
 def test_init_draft_prefill_graph():

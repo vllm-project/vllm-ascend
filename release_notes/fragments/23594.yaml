@@ -1,0 +1,9 @@
+pr: 23594
+entries:
+  - category: performance
+    text: >-
+      Eligible Ling 3.1 BF16 deployments on Ascend A3 use FlashMLA to decode
+      directly from the paged KV cache. Set `enable_balanced_flash_mla` to
+      `true` in `--additional-config` to share page scheduling across layers
+      in eligible full decode graphs.
+    hardware: [A3]
