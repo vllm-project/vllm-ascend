@@ -28,7 +28,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -42,10 +42,14 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.compilation.fia_graph_replay import CAPTURE_FIA_REPLAY
+from vllm_ascend.compilation.fia_graph_replay import available as fia_graph_replay_available
 from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
@@ -197,11 +201,37 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
+        if graph.fia_replay is not None:
+            graph.fia_replay.prepare(attn_metadata)
+            return super().run_fullgraph(desc)
         resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
         return ret
+
+    def _can_capture_fia_replay(self, attn_groups: list[list[AttentionGroup]], kv_cache_config: KVCacheConfig) -> bool:
+        if not fia_graph_replay_available() or len(attn_groups) != 1 or len(attn_groups[0]) != 1:
+            return False
+
+        config = self.vllm_config
+        return (
+            get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
+            and self.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and self.decode_query_len == 1
+            and not self.varlen_decode
+            and self.ubatch_runner is None
+            and self.compilation_config.max_cudagraph_capture_size <= 8
+            and config.parallel_config.world_size_across_dp == 1
+            and config.speculative_config is None
+            and config.lora_config is None
+            and config.model_config.architecture == "Qwen3ForCausalLM"
+            and config.model_config.dtype == torch.bfloat16
+            and config.model_config.quantization is None
+            and config.model_config.max_model_len <= 2048
+            and len(kv_cache_config.kv_cache_groups) == 1
+            and type(kv_cache_config.kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
+        )
 
     def capture(
         self,
@@ -222,20 +252,34 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
         try:
+            capture_fia_replay = self._can_capture_fia_replay(attn_groups, kv_cache_config)
             with communicator_switch():
-                return super().capture(
-                    model,
-                    model_state,
-                    input_buffers,
-                    intermediate_tensors,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    pcp_manager=pcp_manager,
-                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                    lora_capture_hook=lora_capture_hook,
-                    progress_bar_desc=progress_bar_desc,
-                )
+                while True:
+                    token = CAPTURE_FIA_REPLAY.set(capture_fia_replay)
+                    try:
+                        super().capture(
+                            model,
+                            model_state,
+                            input_buffers,
+                            intermediate_tensors,
+                            block_tables,
+                            attn_groups,
+                            kv_cache_config,
+                            pcp_manager=pcp_manager,
+                            use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                            lora_capture_hook=lora_capture_hook,
+                            progress_bar_desc=progress_bar_desc,
+                        )
+                    finally:
+                        CAPTURE_FIA_REPLAY.reset(token)
+                    if not capture_fia_replay:
+                        return
+                    torch.npu.synchronize()
+                    if all(graph.bind_fia_replay() for graph in self.graphs.values()):
+                        return
+                    logger.warning("FIA launch arguments did not match. Recapturing with task updates.")
+                    self.release_graphs()
+                    capture_fia_replay = False
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:

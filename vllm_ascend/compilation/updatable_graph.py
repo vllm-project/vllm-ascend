@@ -10,6 +10,7 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
+from vllm_ascend.compilation.fia_graph_replay import CAPTURE_FIA_REPLAY, FIAReplay, captured_model
 from vllm_ascend.utils import weak_ref_tensors
 
 Params = dict[str, Any]
@@ -80,6 +81,8 @@ class UpdatableGraph(torch.npu.NPUGraph):
     def __init__(self) -> None:
         super().__init__()
         self.tasks: list[GraphUpdateTask] = []
+        self.fia_replay: FIAReplay | None = None
+        self.fia_capture_model = 0
         self.provider_sizes: dict[ParamProvider, int] = {}
         self.capture_resources: dict[Hashable, Any] = {}
         self.capture_token: Token[UpdatableGraph | None] | None = None
@@ -91,12 +94,23 @@ class UpdatableGraph(torch.npu.NPUGraph):
 
     def capture_end(self) -> None:
         try:
+            if CAPTURE_FIA_REPLAY.get():
+                self.fia_capture_model = captured_model(torch.npu.current_stream())
             super().capture_end()
         finally:
             assert self.capture_token is not None
             _ACTIVE_GRAPH.reset(self.capture_token)
             self.capture_token = None
             self.capture_resources = weak_ref_tensors(self.capture_resources)
+
+    def bind_fia_replay(self) -> bool:
+        if not self.fia_capture_model:
+            return False
+        self.fia_replay = FIAReplay.bind(self.fia_capture_model, self.tasks)
+        if self.fia_replay is None:
+            return False
+        self.tasks.clear()
+        return True
 
     def get_capture_resource(
         self,
@@ -123,6 +137,11 @@ class UpdatableGraph(torch.npu.NPUGraph):
         kwargs: dict[str, Any],
         provider: ParamProvider,
     ) -> None:
+        if CAPTURE_FIA_REPLAY.get():
+            operation(**kwargs)
+            self.tasks.append(GraphUpdateTask(operation, weak_ref_tensors(kwargs), provider, 0, None, None))
+            return
+
         stream = torch.npu.current_stream()
         event = torch.npu.ExternalEvent()
         event.wait(stream)
