@@ -187,7 +187,6 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 
 ## Related Files
 
-- Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/v2/model_runner.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
@@ -195,6 +194,6 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
 - Upstream PCP groups and virtual batches: `vllm/distributed/parallel_state.py`, `vllm/v1/worker/gpu/pcp_manager.py`
 - PCP batch and metadata: `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/v2/attn_utils.py`
-- PCP/DCP slot mapping: `vllm_ascend/worker/v2/block_table.py`
+- Slot mapping (PCP/DCP): `vllm_ascend/worker/v2/block_table.py`
 - Backend selection and configuration: `vllm_ascend/platform.py`
 - DSA V4.1 PCP backend: `vllm_ascend/attention/context_parallel/dsa_v41_cp.py`
