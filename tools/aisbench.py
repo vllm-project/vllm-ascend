@@ -311,7 +311,7 @@ class AisbenchRunner:
                 content,
             )
         if self.task_type in ("accuracy", "performance"):
-            content = re.sub(r"path=.*", lambda _: f"path={str(self.model_path)!r},", content)
+            content = re.sub(r"\bpath=.*", lambda _: f"path={str(self.model_path)!r},", content)
         if self.task_type == "performance":
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
             content = re.sub(r"temperature.*", "temperature=0,", content)
