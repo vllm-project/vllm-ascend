@@ -192,17 +192,41 @@ def test_other_pd_backend_preserves_original_dspark_loading():
     assert runner.pd_dspark_aux_layer_ids == ()
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnector", "SfaRemoteD2HConnector", "AscendStoreConnector"])
+@pytest.mark.parametrize(
+    "connector",
+    [
+        None,
+        "MooncakeConnector",
+        "SfaRemoteD2HConnector",
+        "AscendStoreConnector",
+        "MooncakeConnectorStoreV1",
+        "MultiConnector",
+    ],
+)
 @pytest.mark.parametrize("method", ["dspark", "mtp", "eagle3"])
 @pytest.mark.parametrize("layerwise", [False, True])
-def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_construction(connector, method, layerwise):
+@pytest.mark.parametrize("backend", ["memcache", "mooncake"])
+def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_construction(
+    connector, method, layerwise, backend
+):
     from vllm_ascend.worker import worker as module
 
     worker = module.NPUWorker.__new__(module.NPUWorker)
     transfer = (
         SimpleNamespace(
             kv_connector=connector,
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": layerwise},
+            kv_connector_extra_config=(
+                {
+                    "connectors": [
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_connector_extra_config": {"backend": backend, "use_layerwise": layerwise},
+                        }
+                    ]
+                }
+                if connector == "MultiConnector"
+                else {"backend": backend, "use_layerwise": layerwise}
+            ),
             is_kv_producer=True,
             is_kv_consumer=False,
         )
@@ -219,7 +243,9 @@ def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_cons
     )
     cache_config = SimpleNamespace(has_mamba_layers=False, needs_kv_cache_zeroing=False)
     enabled = method == "dspark" and (
-        connector == "SfaRemoteD2HConnector" or connector == "AscendStoreConnector" and layerwise
+        connector == "SfaRemoteD2HConnector"
+        or connector in ("AscendStoreConnector", "MooncakeConnectorStoreV1", "MultiConnector")
+        and layerwise
     )
 
     def check_registration(config, cache):

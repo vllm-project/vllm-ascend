@@ -121,9 +121,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self._dspark_draft_layer_names = (
-            set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
-        )
+        self._dspark_draft_layer_names = set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
         self.dflash_draft_layer_names = (
             frozenset(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
             if self.use_layerwise_transfer
@@ -200,7 +198,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
         stage_num_layers = self.num_layers
-        dflash_draft_names: frozenset[str] = getattr(self, "dflash_draft_layer_names", frozenset())
+        dflash_draft_names = set(getattr(self, "dflash_draft_layer_names", ()))
         self._dflash_draft_start_layer: int | None = None
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
@@ -235,15 +233,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
             if self.use_layerwise_transfer:
                 self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
-                if (
-                    draft_names
-                    and self._layerwise_reuse_layout is None
-                    and getattr(self, "_dspark_prefix_keys", None) is None
-                ):
-                    # Without scratch reuse, retain the original target+draft
-                    # pool for prefix storage and load/save addressing.
-                    self._dspark_draft_layer_names = draft_names = set()
-                    target_specs = layer_specs
+            if (
+                draft_names
+                and self._layerwise_reuse_layout is None
+                and getattr(self, "_dspark_prefix_keys", None) is None
+            ):
+                # Draft KV stays in the pool and must be saved after the speculator writes it.
+                dflash_draft_names.update(draft_names)
+                self._dspark_draft_layer_names = draft_names = set()
+                target_specs = layer_specs
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
                 for group_spec in self.kv_cache_config.kv_cache_groups
@@ -283,7 +281,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
-                self._init_dflash_draft_layers(target_specs.keys() & dflash_draft_names)
+                # Connector defers these DFlash/DSpark layers to finish_forward and wait_for_save.
+                self.dflash_draft_layer_names = frozenset(target_specs.keys() & dflash_draft_names)
+                self._init_dflash_draft_layers(self.dflash_draft_layer_names)
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
@@ -368,7 +368,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
-    def _init_dflash_draft_layers(self, draft_names: set[str]) -> None:
+    def _init_dflash_draft_layers(self, draft_names: frozenset[str]) -> None:
         draft_layers = {self._global_to_local_layer[self._extract_physical_layer_index(name)] for name in draft_names}
         if not draft_layers:
             return

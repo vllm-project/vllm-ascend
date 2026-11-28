@@ -168,7 +168,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_standard_connector_drives_full_sparse_sequence(self):
-        worker, store, _ = make_shared_worker(self, bounded=True, draft=True)
+        worker, store, _ = make_shared_worker(self, bounded=True, draft=True, mark_dspark_draft=False)
         meta = metadata(worker)
         conn = AscendStoreConnector.__new__(AscendStoreConnector)
         conn.use_layerwise = conn.can_put = True
