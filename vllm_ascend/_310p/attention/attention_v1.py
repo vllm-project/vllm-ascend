@@ -42,6 +42,9 @@ from vllm_ascend.attention.attention_v1 import (
 
 MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
 MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
+_ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
+_MAX_HEAD_SIZE = 256
+_SUPPORTED_KERNEL_BLOCK_SIZES = (128, 64)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -96,7 +99,16 @@ class AscendAttentionBackend310(AscendAttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
-        return [128, 64]
+        head_size = getattr(kv_cache_spec, "head_size", None)
+        if head_size is None:
+            return list(_SUPPORTED_KERNEL_BLOCK_SIZES)
+        if head_size > _MAX_HEAD_SIZE:
+            raise NotImplementedError(f"310P paged attention requires head_size <= {_MAX_HEAD_SIZE}, got {head_size}.")
+        return [
+            block_size
+            for block_size in _SUPPORTED_KERNEL_BLOCK_SIZES
+            if block_size * head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+        ]
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:

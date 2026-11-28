@@ -33,6 +33,7 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
         self.device = device
         self.pin_memory = pin_memory
         self._kv_tensors: list[torch.Tensor] = []
+        self._kv_page_ratios: list[int] = []
         self._logical_page_ratio: int = 1
 
     def init_meta(
@@ -45,15 +46,18 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
     ) -> None:
         seen_ptrs: set[int] = set()
         self._kv_tensors = []
+        self._kv_page_ratios = []
         self._logical_page_ratio = 1
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
             if not isinstance(spec, FullAttentionSpec):
                 continue
-            if group.kv_cache_group_id >= len(kernel_block_sizes):
-                continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id][0]
+            kernel_bs = getattr(group, "kernel_block_size", None)
+            if kernel_bs is None:
+                if group.kv_cache_group_id >= len(kernel_block_sizes):
+                    continue
+                kernel_bs = kernel_block_sizes[group.kv_cache_group_id][0]
             ratio = spec.block_size // kernel_bs
             if not self._kv_tensors:
                 self._logical_page_ratio = ratio
@@ -69,14 +73,19 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
                         continue
                     seen_ptrs.add(dp)
                     self._kv_tensors.append(kv)
+                    self._kv_page_ratios.append(ratio)
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         if not block_ids or not self._kv_tensors:
             return
 
-        ratio = self._logical_page_ratio
-        for block_id in block_ids:
-            start = block_id * ratio
-            end = start + ratio
-            for kv in self._kv_tensors:
+        ratios = (
+            self._kv_page_ratios
+            if len(self._kv_page_ratios) == len(self._kv_tensors)
+            else [self._logical_page_ratio] * len(self._kv_tensors)
+        )
+        for kv, ratio in zip(self._kv_tensors, ratios):
+            for block_id in block_ids:
+                start = block_id * ratio
+                end = start + ratio
                 kv[start:end].zero_()

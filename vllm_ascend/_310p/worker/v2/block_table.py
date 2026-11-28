@@ -25,22 +25,18 @@ class Ascend310PBlockTables(BlockTables):
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
         device: torch.device,
-        kernel_block_sizes: list[int] | None = None,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
     ) -> None:
-        if kernel_block_sizes is None:
-            kernel_block_sizes = block_sizes
         if cp_size != 1:
             raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
         if len(max_num_blocks_per_group) != len(block_sizes):
             raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
 
         self.block_sizes = block_sizes
-        self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
@@ -60,14 +56,10 @@ class Ascend310PBlockTables(BlockTables):
             if len(dcp_sharded) != self.num_kv_cache_groups:
                 raise ValueError("dcp_sharded must match the number of KV cache groups.")
             self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
-        self.blocks_per_kv_block = [
-            block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
-        ]
 
-        table_shapes = [
-            (max_num_reqs, max_num_blocks * blocks_per_kv_block)
-            for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
-        ]
+        # Keep public block tables at KV-cache-manager granularity; kernel-block
+        # mapping is owned by each AttentionGroup.
+        table_shapes = [(max_num_reqs, max_num_blocks) for max_num_blocks in max_num_blocks_per_group]
         pin_memory = is_pin_memory_available()
         self._block_tables_cpu_tensors = [
             torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
@@ -111,13 +103,6 @@ class Ascend310PBlockTables(BlockTables):
     ) -> None:
         for group_id, block_ids in enumerate(new_block_ids):
             start = 0 if overwrite else int(self.num_blocks_np[group_id, req_index])
-            blocks_per_kv_block = self.blocks_per_kv_block[group_id]
-            if blocks_per_kv_block > 1:
-                block_ids = [
-                    block_id * blocks_per_kv_block + offset
-                    for block_id in block_ids
-                    for offset in range(blocks_per_kv_block)
-                ]
             end = start + len(block_ids)
             if end > self.block_tables_cpu[group_id].shape[1]:
                 raise ValueError(f"Too many block IDs for request {req_index} in KV cache group {group_id}.")
@@ -210,7 +195,8 @@ class Ascend310PBlockTables(BlockTables):
             token_positions = positions_np[token_start:token_end]
             if not all_active:
                 rows = np.where(active, rows, 0)
-            for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.kernel_block_sizes)):
+            # Public block tables and flat slots use manager-block units.
+            for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.block_sizes)):
                 if not self._slot_mapping_enabled[group_id]:
                     continue
                 block_numbers = block_table[rows, token_positions // block_size]

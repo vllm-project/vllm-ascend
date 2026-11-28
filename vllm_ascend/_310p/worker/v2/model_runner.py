@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
@@ -59,10 +60,8 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     shared_experts_calculation_stream,
 )
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import build_attn_state, initialize_kernel_block_table_buffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-_ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
 def _post_update_cpu(
@@ -818,14 +817,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             kv_cache_config, self.vllm_config, self.device
         )
-        self._adjust_kernel_block_sizes(kv_cache_config)
         self.block_tables = Ascend310PBlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            kernel_block_sizes=self.kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -859,12 +856,14 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers,
                 self.attn_groups,
             )
+            self._align_draft_kernel_block_sizes(kv_cache_config)
             metadata_groups.extend(self.speculator.attn_groups)
 
-        # Skip remapping to preserve 310P's existing block table expansion.
-        for groups in metadata_groups:
-            for attn_group in groups:
-                attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+        initialize_kernel_block_table_buffers(
+            (group for groups in metadata_groups for group in groups),
+            self.max_num_reqs + 1,
+            [table.shape[1] for table in self.block_tables.input_block_tables],
+        )
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
@@ -896,33 +895,68 @@ class NPUModelRunner310V2(NPUModelRunner):
             kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
         )
 
-    def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
-        for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                specs = tuple(group_spec.kv_cache_specs.values())
-            else:
-                specs = (group_spec,)
-            attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
-            # Hybrid groups may be pure MambaSpec; skip kernel-block sizing.
-            if not attention_specs:
-                continue
-            max_head_size = max(spec.head_size for spec in attention_specs)
-            if max_head_size > 256:
-                raise NotImplementedError(f"310P paged attention requires head_size <= 256, got {max_head_size}.")
-            backend = self.attn_groups[group_id][0].backend
-            supported_sizes = [
-                block_size
-                for block_size in backend.get_supported_kernel_block_sizes()
-                if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
-                and all(spec.block_size % block_size == 0 for spec in attention_specs)
-            ]
-            if not supported_sizes:
-                raise NotImplementedError(
-                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT} "
-                    "and a kernel block size that divides every attention cache block size in the group."
-                )
-            self.kernel_block_sizes[group_id] = supported_sizes[0]
+    @staticmethod
+    def _effective_kernel_block_size(group: Any, fallback_block_sizes: Sequence[int] | None = None) -> int:
+        kernel_block_size = getattr(group, "kernel_block_size", None)
+        if kernel_block_size is not None:
+            return int(kernel_block_size)
+        if fallback_block_sizes is not None:
+            group_id = getattr(group, "kv_cache_group_id", None)
+            if isinstance(group_id, int) and 0 <= group_id < len(fallback_block_sizes):
+                return int(fallback_block_sizes[group_id])
+        return int(group.kv_cache_spec.block_size)
+
+    def _align_draft_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
+        """Keep draft AttentionGroups aligned with the allocated layer KV page size."""
+        if not isinstance(self.speculator, DraftModelSpeculator):
+            return
+        allocated_by_layer: dict[str, int] = {}
+        for groups in self.attn_groups:
+            for group in groups:
+                layer_names = getattr(group, "layer_names", None)
+                if not layer_names:
+                    continue
+                allocated_size = self._effective_kernel_block_size(group, self.kernel_block_sizes)
+                for layer_name in layer_names:
+                    allocated_by_layer[layer_name] = allocated_size
+
+        draft_vllm_config = getattr(self.speculator, "attn_vllm_config", self.vllm_config)
+        for groups in self.speculator.attn_groups:
+            for draft_group in groups:
+                layer_names = getattr(draft_group, "layer_names", None)
+                if not layer_names:
+                    continue
+                expected_sizes = {allocated_by_layer[name] for name in layer_names if name in allocated_by_layer}
+                if not expected_sizes:
+                    continue
+                if len(expected_sizes) > 1:
+                    raise RuntimeError(
+                        f"310P draft AttentionGroup spans layers with mismatched KV page sizes: "
+                        f"layers={layer_names}, sizes={sorted(expected_sizes)}."
+                    )
+                expected_size = next(iter(expected_sizes))
+                actual_size = self._effective_kernel_block_size(draft_group)
+                if actual_size != expected_size and hasattr(draft_group, "create_metadata_builders"):
+                    draft_group.kernel_block_size = None
+                    draft_group.kernel_block_table = None
+                    draft_group.kernel_block_offsets = None
+                    builder_kwargs: dict[str, Any] = {
+                        "vllm_config": draft_vllm_config,
+                        "device": self.device,
+                        "kernel_block_size": expected_size,
+                        "num_metadata_builders": len(getattr(draft_group, "metadata_builders", ())),
+                    }
+                    if "kv_cache_group" in inspect.signature(draft_group.create_metadata_builders).parameters:
+                        builder_kwargs["kv_cache_group"] = kv_cache_config.kv_cache_groups[
+                            draft_group.kv_cache_group_id
+                        ]
+                    draft_group.create_metadata_builders(**builder_kwargs)
+                    actual_size = self._effective_kernel_block_size(draft_group)
+                if actual_size != expected_size:
+                    raise RuntimeError(
+                        f"310P draft AttentionGroup kernel_block_size ({actual_size}) does not match "
+                        f"allocated KV page size ({expected_size}) for layers {layer_names}."
+                    )
 
     def _init_kv_zero_meta(self) -> None:
         self.kv_block_zeroer = AscendKVBlockZeroer310V2(self.device, is_pin_memory_available())
@@ -957,11 +991,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                     layer_specs[layer_name] = group_spec
                 layer_group_ids[layer_name] = group_id
 
-        layer_backends = {
-            layer_name: group.backend
-            for groups in self.attn_groups
-            for group in groups
-            for layer_name in group.layer_names
+        layer_groups = {
+            layer_name: group for groups in self.attn_groups for group in groups for layer_name in group.layer_names
         }
         kv_caches: dict[str, Any] = {}
         layout_resolver = getattr(self.cache_config, "get_resolved_kv_cache_layout", None)
@@ -980,12 +1011,19 @@ class NPUModelRunner310V2(NPUModelRunner):
                 kv_cache_spec = layer_specs[layer_name]
                 cache_key: tuple[Any, ...]
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    backend = layer_backends[layer_name]
+                    group = layer_groups[layer_name]
+                    backend = group.backend
                     group_id = layer_group_ids[layer_name]
+                    group_kernel_block_size = getattr(group, "kernel_block_size", None)
+                    selected_kernel_block_size = (
+                        group_kernel_block_size
+                        if group_kernel_block_size is not None
+                        else self.kernel_block_sizes[group_id]
+                    )
                     kernel_block_size = (
                         kv_cache_spec.num_states
                         if kv_cache_spec.num_states != kv_cache_spec.block_size
-                        else self.kernel_block_sizes[group_id]
+                        else selected_kernel_block_size
                     )
                     cache_key = (kv_cache_spec, backend, kernel_block_size)
                 else:

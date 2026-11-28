@@ -1177,7 +1177,6 @@ def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping(_pin_memory) 
         max_num_batched_tokens=8,
         max_num_blocks_per_group=[4],
         device=torch.device("cpu"),
-        kernel_block_sizes=[4],
     )
     block_tables.append_block_ids(0, ([10, 11],), overwrite=True)
     block_tables.append_block_ids(1, ([20],), overwrite=True)
@@ -1200,17 +1199,28 @@ def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping(_pin_memory) 
 
 
 @patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
-def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -> None:
+def test_block_table_keeps_manager_blocks_and_computes_equivalent_slots(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[128],
         max_num_reqs=1,
-        max_num_batched_tokens=2,
+        max_num_batched_tokens=4,
         max_num_blocks_per_group=[1],
         device=torch.device("cpu"),
-        kernel_block_sizes=[64],
     )
     block_tables.append_block_ids(0, ([7],), overwrite=True)
-    assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
+    assert block_tables.block_tables_cpu[0][0, :1].tolist() == [7]
+
+    slots = block_tables.compute_slot_mappings(
+        np.array([0], dtype=np.int32),
+        np.array([0, 4], dtype=np.int32),
+        np.array([0, 63, 64, 127], dtype=np.int64),
+        num_tokens_padded=4,
+    )
+    # Manager block 7 spans contiguous 64-token kernel blocks 14 and 15.
+    torch.testing.assert_close(
+        slots,
+        torch.tensor([[7 * 128, 7 * 128 + 63, 7 * 128 + 64, 7 * 128 + 127]], dtype=torch.int32),
+    )
 
 
 @pytest.mark.skipif(
@@ -1219,18 +1229,29 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
 )
 @pytest.mark.parametrize("for_capture", [False, True])
 @patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
-def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_capture: bool) -> None:
+def test_attention_group_maps_310p_manager_block_table(_pin_memory, for_capture: bool) -> None:
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
     block_tables = Ascend310PBlockTables(
         block_sizes=[128],
         max_num_reqs=1,
         max_num_batched_tokens=2,
         max_num_blocks_per_group=[1],
         device=torch.device("cpu"),
-        kernel_block_sizes=[64],
     )
     block_tables.append_block_ids(0, ([7],), overwrite=True)
-    (kernel_block_table,) = block_tables.gather_block_tables(np.array([0]), num_reqs_padded=1)
-    common_metadata = MagicMock(block_table_tensor=kernel_block_table)
+    (manager_block_table,) = block_tables.gather_block_tables(np.array([0]), num_reqs_padded=1)
+    common_metadata = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=2,
+        max_query_len=2,
+        max_seq_len=128,
+        block_table_tensor=manager_block_table,
+        slot_mapping=torch.tensor([7 * 128, 7 * 128 + 1], dtype=torch.int32),
+    )
     builder = MagicMock()
     group = AttentionGroup(
         backend=MagicMock(),
@@ -1238,9 +1259,10 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
         kv_cache_spec=MagicMock(block_size=128),
         kv_cache_group_id=0,
         kernel_block_size=64,
+        kernel_block_table=torch.zeros((1, 1, 2), dtype=torch.int32),
+        kernel_block_offsets=torch.arange(2, dtype=torch.int32),
         metadata_builders=[builder],
     )
-    group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
 
     if for_capture:
         group.build_metadata_for_cudagraph_capture(common_metadata)
@@ -1249,22 +1271,135 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
         group.build_metadata(common_metadata)
         _, received_metadata = builder.build.call_args.args
 
-    assert received_metadata.block_table_tensor is kernel_block_table
     assert received_metadata.block_table_tensor.tolist() == [[14, 15]]
 
 
-def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
-    target_group = SimpleNamespace()
-    draft_group = SimpleNamespace()
+def test_align_draft_kernel_block_sizes_rebuilds_mismatched_draft_group() -> None:
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = MagicMock()
+    runner.vllm_config.model_config.max_model_len = 512
+    runner.vllm_config.scheduler_config.max_num_seqs = 4
+    runner.kernel_block_sizes = [64]
+    target_group = SimpleNamespace(
+        layer_names=["model.layers.0.self_attn", "model.layers.draft_0.self_attn"],
+        kv_cache_spec=SimpleNamespace(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=64,
+    )
+    runner.attn_groups = [[target_group]]
+
+    created_specs: list[Any] = []
+
+    class FakeBuilder:
+        requires_block_table_width = False
+
+        def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
+            del layer_names, vllm_config, device, kwargs
+            created_specs.append(kv_cache_spec)
+
+    class FakeDraftBackend:
+        get_supported_kernel_block_sizes = staticmethod(AscendAttentionBackend310.get_supported_kernel_block_sizes)
+        get_supported_kernel_block_sizes_for_layers = classmethod(
+            lambda cls, spec, layer_names: AscendAttentionBackend310.get_supported_kernel_block_sizes(spec)
+        )
+
+        @staticmethod
+        def get_builder_cls():
+            return FakeBuilder
+
+    draft_spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    draft_group = AttentionGroup(
+        backend=FakeDraftBackend,  # type: ignore[arg-type]
+        layer_names=["model.layers.draft_0.self_attn"],
+        kv_cache_spec=draft_spec,
+        kv_cache_group_id=0,
+        metadata_builders=[MagicMock()],
+    )
+    draft_vllm_config = MagicMock()
+    draft_vllm_config.model_config.max_model_len = 512
+    draft_vllm_config.scheduler_config.max_num_seqs = 4
+    runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
+    runner.speculator.attn_groups = [[draft_group]]
+    runner.speculator.attn_vllm_config = draft_vllm_config
+    kv_cache_group = SimpleNamespace(
+        kv_cache_spec=draft_spec,
+        max_num_blocks_per_req=lambda cfg: 4,
+    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[kv_cache_group])
+
+    runner._align_draft_kernel_block_sizes(kv_cache_config)
+
+    assert draft_group.kernel_block_size == 64
+    assert draft_group.kernel_block_table is not None
+    assert draft_group.kernel_block_offsets is not None
+    assert draft_group.kernel_block_offsets.tolist() == [0, 1]
+    assert len(created_specs) == 1
+    assert created_specs[0].block_size == 64
+
+
+def test_align_draft_kernel_block_sizes_raises_on_unresolved_mismatch() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = MagicMock()
+    runner.kernel_block_sizes = [64]
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=["model.layers.draft_0.self_attn"],
+                kv_cache_spec=SimpleNamespace(block_size=128),
+                kv_cache_group_id=0,
+                kernel_block_size=64,
+            )
+        ]
+    ]
+    draft_group = SimpleNamespace(
+        layer_names=["model.layers.draft_0.self_attn"],
+        kv_cache_spec=SimpleNamespace(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=None,
+    )
+    runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
+    runner.speculator.attn_groups = [[draft_group]]
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=128))])
+
+    with pytest.raises(RuntimeError, match="does not match allocated KV page size"):
+        runner._align_draft_kernel_block_sizes(kv_cache_config)
+
+
+def test_initialize_kv_cache_initializes_310p_kernel_block_table_buffers(monkeypatch) -> None:
+    target_group = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=64,
+        kernel_block_table=torch.zeros((1, 2, 4), dtype=torch.int32),
+    )
+    draft_group = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=64,
+        kernel_block_table=torch.zeros((1, 2, 4), dtype=torch.int32),
+    )
     target_groups = [[target_group]]
     runner = MagicMock()
     runner.device = torch.device("cpu")
     runner.max_model_len = 512
+    runner.max_num_reqs = 4
     runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=128))],
         needs_kv_cache_zeroing=False,
     )
+    mock_block_tables = SimpleNamespace(input_block_tables=[torch.zeros((4, 6), dtype=torch.int32)])
 
     def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups):
         assert block_tables is runner.block_tables
@@ -1272,15 +1407,13 @@ def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> 
         runner.speculator.attn_groups = [[draft_group]]
 
     def init_draft_graph(cudagraph_mode):
-        assert target_group.block_table_is_kernel_granular
-        assert draft_group.block_table_is_kernel_granular
+        assert target_group.kernel_block_table.shape == (1, 5, 12)
+        assert draft_group.kernel_block_table.shape == (1, 5, 12)
 
     runner.speculator.set_attn.side_effect = set_draft_attn
     runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph
-    monkeypatch.setattr(
-        model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [128]))
-    )
-    monkeypatch.setattr(model_runner_module, "Ascend310PBlockTables", Mock())
+    monkeypatch.setattr(model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [64])))
+    monkeypatch.setattr(model_runner_module, "Ascend310PBlockTables", Mock(return_value=mock_block_tables))
     monkeypatch.setattr(model_runner_module, "initialize_mamba_ssu_backend", Mock())
     monkeypatch.setattr(model_runner_module, "ModelAclGraphManager310", Mock())
     monkeypatch.setattr(model_runner_module, "check_attention_cp_compatibility", Mock())
@@ -1507,49 +1640,43 @@ def test_worker_selects_v2_runner_on_310p() -> None:
 
 
 @pytest.mark.parametrize(
-    ("block_sizes", "head_sizes", "expected_kernel_size"),
-    [([64], [128], 64), ([128], [128], 128), ([128], [256], 64), ([256], [128], 128), ([128, 64], [128, 128], 64)],
+    ("manager_block_size", "head_sizes", "expected_kernel_size"),
+    [
+        (64, [128], 64),
+        (128, [128], 128),
+        (128, [256], 64),
+        (256, [128], 128),
+        (256, [256], 64),
+        (128, [128, 256], 64),
+    ],
 )
-def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_sizes, expected_kernel_size):
-    class FakeAttentionSpec:
-        def __init__(self, block_size, head_size):
-            self.block_size = block_size
-            self.head_size = head_size
+def test_310p_select_common_block_size_respects_head_size_limit(
+    manager_block_size: int, head_sizes: list[int], expected_kernel_size: int
+) -> None:
+    from vllm.v1.worker.utils import select_common_block_size
 
-    class FakeUniformTypeKVCacheSpecs:
-        def __init__(self, specs):
-            self.kv_cache_specs = dict(enumerate(specs))
+    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 
-    specs = [FakeAttentionSpec(b, h) for b, h in zip(block_sizes, head_sizes)]
-    group_spec = specs[0] if len(specs) == 1 else FakeUniformTypeKVCacheSpecs(specs)
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.kernel_block_sizes = [128]
-    runner.attn_groups = [
-        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
-    ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
-    with (
-        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
-    ):
-        runner._adjust_kernel_block_sizes(config)
-    assert runner.kernel_block_sizes == [expected_kernel_size]
-    assert all(b % expected_kernel_size == 0 for b in block_sizes)
+    specs = [SimpleNamespace(block_size=manager_block_size, head_size=h) for h in head_sizes]
+    backends = [AscendAttentionBackend310] * len(specs)
+    selected = select_common_block_size(manager_block_size, backends, specs)
+    assert selected == expected_kernel_size
+    assert manager_block_size % selected == 0
 
 
-def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
-    class FakeAttentionSpec:
-        block_size = 96
-        head_size = 128
+def test_310p_select_common_block_size_rejects_incompatible_block_size() -> None:
+    from vllm.v1.worker.utils import select_common_block_size
 
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.kernel_block_sizes = [128]
-    runner.attn_groups = [
-        [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
-    ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
-    with (
-        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        pytest.raises(NotImplementedError, match="divides every attention cache block size"),
-    ):
-        runner._adjust_kernel_block_sizes(config)
+    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+
+    spec = SimpleNamespace(block_size=96, head_size=128)
+    with pytest.raises(ValueError, match="No common block size"):
+        select_common_block_size(96, [AscendAttentionBackend310], [spec])
+
+
+def test_310p_supported_kernel_block_sizes_rejects_oversized_head_size() -> None:
+    from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+
+    spec = SimpleNamespace(block_size=128, head_size=512)
+    with pytest.raises(NotImplementedError, match="head_size <= 256"):
+        AscendAttentionBackend310.get_supported_kernel_block_sizes(spec)
