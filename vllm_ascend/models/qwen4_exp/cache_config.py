@@ -180,14 +180,16 @@ def _real_page_size_bytes(spec: KVCacheSpec) -> int:
     return int(getattr(spec, "real_page_size_bytes", spec.page_size_bytes))
 
 
-def build_qwen4_kv_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-    num_blocks: int,
-) -> Qwen4KVCacheLayout | None:
-    """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
+@dataclass(frozen=True)
+class _Qwen4RoleMembers:
+    role_members: dict[str, list[tuple[str, KVCacheSpec]]]
+    owner_group_ids: dict[str, int]
 
-    if num_blocks <= 0:
-        raise ValueError("Qwen4 hybrid layout requires a positive block count")
+
+def _collect_qwen4_role_members(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> _Qwen4RoleMembers | None:
+    """Classify and validate Qwen4 cache owners without legacy slab sizing."""
     role_members: dict[str, list[tuple[str, KVCacheSpec]]] = {
         QSA_MAIN: [],
         QSA_RAW: [],
@@ -212,7 +214,6 @@ def build_qwen4_kv_cache_layout(
     if not role_members[QSA_RAW]:
         return None
     required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN)
-    owner_roles = (*required, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
         details = [(name, type(spec).__name__) for name, spec in unknown]
@@ -236,6 +237,50 @@ def build_qwen4_kv_cache_layout(
     for role in (GDN, PLE, HIDDEN):
         role_members[role].sort(key=lambda item: _owner_sort_key(item[0]))
 
+    for source in qsa_sources:
+        main_name, main_spec = qsa_by_role[QSA_MAIN][source]
+        compressed_name, compressed_spec = qsa_by_role[QSA_COMPRESSED][source]
+        raw_name, raw_spec = qsa_by_role[QSA_RAW][source]
+        assert isinstance(main_spec, FullAttentionSpec)
+        assert isinstance(compressed_spec, MLAAttentionSpec)
+        assert isinstance(raw_spec, CircularBufferSpec)
+        if main_spec.block_size % 128:
+            raise ValueError(f"{main_name} block_size={main_spec.block_size} must be a multiple of 128")
+        compress_ratio = get_kv_cache_compression_ratio(compressed_spec)
+        same_block_table = owner_group_ids[main_name] == owner_group_ids[compressed_name]
+        if same_block_table and compressed_spec.block_size != main_spec.block_size:
+            raise ValueError(
+                f"{compressed_name} logical block_size="
+                f"{compressed_spec.block_size} does not match QSA main "
+                f"block_size={main_spec.block_size} in their composite group"
+            )
+        if compressed_spec.block_size % compress_ratio:
+            raise ValueError(
+                f"{compressed_name} block_size={compressed_spec.block_size} is not divisible by ratio={compress_ratio}"
+            )
+        if raw_spec.block_size % compress_ratio:
+            raise ValueError(
+                f"{raw_name} circular capacity={raw_spec.block_size} is not aligned to ratio={compress_ratio}"
+            )
+
+    return _Qwen4RoleMembers(role_members=role_members, owner_group_ids=owner_group_ids)
+
+
+def build_qwen4_kv_cache_layout(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    num_blocks: int,
+) -> Qwen4KVCacheLayout | None:
+    """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
+
+    if num_blocks <= 0:
+        raise ValueError("Qwen4 hybrid layout requires a positive block count")
+    collected = _collect_qwen4_role_members(kv_cache_groups)
+    if collected is None:
+        return None
+    role_members = collected.role_members
+    owner_group_ids = collected.owner_group_ids
+    owner_roles = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
+
     dtype_sizes = {
         get_dtype_size(dtype)
         for role in owner_roles
@@ -254,29 +299,6 @@ def build_qwen4_kv_cache_layout(
             raise ValueError(
                 f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
                 f"minimum={minimum_block_size}, kernel_multiple=128"
-            )
-    for source in qsa_sources:
-        main_name, main_spec = qsa_by_role[QSA_MAIN][source]
-        compressed_name, compressed_spec = qsa_by_role[QSA_COMPRESSED][source]
-        raw_name, raw_spec = qsa_by_role[QSA_RAW][source]
-        assert isinstance(main_spec, FullAttentionSpec)
-        assert isinstance(compressed_spec, MLAAttentionSpec)
-        assert isinstance(raw_spec, CircularBufferSpec)
-        compress_ratio = get_kv_cache_compression_ratio(compressed_spec)
-        same_block_table = owner_group_ids[main_name] == owner_group_ids[compressed_name]
-        if same_block_table and compressed_spec.block_size != main_spec.block_size:
-            raise ValueError(
-                f"{compressed_name} logical block_size="
-                f"{compressed_spec.block_size} does not match QSA main "
-                f"block_size={main_spec.block_size} in their composite group"
-            )
-        if compressed_spec.block_size % compress_ratio:
-            raise ValueError(
-                f"{compressed_name} block_size={compressed_spec.block_size} is not divisible by ratio={compress_ratio}"
-            )
-        if raw_spec.block_size % compress_ratio:
-            raise ValueError(
-                f"{raw_name} circular capacity={raw_spec.block_size} is not aligned to ratio={compress_ratio}"
             )
     main_pages = [
         _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
@@ -609,8 +631,8 @@ def _get_qwen4_exp_cache_slots(
     kv_cache_groups: list[KVCacheGroupSpec],
     vllm_config: VllmConfig | None,
 ) -> list[tuple[int, list[str]]]:
-    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
-    if layout is None:
+    collected = _collect_qwen4_role_members(kv_cache_groups)
+    if collected is None:
         if vllm_config is None or not is_qwen4_exp_model(vllm_config):
             return []
         # A PP rank without QSA still uses the same backing for its local owners.
@@ -620,31 +642,46 @@ def _get_qwen4_exp_cache_slots(
             slots.extend((specs[name].page_size_bytes, [name]) for name in group.layer_names)
         return slots
 
+    role_members = collected.role_members
+    owner_group_ids = collected.owner_group_ids
     shared_slots = [
-        (owner.spec.page_size_bytes, [owner.layer_name], {owner.group_id})
-        for owner in layout.owners
-        if owner.role == QSA_MAIN
+        (spec.page_size_bytes, [layer_name], {owner_group_ids[layer_name]})
+        for layer_name, spec in role_members[QSA_MAIN]
     ]
     slots = [(page_size, names) for page_size, names, _ in shared_slots]
     shared_slots.sort(key=lambda slot: slot[0])
-    for owner in layout.owners:
-        if owner.role == QSA_MAIN:
-            continue
-        page_size = owner.spec.page_size_bytes
-        if owner.role == GDN:
-            assert isinstance(owner.spec, MambaSpec)
-            alignment = math.lcm(*(get_dtype_size(dtype) for dtype in owner.spec.dtypes))
-            # Each scheduler group may use a slot once. Other groups can reuse
-            # its pages because live manager block IDs belong to just one group.
-            for stride, names, groups in shared_slots:
-                if page_size <= stride and stride % alignment == 0 and owner.group_id not in groups:
-                    names.append(owner.layer_name)
-                    groups.add(owner.group_id)
-                    break
-            else:
-                slots.append((page_size, [owner.layer_name]))
+    private_gdn_pages: list[int] = []
+    for layer_name, spec in role_members[GDN]:
+        assert isinstance(spec, MambaSpec)
+        page_size = spec.page_size_bytes
+        group_id = owner_group_ids[layer_name]
+        alignment = math.lcm(*(get_dtype_size(dtype) for dtype in spec.dtypes))
+        # Each scheduler group may use a slot once. Other groups can reuse
+        # its pages because live manager block IDs belong to just one group.
+        for stride, names, groups in shared_slots:
+            if page_size <= stride and stride % alignment == 0 and group_id not in groups:
+                names.append(layer_name)
+                groups.add(group_id)
+                break
         else:
-            slots.append((page_size, [owner.layer_name]))
+            # Heterogeneous or quantized layouts, small block sizes and PP
+            # stages with more state layers than QSA slots keep a private slot
+            # in the same backing instead of failing.
+            slots.append((page_size, [layer_name]))
+            private_gdn_pages.append(page_size)
+    if private_gdn_pages:
+        logger.warning_once(
+            "Qwen4 cache planner could not overlay %d GDN state layer(s) onto QSA main slots "
+            "(largest GDN page %d bytes, largest QSA main page %d bytes). They use private "
+            "slots in the shared backing, which increases the bytes per cache block. Check "
+            "the block size and KV cache dtype if this is unexpected.",
+            len(private_gdn_pages),
+            max(private_gdn_pages),
+            max(stride for stride, _, _ in shared_slots),
+        )
+    for role in (QSA_RAW, QSA_COMPRESSED, PLE, HIDDEN):
+        for layer_name, spec in role_members[role]:
+            slots.append((spec.page_size_bytes, [layer_name]))
     return slots
 
 

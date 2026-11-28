@@ -957,3 +957,82 @@ def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():
     gdn_ssm[1].zero_()
     assert torch.count_nonzero(qsa[1].flatten()[: 798 * 1024 // 2]) == 0
     assert torch.count_nonzero(qsa[[0, 2]]) == 0
+
+
+def _record_private_gdn_warnings(monkeypatch) -> list[tuple]:
+    from vllm_ascend.models.qwen4_exp import cache_config as qwen4_cache_config
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(qwen4_cache_config.logger, "warning_once", lambda _msg, *args, **_kwargs: calls.append(args))
+    return calls
+
+
+def test_standard_layout_does_not_warn_about_private_gdn_slots(monkeypatch) -> None:
+    warnings = _record_private_gdn_warnings(monkeypatch)
+    assert get_qwen4_exp_pool_bytes_per_block(_groups()) is not None
+    assert warnings == []
+
+
+def test_oversized_gdn_falls_back_to_private_slot_in_shared_backing(monkeypatch) -> None:
+    warnings = _record_private_gdn_warnings(monkeypatch)
+    groups = _groups()
+    # Shrink main block_size to 128 (page_size = 32 KiB) while making GDN SSM
+    # exceed one main page (64 KiB + conv). Unified planning must allocate a
+    # private slot in the shared backing instead of raising legacy slab errors.
+    groups[0] = KVCacheGroupSpec(groups[0].layer_names, replace(groups[0].kv_cache_spec, block_size=128))
+    groups[2] = KVCacheGroupSpec(groups[2].layer_names, replace(groups[2].kv_cache_spec, block_size=128))
+    groups[3] = KVCacheGroupSpec(
+        groups[3].layer_names,
+        replace(groups[3].kv_cache_spec, shapes=((64, 4), (256, 128)), dtypes=(torch.bfloat16, torch.bfloat16)),
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None),
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    assert config.num_blocks == 3
+    tensors = {tensor.layers[0]: tensor for tensor in config.kv_cache_tensors}
+    assert {tensor.size for tensor in tensors.values()} == {3 * get_qwen4_exp_pool_bytes_per_block(groups)}
+    main_offsets = {tensors[name].offset for name in groups[0].layer_names}
+    for gdn_name in groups[3].layer_names:
+        assert tensors[gdn_name].offset not in main_offsets
+        assert tensors[gdn_name].block_stride == groups[3].kv_cache_spec.page_size_bytes
+    slots = sorted({(tensor.offset, tensor.block_stride) for tensor in config.kv_cache_tensors})
+    for (offset, stride), (following, _) in zip(slots, slots[1:], strict=False):
+        assert offset + 3 * stride <= following
+    assert warnings
+    assert all(args[0] == len(groups[3].layer_names) for args in warnings)
+    assert all(args[1] == groups[3].kv_cache_spec.page_size_bytes for args in warnings)
+    assert all(args[2] == groups[0].kv_cache_spec.page_size_bytes for args in warnings)
+
+
+def test_pp_overflow_gdn_layers_allocate_extra_private_slots(monkeypatch) -> None:
+    warnings = _record_private_gdn_warnings(monkeypatch)
+    groups = _groups()
+    # Four GDN layers in one group exceed the three QSA main slots; the first
+    # three reuse main slots while the fourth falls back to its own slot.
+    groups[3] = KVCacheGroupSpec(
+        [f"model.layers.{index}.linear_attn" for index in range(4)],
+        groups[3].kv_cache_spec,
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None),
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    tensors = {tensor.layers[0]: tensor for tensor in config.kv_cache_tensors}
+    main_offsets = {tensors[name].offset for name in groups[0].layer_names}
+    reused = [name for name in groups[3].layer_names if tensors[name].offset in main_offsets]
+    private = [name for name in groups[3].layer_names if tensors[name].offset not in main_offsets]
+    assert len(reused) == 3
+    assert len(private) == 1
+    assert len({tensors[name].offset for name in groups[3].layer_names}) == 4
+    assert tensors[private[0]].block_stride == groups[3].kv_cache_spec.page_size_bytes
+    assert warnings
+    assert all(args[0] == 1 for args in warnings)
