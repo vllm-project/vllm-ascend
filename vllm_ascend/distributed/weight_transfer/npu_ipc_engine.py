@@ -4,7 +4,7 @@
 
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -26,6 +26,7 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -98,9 +99,9 @@ class NPUIPCTrainerInitInfo(IPCTrainerInitInfo):
 
 @dataclass
 class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):
-    """NPU IPC variant — inherits all fields and validation from the CUDA IPC
-    base class.  No overrides needed; the field types and ``__post_init__`` are
-    identical."""
+    """NPU IPC retains one complete tensor per slice of a packed buffer."""
+
+    tensor_sizes: list[int] | None = None
 
 
 class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
@@ -130,6 +131,28 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
         super().__init__(config, vllm_config, device, model)
         self._packed_importer = NPUPackedBufferImporter()
 
+    def start_weight_update(self) -> None:
+        if vllm_version_is("0.34.0"):
+            super().start_weight_update()
+            return
+        from vllm.model_executor.model_loader.reload import start_reload
+
+        start_reload(self.model)
+
+    def finish_weight_update(self) -> None:
+        if vllm_version_is("0.34.0"):
+            super().finish_weight_update()
+            return
+        from vllm.model_executor.model_loader.reload import finish_reload
+
+        try:
+            finish_reload(self.model, self.model_config, self.device)
+        finally:
+            self._packed_importer.close()
+
+    def shutdown(self) -> None:
+        self._packed_importer.close()
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -156,7 +179,8 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
         physical_npu_id = npu_generate_uuid(device_index)
 
         if self.packed:
-            if update_info.tensor_sizes is None:
+            tensor_sizes = getattr(update_info, "tensor_sizes", None)
+            if tensor_sizes is None:
                 raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
             weights = packed_npu_ipc_consumer(
@@ -165,7 +189,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 names=update_info.names,
                 shapes=update_info.shapes,
                 dtype_names=update_info.dtype_names,
-                tensor_sizes=update_info.tensor_sizes,
+                tensor_sizes=tensor_sizes,
                 device_index=device_index,
                 importer=self._packed_importer,
             )
@@ -267,8 +291,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             return merged
         return [{} for _ in handles]
 
-    @staticmethod
-    def _post_send_sync() -> None:
+    @classmethod
+    def _post_send_sync(cls) -> None:
         """Synchronize each send and keep all trainer ranks in step."""
         if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             torch.distributed.barrier()
@@ -285,13 +309,15 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
             ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
-            self._do_send(
-                names=chunk.names,
-                dtype_names=chunk.dtype_names,
-                shapes=chunk.shapes,
-                ipc_handles=ipc_handle,
-                tensor_sizes=chunk.tensor_sizes,
-            )
+            if self.is_sender:
+                update_info = NPUIPCWeightTransferUpdateInfo(
+                    names=chunk.names,
+                    dtype_names=chunk.dtype_names,
+                    shapes=chunk.shapes,
+                    ipc_handles=ipc_handle,
+                    tensor_sizes=chunk.tensor_sizes,
+                )
+                self.client.update_weights(asdict(update_info))
             # Per-chunk barrier: the producer reuses a single IPC buffer
             # across chunks. Without syncing every rank here, non-sender
             # ranks race ahead and overwrite their buffer while their

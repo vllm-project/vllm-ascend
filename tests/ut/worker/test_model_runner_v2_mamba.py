@@ -13,20 +13,16 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheTensor,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -49,9 +45,10 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
 
 
 class _MetadataState(SimpleNamespace):
-    # Metadata-only doubles still use the real inherited entry check.
+    # Metadata-only doubles still use the real model state checks.
     _check_finegrained_tp_idle_graph_step = AscendMambaHybridModelState._check_finegrained_tp_idle_graph_step
     _uses_global_mamba_pcp = AscendMambaHybridModelState._uses_global_mamba_pcp
+    mamba_prefix_caching = AscendMambaHybridModelState.mamba_prefix_caching
 
 
 class _FakeAttentionBackend:
@@ -65,6 +62,10 @@ class _FakeAttentionBackend:
     def get_supported_kernel_block_sizes(spec):
         # These layout tests use arbitrary block sizes without kernel alignment.
         return [MultipleOf(1)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(cls, spec, layer_names):
+        return cls.get_supported_kernel_block_sizes(spec)
 
 
 def _mock_vllm_config():
@@ -150,6 +151,7 @@ def _make_defer_state(kv_cache_config):
     state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     state.model = SimpleNamespace(get_mamba_state_copy_func=lambda: (MagicMock(), MagicMock()))
     state._align_mode = True
+    state.prefix_caching = True
     state._mamba_group_ids = [0]
     state._mamba_spec = _mamba_spec()
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
@@ -421,6 +423,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         max_model_len=1024,
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -489,6 +492,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
         max_model_len=1024,
         recoverssm=None,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,
@@ -678,6 +682,7 @@ def test_mamba_padding_is_independent_of_pcp_context(
         max_model_len=1024,
         recoverssm=None,
         _align_mode=False,
+        prefix_caching=False,
     )
     batch = SimpleNamespace(
         num_reqs=1,
@@ -792,6 +797,7 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     state = object.__new__(AscendMambaHybridModelState)
     vars(state).update(
         _align_mode=True,
+        prefix_caching=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         _finish_previous_layerwise_mamba_copy=MagicMock(),
@@ -1066,6 +1072,9 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": spec})["linear_attn"]
     mock_get_layers.return_value = {"linear_attn": mamba_layer}
 
     assert get_kv_cache_spec(_mock_vllm_config()) == {"linear_attn": spec}
@@ -1095,12 +1104,20 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_kv_cache_config(self, _vllm_config):
+            return make_layer_cache_configs({"full_attn": attention_spec})["full_attn"]
+
         def get_attn_backend(self):
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": mamba_spec})[
+            "linear_attn"
+        ]
     mock_get_layers.return_value = {
         "linear_attn": mamba_layer,
         "full_attn": FakeAttention(),
@@ -1151,12 +1168,20 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
 
+        def get_kv_cache_config(self, _vllm_config):
+            return make_layer_cache_configs({"attn": self.spec})["attn"]
+
         def get_attn_backend(self):
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": mamba_spec})[
+            "linear_attn"
+        ]
     mock_get_layers.return_value = {
         "small_attn": FakeAttention(small_attention_spec),
         "linear_attn": mamba_layer,
@@ -1213,6 +1238,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         name: SimpleNamespace(
             is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_kv_cache_config=lambda _config, spec=spec: make_layer_cache_configs({"layer": spec})["layer"],
             get_attn_backend=lambda: _FakeAttentionBackend,
         )
         for name, spec in original_specs.items()
@@ -1442,6 +1468,7 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
         _align_mode=False,
+        prefix_caching=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=16,
@@ -1491,6 +1518,7 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
         max_model_len=1024,
         recoverssm=None,
         _align_mode=True,
+        prefix_caching=True,
         _get_mamba_group_info=MagicMock(return_value=(list(range(24)), None)),
         _ensure_align_ctx=MagicMock(return_value=SimpleNamespace(compute_aligned_state_indices=gather)),
     )

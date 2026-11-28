@@ -18,23 +18,19 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on main.
-from vllm.v1.core.kv_cache_planning import (
-    get_kv_cache_config_from_groups,
-    is_kv_cache_spec_uniform,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.request import RequestStatus
 from zmq.constants import ROUTER
 from zmq.sugar.socket import Socket
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    is_kv_cache_spec_uniform,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -59,7 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -403,17 +399,20 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             index_layer: index_spec,
         }
         self.assertFalse(is_kv_cache_spec_uniform(layer_specs))
-        uniform_spec = UniformTypeKVCacheSpecs(
-            block_size=128,
-            kv_cache_specs=layer_specs,
-        )
+        uniform_spec = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=layer_specs)
+        if vllm_version_is("0.34.0"):
+            groups = [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)]
+        else:
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            groups = [KVCacheGroup.from_layers(make_layer_cache_configs(layer_specs))]
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
         num_blocks = 10
-        allocated_config = get_kv_cache_config_from_groups(
+        allocated_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
             vllm_config,
-            [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
-            available_memory=uniform_spec.page_size_bytes * num_blocks,
+            groups,
+            num_blocks,
         )
         placements = {
             layer: tensor
@@ -3022,6 +3021,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
+        self.scheduler.vllm_config.cache_config.enable_prefix_caching = False
         self.scheduler.group_transfer_info = [
             GroupTransferInfo(
                 tokens_per_block=16,

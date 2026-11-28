@@ -10,14 +10,15 @@ import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import KVConnectorBlockState
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, LegacyMambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import coordinator, metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.utils import vllm_version_is
 
 try:
     importlib.import_module("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator")
@@ -33,7 +34,7 @@ def groups():
             ["attention"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         ),
         KVCacheGroupSpec(
-            ["mamba"], MambaSpec(block_size=16, shapes=((2,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+            ["mamba"], LegacyMambaSpec(block_size=16, shapes=((2,),), dtypes=(torch.float32,), mamba_cache_mode="align")
         ),
     ]
 
@@ -44,6 +45,16 @@ def test_same_group_hits_as_upstream(eagle):
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(32)]
     # Start with a shared prefix, then leave different holes in each group.
     exists = {(g, bytes(h)) for g in range(2) for i, h in enumerate(hashes) if i not in (12 + g, 21 + g)}
+    release = vllm_version_is("0.34.0")
+    cache_groups = groups()
+    if not release:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        cache_groups = [
+            KVCacheGroup(group.kv_cache_specs, group.manager_config, group.block_size) for group in cache_groups
+        ]
+    lookahead_tokens = 4 if eagle else 0
+    policy = {"use_eagle": eagle} if release else {"num_hash_lookahead_tokens": lookahead_tokens}
     results = []
     for module, cls in [
         (coordinator, coordinator.AscendStoreCoordinator),
@@ -54,8 +65,12 @@ def test_same_group_hits_as_upstream(eagle):
             if cls is coordinator.AscendStoreCoordinator
             else {}
         )
-        coord = cls(groups(), 16, 4, use_eagle=eagle, enable_partial_hash_hits=True, **geometry)
+        coord = cls(cache_groups, 16, 4, enable_partial_hash_hits=True, **policy, **geometry)
         pool = module.ExternalCachedBlockPool(4, exists)
+        if not release:
+            # Both native coordinators pass the hash lookahead through the
+            # block pool to the allocation managers.
+            pool.num_hash_lookahead_tokens = lookahead_tokens
         results.append([coord.find_longest_cache_hit(hashes, end, pool)[1] for end in range(4, 129, 4)])
     assert results[0] == results[1]
 
@@ -178,27 +193,31 @@ def test_partial_chunks_do_not_fold_hashes_into_page_keys(tail_key_boundary, tai
 
 
 @pytest.mark.parametrize(
-    "completed, mamba_tails, publish, expected",
+    "completed, mamba_tails, publish, release_puts, main_puts",
     [
-        (40, [40], False, []),
-        (75, [68], True, [(0, 17, 68), (0, 18, 72)]),
-        (75, [40, 68], True, [(0, 17, 68), (0, 18, 72)]),
-        (75, [68, 68], False, [(0, 17, 68), (0, 18, 72)]),
-        (68, [68], False, []),
-        (75, [], True, [(0, 17, 68), (0, 18, 72)]),
-        (75, [], False, []),
+        (40, [40], False, [], []),
+        (75, [68], True, [(0, 17, 68), (0, 18, 72)], [(0, 17, 68)]),
+        (75, [40, 68], True, [(0, 17, 68), (0, 18, 72)], [(0, 17, 68)]),
+        (75, [68, 68], False, [(0, 17, 68), (0, 18, 72)], [(0, 17, 68)]),
+        (68, [68], False, [], [(0, 17, 68)]),
+        (75, [], True, [(0, 17, 68), (0, 18, 72)], [(0, 17, 68)]),
+        (75, [], False, [], []),
     ],
 )
-def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed, mamba_tails, publish, expected):
-    # Match upstream's shared-prefix junction cases: a 75-token prompt has an
-    # EAGLE checkpoint at 68, with attention proof through token 72.
+def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(
+    completed, mamba_tails, publish, release_puts, main_puts
+):
+    # Both pins checkpoint at token 68. The release needs attention KV through
+    # token 72, while the main pin encodes lookahead proof in the hash.
+    release = vllm_version_is("0.34.0")
     scheduler = object.__new__(KVPoolScheduler)
     scheduler.cache_coordinator = SimpleNamespace(
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
-        eagle_proof_margin_by_group={0: 4},
+        use_eagle=release,
+        num_hash_lookahead_tokens=7,
+        eagle_proof_margin_by_group={0: 4} if release else {},
     )
     scheduler.grouped_block_size = [4, 16]
     scheduler.cacheable_group_ids = [0, 1]
@@ -212,7 +231,7 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed
         boundary_puts=[metadata.BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
     )
-    assert scheduler._partial_tail_non_mamba_puts(req_meta) == expected
+    assert scheduler._partial_tail_non_mamba_puts(req_meta) == (release_puts if release else main_puts)
 
 
 @pytest.mark.parametrize("blocks, expected", [([1, 2, 0], []), ([1, 2], []), ([1, 2, 3], [(0, 3, 44)])])
@@ -224,7 +243,8 @@ def test_partial_tail_non_mamba_puts_follow_upstream_eagle_drop(blocks, expected
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
+        use_eagle=vllm_version_is("0.34.0"),
+        num_hash_lookahead_tokens=5,
         eagle_proof_margin_by_group={},
     )
     scheduler.grouped_block_size = [16, 16]
@@ -250,7 +270,8 @@ def finishing_tail():
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
+        use_eagle=vllm_version_is("0.34.0"),
+        num_hash_lookahead_tokens=5,
         eagle_proof_margin_by_group={},
     )
     scheduler.grouped_block_size = [16, 16]

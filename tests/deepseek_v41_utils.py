@@ -7,8 +7,8 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec, get_group_layer_layouts, get_group_layout
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -310,7 +310,7 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: g.kv_cache_spec.kv_cache_specs[n] for g in config.kv_cache_groups for n in g.layer_names}
+    specs = {name: spec for group in config.kv_cache_groups for name, spec in get_group_layer_layouts(group).items()}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
@@ -318,7 +318,7 @@ def allocate_cache_views(config, device="cpu"):
         config,
         raw,
         _get_cache_attention_groups(config, layers, {}),
-        [group.kv_cache_spec.block_size for group in config.kv_cache_groups],
+        [get_group_layout(group).block_size for group in config.kv_cache_groups],
         {},
     )
     for name, cache in caches.items():

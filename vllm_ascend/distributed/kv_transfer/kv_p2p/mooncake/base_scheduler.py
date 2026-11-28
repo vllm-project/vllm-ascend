@@ -17,11 +17,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from zmq.constants import SocketOption, SocketType
 from zmq.error import Again
@@ -29,6 +25,11 @@ from zmq.error import Again
 from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
+)
+from vllm_ascend.core.kv_cache_compat import (
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -40,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import zmq_ctx
 from vllm_ascend.distributed.kv_transfer.utils.utils import truncate_block_hashes_fallback
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -414,7 +416,7 @@ class MooncakeBaseConnectorScheduler:
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
-        self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
+        self.group_block_size = [get_group_layout(group).block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
         self.need_truncate = self._needs_prefill_token_truncation()
         self._logged_mamba_allocation = False
@@ -454,21 +456,24 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        has_sliding_window_group = any(
-            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
-        )
+        if vllm_version_is("0.34.0"):
+            has_sliding_window_group = any(
+                isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
+            )
+        else:
+            has_sliding_window_group = any(group.sliding_window_reach > 0 for group in self.kv_cache_groups)
         # D replays the final prompt token. P must retain SWA pages for that
         # same position rather than retire them for the next token's window.
         return uses_compressed_cache or has_state_group or has_sliding_window_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
+        if not isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
+            return [get_group_layout(group)]
 
         specs = []
         for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
+            layer_spec = get_group_layout(group).kv_cache_specs[layer_name]
             if layer_spec not in specs:
                 specs.append(layer_spec)
         return specs

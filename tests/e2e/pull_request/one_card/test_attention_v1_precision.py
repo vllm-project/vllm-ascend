@@ -8,7 +8,6 @@ from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from tests.e2e.pull_request.one_card.attention_utils import (
     BatchSpec,
@@ -18,6 +17,7 @@ from tests.e2e.pull_request.one_card.attention_utils import (
     create_vllm_config,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 
 
 @pytest.fixture(autouse=True)

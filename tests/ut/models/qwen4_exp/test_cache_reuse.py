@@ -9,15 +9,17 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
     HiddenStateCacheSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     LayerwiseCachePlanner,
     get_spec_reuse_rules,
@@ -47,14 +49,14 @@ def _groups():
     compressed = MLAAttentionSpec(
         block_size=256, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, tokens_per_state=4, page_size_padded=65536
     )
-    state = MambaSpec(
+    state = LegacyMambaSpec(
         block_size=256,
         shapes=((3, 64), (8, 32, 32)),
         dtypes=(torch.bfloat16, torch.float32),
         mamba_cache_mode="align",
         page_size_padded=65536,
     )
-    ple = MambaSpec(
+    ple = LegacyMambaSpec(
         block_size=256, shapes=((3, 64),), dtypes=(torch.bfloat16,), mamba_cache_mode="align", tp_replicated=True
     )
     composite = {f"{source}.attn": main for source in sources}

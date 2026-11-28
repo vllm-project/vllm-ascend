@@ -28,6 +28,7 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
@@ -67,6 +68,8 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    uses_external_mamba_prefix_cache,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -92,6 +95,11 @@ logger.info_once(
     value,
     scope="process",
 )
+
+if is_torch_equal_or_newer("2.14.0") and not vllm_version_is("0.34.0"):
+    # The bundled Inductor format cannot restore Ascend's compiled pieces.
+    # Retain AOT graph caching and restore pieces through the Ascend compiler.
+    os.environ.setdefault("VLLM_USE_MEGA_AOT_ARTIFACT", "0")
 
 _CUSTOM_OP_REGISTERED = False
 _MINIMAX_M3_ARCHITECTURES = frozenset(
@@ -685,11 +693,16 @@ class NPUPlatform(Platform):
         using_kv_transfer_with_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
-        if (
-            not cache_config.enable_prefix_caching
+        release_external_align = (
+            vllm_version_is("0.34.0")
+            and not cache_config.enable_prefix_caching
             and using_kv_transfer_with_hybrid
             and cache_config.mamba_cache_mode == "align"
-        ):
+        )
+        main_external_align = getattr(model_config, "is_hybrid", False) and uses_external_mamba_prefix_cache(
+            vllm_config
+        )
+        if release_external_align or main_external_align:
             if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
                 cache_config.mamba_block_size = cache_config.block_size
             else:

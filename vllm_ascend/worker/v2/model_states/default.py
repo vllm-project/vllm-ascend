@@ -29,15 +29,20 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata, ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
@@ -46,7 +51,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -434,6 +439,22 @@ class AscendModelState(DefaultModelState):
         set_embedding_num_tokens_padded = getattr(self.model, "set_embedding_num_tokens_padded", None)
         if set_embedding_num_tokens_padded is not None:
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
+        if (
+            not vllm_version_is("0.34.0")
+            and (set_embedding_num_tokens_padded is not None or getattr(self, "supports_mm_inputs", False))
+            and input_batch.num_tokens == 0
+        ):
+            # vLLM #64435 skips embedding lookup for empty local PCP batches.
+            # Ascend must still join the padded token exchange with busy peers.
+            empty_ids = input_batch.input_ids[:0]
+            if self.supports_mm_inputs:
+                self.execute_mm_encoder(scheduled_encoder_inputs)
+                mm_embeds, is_mm_embed = ModelState.gather_mm_embeddings(self, input_batch)
+                inputs_embeds = self.encoder_runner.get_inputs_embeds(empty_ids, mm_embeds, is_mm_embed)
+            else:
+                self.model.embed_input_ids(empty_ids)
+                inputs_embeds = self.inputs_embeds
+            return inputs_embeds[: input_batch.num_tokens_after_padding].zero_()
         return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:

@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 try:
     import triton  # type: ignore[import-untyped]
@@ -27,6 +28,8 @@ try:
     _HAS_TRITON = True
 except ImportError:
     _HAS_TRITON = False
+
+_REQUIRE_EXPLICIT_SGMV_MUTATION = is_torch_equal_or_newer("2.14.0")
 
 
 def bgmv_shrink(
@@ -105,7 +108,7 @@ def sgmv_expand(
     token_nums: int,
     add_inputs: bool = False,
 ):
-    return torch.ops._C_ascend.sgmv_expand(
+    return _sgmv_expand(
         inputs,
         lora_b_weights,
         lora_indices_tensor,
@@ -130,9 +133,17 @@ def sgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = False,
 ):
-    return torch.ops._C_ascend.sgmv_expand(
+    return _sgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, seq_len_tensor, output_tensor, slice_offset, slice_size
     )
+
+
+def _sgmv_expand(inputs, weights, indices, seq_len, output, slice_offset, slice_size) -> torch.Tensor:
+    if _REQUIRE_EXPLICIT_SGMV_MUTATION and torch.compiler.is_compiling():
+        # Keep the in-place update visible to AOT without returning an alias from the operator.
+        torch.ops._C_ascend.sgmv_expand_inplace(inputs, weights, indices, seq_len, output, slice_offset, slice_size)
+        return output
+    return torch.ops._C_ascend.sgmv_expand(inputs, weights, indices, seq_len, output, slice_offset, slice_size)
 
 
 _LORA_TRITON_RANKS = (8, 16, 32, 64)

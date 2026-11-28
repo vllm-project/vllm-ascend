@@ -151,17 +151,29 @@ def _finish_prefill_chunk(scheduler: Scheduler, request: Request, scheduler_outp
     scheduler.update_from_output(scheduler_output, runner_output)
 
 
+def _capture_encoder_refs_before_update(scheduler, request, captured):
+    update = scheduler._update_after_schedule
+
+    def record(output):
+        captured.append(set(scheduler.encoder_cache_manager.get_cached_input_ids(request)))
+        return update(output)
+
+    return patch.object(scheduler, "_update_after_schedule", side_effect=record)
+
+
 @pytest.mark.parametrize("scheduler_cls", SCHEDULER_CLASSES)
 def test_waiting_duplicate_encoder_input_keeps_cache_reference(scheduler_cls):
     scheduler = _make_scheduler(scheduler_cls)
     request = _image_request([("shared", 4), ("shared", 4)])
     scheduler.add_request(request)
 
-    output = scheduler.schedule()
+    refs_before_update: list[set[int]] = []
+    with _capture_encoder_refs_before_update(scheduler, request, refs_before_update):
+        output = scheduler.schedule()
 
     assert output.scheduled_encoder_inputs == {request.request_id: [0]}
     manager = scheduler.encoder_cache_manager
-    assert manager.get_cached_input_ids(request) == {0, 1}
+    assert refs_before_update == [{0, 1}]
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert manager.get_cached_input_ids(request) == set()
 
@@ -178,12 +190,16 @@ def test_running_duplicate_encoder_input_keeps_cache_reference(scheduler_cls):
     assert request in scheduler.running
 
     scheduler.max_num_scheduled_tokens = 4
-    with patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate:
+    refs_before_update: list[set[int]] = []
+    with (
+        patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate,
+        _capture_encoder_refs_before_update(scheduler, request, refs_before_update),
+    ):
         output = scheduler.schedule()
 
     assert output.scheduled_encoder_inputs == {request.request_id: [1]}
     allocate.assert_called_once_with(request, [1], [2])
-    assert {1, 2} <= scheduler.encoder_cache_manager.get_cached_input_ids(request)
+    assert {1, 2} <= refs_before_update[0]
 
 
 @pytest.mark.parametrize("scheduler_cls", SCHEDULER_CLASSES)

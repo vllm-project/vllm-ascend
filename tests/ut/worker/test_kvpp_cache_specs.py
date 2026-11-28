@@ -3,10 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
 from tests.ut.kvpp_utils import make_dspark_kvpp_case
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, SlidingWindowSpec
 from vllm_ascend.core.kv_cache_placement import create_kvpp_cache_allocation_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import worker
 
 
@@ -28,6 +29,17 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
         ),
         _kvpp_cache_allocation_plan=None,
     )
+    instance._record_kvpp_allocation = lambda layouts: worker.NPUWorker._record_kvpp_allocation(instance, layouts)
+    if not vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+        from vllm_ascend.core.kv_cache_compat import legacy_manager_config
+
+        instance.model_runner.get_kv_cache_layer_configs = lambda: {
+            name: KVCacheLayerConfig(legacy_manager_config(spec), spec, is_draft=name in drafts)
+            for name, spec in specs.items()
+        }
+        instance.get_kv_cache_layer_configs = lambda: worker.NPUWorker.get_kv_cache_layer_configs(instance)
     monkeypatch.setattr(worker, "get_tp_group", lambda: SimpleNamespace(rank_in_group=rank))
     monkeypatch.setattr(worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
     monkeypatch.setattr(worker, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=0))
@@ -40,7 +52,11 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
         assert specs[name].block_size == draft_block_size
         assert specs[name].sliding_window == 4
     if not enabled:
-        assert returned is specs
+        if vllm_version_is("0.34.0"):
+            assert returned is specs
+        else:
+            assert returned.keys() == specs.keys()
+            assert all(returned[name] is spec for name, spec in specs.items())
         assert instance._kvpp_cache_allocation_plan is None
         return
     plan = instance._kvpp_cache_allocation_plan

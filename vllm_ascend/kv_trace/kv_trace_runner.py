@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 from typing import Any, cast
 
+from vllm_ascend.core.kv_cache_compat import get_group_layout
 from vllm_ascend.kv_trace.kv_trace_runtime import KVTraceRuntime, get_trace
 
 
@@ -20,7 +21,7 @@ class _V2RunnerAdapter:
 
     def configure(self) -> None:
         tables = self.runner.block_tables
-        sizes = [group.kv_cache_spec.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
+        sizes = [get_group_layout(group).block_size for group in self.runner.kv_cache_config.kv_cache_groups]
         # Public V2 tables use manager blocks. Metadata tables are expanded
         # by each AttentionGroup; the trace auditor requires matching units.
         if list(tables.block_sizes) != sizes or any(

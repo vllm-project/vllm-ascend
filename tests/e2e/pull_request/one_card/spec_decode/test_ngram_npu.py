@@ -7,6 +7,7 @@ import torch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 
@@ -110,8 +111,12 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_mrv2_ngram_greedy_accuracy(test_prompts, model_name, async_scheduling, enforce_eager):
+def test_mrv2_ngram_greedy_accuracy(test_prompts, model_name, async_scheduling, enforce_eager, monkeypatch):
     """Compare target token IDs, including chunked prefill and request slot reuse."""
+    if not vllm_version_is("0.34.0"):
+        # vLLM #66547 uses the Transformers backend for top-level Llama.
+        # With speculation the verifier sees different batch shapes.
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
     common = dict(
         max_model_len=2048,

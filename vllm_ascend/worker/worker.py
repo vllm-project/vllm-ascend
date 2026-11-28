@@ -22,6 +22,7 @@ import gc
 import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import replace
 from datetime import timedelta
 from threading import RLock
 from types import NoneType
@@ -61,11 +62,8 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -85,6 +83,11 @@ from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime, release_static_kernels
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
+from vllm_ascend.core.kv_cache_compat import (
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+    get_group_layer_layouts,
+)
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
@@ -121,6 +124,8 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
     shared_expert_tp_enable,
+    speculator_uses_target_hidden_states,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -171,6 +176,31 @@ def allow_v2_model_runner_without_triton() -> Iterator[None]:
             yield
         finally:
             gpu_worker.HAS_TRITON = has_triton
+
+
+@contextmanager
+def _direct_host_submission_for_aclgraph_capture(mode: CUDAGraphMode) -> Iterator[None]:
+    if (
+        mode == CUDAGraphMode.NONE
+        or getattr(torch_npu, "__version__", "") != "2.14.0"
+        or not get_current_hardware_profile().aclgraph_capture_requires_direct_host_submission
+    ):
+        yield
+        return
+
+    previous_mode = torch_npu.npu.get_task_queue_enable()
+    if previous_mode != 1:
+        yield
+        return
+
+    # TorchNPU drains pending launches when switching modes. Limit the switch
+    # to startup capture, before the worker begins accepting requests.
+    logger.info_once("Using direct host submission during TorchNPU 2.14 ACL graph capture.")
+    torch_npu.npu.set_task_queue_enable(0)
+    try:
+        yield
+    finally:
+        torch_npu.npu.set_task_queue_enable(previous_mode)
 
 
 class NPUWorker(GPUWorker):
@@ -865,20 +895,23 @@ class NPUWorker(GPUWorker):
             if transfer is not None and transfer.has_connector("AscendStoreConnector"):
                 return max(0, available_memory - (DEVICE_BUFFER_ALIGNMENT - 1))
             return available_memory
-        kv_cache_spec = self.get_kv_cache_spec()
-        if not isinstance(kv_cache_spec, dict):
-            return available_memory
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        if vllm_version_is("0.34.0"):
+            layouts = self.get_kv_cache_spec()
+            if not isinstance(layouts, dict) or not layouts:
+                return available_memory
+            kv_cache_groups = get_kv_cache_groups(self.vllm_config, layouts)
+        else:
+            configs = self.get_kv_cache_layer_configs()
+            if not configs:
+                return available_memory
+            kv_cache_groups = get_kv_cache_groups(self.vllm_config, configs)
         if not kv_cache_groups:
             return available_memory
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
         # physical storage across all groups. Their budgets must not take the
         # generic per-layer scale, including when the runner uses sparse SFA.
         for group in kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            specs = (
-                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
-            )
+            specs = get_group_layer_layouts(group).values()
             if any(
                 getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41", "glm5_next"} for spec in specs
             ):
@@ -889,13 +922,7 @@ class NPUWorker(GPUWorker):
         # preserve that contract for attention/Mamba and eligible full/sliding
         # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
-        per_layer_specs = []
-        for group in kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs.extend(group_spec.kv_cache_specs.values())
-            else:
-                per_layer_specs.append(group_spec)
+        per_layer_specs = [spec for group in kv_cache_groups for spec in get_group_layer_layouts(group).values()]
         has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
@@ -928,15 +955,8 @@ class NPUWorker(GPUWorker):
         bytes_per_block = 0
         sum_pages = 0
         for group in kv_cache_groups:
-            group_pages = 0
-            for layer_name in group.layer_names:
-                group_spec = group.kv_cache_spec
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_spec = group_spec
-                group_pages += layer_spec.page_size_bytes
-                sum_pages += layer_spec.page_size_bytes
+            group_pages = sum(spec.page_size_bytes for spec in get_group_layer_layouts(group).values())
+            sum_pages += group_pages
             bytes_per_block = max(bytes_per_block, group_pages)
         if bytes_per_block > 0 and sum_pages > bytes_per_block:
             scale = bytes_per_block / sum_pages
@@ -1102,7 +1122,8 @@ class NPUWorker(GPUWorker):
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            npugraph_memory_bytes = self.model_runner.capture_model()
+            with _direct_host_submission_for_aclgraph_capture(self.vllm_config.compilation_config.cudagraph_mode):
+                npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
@@ -1209,7 +1230,40 @@ class NPUWorker(GPUWorker):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_layer_configs(self):
+            """Return native declarations to Core after Ascend profiles the layouts."""
+            from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+
+            from vllm_ascend.core.kv_cache_compat import bridge_attention_layout
+
+            configs = self.model_runner.get_kv_cache_layer_configs()
+            layouts = {name: config.spec for name, config in configs.items()}
+            if KVPPConfig.from_vllm_config(self.vllm_config).size > 1:
+                register_kvpp_draft_layers(
+                    self.vllm_config, self.model_runner, layouts, is_last_pp_rank=get_pp_group().is_last_rank
+                )
+                speculative = self.vllm_config.speculative_config
+                if (
+                    speculative is not None
+                    and speculator_uses_target_hidden_states(speculative)
+                    and any(config.manager_cls is SlidingWindowManager for config in configs.values())
+                ):
+                    unify_hybrid_kv_cache_specs(configs)
+                    configs = {
+                        name: replace(config, spec=bridge_attention_layout(config)) for name, config in configs.items()
+                    }
+                if any(config.manager_cls is not FullAttentionManager for config in configs.values()):
+                    raise ValueError("KVPP requires full-attention cache allocation.")
+                self._record_kvpp_allocation({name: config.spec for name, config in configs.items()})
+            if get_ascend_config().sparse_kv_offload_config.enabled:
+                self.kv_cache_spec = {name: config.spec for name, config in configs.items()}
+            return configs
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        if not vllm_version_is("0.34.0"):
+            return {name: config.spec for name, config in self.get_kv_cache_layer_configs().items()}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
@@ -1222,26 +1276,25 @@ class NPUWorker(GPUWorker):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.use_eagle()
+                and speculator_uses_target_hidden_states(speculative_config)
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
                 unify_hybrid_kv_cache_specs(kv_cache_spec)
-            kvpp_rank = (
-                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
-                + get_tp_group().rank_in_group
-            )
-            self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
-                self.vllm_config,
-                kv_cache_spec,
-                kvpp_rank,
-            )
+            self._record_kvpp_allocation(kv_cache_spec)
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
             self.kv_cache_spec = kv_cache_spec
         return kv_cache_spec
+
+    def _record_kvpp_allocation(self, kv_cache_spec: dict[str, KVCacheSpec]) -> None:
+        kvpp_rank = (
+            get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+            + get_tp_group().rank_in_group
+        )
+        self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(self.vllm_config, kv_cache_spec, kvpp_rank)
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
@@ -1392,6 +1445,23 @@ class NPUWorker(GPUWorker):
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+
+    def probe_forward(self) -> str | None:
+        """Probe a decode forward on the NPU without changing GDN state."""
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner._dummy_run(
+                    self.model_runner.decode_query_len,
+                    uniform_decode=True,
+                    num_active_loras=0,
+                    skip_gdn_state_update=True,
+                )
+            self.synchronize_device()
+        except Exception as exc:
+            logger.exception("Forward probe failed")
+            self.model_runner.kv_connector.set_disabled(False)
+            return repr(exc)
+        return None
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

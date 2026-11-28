@@ -7,17 +7,15 @@ import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core import kv_cache_planning as planning
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, KVCacheSpec, MambaSpec, MLAAttentionSpec
+
+from vllm_ascend.core.kv_cache_compat import (
     CircularBufferSpec,
     FullAttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
+    LegacyMambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -33,6 +31,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_slab_view,
 )
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -130,14 +129,14 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
-    gdn = MambaSpec(
+    gdn = LegacyMambaSpec(
         block_size=128,
         shapes=((64, 4), (128, 128)),
         dtypes=(torch.bfloat16, torch.bfloat16),
         mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
-    ple = MambaSpec(
+    ple = LegacyMambaSpec(
         block_size=128,
         shapes=((128, 5),),
         dtypes=(torch.bfloat16,),
@@ -338,6 +337,7 @@ def _allocate_mrv2_kv_cache(
     backend = SimpleNamespace(
         full_cls_name=lambda: "qwen-cache-test",
         get_supported_kernel_block_sizes=lambda _spec: block_sizes,
+        get_supported_kernel_block_sizes_for_layers=lambda _spec, _names: block_sizes,
     )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
@@ -725,6 +725,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
         cache_dtype="auto",
         block_size=128,
         mamba_cache_mode=cache_mode,
+        enable_prefix_caching=cache_mode == "align",
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
         mamba_page_size_padded=None,
@@ -740,6 +741,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
             get_mamba_chunk_size=lambda: 64,
         ),
         cache_config=cache,
+        speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -911,7 +913,17 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
     # Exercise the actual MRV2 factory, which rewrites the builder spec.
     group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+    builder_kwargs = {}
+    if not vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        from tests.ut.kvpp_utils import make_layer_cache_configs
+        from vllm_ascend.core.kv_cache_compat import get_group_layer_layouts
+
+        builder_kwargs["kv_cache_group"] = KVCacheGroup.from_layers(
+            make_layer_cache_configs(get_group_layer_layouts(compressed_group))
+        )
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128, **builder_kwargs)
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
     layer = qsa.qsa_indexer.QSACompressedKeyCache(

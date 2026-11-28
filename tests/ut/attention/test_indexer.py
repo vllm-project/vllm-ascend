@@ -12,7 +12,7 @@ import torch_npu
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.attention.ops import pcp
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import SparseCacheRole
 
 from vllm_ascend.attention import indexer as indexer_module
 from vllm_ascend.attention.indexer import (
@@ -23,6 +23,7 @@ from vllm_ascend.attention.indexer import (
     QLIMetadataBuffers,
     QLIMetadataConfig,
 )
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, LegacyMLAAttentionSpec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
 
@@ -703,7 +704,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     backend.enable_sparse_li_c4, backend.enable_sparse_li_c8 = c4, c8
     backend.c4_k_cache_dtype, backend.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
     backend.c8_k_cache_dtype, backend.c8_k_scale_cache_dtype = torch.int8, torch.float16
-    source = MLAAttentionSpec(
+    source = LegacyMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=132,

@@ -11,17 +11,17 @@ import pytest
 import torch
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm_ascend.utils import vllm_version_is
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -1338,7 +1338,10 @@ def test_pcp_offload_local_round_trip_waits_for_all_workers(pcp, tp, pp, dcp, sh
         scheduler = PreemptOffloadScheduler(
             config, kv_config, cpu_capacity_bytes=1, enable_offload_prefix_caching=False
         )
-    assert coordinator.call_args.kwargs["pcp_world_size"] == 1
+    if vllm_version_is("0.34.0"):
+        assert coordinator.call_args.kwargs["pcp_world_size"] == 1
+    else:
+        assert "pcp_world_size" not in coordinator.call_args.kwargs
     assert coordinator.call_args.kwargs["dcp_world_size"] == dcp
     assert scheduler._expected_worker_count == tp * pp * pcp
     scheduler._gpu_block_pool = SimpleNamespace(

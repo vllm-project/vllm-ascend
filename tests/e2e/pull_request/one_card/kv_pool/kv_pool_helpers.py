@@ -108,6 +108,7 @@ from tests.e2e.pull_request.kv_pool_watch import (
     extract_pool_answer,
     snapshot_metrics,
 )
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = os.environ.get("QWEN38_POOL_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
 # Performance is measured the way a serving workload meets the pool - and the
@@ -629,9 +630,10 @@ def _leg(
             enable_chunked_prefill=True,
             disable_log_stats=False,
             async_scheduling=True,
-            mamba_cache_mode="align",
             compilation_config={"cudagraph_mode": "PIECEWISE" if use_layerwise else "FULL_DECODE_ONLY"},
         )
+        if vllm_version_is("0.34.0"):
+            kwargs["mamba_cache_mode"] = "align"
         if use_pool:
             if backend == "mooncake":
                 # Official A2 pool environment (KV pool guide): A2 (and A3 on

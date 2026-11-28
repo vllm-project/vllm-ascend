@@ -26,6 +26,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import CANDIDATE_LENGTHS, CANDIDATES, TOPK, TOPK_LENGTHS, build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 
 
@@ -300,7 +301,15 @@ def test_all_dependencies_survive_multiple_stage_forwarding(runtime, monkeypatch
 @pytest.mark.parametrize("draft_layers", [0, 3])
 def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monkeypatch, lengths, draft_layers):
     config = make_cache_config(17, head_size=8, index_size=4, draft_layers=draft_layers)
-    global_specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    global_groups = config.kv_cache_groups
+    global_specs = {n: s for g in global_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    if not vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        global_groups = [
+            KVCacheGroup(group.kv_cache_specs, group.manager_config, group.block_size, group.dcp_sharded)
+            for group in global_groups
+        ]
     partitions = _partitions(lengths)
     planner = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
@@ -317,7 +326,7 @@ def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monk
             or (".mtp." in "." + name and end == 40)
             or (".layers." in name and start <= int(name.split(".layers.")[1].split(".")[0]) < end)
         }
-        stage_groups = [_project_kv_cache_groups_to_worker(config.kv_cache_groups, local)]
+        stage_groups = [_project_kv_cache_groups_to_worker(global_groups, local)]
         if not draft_layers:
             # Also cover stage-local backbone grouping used for profiling.
             stage_groups.append(make_cache_groups(group_cache_specs(local)))

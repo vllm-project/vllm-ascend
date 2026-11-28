@@ -12,6 +12,7 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
@@ -51,14 +52,21 @@ class FakeGuidanceBackend(FakeBackend):
 
 def make_manager() -> StructuredOutputManager:
     manager = object.__new__(StructuredOutputManager)
-    manager.backend = None
+    if vllm_version_is("0.34.0"):
+        manager.backend = None
+        manager.backend_name = None
+    else:
+        manager.backends = {}
     manager.vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_vocab_size=lambda: 128))
     manager.tokenizer = object()
     manager._use_async_grammar_compilation = False
-    # vLLM main's ``StructuredOutputManager.grammar_init`` reads this; it is
-    # set by ``__init__``, which this stub bypasses.
-    manager.backend_name = None
     return manager
+
+
+def manager_backend(manager: StructuredOutputManager, name: str):
+    if vllm_version_is("0.34.0"):
+        return manager.backend
+    return manager.backends.get(name)
 
 
 def make_request(backend: str):
@@ -179,7 +187,7 @@ def test_manager_rejects_mixed_structured_output_backends(monkeypatch):
     xgrammar_request = make_request("xgrammar")
     manager.grammar_init(xgrammar_request)
 
-    assert isinstance(manager.backend, FakeXgrammarBackend)
+    assert isinstance(manager_backend(manager, "xgrammar"), FakeXgrammarBackend)
     assert (
         getattr(
             manager,
@@ -200,11 +208,15 @@ def test_manager_rejects_mixed_structured_output_backends(monkeypatch):
 
 def test_manager_rejects_mixed_backend_after_subclassed_backend_is_initialized():
     manager = make_manager()
-    manager.backend = FakeXgrammarBackend(
+    backend = FakeXgrammarBackend(
         manager.vllm_config,
         manager.tokenizer,
         manager.vllm_config.model_config.get_vocab_size(),
     )
+    if vllm_version_is("0.34.0"):
+        manager.backend = backend
+    else:
+        manager.backends["xgrammar"] = backend
 
     with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
         manager.grammar_init(make_request("guidance"))
@@ -218,7 +230,7 @@ def test_manager_allows_consistent_guidance_backend(monkeypatch):
         request = make_request("guidance")
         manager.grammar_init(request)
 
-        assert isinstance(manager.backend, FakeGuidanceBackend)
+        assert isinstance(manager_backend(manager, "guidance"), FakeGuidanceBackend)
         assert getattr(manager, patch_structured_output._BACKEND_ATTR) == "guidance"
         assert request.structured_output_request.grammar == (
             "FakeGuidanceBackend",
@@ -239,5 +251,5 @@ def test_failed_first_backend_does_not_lock_manager(monkeypatch):
     request = make_request("xgrammar")
     manager.grammar_init(request)
 
-    assert isinstance(manager.backend, FakeXgrammarBackend)
+    assert isinstance(manager_backend(manager, "xgrammar"), FakeXgrammarBackend)
     assert getattr(manager, patch_structured_output._BACKEND_ATTR) == "xgrammar"

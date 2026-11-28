@@ -8,8 +8,14 @@ Core retains residency scheduling, DMA and the Host write completion fence.
 
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager, HiSparseResidentManager
 
 
 def prepare_pcp_query_metadata(metadata, states, local_states, world_size):
@@ -75,13 +81,26 @@ class PCPHiSparseConnector(ActiveKVConnector):
         self._global_block_tables = block_tables
         worker = self.kv_connector.connector_worker
         groups = worker.kv_cache_config.kv_cache_groups
-        resident_groups = [i for i, group in enumerate(groups) if isinstance(group.kv_cache_spec, HiSparseResidentSpec)]
-        hot_groups = [
-            i
-            for i, group in enumerate(groups)
-            if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-            for _ in group.layer_names
-        ]
+        if vllm_version_is("0.34.0"):
+            resident_groups = [
+                i for i, group in enumerate(groups) if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+            ]
+            hot_groups = [
+                i
+                for i, group in enumerate(groups)
+                if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+                for _ in group.layer_names
+            ]
+        else:
+            resident_groups = [
+                i for i, group in enumerate(groups) if issubclass(group.manager_cls, HiSparseResidentManager)
+            ]
+            hot_groups = [
+                i
+                for i, group in enumerate(groups)
+                if issubclass(group.manager_cls, HiSparseHotManager)
+                for _ in group.layer_names
+            ]
         self._pcp_bindings = []
         for cache, hot_group in zip(worker.cache_handles, hot_groups, strict=True):
             self._pcp_bindings.append((cache, resident_groups[cache.runtime.resident_source_index], hot_group))

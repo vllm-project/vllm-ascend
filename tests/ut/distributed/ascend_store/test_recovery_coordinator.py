@@ -3,17 +3,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from math import lcm
+from unittest.mock import Mock
 
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, LegacyMambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import coordinator as coordinator_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator as StoreCoordinator,
@@ -24,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def chunk_hashes_for_block_size(hashes, hash_size, block_size):
@@ -31,7 +28,7 @@ def chunk_hashes_for_block_size(hashes, hash_size, block_size):
 
 
 def _mamba_align(block_size=32):
-    return MambaSpec(
+    return LegacyMambaSpec(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -45,6 +42,7 @@ def _make_coord(
     use_eagle=False,
     retention_interval=None,
     enable_partial_hash_hits=False,
+    num_hash_lookahead_tokens=0,
 ):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
@@ -60,6 +58,7 @@ def _make_coord(
         use_eagle=use_eagle,
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -347,19 +346,16 @@ def test_store_mask_fast_path_single_attention_group():
 # ----- store_mask with retention_interval (DSV4 sparse SWA checkpointing) -----
 
 
-@pytest.mark.parametrize("has_hash_lookahead", [False, True])
-def test_replay_boundary_core_signature_compatibility(monkeypatch, has_hash_lookahead):
-    calls = []
-
-    def replay(prompt, block, use_eagle, **kwargs):
-        calls.append((prompt, block, use_eagle, kwargs))
-        return (prompt - 1,)
-
+def test_replay_boundary_core_signature_compatibility(monkeypatch):
+    replay = Mock(wraps=coordinator_module.replay_boundaries)
     monkeypatch.setattr(coordinator_module, "replay_boundaries", replay)
-    monkeypatch.setattr(coordinator_module, "_REPLAY_HAS_HASH_LOOKAHEAD", has_hash_lookahead)
     coord = _make_coord([KVCacheGroupSpec(["L0"], _mamba_align())], hash_block_size=8, retention_interval=0)
+    coord.num_hash_lookahead_tokens = 4
     coord.store_mask(64, num_prompt_tokens=65)
-    assert calls == [(65, 32, False, {"num_hash_lookahead_tokens": 0} if has_hash_lookahead else {})]
+    if vllm_version_is("0.34.0"):
+        replay.assert_called_once_with(65, 32, use_eagle=False)
+    else:
+        replay.assert_called_once_with(65, 4)
 
 
 @pytest.mark.parametrize("partial_hits", [False, True])
@@ -409,15 +405,26 @@ def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
     back from it. The retained SWA tail must span the ``need`` contiguous
     blocks the lookup requires (cdiv(8 - 1, 8) + 1 = 2 here); the non-EAGLE
     boundary leaves only one of them inside the saved prefix."""
-    coord = _make_coord(_retention_groups(), hash_block_size=8, use_eagle=True, retention_interval=0)
+    lookahead_tokens = 5
+    coord = _make_coord(
+        _retention_groups(),
+        hash_block_size=8,
+        use_eagle=True,
+        retention_interval=0,
+        num_hash_lookahead_tokens=lookahead_tokens,
+    )
+    release = vllm_version_is("0.34.0")
     # num_prompt=100 -> boundary 64 -> chunks 7, 8 (8 is the EAGLE peek).
     masks = coord.store_mask(96, num_prompt_tokens=100)
     assert masks[0] == [True] * 3
     # Whole-page external lookup does not drop: keep its tail at 96 too.
-    assert masks[1] == [i in (7, 8, 11) for i in range(12)]
+    # Main retains both the hash-proven resend and the extension boundary.
+    tails = (7, 8, 11) if release else (7, 11)
+    assert masks[1] == [i in tails for i in range(12)]
     # Aligned num_prompt=96 -> boundaries 32 (resend) and 64 (longer sibling).
     masks = coord.store_mask(96, num_prompt_tokens=96)
-    assert masks[1] == [i in (3, 4, 7, 8) for i in range(12)]
+    tails = (3, 4, 7, 8) if release else (7, 11)
+    assert masks[1] == [i in tails for i in range(12)]
 
 
 @pytest.mark.parametrize("num_prompt_tokens", [100, 96])
@@ -427,7 +434,14 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
     96). The unaligned prompt hit 0 before the fix; the aligned one already
     hit."""
     groups = _retention_groups()
-    coord = _make_coord(groups, hash_block_size=8, use_eagle=True, retention_interval=0)
+    lookahead_tokens = 5
+    coord = _make_coord(
+        groups,
+        hash_block_size=8,
+        use_eagle=True,
+        retention_interval=0,
+        num_hash_lookahead_tokens=lookahead_tokens,
+    )
     hashes = _hashes(96 // coord.hash_block_size)
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
@@ -439,8 +453,10 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
 
     _masks, hit = coord.find_longest_cache_hit(
         hashes,
-        max_length=96,
-        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+        max_length=96 if vllm_version_is("0.34.0") else num_prompt_tokens - lookahead_tokens,
+        cached_block_pool=ExternalCachedBlockPool(
+            coord.hash_block_size, exists, num_hash_lookahead_tokens=lookahead_tokens
+        ),
     )
     assert hit == 64
 
@@ -492,10 +508,12 @@ def test_lookup_with_eagle_pops_last_full_attention_block():
     """Sanity: with use_eagle, find_longest_cache_hit drops the last block.
     Pairs with the load_mask test below to lock the round-trip contract."""
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=2)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    # The main scheduler bounds lookup by hashes with enough known tokens.
+    lookup_len = 64 if vllm_version_is("0.34.0") else 64 - coord.num_hash_lookahead_tokens
+    _masks, hit = coord.find_longest_cache_hit(hs, max_length=lookup_len, cached_block_pool=cmap)
     # 4 blocks present, eagle pops 1 → 3 blocks = 48 tokens.
     assert hit == 48
 
@@ -511,10 +529,12 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     uninitialized in local KV.
     """
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=2)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    # The main scheduler bounds lookup by hashes with enough known tokens.
+    lookup_len = 64 if vllm_version_is("0.34.0") else 64 - coord.num_hash_lookahead_tokens
+    _masks, hit = coord.find_longest_cache_hit(hs, max_length=lookup_len, cached_block_pool=cmap)
     assert hit == 48  # eagle popped 1 block
 
     masks = coord.load_mask(hs, token_len=hit)
@@ -532,11 +552,13 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _swa(16, 32)),
     ]
-    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=2)
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    # The main scheduler bounds lookup by hashes with enough known tokens.
+    lookup_len = 64 if vllm_version_is("0.34.0") else 64 - coord.num_hash_lookahead_tokens
+    _masks, hit = coord.find_longest_cache_hit(hs, max_length=lookup_len, cached_block_pool=cmap)
     # FullAttn dictates the convergence; eagle pops one block off it.
     assert hit == 48
 
@@ -560,7 +582,7 @@ def test_load_mask_without_eagle_unchanged():
 
 
 def _mamba(block_size=16):
-    return MambaSpec(
+    return LegacyMambaSpec(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -586,6 +608,10 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
+    if not vllm_version_is("0.34.0"):
+        # The recurrent snapshot exists at 64, while full attention has
+        # hashes only through 48.
+        exists.remove((0, bytes(hs[-1])))
     cmap = ExternalCachedBlockPool(16, exists)
     _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
@@ -610,12 +636,18 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
         KVCacheGroupSpec(["L1"], swa),
         KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
     ]
-    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
-    assert coord.eagle_group_ids == {2}
-    assert coord.eagle_reachable_group_ids == {1, 2}
+    lookahead_tokens = 3
+    release = vllm_version_is("0.34.0")
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=lookahead_tokens)
+    if release:
+        assert coord.eagle_group_ids == {2}
+        assert coord.eagle_reachable_group_ids == {1, 2}
+    else:
+        assert [ids for _, ids, _ in coord.attention_groups] == [[0], [1, 2]]
 
     # Save side: both SWA groups must produce identical (eagle-shifted) masks.
-    masks = coord.store_mask(128, num_prompt_tokens=130)
+    prompt_tokens = 130
+    masks = coord.store_mask(128, num_prompt_tokens=prompt_tokens)
     assert masks[1] == masks[2]
 
     # Round trip: everything store_mask kept is in the store; the eagle
@@ -629,7 +661,9 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
             if mask is None or mask[i]:
                 exists.add((g_idx, bytes(ghashes[i])))
     _masks, hit = coord.find_longest_cache_hit(
-        hs, max_length=128, cached_block_pool=ExternalCachedBlockPool(16, exists)
+        hs,
+        max_length=128 if release else prompt_tokens - lookahead_tokens,
+        cached_block_pool=ExternalCachedBlockPool(16, exists, num_hash_lookahead_tokens=lookahead_tokens),
     )
     assert hit == 64
 
@@ -649,7 +683,8 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
         KVCacheGroupSpec(["c4_state"], _swa(block_size=4, sliding_window=8)),
         KVCacheGroupSpec(["c128_state"], _swa(block_size=8, sliding_window=128)),
     ]
-    coord = _make_coord(groups, hash_block_size=4, use_eagle=True)
+    lookahead_tokens = 4
+    coord = _make_coord(groups, hash_block_size=4, use_eagle=True, num_hash_lookahead_tokens=lookahead_tokens)
     token_len = 768
     hashes = _hashes(token_len // coord.hash_block_size)
 
@@ -665,8 +700,10 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
 
     _masks, hit = coord.find_longest_cache_hit(
         hashes,
-        max_length=token_len,
-        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+        max_length=token_len if vllm_version_is("0.34.0") else token_len - lookahead_tokens,
+        cached_block_pool=ExternalCachedBlockPool(
+            coord.hash_block_size, exists, num_hash_lookahead_tokens=lookahead_tokens
+        ),
     )
 
     # The final 256-token segment has no lookahead block, so EAGLE falls back

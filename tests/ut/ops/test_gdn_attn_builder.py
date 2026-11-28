@@ -31,6 +31,7 @@ from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNHostMetadataBuilder,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import LegacyMambaSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
@@ -50,6 +51,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba import cached_decode as cached_decode_module
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -297,7 +299,7 @@ def test_empty_align_batch_skips_gather_on_build_and_update(builder_cls, num_spe
     )
     # The upstream helper accepts empty tensors; V2 should avoid launching its
     # arithmetic/gather operations when the output is already known to be empty.
-    expected_table = ascend_gdn_attn_builder.mamba_get_block_table_tensor(table, empty, owner.kv_cache_spec, "align")
+    expected_table = owner._get_mamba_block_table(table, empty, "align")
     assert expected_table.shape == (0, num_spec + 1)
     with patch.object(
         ascend_gdn_attn_builder, "mamba_get_block_table_tensor", side_effect=AssertionError("Skip empty gather")
@@ -342,8 +344,8 @@ def test_batched_spec_group_reuses_view_with_current_table(mamba_cache_mode):
         if mamba_cache_mode == "align":
             # vLLM #58737 asserts block_table rows match seq_lens rows; the
             # unpadded batch keeps padded rows, so pass only real request rows.
-            other.mamba_aligned_state_indices = ascend_gdn_attn_builder.mamba_get_block_table_tensor(
-                table[: source.gdn_seq_lens.shape[0]], source.gdn_seq_lens, other.kv_cache_spec, "align"
+            other.mamba_aligned_state_indices = other._get_mamba_block_table(
+                table[: source.gdn_seq_lens.shape[0]], source.gdn_seq_lens, "align"
             )
         expected = reference.update_block_table(source, table)
         other.spec_state_indices_tensor.fill_(-99)
@@ -537,7 +539,7 @@ def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
 def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size):
     config = _make_vllm_config(num_speculative_tokens=3)
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
     assert builder.supports_update_block_table is (pcp_size == 1)
 
@@ -549,7 +551,7 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
         num_speculative_tokens=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
     )
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
     common = create_common_attn_metadata(BatchSpec([24, 48], [1, 1]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4) + 100
@@ -561,7 +563,7 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
 
 def test_mixed_prefill_sentinels_do_not_cancel_live_drafts():
     config = _make_vllm_config(num_speculative_tokens=3)
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = AscendGDNAttentionMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     common = create_common_attn_metadata(BatchSpec([24, 8], [2, 8]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4)
@@ -675,12 +677,17 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=mamba_cache_mode == "align", mamba_cache_mode=mamba_cache_mode, use_replayssm=False
+        ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         speculative_config=speculative_config,
+        num_speculative_tokens=num_speculative_tokens,
+        use_replayssm_trackers=False,
         num_hash_lookahead_tokens=0,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
@@ -828,7 +835,7 @@ def _make_builder(
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
-    spec = MambaSpec(
+    spec = LegacyMambaSpec(
         block_size=block_size,
         shapes=((1,), (1,)),
         dtypes=(torch.float32,),
@@ -1337,10 +1344,23 @@ def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
     config = _make_vllm_config(mamba_cache_mode="align")
     config.cache_config.hash_block_size = 16
     config.cache_config.cache_hit_alignment_tokens = 128
+    checkpoint_alignment: dict[str, object]
+    if vllm_version_is("0.34.0"):
+        checkpoint_alignment = {"get_kv_cache_checkpoint_alignment": lambda _: 16}
+    else:
+        checkpoint_alignment = {
+            "get_cache_checkpoint_alignment": lambda: 16,
+            "requires_grid_checkpoint_alignment": False,
+        }
     config.compilation_config.static_forward_context = {
-        name: SimpleNamespace(_ascend_internal_checkpoint_enabled=True) for name in ("g0", "g1")
+        name: Mock(
+            spec=AscendGatedDeltaNetAttention,
+            _ascend_internal_checkpoint_enabled=True,
+            **checkpoint_alignment,
+        )
+        for name in ("g0", "g1")
     }
-    spec = MambaSpec(
+    spec = LegacyMambaSpec(
         block_size=128,
         shapes=((1,), (1,)),
         dtypes=(torch.float32,),
@@ -1653,6 +1673,7 @@ def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_me
     monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
     builder_cls = backend_cls.get_builder_cls()
     config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
+    config.max_concurrent_batches = 2
     group = AttentionGroup(
         backend=backend_cls,
         layer_names=["layer0"],
@@ -1699,8 +1720,11 @@ def test_varlen_graph_capability_requires_adaptive_recurrent_path(builder_cls, a
 def test_adaptive_mixed_batch_rejects_cpu_fused_layout():
     builder = AscendGDNHostMetadataBuilder.__new__(AscendGDNHostMetadataBuilder)
     builder._spec_conv_indices = torch.empty(3, dtype=torch.int32)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=True, mamba_cache_mode="align")
+    )
     builder.kv_cache_spec = SimpleNamespace(num_speculative_blocks=3)
+    builder.num_speculative_blocks = 3
     builder.num_spec = 3
     builder.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
     with patch.object(ascend_gdn_attn_builder, "prepare_gdn", side_effect=AssertionError("CPU layout is unsafe")):

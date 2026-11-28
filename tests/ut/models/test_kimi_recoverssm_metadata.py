@@ -11,6 +11,7 @@ from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
 from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops import recurrent_pcp
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_context_is_reused_only_while_all_layer_buffers_remain_bound(monkeypatch):
@@ -169,6 +170,10 @@ def test_recoverssm_commit_uses_corrected_lengths_across_page_boundary():
     )
     builder.recoverssm_context = SimpleNamespace(is_bound_to=lambda layers: True)
     common = create_common_attn_metadata(BatchSpec(seq_lens=[33, 17], query_lens=[3, 2]), 16, device)
+    if not vllm_version_is("0.34.0"):
+        # The native Mamba policy reserves draft slots beyond the last live page.
+        draft_slots = builder.vllm_config.speculative_config.num_speculative_tokens
+        common.block_table_tensor = torch.nn.functional.pad(common.block_table_tensor, (0, draft_slots))
     common.is_prefilling.fill_(False)
     # The optimistic second row points at page 1; the corrected count
     # after rejection puts its last token on page 0.

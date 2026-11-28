@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import CUDAGraphMode, KVTransferConfig
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import get_group_layout, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -22,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_backing_bytes,
     get_layerwise_reuse_layout,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_layout(model="flash", *, block_size=32, cache_format="a3", buffers=2, independent=None, mtp=False):
@@ -117,11 +119,13 @@ def make_layout(model="flash", *, block_size=32, cache_format="a3", buffers=2, i
         runtime.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1, use_eagle=lambda: True)
         runtime.num_hash_lookahead_tokens = 0
         specs["mtp.layers.0.self_attn.swa_cache"] = replace(specs["model.layers.0.self_attn.swa_cache"], is_draft=True)
-    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
-    # The core planner marks these after get_kv_cache_groups; mirror that step
-    # so the coordinator applies draft lookahead only to the owning group(s).
-    for group in groups:
-        group.is_eagle_group = mtp and any(specs[name].is_draft for name in group.layer_names)
+    release = vllm_version_is("0.34.0")
+    layer_configs = specs if release else make_layer_cache_configs(specs)
+    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, layer_configs)
+    if release:
+        # Mirror the release coordinator's group-level draft marker.
+        for group in groups:
+            group.is_eagle_group = mtp and any(specs[name].is_draft for name in group.layer_names)
     return runtime, groups, specs
 
 
@@ -156,7 +160,7 @@ def allocate_test_views(monkeypatch, runtime, config, specs):
     layer = SimpleNamespace(get_attn_backend=lambda: AscendDSABackend)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: dict.fromkeys(specs, layer))
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
-    kernel_block_sizes = [group.kv_cache_spec.block_size for group in config.kv_cache_groups]
+    kernel_block_sizes = [get_group_layout(group).block_size for group in config.kv_cache_groups]
     caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_block_sizes)
     return caches, allocations
 
@@ -175,7 +179,9 @@ def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, model
     caches, allocations = allocate_test_views(monkeypatch, runtime, config, specs)
     assert allocations == [num_blocks * cost]
     assert len({components[0].untyped_storage().data_ptr() for components in caches.values()}) == 1
-    draft_group = next(gid for gid, group in enumerate(groups) if group.is_eagle_group)
+    draft_group = next(
+        gid for gid, group in enumerate(groups) if any(specs[name].is_draft for name in group.layer_names)
+    )
     for component in caches["mtp.layers.0.self_attn.swa_cache"]:
         component[draft_group + 1].fill_(64)
     # Independent group IDs, as assigned from one global block pool. Check
@@ -309,10 +315,11 @@ def test_core_converges_worker_budgets_using_the_reused_physical_cost(monkeypatc
     required = kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, groups)
     budget = required + block_cost  # Block zero is reserved even for a single request.
     assert budget < required // block_cost * builder._get_native_pool_bytes_per_block(runtime, groups)
+    layer_configs = specs if vllm_version_is("0.34.0") else make_layer_cache_configs(specs)
     with pytest.raises(ValueError, match="KV cache"):
-        kv_cache_planning.get_kv_cache_configs(runtime, [specs], [budget - 1], groups)
+        kv_cache_planning.get_kv_cache_configs(runtime, [layer_configs], [budget - 1], groups)
     budgets = [budget + 2 * block_cost, budget]
-    plans = kv_cache_planning.get_kv_cache_configs(runtime, [specs, specs], budgets, groups)
+    plans = kv_cache_planning.get_kv_cache_configs(runtime, [layer_configs, layer_configs], budgets, groups)
     expected = min(budgets) // builder._get_pool_bytes_per_block(runtime, groups)
     assert [plan.num_blocks for plan in plans] == [expected, expected]
     assert plans[0].kv_cache_tensors == plans[1].kv_cache_tensors

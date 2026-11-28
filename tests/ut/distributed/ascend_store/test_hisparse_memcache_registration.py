@@ -8,18 +8,18 @@ from unittest.mock import Mock, call, patch
 import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.layout import get_hisparse_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     SparseCacheRole,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout im
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_bulk_by_memory_location
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
+from vllm_ascend.utils import vllm_version_is
 
 SLAB_ALIGNMENT = 2 * 1024 * 1024
 
@@ -289,8 +290,15 @@ def test_hisparse_groups_register_with_independent_host_blocks(
         load_config=SimpleNamespace(load_format="auto"),
         speculative_config=None,
     )
-    groups = get_hisparse_kv_cache_groups(config, {source_name: source_spec, indexer_name: indexer_spec})
-    assert groups is not None
+    specs = {source_name: replace(source_spec, cache_role=SparseCacheRole.SPARSE), indexer_name: indexer_spec}
+    if vllm_version_is("0.34.0"):
+        groups = get_hisparse_kv_cache_groups(config, specs)
+        assert groups is not None
+    else:
+        groups = get_hisparse_kv_cache_groups(
+            config, {name: FullAttentionManager.layer_config(spec) for name, spec in specs.items()}
+        )
+        assert groups is not None
     resident_name = groups[2].layer_names[0]
     hot_name = groups[3].layer_names[0]
     indexer_stride = 17408 if indexer_c8 else 98304
@@ -414,13 +422,16 @@ def test_hisparse_groups_register_with_independent_host_blocks(
     worker.kv_cache_config.kv_cache_tensors[1].block_stride += 512
     assert pool_key() != original_key
     worker.kv_cache_config.kv_cache_tensors[1].block_stride -= 512
-    spec = groups[1].kv_cache_spec
     replacement = replace(indexer_spec, block_size=64)
-    groups[1].kv_cache_spec = (
-        replace(spec, block_size=64, kv_cache_specs={indexer_name: replacement})
-        if isinstance(spec, UniformTypeKVCacheSpecs)
-        else replacement
-    )
+    if vllm_version_is("0.34.0"):
+        spec = groups[1].kv_cache_spec
+        groups[1].kv_cache_spec = (
+            replace(spec, block_size=64, kv_cache_specs={indexer_name: replacement})
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else replacement
+        )
+    else:
+        groups[1] = replace(groups[1], block_size=64, kv_cache_specs={indexer_name: replacement})
     assert pool_key() != original_key
 
 
@@ -467,7 +478,13 @@ def test_buffer_descriptor_rejects_invalid_geometry(overrides, message):
 
 def test_register_hisparse_views_requires_sized_host_pool():
     spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    if vllm_version_is("0.34.0"):
+        source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseSourceManager
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        source = KVCacheGroup.from_layers({"source": HiSparseSourceManager.layer_config(spec)}, host_resident=True)
     worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.use_recoverssm = False
     worker.kv_cache_config = KVCacheConfig(1, [], [source])

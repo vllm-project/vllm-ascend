@@ -9,7 +9,7 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import pad_num_tokens
+from vllm_ascend.utils import pad_num_tokens, vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -41,11 +41,21 @@ def initialize_kv_cache(
     kv_cache_config: KVCacheConfig,
     is_profiling: bool = False,
     kv_cache_allocation_context: AbstractContextManager | None = None,
+    extensible: bool = False,
 ) -> None:
+    release_lane = vllm_version_is("0.34.0")
     # GPUWorker finalizes the PD interleave before KV cache initialization.
     self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
     kv_cache_config = upstream.deepcopy(kv_cache_config)
     self.kv_cache_config = kv_cache_config
+    self.extensible_kv_cache = None
+    if extensible:
+        self.extensible_kv_cache = upstream.ExtensibleKVCache(
+            kv_cache_config,
+            self.device,
+            self.cache_config.get_resolved_kv_cache_layout(),
+            export_handle_types=upstream.kv_cache_export_handle_types(self.vllm_config),
+        )
 
     block_table_max_model_len = self.max_model_len
     if self.is_encoder_decoder:
@@ -61,13 +71,25 @@ def initialize_kv_cache(
     max_num_blocks_per_group = []
     slot_mapping_enabled = []
     dcp_sharded = []
+    sliding_window_reach = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
+        if not release_lane:
+            block_sizes.append(kv_cache_group.block_size)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            dcp_sharded.append(kv_cache_group.dcp_sharded)
+            sliding_window_reach.append(kv_cache_group.sliding_window_reach)
+            max_num_blocks_per_group.append(
+                kv_cache_group.block_table_width(self.vllm_config, block_table_max_model_len)
+            )
+            continue
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
-        # vLLM main lets each cache type report whether it is DCP-sharded;
         dcp_sharded.append(spec.dcp_sharded)
+        sliding_window_reach.append(
+            layer_spec.num_retained_tokens if isinstance(layer_spec, upstream.SlidingWindowSpec) else 0
+        )
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
@@ -121,8 +143,8 @@ def initialize_kv_cache(
         copy_admitted_drafts_to_host=self.batch_sharder is not None,
     )
 
-    block_tables_kwargs = {}
-    block_tables_kwargs["dcp_sharded"] = dcp_sharded
+    # V2 block tables now hold manager blocks. AttentionGroup maps each
+    # backend's block table to the corresponding Ascend allocation view.
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,
@@ -133,15 +155,11 @@ def initialize_kv_cache(
         cp_size=self.dcp_size,
         cp_rank=self.dcp_rank,
         cp_interleave=self.cp_interleave,
-        **block_tables_kwargs,
+        dcp_sharded=dcp_sharded,
+        sliding_window_reach=sliding_window_reach,
     )
-    self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
-        self.vllm_config,
-        self.device,
-        self.supports_mm_inputs,
-        self.block_tables,
-        cls=self.pcp_manager_cls,
-    )
+    if self.pcp_manager is not None:
+        self.pcp_manager.set_block_tables(self.block_tables)
     self.ubatch_runner = upstream.maybe_build_ubatch_runner(
         self.vllm_config,
         self.device,
@@ -165,7 +183,6 @@ def initialize_kv_cache(
             self.compilation_config.cudagraph_mode,
             piecewise_capture_available=piecewise_capture_available,
         )
-    # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
     cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
@@ -195,6 +212,7 @@ def initialize_kv_cache(
             self.block_tables,
             self.input_buffers,
             self.attn_groups,
+            **({} if release_lane else {"kernel_block_sizes": self.kernel_block_sizes}),
         )
     if self.speculator is not None:
         # After set_attn, so the speculator can size its cudagraph mode
@@ -202,6 +220,13 @@ def initialize_kv_cache(
         self.speculator.init_cudagraph_manager(cudagraph_mode)
 
     # Capture warmup providers that depend on allocated KV-cache strides.
+    # Ascend allocates the backend's kernel-block views directly.
+    # HiSparse uses the native allocator and still needs native rebinding.
+    attn_groups = (
+        (g for groups in self.attn_groups + getattr(self.speculator, "attn_groups", []) for g in groups)
+        if self.vllm_config.attention_config.hisparse_config is not None
+        else ()
+    )
     with self.jit_warmup_registry.activate():
         kv_caches_dict = upstream.init_kv_cache(
             self.compilation_config.static_forward_context,
@@ -211,6 +236,8 @@ def initialize_kv_cache(
             self.vllm_config,
             kv_cache_allocation_context=kv_cache_allocation_context,
             block_tables=self.block_tables,
+            attn_groups=attn_groups,
+            allocate=self.extensible_kv_cache.allocate if self.extensible_kv_cache is not None else None,
         )
     register_sparse_kv_caches = getattr(self, "_register_sparse_kv_caches", None)
     if register_sparse_kv_caches is not None:
@@ -233,6 +260,7 @@ def initialize_kv_cache(
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:
+        self.kv_caches_by_layer = kv_caches_dict
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().

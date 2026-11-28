@@ -199,9 +199,59 @@ jobs:
               - '!**/*.md'
               - '!vllm_ascend/patch/__init__.py'
 
+      # This trial belongs to the November 26 main snapshot of PR #22176.
+      # Edit the job checkout before building or installing Ascend so its
+      # runtime and build-system requirements select the same Torch ABI.
+      - name: Set up the PR-specific PyTorch 2.14 dependencies
+        id: torch-214
+        if: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && inputs.vllm == 'c6dbe55260baa2195983184e4287ff7da3a003d6' }}
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          pins = {
+              "torch": "2.14.0+cpu",
+              "torch-npu": "2.14.0",
+              "torchvision": "0.29.0",
+              "torchaudio": "2.11.1",
+          }
+          for filename in ("requirements.txt", "pyproject.toml"):
+              path = Path(filename)
+              text = path.read_text()
+              for package, version in pins.items():
+                  if filename == "pyproject.toml" and package == "torchaudio":
+                      continue
+                  text, count = re.subn(
+                      rf'^([ \t]*"?){package}(?:==[0-9.]+(?:\.post[0-9]+)?)?("?,?)$',
+                      rf"\g<1>{package}=={version}\g<2>",
+                      text,
+                      flags=re.MULTILINE,
+                  )
+                  if count != 1:
+                      raise ValueError(f"Expected one {package} requirement in {filename}, found {count}")
+              path.write_text(text)
+
+          cmake = Path("CMakeLists.txt")
+          original = cmake.read_text()
+          version_check = (
+              '# check torch version is 2.10.0\n'
+              'if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")\n'
+              '  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")\n'
+              'endif()'
+          )
+          if original.count(version_check) != 1:
+              raise ValueError("Expected one PyTorch 2.10 version check in CMakeLists.txt")
+          standard = "set(CMAKE_CXX_STANDARD 17)"
+          if original.count(standard) != 1:
+              raise ValueError("Expected one host extension C++ standard in CMakeLists.txt")
+          updated = original.replace(version_check, version_check.replace("2.10.0", "2.14.0"))
+          cmake.write_text(updated.replace(standard, "set(CMAKE_CXX_STANDARD 20)"))
+          PY
+
       - name: Get csrc hash
         id: get_csrc_hash
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         run: |
           # Fail closed so a git error cannot be converted into sha256(empty)
           # and then appear to be a legitimate cache miss.
@@ -221,7 +271,7 @@ jobs:
 
       - name: Get architecture
         id: get_arch
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
@@ -232,7 +282,7 @@ jobs:
 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         uses: runs-on/cache/restore@v5
         with:
           path: |
@@ -248,13 +298,13 @@ jobs:
 
       # Stage manifests where both the job container and runner can read them.
       - name: Check layout and stage actions
-        if: ${{ startsWith(inputs.request_id, 'daily-') || (matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true') }}
+        if: ${{ startsWith(inputs.request_id, 'daily-') || (matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' && steps.cache-csrc.outputs.cache-hit != 'true') }}
         shell: bash
         run: bash .github/workflows/scripts/stage_ci_actions.sh
 
       - name: Restore incremental cache
         id: fallback-l1
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
@@ -295,6 +345,62 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+
+      - name: Select C++20 for Triton Ascend runtime extensions
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # Triton Ascend #1411: the installed wheel still compiles npu_utils with C++17.
+          python3 - <<'PY'
+          from importlib.metadata import distribution
+
+          wheel = distribution("triton-ascend")
+          launcher = wheel.locate_file("triton/backends/ascend/utils.py")
+          original = launcher.read_text(encoding="utf-8")
+          flags = 'cc_cmd += ["-std=c++17", "-shared", "-fPIC", "-o", so_path]'
+          if wheel.version != "3.6.0.post2" or original.count(flags) != 1:
+              raise SystemExit("Unexpected Triton Ascend host compiler flags for the Torch 2.14 trial")
+          launcher.write_text(original.replace(flags, flags.replace("c++17", "c++20")), encoding="utf-8")
+          PY
+          printf 'TRITON_CACHE_DIR=%s\n' "$(mktemp -d "$RUNNER_TEMP/triton-torch214.XXXXXX")" >> "$GITHUB_ENV"
+
+      - name: Build the pinned XLite wheel for the PR Torch runtime
+        if: ${{ steps.torch-214.outcome == 'success' && contains(matrix.group.tests, '/test_xlite.py') }}
+        run: |
+          set -eo pipefail
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set -u
+
+          build_dir=$(mktemp -d "$RUNNER_TEMP/xlite-torch214.XXXXXX")
+          git clone --depth 1 --branch 0.2.0rc5 https://gitcode.com/openeuler/GVirt.git "$build_dir/source"
+          test "$(git -C "$build_dir/source" rev-parse HEAD)" = 4cbf60df29fa6bdcdbca171f5ece2443b6ddefdd
+          uv pip install build 'cmake>=3.22.0' 'pybind11>=3.0.0' 'setuptools>=64.0.0,<82.0.0' 'setuptools-scm>=8.0.0'
+
+          python3 - "$build_dir/source/xlite" <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          edits = (
+              ('pyproject.toml', 'torch>=2.5.1,<=2.10.0', 'torch==2.14.0+cpu', 1),
+              ('CMakeLists.txt', '-std=c++17', '-std=c++20', 2),
+              ('setup.py', 'str(build_temp), "-j"]', 'str(build_temp), "-j", "8"]', 1),
+          )
+          for name, old, new, expected in edits:
+              path = root / name
+              source = path.read_text(encoding='utf-8')
+              if source.count(old) != expected:
+                  raise SystemExit(f'Unexpected XLite build input in {name}')
+              path.write_text(source.replace(old, new), encoding='utf-8')
+          PY
+
+          SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0rc5 python3 -m build --wheel --no-isolation \
+            --outdir "$build_dir/dist" "$build_dir/source/xlite"
+          wheels=("$build_dir"/dist/xlite-0.2.0rc5-*.whl)
+          test "${#wheels[@]}" -eq 1
+          test -f "${wheels[0]}"
+          uv pip install --no-deps --reinstall "${wheels[0]}"
+          python3 -c 'import torch; import torch_npu; from xlite._C import Model; print(torch.__version__, Model)'
 
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
@@ -362,6 +468,28 @@ jobs:
           uv pip install --no-deps flash-linear-attention-npu-a3==26.11.0.dev20261126
           uv pip install -e .
 
+      - name: Record the PR-specific Torch runtime
+        if: ${{ steps.torch-214.outcome == 'success' }}
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: ${{ matrix.group.npu_type == 'cpu' && '0' || '1' }}
+          NPU_TYPE: ${{ matrix.group.npu_type }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from importlib.metadata import version
+
+          import torch
+          from torch._custom_class_base import CustomClassBase
+
+          assert torch.__version__ == "2.14.0+cpu", torch.__version__
+          assert version("torch-npu") == "2.14.0", version("torch-npu")
+          print(f"torch {torch.__version__}; {CustomClassBase.__name__}")
+          if os.environ["NPU_TYPE"] != "cpu":
+              import torch_npu
+
+              print(f"torch_npu {torch_npu.__version__}; devices {torch.npu.device_count()}")
+          PY
+
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
         run: |
@@ -374,6 +502,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          CI_CONTINUE_SELECTED_TESTS_ON_ERROR: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && contains(github.event.pull_request.labels.*.name, 'main2main') }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then

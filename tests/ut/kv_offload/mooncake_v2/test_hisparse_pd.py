@@ -5,8 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
     _HiSparsePDWorker,
     _HiSparsePullThread,

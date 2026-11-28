@@ -22,10 +22,10 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
+from vllm_ascend.core.kv_cache_compat import SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     GET_META_MSG,
     MooncakeBaseConnectorScheduler,

@@ -29,6 +29,7 @@ from tests.e2e.pull_request.four_card.test_kimi_k3 import (
     run_k3_mla_pd_tp2,
     run_k3_mtp_image_tp4,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.e2e_model("Kimi-K3")
 
@@ -68,8 +69,12 @@ class KimiRecoverSSMWorker:
     model_runner: Any
 
     def kimi_cache_block_size(self):
+        from vllm_ascend.utils import vllm_version_is
+
         groups = self.model_runner.kv_cache_config.kv_cache_groups
-        return math.lcm(*(group.kv_cache_spec.block_size for group in groups))
+        if vllm_version_is("0.34.0"):
+            return math.lcm(*(group.kv_cache_spec.block_size for group in groups))
+        return math.lcm(*(group.block_size for group in groups))
 
     def _kimi_recoverssm_builders(self):
         from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
@@ -178,7 +183,7 @@ def test_kimi_recoverssm_tp4(k3_models, k31_models, family, graph, prefix_cachin
         worker_extension_cls=f"{__name__}.KimiRecoverSSMWorker",
         use_replayssm=True,
         enable_prefix_caching=prefix_caching,
-        mamba_cache_mode="align" if prefix_caching else "none",
+        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.34.0") else {}),
         enforce_eager=not graph,
     )
     if prefix_caching:

@@ -12,26 +12,32 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import replay_boundaries
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock, eagle_proof_margin
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 _REACHABLE_MASK_CACHE_SIZE = 32
-_REPLAY_HAS_HASH_LOOKAHEAD = "num_hash_lookahead_tokens" in inspect.signature(replay_boundaries).parameters
 
 # kwargs every reachable_block_mask implementation must accept. Used when the
 # manager's signature cannot be introspected.
@@ -85,10 +91,13 @@ class ExternalCachedBlockPool:
         self,
         hash_block_size: int,
         exists: set[tuple[int, bytes]] | None = None,
+        *,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
@@ -128,6 +137,7 @@ class AscendStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -138,7 +148,8 @@ class AscendStoreCoordinator:
         self.kv_cache_groups = kv_cache_groups
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
-        self.use_eagle = use_eagle
+        self.use_eagle = vllm_version_is("0.34.0") and use_eagle
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.retention_interval = retention_interval
         # Internal capability resolved from Core's cache plan, never an extra
         # connector option. IO still addresses physical pages.
@@ -146,7 +157,7 @@ class AscendStoreCoordinator:
         self.mamba_group_ids = {
             group_id
             for group_id, group in enumerate(kv_cache_groups)
-            if isinstance(_unwrap_spec(group.kv_cache_spec), MambaSpec)
+            if isinstance(_unwrap_spec(get_group_layout(group)), MambaSpec)
         }
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
@@ -159,8 +170,10 @@ class AscendStoreCoordinator:
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
-        self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
-        if use_eagle and not self.eagle_group_ids:
+        self.eagle_group_ids: set[int] = set()
+        if vllm_version_is("0.34.0"):
+            self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
+        if self.use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
@@ -178,15 +191,17 @@ class AscendStoreCoordinator:
         self.group_effective_specs: list[KVCacheSpec] = []
 
         for group_id, group in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(group.kv_cache_spec)
+            spec = _unwrap_spec(get_group_layout(group))
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
-            manager_cls = _get_manager_class(spec)
+            release = vllm_version_is("0.34.0")
+            manager_cls = _get_manager_class(spec) if release else group.manager_cls
 
             for existing_spec, group_ids, existing_cls in attention_groups:
-                if existing_spec == effective_spec:
+                same_policy = release or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                if existing_spec == effective_spec and same_policy:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
                     group_ids.append(group_id)
                     break
@@ -207,16 +222,20 @@ class AscendStoreCoordinator:
         self.eagle_reachable_group_ids: set[int] = {
             group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
         }
-        self.eagle_proof_margin_by_group = {
-            group_id: eagle_proof_margin(
-                spec.block_size,
-                self.hash_block_size,
-                self.enable_partial_hash_hits and getattr(manager_cls, "supports_fine_grained_hash_lookup", False),
-            )
-            for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups)
-            if index in self.eagle_attn_group_indices and not isinstance(spec, MambaSpec)
-            for group_id in group_ids
-        }
+        self.eagle_proof_margin_by_group: dict[int, int] = (
+            {
+                group_id: eagle_proof_margin(
+                    spec.block_size,
+                    self.hash_block_size,
+                    self.enable_partial_hash_hits and getattr(manager_cls, "supports_fine_grained_hash_lookup", False),
+                )
+                for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups)
+                if index in self.eagle_attn_group_indices and not isinstance(spec, MambaSpec)
+                for group_id in group_ids
+            }
+            if vllm_version_is("0.34.0")
+            else {}
+        )
 
     def find_longest_cache_hit(
         self,
@@ -262,7 +281,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size),
+            ExternalCachedBlockPool(self.hash_block_size, num_hash_lookahead_tokens=self.num_hash_lookahead_tokens),
             apply_eagle=False,
         )
         return masks
@@ -280,23 +299,20 @@ class AscendStoreCoordinator:
         # Stores retain the request's replay checkpoint. Lookups must probe
         # every possible checkpoint: a shorter request may have published a
         # boundary that is not the current request's replay/segment boundary.
-        reachable_boundaries = (
-            replay_boundaries(
+        reachable_boundaries: Sequence[int]
+        if num_prompt_tokens is None:
+            reachable_boundaries = range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
+        elif vllm_version_is("0.34.0"):
+            reachable_boundaries = replay_boundaries(
                 num_prompt_tokens,
                 self.lcm_block_size,
                 use_eagle=bool(self.eagle_reachable_group_ids),
-                **({"num_hash_lookahead_tokens": 0} if _REPLAY_HAS_HASH_LOOKAHEAD else {}),
             )
-            if num_prompt_tokens is not None
-            else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
-        )
-        if num_prompt_tokens is not None and not self.enable_partial_hash_hits:
-            # Whole-page lookup uses apply_eagle=False and trims the final
-            # block in the scheduler. Applying Core's replay drop here too
-            # moves sparse SWA saves one LCM below the lookup boundary.
-            # Also retain Core's lower boundary for callers doing the drop
-            # themselves; the two read entry points must both be recoverable.
-            reachable_boundaries = tuple(sorted({*reachable_boundaries, max(0, num_prompt_tokens - 1)}))
+            if not self.enable_partial_hash_hits:
+                # Whole-page lookups apply the EAGLE trim in the scheduler.
+                reachable_boundaries = tuple(sorted({*reachable_boundaries, max(0, num_prompt_tokens - 1)}))
+        else:
+            reachable_boundaries = replay_boundaries(num_prompt_tokens, self.num_hash_lookahead_tokens)
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
             if group_id not in self.cacheable_group_ids:
@@ -306,14 +322,19 @@ class AscendStoreCoordinator:
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
-            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            group = self.kv_cache_groups[group_id]
+            manager_cls = (
+                _get_manager_class(_unwrap_spec(get_group_layout(group)))
+                if vllm_version_is("0.34.0")
+                else group.manager_cls
+            )
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
-                kv_cache_spec=spec,
-                use_eagle=group_id in self.eagle_reachable_group_ids,
+                **self._manager_layout_args(group_id, spec),
+                **({"use_eagle": group_id in self.eagle_reachable_group_ids} if vllm_version_is("0.34.0") else {}),
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
                 reachable_boundaries=reachable_boundaries,
@@ -397,7 +418,9 @@ class AscendStoreCoordinator:
         _, hit_length = self.find_longest_cache_hit(
             hit_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size, exists),
+            ExternalCachedBlockPool(
+                self.hash_block_size, exists, num_hash_lookahead_tokens=self.num_hash_lookahead_tokens
+            ),
             apply_eagle=False,
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
@@ -408,6 +431,11 @@ class AscendStoreCoordinator:
         # when resolving each group's block-size view.
         return cast(BlockHashList, block_hashes)
 
+    def _manager_layout_args(self, group_id: int, spec: KVCacheSpec) -> dict[str, Any]:
+        if vllm_version_is("0.34.0"):
+            return {"kv_cache_spec": spec}
+        return {"block_size": spec.block_size, "manager_config": self.kv_cache_groups[group_id].manager_config}
+
     def _find_hit_blocks(
         self,
         block_hashes: Sequence[BlockHash],
@@ -416,7 +444,7 @@ class AscendStoreCoordinator:
         *,
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
+        eagle_indices = self.eagle_attn_group_indices if apply_eagle and vllm_version_is("0.34.0") else set()
         alignment_tokens = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
@@ -427,8 +455,8 @@ class AscendStoreCoordinator:
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
-                kv_cache_spec=spec,
-                drop_eagle_block=0 in eagle_indices,
+                **self._manager_layout_args(group_ids[0], spec),
+                **({"drop_eagle_block": 0 in eagle_indices} if vllm_version_is("0.34.0") else {}),
                 alignment_tokens=alignment_tokens,
             )
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
@@ -466,8 +494,8 @@ class AscendStoreCoordinator:
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
-                    kv_cache_spec=spec,
-                    drop_eagle_block=drop_eagle_block,
+                    **self._manager_layout_args(group_ids[0], spec),
+                    **({"drop_eagle_block": drop_eagle_block} if vllm_version_is("0.34.0") else {}),
                     alignment_tokens=alignment_tokens,
                 )
                 if drop_eagle_block:

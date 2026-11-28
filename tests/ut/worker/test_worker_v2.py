@@ -6,14 +6,12 @@ import pytest
 import torch
 from vllm.config import AttentionConfig, CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -365,6 +363,7 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
             "linear_attn": mamba_spec,
         }
     )
+    worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(worker.get_kv_cache_spec())
     for use_sparse in (False, True):
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,

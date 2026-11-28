@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Consumer-specific V4.1 metadata and shared-buffer regressions."""
 
+from dataclasses import fields
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -203,9 +204,9 @@ class TestSharedPCPMetadata:
         common = _batch(2, 0, "prefill").local
         common = SimpleNamespace(
             **{
-                name: value
-                for name, value in vars(common).items()
-                if name not in {"attn_state", "is_prefilling", "causal"}
+                field.name: getattr(common, field.name)
+                for field in fields(common)
+                if field.name not in {"attn_state", "is_prefilling", "causal"}
             }
         )
         metadata = owner._global_builder.build(0, common)

@@ -48,6 +48,7 @@ def runner(buffers):
 def _make_graph_manager(buffers, mode, uniform, capture_size):
     manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
     manager.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=buffers.input_ids.numel()),
         speculative_config=None,
         cache_config=SimpleNamespace(use_kda_recoverssm=False),
         uniform_decode_query_len=uniform,
@@ -336,6 +337,7 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     # The bare instance bypasses __init__, so mirror the upstream default that
     # prepare_attn now consults for the aligned mamba cache path.
     state._align_mode = False
+    state.prefix_caching = False
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )

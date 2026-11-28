@@ -335,6 +335,8 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    # A3 needs direct host submission for model ACL graph capture with TorchNPU 2.14.
+    aclgraph_capture_requires_direct_host_submission: bool = False
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
     minimax_m3_gbsa_bf16_softmax_precision: int = 0
@@ -452,6 +454,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            aclgraph_capture_requires_direct_host_submission=True,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,

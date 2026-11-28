@@ -116,9 +116,12 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # a subsequent contiguous() would otherwise materialize ND again.
         # This also covers dummy loading, where weight_loader never runs.
         if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
+            weight = layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            if vllm_version_is("0.34.0"):
+                layer.weight.data = weight
+            else:
+                # Direct reload restores the 2D view on the storage captured by ACLGraph.
+                replace_parameter(layer, "weight", weight)
 
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
@@ -308,12 +311,12 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         )
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        # #66784's pad-fill helpers only exist on the verified main revision.
-        if not vllm_version_is("0.34.0"):
-            for name in self.padding_fill_params():
-                param = getattr(self, name)
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
                 self._zero_output_padding(param)
-                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True})
 
     def forward(
         self,

@@ -165,10 +165,17 @@ class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraph
                         num_reqs, num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cg_mode
                     )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
+                # The parent now passes FULL while recording a full graph.
+                # Record the draft steps directly; FULL on this descriptor
+                # would make _multi_step_decode replay the unfinished graph.
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
-                    BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
+                    BatchExecutionDescriptor(
+                        cg_mode=CUDAGraphMode.NONE if cg_mode == CUDAGraphMode.FULL else cg_mode,
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                    ),
                     num_tokens_across_dp,
                     seq_lens_cpu_upper_bound,
                     # vLLM #60335 added `num_speculative_steps` on main.

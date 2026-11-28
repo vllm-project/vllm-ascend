@@ -23,6 +23,7 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _scheduler(
@@ -129,8 +130,8 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
         num_new_tokens=4800,
     )
 
-    # 4800 rounds down to 4608; EAGLE keeps one 384-token verifier block.
-    assert result == 4224
+    # Release drops one verifier block. Native lookup uses the hash boundary.
+    assert result == (4224 if vllm_version_is("0.34.0") else 4608)
 
 
 def test_producer_splits_window_after_external_cache_hit():
@@ -192,7 +193,7 @@ def test_sparse_index_kpool_stops_at_last_cacheable_boundary():
         num_new_tokens=100,
     )
 
-    assert result == 36
+    assert result == (36 if vllm_version_is("0.34.0") else 100)
 
 
 def test_sparse_index_kpool_does_not_round_small_chunk_to_zero():
@@ -263,6 +264,7 @@ def _fake_original_recording(observed: dict):
 
 
 def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda _: True)
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
@@ -276,6 +278,7 @@ def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
 
 
 def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda _: True)
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=None)

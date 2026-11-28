@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
@@ -185,6 +186,7 @@ def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
     scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
+    scheduler.kv_cache_groups = [KVCacheGroupSpec(["layer.0"], full), KVCacheGroupSpec(["layer.2"], sliding)]
     assert scheduler._needs_prefill_token_truncation() is True
 
 

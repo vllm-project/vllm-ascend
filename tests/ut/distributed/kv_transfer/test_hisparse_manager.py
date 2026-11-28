@@ -131,8 +131,9 @@ def test_core_pool_plan_selects_memfabric_allocator(
     import vllm.config as core_config
     import vllm.distributed as distributed
     from vllm.v1.hisparse import layout, runtime
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
 
+    from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.hisparse.host_pool import AscendHiSparseOffloadManager
 
@@ -145,7 +146,10 @@ def test_core_pool_plan_selects_memfabric_allocator(
     monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
     alignment = runtime.SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     page_bytes = alignment + alignment // 2
-    source_group = NS(host_resident=True, kv_cache_spec=NS(page_size_bytes=page_bytes, block_size=128))
+    source_spec = MLAAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=1, dtype=torch.int8, page_size_padded=page_bytes
+    )
+    source_group = KVCacheGroupSpec(["source"], source_spec, host_resident=True)
     plan = layout.create_hisparse_layout(config, [source_group], host_budget=7 * alignment)
     assert plan.shared_host_pool is shared
     assert plan.host_block_stride == (2 * alignment if shared else page_bytes)

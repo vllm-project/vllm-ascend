@@ -22,6 +22,7 @@ Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py`
 """
 
 import os
+from typing import Any
 
 import pytest
 from vllm import SamplingParams
@@ -30,6 +31,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 from tests.e2e.pull_request.utils import assert_valid_generation_outputs
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -51,6 +53,7 @@ def _read_mtp_counters(metrics):
 
 
 def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
+    mamba_options: dict[str, Any] = {"mamba_cache_mode": "none"} if vllm_version_is("0.34.0") else {}
     with VllmRunner(
         model_name,
         dtype="bfloat16",
@@ -60,7 +63,7 @@ def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
         distributed_executor_backend="mp",
         disable_log_stats=False,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
+        **mamba_options,
         mamba_ssm_cache_dtype="float32",
         use_replayssm=use_replayssm,
         speculative_config={

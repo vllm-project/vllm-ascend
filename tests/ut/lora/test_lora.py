@@ -1,3 +1,4 @@
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -6,6 +7,7 @@ import torch
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
@@ -23,6 +25,7 @@ from vllm_ascend.lora.fused_moe import (
     sync_lora_context,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_base_layer(*, num_local_experts=256, is_act_and_mul=True, shared_experts=None, use_ep=False):
@@ -94,10 +97,14 @@ def test_build_lora_context_propagates_ep_flag() -> None:
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
     ):
         wrapper = AscendFusedMoEWithLoRA(_make_base_layer(use_ep=True))
-    context = SimpleNamespace()
+    context = MoELoRAContext(**{field.name: Mock() for field in fields(MoELoRAContext) if field.init})
     with patch.object(FusedMoEWithLoRA, "_build_lora_context", return_value=context):
         out = wrapper._build_lora_context()
-    assert out is context
+    if vllm_version_is("0.34.0"):
+        assert out is context
+    else:
+        assert isinstance(out, MoELoRAContext)
+        assert all(getattr(out, field.name) is getattr(context, field.name) for field in fields(MoELoRAContext))
     assert out.use_ep is True
 
 

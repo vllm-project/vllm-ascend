@@ -9,15 +9,15 @@ reshape (attn_utils._reshape_kv_cache_v2) -> bind (patch_bind_kv_cache).
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.kv_cache_interface import (
+
+import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
+from vllm_ascend.core.kv_cache_compat import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
-import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,

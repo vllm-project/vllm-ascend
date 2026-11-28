@@ -17,20 +17,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map
@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -260,7 +261,7 @@ def test_raw_sequence_lifecycle(
     assert isinstance(pool.kv_recv_thread, KVCacheStoreRecvingThread) == load_async
     assert pool.hash_block_size == hash_size == (prefix_unit or 128)
     assert pool.cache_transfer_granularity == 128
-    assert pool.use_eagle == (speculative_method is not None)
+    assert pool.use_eagle == (vllm_version_is("0.34.0") and speculative_method is not None)
     scheduler = Scheduler(
         config,
         plan,
@@ -268,10 +269,17 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
-    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
-    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
-    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
-    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens
+    if vllm_version_is("0.34.0"):
+        assert config.num_hash_lookahead_tokens == 0
+        assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
+    else:
+        expected_lookahead = (
+            0 if speculative_method is None else config.speculative_config.speculator_config.num_hash_lookahead_tokens
+        )
+        assert config.num_hash_lookahead_tokens == expected_lookahead
+        if pool.cache_coordinator is not None:
+            assert pool.cache_coordinator.num_hash_lookahead_tokens == expected_lookahead
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):
@@ -280,7 +288,7 @@ def test_raw_sequence_lifecycle(
             prompt_token_ids=tokens,
             sampling_params=SamplingParams(max_tokens=10 if speculative_method else 2),
             pooling_params=None,
-            block_hasher=get_request_block_hasher(hash_size, sha256),
+            block_hasher=get_request_block_hasher(hash_size, sha256, config.num_hash_lookahead_tokens),
         )
         scheduler.add_request(request)
         seen_load = False
@@ -390,7 +398,15 @@ def test_raw_sequence_lifecycle(
         return list(request.all_token_ids)
 
     try:
-        run_request("producer", producer_tokens, 0)
+        produced = run_request("producer", producer_tokens, 0)
+        lookahead = config.num_hash_lookahead_tokens
+        matching_long_prompt = produced[:513] if lookahead else list(range(513))
+        # A hash-dependent page ending at the prompt boundary becomes
+        # available after prefill, when its lookahead token is known.
+        saved_prefix = len(producer_tokens) if save_decode_cache else (len(producer_tokens) - lookahead) // 128 * 128
+        can_reuse_partial_page = not has_private_state and (
+            not speculative_method or (speculative_method == "dspark" and not vllm_version_is("0.34.0"))
+        )
         saved = dict(MemoryBackend.payloads)
         assert saved
         # Clear the real local prefix cache; the next request must use the Store.
@@ -417,12 +433,17 @@ def test_raw_sequence_lifecycle(
             pool.m_store.loads.clear()
             for _, _, _, tensor in cache_entries(plan, caches):
                 tensor.fill_(-3)
-            tokens = list(range(length))
+            tokens = matching_long_prompt.copy() if length == 513 else list(range(length))
             if fork is not None:
                 tokens[fork] += 1000
-            if not has_private_state and not speculative_method and fork is None:
-                # Legacy full hits still reserve only the final token.
+                # A divergence in the hash lookahead also invalidates the
+                # preceding block ending at that token boundary.
+                if hit and lookahead and fork % 128 < lookahead:
+                    hit = max(0, hit - 128)
+            if can_reuse_partial_page and fork is None:
+                # A full stored page can be loaded while reserving the final token.
                 hit = {125: 0, 126: 0, 127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
+            hit = min(hit, saved_prefix)
             generated = run_request(f"consumer-{case}", tokens, hit)
             assert bool(pool.m_store.loads) == bool(hit)
             if speculative_method and length in (125, 126):
@@ -436,15 +457,15 @@ def test_raw_sequence_lifecycle(
         assert scheduler.reset_prefix_cache()
         MemoryBackend.payloads = dict(saved)
         seed_length = 256 if speculative_method else 128
-        seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
+        seed_hit = seed_length - 1 if can_reuse_partial_page else seed_length - 128
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        # vLLM main caches speculative blocks in the base Scheduler; only the
-        # pure full-attention dspark layout sees the doubled local prefix hit.
+        # vLLM main caches dspark blocks in the base Scheduler for hybrid
+        # layouts as well as the pure full-attention layout.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if speculative_method == "dspark" and only_full_attention:
+        if speculative_method == "dspark" and (only_full_attention or not vllm_version_is("0.34.0")):
             mixed_local = 256
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
+        run_request("mixed-local-remote", matching_long_prompt, saved_prefix, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}

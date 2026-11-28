@@ -75,7 +75,9 @@ def test_initialization_requires_speculative_decoding():
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
     ],
 )
-def test_initialization_rejects_unsupported_execution(section, field, value, message):
+def test_initialization_rejects_unsupported_execution(section, field, value, message, monkeypatch):
+    if field in ("mamba_cache_mode", "enable_prefix_caching"):
+        monkeypatch.setattr("vllm_ascend.models.glm5next.recoverssm_config.vllm_version_is", lambda _: True)
     config = make_config()
     setattr(getattr(config, section), field, value)
     with pytest.raises(ValueError, match=message):

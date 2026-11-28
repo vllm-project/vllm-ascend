@@ -9,14 +9,20 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+)
 
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -107,7 +113,7 @@ class PreemptOffloadWorker:
         mamba_layers: dict[str, MambaSpec] = {}
         for group in self.kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
-                layer_spec = group.kv_cache_spec
+                layer_spec = get_group_layout(group)
                 if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                     layer_spec = layer_spec.kv_cache_specs[layer_name]
                 if isinstance(layer_spec, MambaSpec):
@@ -229,8 +235,7 @@ class PreemptOffloadWorker:
             return False
         if spec.mamba_type == MambaAttentionBackendEnum.SHORT_CONV:
             return True
-        if spec.mamba_type in (
-            MambaAttentionBackendEnum.MAMBA1,
+        if (vllm_version_is("0.34.0") and spec.mamba_type == MambaAttentionBackendEnum.MAMBA1) or spec.mamba_type in (
             MambaAttentionBackendEnum.MAMBA2,
             MambaAttentionBackendEnum.GDN_ATTN,
         ):

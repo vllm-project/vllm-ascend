@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -43,10 +45,11 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("Kimi RecoverSSM does not support stochastic rounding")
     cache = vllm_config.cache_config
-    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
-    if cache.mamba_cache_mode != expected_cache_mode:
-        raise ValueError(
-            f"Kimi RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
-        )
+    if vllm_version_is("0.34.0"):
+        expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+        if cache.mamba_cache_mode != expected_cache_mode:
+            raise ValueError(
+                f"Kimi RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+            )
     if vllm_config.kv_transfer_config is not None and is_conv_state_dim_first():
         raise ValueError("Kimi RecoverSSM KV transfer requires SD convolution cache layout")

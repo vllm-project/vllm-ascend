@@ -13,14 +13,16 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     pytest.importorskip("vllm.v1.hisparse.backend")
     pytest.importorskip("vllm.v1.hisparse.binding")
     from vllm.v1.hisparse import binding
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, KVCacheTensor, SparseCacheRole
+    from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheTensor, SparseCacheRole
 
+    from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -33,10 +35,21 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     indexer = AscendSFAIndexerCacheSpec(
         block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, cache_role=SparseCacheRole.INDEXER
     )
-    groups = [
-        KVCacheGroupSpec(["source"], source, host_resident=True),
-        KVCacheGroupSpec(["indexer"], indexer),
-    ]
+    if vllm_version_is("0.34.0"):
+        groups = [
+            KVCacheGroupSpec(["source"], source, host_resident=True),
+            KVCacheGroupSpec(["indexer"], indexer),
+        ]
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheGroupRole
+
+        groups = [
+            KVCacheGroup.from_layers({"source": FullAttentionManager.layer_config(source)}, host_resident=True),
+            KVCacheGroup.from_layers(
+                {"indexer": FullAttentionManager.layer_config(indexer)}, role=KVCacheGroupRole.HISPARSE_INDEXER
+            ),
+        ]
     tensors = [
         KVCacheTensor(3 * page, ["source"], page, page, host_resident=True),
         KVCacheTensor(size, ["indexer"], page, stride, offset=page),

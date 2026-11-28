@@ -68,7 +68,9 @@ def _make_decode(monkeypatch, num_tokens, speculative, quantization, num_heads, 
     impl.sliding_window = None
     impl.fa_quant_layer = quantization != "bf16"
     impl.support_fp8_attention = quantization != "int8"
-    impl.speculative_config = SimpleNamespace(use_eagle=lambda: False) if speculative else None
+    impl.speculative_config = (
+        SimpleNamespace(use_eagle=lambda: False, uses_target_hidden_states=False) if speculative else None
+    )
     impl.layer_name = "layer"
     impl.scale = 1.0
     impl.fak_descale_float = torch.ones(1)

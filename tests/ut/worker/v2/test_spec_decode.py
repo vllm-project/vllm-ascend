@@ -14,6 +14,7 @@ from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, Specu
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
@@ -191,6 +192,10 @@ def test_mtp_routing_uses_actual_native_config(
             ),
         ),
     )
+    if not vllm_version_is("0.34.0") and model_type == "gemma4_mtp":
+        speculative.draft_model_config.speculator_config_class = (
+            "vllm.v1.worker.gpu.spec_decode.gemma4.config.Gemma4MTPSpeculatorConfig"
+        )
     config = SimpleNamespace(speculative_config=speculative)
     if use_310p:
         _install_310p_spec_decode_patch(monkeypatch)

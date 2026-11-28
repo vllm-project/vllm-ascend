@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
-from vllm.model_executor.models.qwen2 import Qwen2MLP
+from vllm.model_executor.models.qwen3 import Qwen3MLP
 from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3DecoderLayer,
     DFlashQwen3ForCausalLM,
@@ -347,7 +347,7 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
                 disable_mlapo=True,
             )
         self.self_attn.causal = causal
-        self.mlp = Qwen2MLP(
+        self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,

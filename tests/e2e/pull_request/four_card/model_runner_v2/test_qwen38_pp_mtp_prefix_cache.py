@@ -12,6 +12,7 @@ import torch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from vllm_ascend.utils import get_mamba_cache_mode
 
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
@@ -23,7 +24,7 @@ class MambaAlignWorker:
 
     def install_align_probe(self):
         runner = self.model_runner
-        assert runner.cache_config.mamba_cache_mode == "align"
+        assert get_mamba_cache_mode(runner.cache_config) == "align"
         if runner.is_last_pp_rank:
             return None
         state = runner.model_state

@@ -729,6 +729,12 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     cmd.Run();
     return y_out;
 }
+
+void sgmv_expand_inplace(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
+                         at::Tensor &y, int64_t slice_offset, int64_t slice_size)
+{
+    (void)sgmv_expand(x, weight, lora_indices, seq_len, y, slice_offset, slice_size);
+}
 #endif
 
 at::Tensor npu_sign_bits_pack(const at::Tensor& input,
@@ -3101,6 +3107,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
+
+    ops.def(
+        "sgmv_expand_inplace(Tensor x, Tensor weight, Tensor lora_indices, Tensor seq_len, Tensor(a!) y,"
+        "                    int slice_offset, int slice_size) -> ()");
+    ops.impl("sgmv_expand_inplace", torch::kPrivateUse1, &vllm_ascend::sgmv_expand_inplace);
 
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"

@@ -223,6 +223,8 @@ def test_mamba_dcp_preserves_tp_state_bytes(
     """DCP must neither drop TP state shards nor apply attention token stripes."""
     backends = SimpleNamespace(MAMBA1="MAMBA1", MAMBA2="MAMBA2", GDN_ATTN="GDN_ATTN")
     monkeypatch.setattr(base_worker, "MambaAttentionBackendEnum", backends)
+    if mamba_type == "MAMBA1":
+        monkeypatch.setattr(base_worker, "vllm_version_is", lambda version: version == "0.34.0")
     monkeypatch.setattr(
         base_worker, "torch", SimpleNamespace(tensor=lambda *args, **kwargs: SimpleNamespace(element_size=lambda: 1))
     )

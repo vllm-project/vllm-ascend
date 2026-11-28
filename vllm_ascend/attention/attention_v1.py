@@ -39,7 +39,9 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+)
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -58,6 +60,9 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
+)
+from vllm_ascend.core.kv_cache_compat import (
+    CrossAttentionSpec,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile

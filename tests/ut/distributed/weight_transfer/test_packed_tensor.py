@@ -34,17 +34,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedIpcChunk,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.packed_tensor"
+_RELEASE_PACKING = vllm_version_is("0.34.0")
+_ALIGNED_CAPACITY = 16
+
+
+def _hccl_stream_count(producer, num_buffers):
+    return num_buffers if producer or _RELEASE_PACKING else num_buffers + 1
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +113,7 @@ def _stub_torch_npu():
         Stream=_FakeNpuStream,
         Event=MagicMock,
         current_device=lambda: 0,
-        current_stream=lambda: active,
+        current_stream=lambda device=None: active,
         synchronize=lambda *a, **kw: None,
         stream=stream_context,
     )
@@ -200,13 +207,13 @@ def test_packed_broadcast_producer_multiple_tensors_one_buffer():
 
 def test_packed_broadcast_producer_splits_when_exceeding_buffer():
     """Tensors larger than ``buffer_size_bytes`` trigger an extra broadcast."""
-    # buffer = 32 bytes (8 float32). Two tensors of 12 floats each (48 bytes)
-    # → first tensor fills past the threshold and triggers a broadcast after it.
+    # Two 48-byte tensors exercise whole-tensor and split-tensor packing.
     tensors = [
         ("a", torch.full((12,), 1.0, dtype=torch.float32)),
         ("b", torch.full((12,), 2.0, dtype=torch.float32)),
     ]
-    group = _make_group_mock()
+    payloads = []
+    group = types.SimpleNamespace(broadcast=lambda tensor, **kwargs: payloads.append(tensor.clone()))
 
     packed_broadcast_producer(
         iterator=iter(tensors),
@@ -216,14 +223,11 @@ def test_packed_broadcast_producer_splits_when_exceeding_buffer():
         buffer_size_bytes=32,
     )
 
-    assert group.broadcast.call_count == 2
-    first_payload = group.broadcast.call_args_list[0].args[0]
-    second_payload = group.broadcast.call_args_list[1].args[0]
-    # First buffer holds only the first tensor (it already exceeds the 32-byte
-    # threshold, so the loop breaks right after appending it).
-    assert torch.equal(first_payload.view(torch.float32), tensors[0][1])
-    # Second buffer holds the second tensor.
-    assert torch.equal(second_payload.view(torch.float32), tensors[1][1])
+    first, second = (tensor for _, tensor in tensors)
+    expected = [first, second] if _RELEASE_PACKING else [first[:8], torch.cat([first[8:], second[:4]]), second[4:]]
+    assert len(payloads) == len(expected)
+    for payload, values in zip(payloads, expected, strict=True):
+        assert torch.equal(payload.view(torch.float32), values)
 
 
 def test_packed_broadcast_producer_empty_iterator():
@@ -246,7 +250,7 @@ def test_packed_broadcast_producer_passes_src_rank():
         group=group,
         src=3,
         post_iter_func=lambda item: item[1],
-        buffer_size_bytes=1,
+        buffer_size_bytes=_ALIGNED_CAPACITY,
     )
     assert group.broadcast.call_args.kwargs.get("src") == 3
 
@@ -338,7 +342,10 @@ def test_packed_broadcast_consumer_handles_multiple_dtypes():
     """Consumer correctly restores tensors of different dtypes from one buffer."""
     f16 = torch.tensor([1.5, 2.5], dtype=torch.float16)
     f32 = torch.tensor([3.0, 4.0], dtype=torch.float32)
-    packed = torch.cat([f16.view(torch.uint8).view(-1), f32.view(torch.uint8).view(-1)])
+    prefix = f16.view(torch.uint8)
+    if not _RELEASE_PACKING:
+        prefix = torch.nn.functional.pad(prefix, (0, _ALIGNED_CAPACITY - prefix.numel()))
+    packed = torch.cat([prefix, f32.view(torch.uint8)])
     group = _make_group_mock()
     group.broadcast = MagicMock(side_effect=lambda t, **kw: t.copy_(packed))
 
@@ -681,7 +688,10 @@ def test_packed_broadcast_consumer_unpacks_multiple_dtypes_in_one_buffer():
     """
     f16 = torch.tensor([1.5, 2.5], dtype=torch.float16)
     i32 = torch.tensor([10, 20, 30], dtype=torch.int32)
-    packed = torch.cat([f16.view(torch.uint8).view(-1), i32.view(torch.uint8).view(-1)])
+    prefix = f16.view(torch.uint8)
+    if not _RELEASE_PACKING:
+        prefix = torch.nn.functional.pad(prefix, (0, _ALIGNED_CAPACITY - prefix.numel()))
+    packed = torch.cat([prefix, i32.view(torch.uint8)])
     group = _make_group_mock()
     group.broadcast = MagicMock(side_effect=lambda t, **kw: t.copy_(packed))
 
@@ -924,10 +934,11 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
     buffers: list[torch.Tensor] = []
     received: list[tuple[str, torch.Tensor]] = []
     if backend == "hccl":
-        group = _make_group_mock()
+        sent = []
+        group = types.SimpleNamespace(broadcast=lambda tensor, **kwargs: sent.append(tensor.clone()))
         packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
-        payloads = iter(call.args[0].clone() for call in group.broadcast.call_args_list)
-        chunk_count = group.broadcast.call_count
+        payloads = iter(sent)
+        chunk_count = len(sent)
 
         def receive(packed, **kwargs):
             packed.copy_(next(payloads))
@@ -951,7 +962,7 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
         assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
         chunk_count = len(chunks)
         chunk = chunks[0]
-        assert isinstance(chunk, PackedIpcChunk)
+        assert isinstance(chunk, NPUPackedIpcChunk)
         with _install_fake_rebuild_npu_tensor(buffers[0]):
             received = packed_npu_ipc_consumer(
                 chunk.ipc_handle,
@@ -972,7 +983,7 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
     return chunk_count
 
 
-@pytest.mark.parametrize("buffer_size", [1, 8, 128])
+@pytest.mark.parametrize("buffer_size", [1, 8, 128] if _RELEASE_PACKING else [16, 32, 128])
 def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size):
     tensors = [
         ("byte", torch.tensor([7], dtype=torch.uint8)),
@@ -981,6 +992,11 @@ def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size
         ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
     ]
     _assert_packed_roundtrip("hccl", tensors, buffer_size)
+
+
+def test_packed_broadcast_roundtrip_with_split_tensor_and_slot_reuse():
+    tensors = [("matrix", torch.arange(48, dtype=torch.float32).reshape(6, 8))]
+    assert _assert_packed_roundtrip("hccl", tensors, 32) == (1 if _RELEASE_PACKING else 6)
 
 
 @pytest.mark.parametrize("empty_only", [False, True])
@@ -1030,14 +1046,16 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
         pytest.raises(ValueError, match="transfer rejected"),
     ):
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, 1)
+            packed_broadcast_producer(
+                iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], _ALIGNED_CAPACITY, 1
+            )
         else:
             packed_broadcast_consumer(
                 iter([("w", ([1], torch.float32))]),
                 group,
                 0,
                 reject_load,
-                4,
+                _ALIGNED_CAPACITY,
                 1,
             )
     assert events == ["error", "drain"]
@@ -1072,7 +1090,7 @@ def test_packed_consumer_waits_for_receive_before_unpacking():
 
     with patch.object(torch.npu, "Stream", return_value=stream):
         packed_broadcast_consumer(
-            iter([("w", ([1], torch.float32))]), types.SimpleNamespace(broadcast=receive), 0, load, 4, 1
+            iter([("w", ([1], torch.float32))]), types.SimpleNamespace(broadcast=receive), 0, load, _ALIGNED_CAPACITY, 1
         )
     assert events == ["receive", "ready", "load"]
 
@@ -1145,7 +1163,7 @@ def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
 def test_packed_hccl_consumer_rejects_negative_shape_before_broadcast():
     group = _make_group_mock()
     with pytest.raises(ValueError, match="negative shape"):
-        packed_broadcast_consumer(iter([("w", ([-1], torch.float32))]), group, 0, MagicMock(), 4)
+        packed_broadcast_consumer(iter([("w", ([-1], torch.float32))]), group, 0, MagicMock(), _ALIGNED_CAPACITY)
     group.broadcast.assert_not_called()
 
 
@@ -1187,9 +1205,13 @@ def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging
     ):
         group = types.SimpleNamespace(broadcast=broadcast)
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 4, num_buffers)
+            packed_broadcast_producer(
+                iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], _ALIGNED_CAPACITY, num_buffers
+            )
         else:
-            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, MagicMock(), 4, num_buffers)
+            packed_broadcast_consumer(
+                iter([("w", ([1], torch.float32))]), group, 0, MagicMock(), _ALIGNED_CAPACITY, num_buffers
+            )
     if logging_error is None or isinstance(logging_error, Exception):
         assert error.value is original_error
     else:
@@ -1229,9 +1251,11 @@ def test_packed_transfer_rejects_nonpositive_capacity(backend, capacity):
 def test_packed_hccl_rejects_nonpositive_buffer_count(producer, num_buffers):
     with pytest.raises(ValueError, match="positive"):
         if producer:
-            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], 4, num_buffers)
+            packed_broadcast_producer(
+                iter([]), _make_group_mock(), 0, lambda item: item[1], _ALIGNED_CAPACITY, num_buffers
+            )
         else:
-            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, num_buffers)
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), _ALIGNED_CAPACITY, num_buffers)
 
 
 @pytest.mark.parametrize("num_buffers", [1, 2, 3])
@@ -1266,7 +1290,10 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
         nonlocal packed_items
         # Another slot can pack while the previous transfer is still pending.
         # A single slot must finish its own transfer before it can be reused.
-        assert bool(pending) == (packed_items > 0 and num_buffers > 1)
+        if _RELEASE_PACKING:
+            assert bool(pending) == (packed_items > 0 and num_buffers > 1)
+        else:
+            assert not active  # Native producer prepares on the caller stream.
         packed_items += 1
         return item[1]
 
@@ -1274,12 +1301,16 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(torch.npu, "stream", side_effect=StreamContext) as context,
-        patch.object(torch.npu, "current_stream", side_effect=lambda: active[-1] if active else streams[0]),
+        patch.object(torch.npu, "current_stream", side_effect=lambda device=None: active[-1] if active else streams[0]),
     ):
-        packed_broadcast_producer(iter((f"w{i}", torch.ones(1)) for i in range(7)), group, 0, prepare, 1, num_buffers)
+        width = 1 if _RELEASE_PACKING else 4
+        capacity = 1 if _RELEASE_PACKING else _ALIGNED_CAPACITY
+        weights = ((f"w{i}", torch.ones(width)) for i in range(7))
+        packed_broadcast_producer(weights, group, 0, prepare, capacity, num_buffers)
     expected = [streams[i % num_buffers] for i in range(7)]
     assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == expected
-    assert [call.args[0] for call in context.call_args_list[:7]] == expected
+    contexts = [call.args[0] for call in context.call_args_list]
+    assert contexts[:7] == expected if _RELEASE_PACKING else contexts[1::2] == expected
     assert active == []
     assert pending == []
     assert packed_items == 7
@@ -1303,6 +1334,8 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
 
     failure = RuntimeError("cleanup failed")
     failures = [failure, second_error, None]
+    if _hccl_stream_count(producer, 3) > len(failures):
+        failures.append(None)
     drained = []
     armed = False
 
@@ -1316,7 +1349,7 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
                 if failures[self.index] is not None:
                     raise failures[self.index]
 
-    streams = [CleanupStream(index) for index in range(3)]
+    streams = [CleanupStream(index) for index in range(len(failures))]
     pinned: list[torch.Tensor] = []
 
     def finish(*args, **kwargs):
@@ -1336,11 +1369,13 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
     ):
         # One tensor below the threshold reaches finally without another slot wait.
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 3)
+            packed_broadcast_producer(
+                iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], _ALIGNED_CAPACITY, 3
+            )
         else:
-            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 3)
+            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, _ALIGNED_CAPACITY, 3)
     assert error.value is expected
-    assert drained[-3:] == [0, 1, 2]
+    assert drained[-len(streams) :] == list(range(len(streams)))
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
     log_error.assert_called_once()
@@ -1362,9 +1397,9 @@ def test_packed_drain_failure_does_not_retain_unused_empty_slots(producer):
         pytest.raises(RuntimeError, match="stream unavailable"),
     ):
         if producer:
-            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], 4, 2)
+            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], _ALIGNED_CAPACITY, 2)
         else:
-            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, 2)
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), _ALIGNED_CAPACITY, 2)
     assert pinned == []
 
 
@@ -1376,7 +1411,7 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
-@pytest.mark.parametrize("buffer_size", [4, 32], ids=["full-chunk", "final-chunk"])
+@pytest.mark.parametrize("buffer_size", [4, 32] if _RELEASE_PACKING else [32, 48], ids=["full-chunk", "final-chunk"])
 def test_packed_consumer_does_not_retry_receive_when_loader_raises_stop_iteration(buffer_size):
     failure = StopIteration("loader failed")
     loaded = []
@@ -1403,7 +1438,8 @@ def test_packed_consumer_does_not_retry_receive_when_loader_raises_stop_iteratio
 @pytest.mark.parametrize("producer", [False, True], ids=["consumer", "producer"])
 @pytest.mark.parametrize("num_buffers", [1, 3])
 def test_packed_normal_path_drains_every_slot_stream(producer, num_buffers):
-    streams = [_FakeNpuStream() for _ in range(num_buffers)]
+    stream_count = _hccl_stream_count(producer, num_buffers)
+    streams = [_FakeNpuStream() for _ in range(stream_count)]
     before_drain: list[int] = []
 
     def last_work(*args, **kwargs):
@@ -1416,7 +1452,7 @@ def test_packed_normal_path_drains_every_slot_stream(producer, num_buffers):
                 types.SimpleNamespace(broadcast=last_work),
                 0,
                 lambda item: item[1],
-                8,
+                _ALIGNED_CAPACITY,
                 num_buffers,
             )
         else:
@@ -1425,10 +1461,10 @@ def test_packed_normal_path_drains_every_slot_stream(producer, num_buffers):
                 _make_group_mock(),
                 0,
                 last_work,
-                8,
+                _ALIGNED_CAPACITY,
                 num_buffers,
             )
-    assert len(before_drain) == num_buffers
+    assert len(before_drain) == stream_count
     assert all(stream.sync_calls > count for stream, count in zip(streams, before_drain))
 
 
@@ -1444,7 +1480,7 @@ def test_incompatible_upstream_stream_api_fails_before_collective(monkeypatch, c
         monkeypatch.setattr(upstream, "_get_streams", lambda device, count: ())
     group = MagicMock()
     with pytest.raises(RuntimeError, match="Incompatible vLLM packed stream"):
-        packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 2)
+        packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], _ALIGNED_CAPACITY, 2)
     group.broadcast.assert_not_called()
 
 
@@ -1454,9 +1490,13 @@ def test_overlapping_hccl_transfer_is_rejected_and_guard_recovers(producer):
 
     def transfer():
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 2)
+            packed_broadcast_producer(
+                iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], _ALIGNED_CAPACITY, 2
+            )
         else:
-            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, lambda weights: None, 8, 2)
+            packed_broadcast_consumer(
+                iter([("w", ([1], torch.float32))]), group, 0, lambda weights: None, _ALIGNED_CAPACITY, 2
+            )
 
     def overlapping_broadcast(*args, **kwargs):
         with pytest.raises(RuntimeError, match="must be serialized across communicators"):
@@ -1469,7 +1509,7 @@ def test_overlapping_hccl_transfer_is_rejected_and_guard_recovers(producer):
             types.SimpleNamespace(broadcast=overlapping_broadcast),
             0,
             lambda item: item[1],
-            8,
+            _ALIGNED_CAPACITY,
             1,
         )
     group.broadcast.assert_not_called()

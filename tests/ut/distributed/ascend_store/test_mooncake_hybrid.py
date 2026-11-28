@@ -14,17 +14,17 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
@@ -41,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
+from vllm_ascend.utils import vllm_version_is
 
 
 class MemoryRangeStore:
@@ -148,7 +149,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         if extra_entry:
             groups[1].layer_names.append("model.layers.2.c4_indexer")
         if private_tail:
-            groups[2].kv_cache_spec = MambaSpec(
+            groups[2].kv_cache_spec = LegacyMambaSpec(
                 block_size=16,
                 shapes=((4,), (4,)),
                 dtypes=("uint8", "uint8"),
@@ -165,7 +166,14 @@ class TestMooncakeHybrid(unittest.TestCase):
 
             name = "model.layers.2.indexer.tail_cache"
             tail = PrivateTailSpec(block_size=7, num_kv_heads=1, head_size=1, dtype="uint8")
-            groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
+            if vllm_version_is("0.34.0"):
+                groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
+            else:
+                from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+                from vllm.v1.kv_cache_interface import KVCacheGroup
+
+                layer = SlidingWindowManager.layer_config(tail, sliding_window=7, bounded_replay=True)
+                groups.append(KVCacheGroup.from_layers({name: layer}, enable_kv_transfer=False))
         config = KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.BaseKVPoolWorker._build_cache_coordinator",
@@ -295,14 +303,16 @@ class TestMooncakeHybrid(unittest.TestCase):
 
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [True] * len(keys)
         for eagle in (False, True):
-            scheduler.use_eagle = eagle
+            release = vllm_version_is("0.34.0")
+            scheduler.use_eagle = release and eagle
+            scheduler.vllm_config.num_hash_lookahead_tokens = 2 if eagle else 0
             request = SimpleNamespace(
                 request_id="full-hit", num_tokens=64, prompt_token_ids=list(range(64)), block_hashes=[b"h"] * 4
             )
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64 if eagle else 32)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64 if release and eagle else 32)
         # The full hit is a write-skip extent, not the recurrent resume point.
         worker.use_eagle = False
         request = ReqMeta(

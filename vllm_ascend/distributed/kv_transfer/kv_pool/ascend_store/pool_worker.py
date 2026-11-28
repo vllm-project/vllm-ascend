@@ -24,11 +24,14 @@ from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -85,6 +88,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 DRAIN_QUEUED_SAVES_TIMEOUT_S = 60.0
@@ -226,8 +230,11 @@ class BaseKVPoolWorker(ABC):
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
-        self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.use_eagle = False
+        if vllm_version_is("0.34.0"):
+            use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+            self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.num_hash_lookahead_tokens = 0 if vllm_version_is("0.34.0") else vllm_config.num_hash_lookahead_tokens
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
@@ -463,6 +470,7 @@ class BaseKVPoolWorker(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -471,7 +479,7 @@ class BaseKVPoolWorker(ABC):
 
         group_uses_align_state: list[bool] = []
         for group in self.kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
+            kv_cache_spec = get_group_layout(group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 specs = [kv_cache_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names]
             else:
@@ -488,7 +496,7 @@ class BaseKVPoolWorker(ABC):
         if not use_hybrid or kv_cache_config is None:
             return False
         for group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
+            kv_cache_spec = get_group_layout(group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.kv_cache_specs.values()):
                     return True
@@ -710,7 +718,7 @@ class BaseKVPoolWorker(ABC):
         result = dict(kv_caches)
         copy_funcs = None
         for group in self.kv_cache_config.kv_cache_groups:
-            specs = group.kv_cache_spec
+            specs = get_group_layout(group)
             for name in group.layer_names:
                 spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
                 if not isinstance(spec, MambaSpec):

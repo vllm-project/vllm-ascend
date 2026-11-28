@@ -45,6 +45,7 @@ from vllm_ascend.models.qwen_gdn_recoverssm import (
     gdn_mamba_state_shape_from_config,
 )
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -414,10 +415,24 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     # patch_idex_310.py.
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
+    if not vllm_version_is("0.34.0"):
+        _gdn_replayssm_unsupported_reason = _GDN_PATCH_TARGET._replayssm_unsupported_reason
+
+        def _ascend_gdn_replayssm_unsupported_reason(vllm_config: VllmConfig, beta_scale: float = 1.0) -> str | None:
+            # The native ReplaySSM path only supports standard decode. Ascend
+            # uses a separate RecoverSSM kernel for validated speculative config.
+            if beta_scale == 1.0 and _uses_gdn_recoverssm(vllm_config):
+                return None
+            return _gdn_replayssm_unsupported_reason(vllm_config, beta_scale)
+
+        _GDN_PATCH_TARGET._replayssm_unsupported_reason = staticmethod(_ascend_gdn_replayssm_unsupported_reason)
+
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
         self.use_gdn_recoverssm = _uses_gdn_recoverssm(self.vllm_config)
+        if self.use_gdn_recoverssm and not vllm_version_is("0.34.0"):
+            self.use_replayssm = False
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
 

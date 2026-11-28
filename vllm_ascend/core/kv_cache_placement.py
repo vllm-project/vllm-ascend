@@ -10,12 +10,25 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache
+from vllm_ascend.utils import (
+    calc_split_factor,
+    enable_sfa,
+    kv_cache_spec_uses_packed_sfa_main_cache,
+    speculator_uses_target_hidden_states,
+    vllm_version_is,
+)
 
 # One buffer for the current layer and one for the next layer's prefetch.
 KVPP_SCRATCH_BUFFER_COUNT = 2
@@ -116,7 +129,7 @@ def register_kvpp_draft_layers(
 ) -> None:
     """Record loader-discovered ownership on this worker's cache modules."""
     spec = vllm_config.speculative_config
-    if spec is None or not spec.use_eagle():
+    if spec is None or not speculator_uses_target_hidden_states(spec):
         return
     if not is_last_pp_rank:
         draft_names = set()
@@ -139,7 +152,7 @@ def register_kvpp_draft_layers(
 def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
     """Read exact worker-local ownership, never infer it from layer indices."""
     spec = vllm_config.speculative_config
-    if spec is None or not spec.use_eagle():
+    if spec is None or not speculator_uses_target_hidden_states(spec):
         return set()
     context = vllm_config.compilation_config.static_forward_context
     result = set()
@@ -193,8 +206,14 @@ def create_kvpp_cache_allocation_plan(
 ) -> KVPPPhysicalCachePlan:
     """Keep upstream's logical group while budgeting actual allocations."""
     logical_spec = dict(worker_spec)
+
+    def is_full_layout(spec: KVCacheSpec) -> bool:
+        if vllm_version_is("0.34.0"):
+            return isinstance(spec, FullAttentionSpec)
+        return type(spec) is AttentionSpec or isinstance(spec, (FullAttentionSpec, MLAAttentionSpec))
+
     if (
-        any(not isinstance(spec, FullAttentionSpec) for spec in logical_spec.values())
+        any(not is_full_layout(spec) for spec in logical_spec.values())
         or len({spec.block_size for spec in logical_spec.values()}) > 1
     ):
         raise ValueError("KVPP requires one full-attention cache group with a common block size.")

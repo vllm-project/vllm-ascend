@@ -208,6 +208,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         nn.Module.__init__(self)
         self.disable_tp = disable_tp
@@ -253,8 +254,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
-        quant_method = None
-        if quant_config is not None:
+        if quant_method is None and quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
@@ -286,6 +286,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
         )
 
+        self.input_size = self.input_size_per_partition = self.embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.num_embeddings_per_partition]
+        self.prefix = prefix
         self.quant_method.create_weights(
             self,
             self.embedding_dim,
@@ -465,6 +470,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -476,6 +482,7 @@ class AscendParallelLMHead(ParallelLMHead):
             quant_config,
             prefix,
             disable_tp=disable_tp,
+            quant_method=quant_method,
         )
         self.quant_config = quant_config
         if bias:

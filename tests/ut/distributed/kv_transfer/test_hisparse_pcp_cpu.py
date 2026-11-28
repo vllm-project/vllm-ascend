@@ -13,7 +13,6 @@ import torch
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.hisparse.pcp import (
@@ -21,6 +20,16 @@ from vllm_ascend.hisparse.pcp import (
     prepare_pcp_query_metadata,
     prepare_pcp_query_states,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        FullAttentionManager,
+        HiSparseHotManager,
+        HiSparseResidentManager,
+    )
 
 
 def metadata(num_tokens=3, decode=True):
@@ -133,18 +142,24 @@ def make_connector(padded_tokens=3):
     original_slots = torch.tensor([[50, 51, 52], [100, 101, 102], [-1, -1, -1]])
     cache = handle()
     original_tables = tuple(torch.zeros(2, 1, dtype=torch.int64) for _ in range(3))
+    if vllm_version_is("0.34.0"):
+        groups = [
+            NS(kv_cache_spec=None, layer_names=[]),
+            NS(kv_cache_spec=HiSparseResidentSpec.__new__(HiSparseResidentSpec), layer_names=["layer0"]),
+            NS(kv_cache_spec=HiSparseHotSpec.__new__(HiSparseHotSpec), layer_names=["layer0"]),
+        ]
+    else:
+        groups = [
+            NS(manager_cls=FullAttentionManager, layer_names=[]),
+            NS(manager_cls=HiSparseResidentManager, layer_names=["layer0"]),
+            NS(manager_cls=HiSparseHotManager, layer_names=["layer0"]),
+        ]
     underlying = NS(
         connector_worker=NS(
             cache_handles=[cache],
             _group_leaders=[("layer0", cache)],
             request_state_indices=cache.runtime.request_state_indices,
-            kv_cache_config=NS(
-                kv_cache_groups=[
-                    NS(kv_cache_spec=None, layer_names=[]),
-                    NS(kv_cache_spec=HiSparseResidentSpec.__new__(HiSparseResidentSpec), layer_names=["layer0"]),
-                    NS(kv_cache_spec=HiSparseHotSpec.__new__(HiSparseHotSpec), layer_names=["layer0"]),
-                ]
-            ),
+            kv_cache_config=NS(kv_cache_groups=groups),
         ),
         handle_preemptions=Mock(),
         bind_connector_metadata=Mock(),
@@ -355,7 +370,12 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
         assert built.req_id_per_token[-1].item() == num_reqs - 1
     if prefill_lens:
         source = torch.zeros(1, 128, 2)
-        cache = NS(view=None, block_table=None, runtime=NS(gather_prefill_cache=lambda *args, **kwargs: source))
+        cache = NS(
+            view=None,
+            block_table=None,
+            runtime=NS(gather_prefill_cache=lambda *args, **kwargs: source),
+            stage_prefill_rows=lambda *args: source,
+        )
         group = NS(cache=lambda index: cache)
         _, table, request_rows = HiSparseMLAIndexGroup.stage_prefill_rows(group, 0, source, built)
         # This lookup used to fail for PCP's [3 decode, 2 prefill, 1 pad] layout.
