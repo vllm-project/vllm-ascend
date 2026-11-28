@@ -29,6 +29,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import weak_ref_tensors
 
 _ENCODER_SUPPORTS_CAPTURE_AXES = (
@@ -327,6 +328,15 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
     def capture(self, graph_pool: Any | None = None):
         encoder_graph_pool = graph_pool if graph_pool is not None else current_platform.get_global_graph_pool()
         self.graph_pool = encoder_graph_pool
+
+        # MXFP8 V scales are grouped at each image boundary. The FIA graph
+        # task updater below cannot refresh QFA's device metadata or those
+        # dynamic groups, so keep this opt-in path eager for every replay.
+        try:
+            if get_ascend_config().mm_encoder_quant_flash_attn:
+                return
+        except RuntimeError:
+            pass
 
         set_encoder_graph_params(self.path_token_budgets)
         try:

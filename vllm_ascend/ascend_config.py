@@ -531,6 +531,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "mm_encoder_quant_flash_attn": false,
             "kv_trace": {"enabled": false, "action": "log"},
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
@@ -666,6 +667,9 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    # Opt in to A5 MXFP8 QuantFlashAttn for non-causal vision attention.
+    # Encoder NPUGraph is bypassed until dynamic V scales have a replay-safe path.
+    mm_encoder_quant_flash_attn: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"

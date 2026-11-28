@@ -17,9 +17,9 @@
 
 """Ascend implementation of upstream :class:`MMEncoderAttention`.
 
-Eager and ACL-graph capture both use Fused Infer Attention (``npu_fused_infer_attention_score``)
-with ``graph_task_group_begin/end`` so replay-time host metadata can be rebound from the update stream,
-matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`.
+By default, eager and ACL-graph capture use Fused Infer Attention
+(``npu_fused_infer_attention_score``). An opt-in A5 path uses eager MXFP8
+QuantFlashAttn for multimodal encoder self-attention.
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderGraphKey,
@@ -45,6 +47,10 @@ MIN_PAD_SIZE: int = 64
 MAX_PAD_SIZE: int = 128
 SWA_INT_MAX: int = 2147483647
 FIA_BLOCK_SIZE: int = 128
+QFA_QUANT_MODE_MXFP8: int = 1
+QFA_MASK_MODE_NO_MASK: int = 0
+QFA_V_GROUP_SIZE: int = 64
+QFA_SUPPORTED_HEAD_SIZES: frozenset[int] = frozenset({64, 128, 192, 256})
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
@@ -95,6 +101,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
         self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self.use_quant_flash_attn = get_ascend_config().mm_encoder_quant_flash_attn
+        if self.use_quant_flash_attn and not get_current_hardware_profile().supports(
+            HardwareCapability.MM_ENCODER_MXFP8_QFA
+        ):
+            raise ValueError("mm_encoder_quant_flash_attn requires an A5 QuantFlashAttn runtime.")
 
     def _reshape_qkv_to_3d(
         self,
@@ -104,6 +115,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         bsz: int,
         q_len: int,
         kv_len: int,
+        *,
+        repeat_kv: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Reshape query, key, value to 3D tensors:
@@ -113,7 +126,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key = key.view(bsz * kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        if (num_repeat := self.num_queries_per_kv) > 1:
+        if repeat_kv and (num_repeat := self.num_queries_per_kv) > 1:
             # Handle MQA and GQA
             key = torch.repeat_interleave(key, num_repeat, dim=1)
             value = torch.repeat_interleave(value, num_repeat, dim=1)
@@ -247,6 +260,105 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             is_reshaped=is_reshaped,
         )
 
+    def _forward_eager_qfa(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        is_reshaped: bool,
+        bsz: int,
+        q_len: int,
+    ) -> torch.Tensor:
+        """Run non-paged, non-causal MXFP8 attention with per-sequence V scales.
+
+        Q/K are quantized over the head dimension. V is quantized over tokens,
+        resetting its 64-token groups at each sequence boundary as required by
+        the TND QuantFlashAttn contract. The eager path uses the current host
+        boundaries; a captured copy would reuse stale boundaries on replay.
+        """
+        from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
+
+        q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
+        if q.dtype != torch.bfloat16 or k.dtype != q.dtype or v.dtype != q.dtype:
+            raise ValueError("mm_encoder_quant_flash_attn requires BF16 Q/K/V inputs.")
+        if q.shape[-1] not in QFA_SUPPORTED_HEAD_SIZES:
+            raise ValueError(f"Unsupported QuantFlashAttn head size: {q.shape[-1]}.")
+        if q.shape[0] != k.shape[0] or k.shape[0] != v.shape[0]:
+            raise ValueError("mm_encoder_quant_flash_attn currently requires self-attention with equal Q/K/V lengths.")
+        if q.shape[0] == 0:
+            return self._restore_batch_layout(q, bsz=bsz, q_len=q_len, is_reshaped=is_reshaped)
+
+        cu_cpu = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens).to(torch.int32)
+        boundaries = cu_cpu.tolist()
+        if not boundaries or boundaries[0] != 0 or boundaries[-1] != q.shape[0]:
+            raise ValueError("QuantFlashAttn cu_seqlens must start at zero and end at the Q/K/V token count.")
+        if any(end < start for start, end in zip(boundaries, boundaries[1:])):
+            raise ValueError("QuantFlashAttn cu_seqlens must be nondecreasing.")
+
+        q_quant, q_scale = torch_npu.npu_dynamic_mx_quant(q.contiguous(), dst_type=torch.float8_e4m3fn)
+        k_quant, k_scale = torch_npu.npu_dynamic_mx_quant(k.contiguous(), dst_type=torch.float8_e4m3fn)
+        # Every image starts a new 64-token V-scale group. Pack the images at
+        # aligned offsets so the whole V tensor can be quantized in one call.
+        v_positions = torch.arange(v.shape[0], dtype=torch.int64)
+        padded_v_tokens = 0
+        for start, end in zip(boundaries, boundaries[1:]):
+            v_positions[start:end] += padded_v_tokens - start
+            length = end - start
+            padded_v_tokens += (length + QFA_V_GROUP_SIZE - 1) // QFA_V_GROUP_SIZE * QFA_V_GROUP_SIZE
+        if padded_v_tokens == v.shape[0]:
+            v_padded = v
+        else:
+            v_positions = v_positions.to(device=v.device, non_blocking=True)
+            v_padded = v.new_zeros((padded_v_tokens, *v.shape[1:]))
+            v_padded.index_copy_(0, v_positions, v)
+        v_quant_padded, v_scale_padded = torch_npu.npu_dynamic_mx_quant(
+            v_padded.permute(1, 2, 0).contiguous(), dst_type=torch.float8_e4m3fn
+        )
+        v_quant = v_quant_padded.permute(2, 0, 1).contiguous()
+        if padded_v_tokens != v.shape[0]:
+            # aclnnIndexSelect does not accept float8; preserve the quantized
+            # bytes across the gather rather than converting them numerically.
+            v_quant = v_quant.view(torch.uint8).index_select(0, v_positions).view(v_quant.dtype)
+        v_scale = v_scale_padded.permute(2, 0, 1, 3).contiguous()
+        cu_device = cu_cpu.to(device=q.device, non_blocking=True)
+        max_seqlen = max(end - start for start, end in zip(boundaries, boundaries[1:]))
+        common = dict(
+            cu_seqlens_q=cu_device,
+            cu_seqlens_kv=cu_device,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_kv=max_seqlen,
+            mask_mode=QFA_MASK_MODE_NO_MASK,
+            layout_q="TND",
+            layout_q_descale="TND",
+            layout_kv="TND",
+            layout_out="TND",
+        )
+        metadata = quant_flash_attn_metadata(
+            self.num_heads,
+            self.num_kv_heads,
+            q.shape[-1],
+            QFA_QUANT_MODE_MXFP8,
+            **common,
+        )
+        result = quant_flash_attn(
+            q_quant,
+            k_quant,
+            v_quant,
+            q_scale.view(torch.float8_e8m0fnu),
+            k_scale.view(torch.float8_e8m0fnu),
+            v_scale.view(torch.float8_e8m0fnu),
+            QFA_QUANT_MODE_MXFP8,
+            metadata=metadata,
+            softmax_scale=self.scale,
+            return_softmax_lse=False,
+            **common,
+        )
+        context_layer = result[0] if isinstance(result, tuple) else result
+        context_layer = self._maybe_unpad_output(context_layer, origin_head_dim)
+        return self._restore_batch_layout(context_layer, bsz=bsz, q_len=q_len, is_reshaped=is_reshaped)
+
     def _forward_capture_fia(
         self,
         query: torch.Tensor,
@@ -361,7 +473,20 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         kv_len = key.size(1)
         is_reshaped = query.dim() == 4
 
-        q, k, v = self._reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
+        q, k, v = self._reshape_qkv_to_3d(
+            query, key, value, bsz, q_len, kv_len, repeat_kv=not self.use_quant_flash_attn
+        )
+
+        if self.use_quant_flash_attn:
+            return self._forward_eager_qfa(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                is_reshaped=is_reshaped,
+                bsz=bsz,
+                q_len=q_len,
+            )
 
         if get_encoder_forward_context().capturing:
             return self._forward_capture_fia(
