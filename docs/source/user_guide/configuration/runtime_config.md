@@ -33,8 +33,8 @@ Valid action names: `report`, `dump_kv`. ActionQueue capacity is a fixed interna
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `auto_max_times` | int | `0` | Max auto `dump_kv` captures per process lifetime. `0` disables auto dump quota. A unit is kept once the dump directory (or drain skip marker) is created, even if D2H later fails; refund only applies when the arm is dropped before any dump tree exists |
-| `auto_cooldown_seconds` | float | `300` | Minimum seconds between auto dumps after a kept quota consume (refund before dump-tree creation clears this cooldown) |
+| `auto_max_times` | int | `0` | Max auto `dump_kv` captures per process lifetime. `0` disables auto dump quota. Once drain creates a TP0 shard directory for an arm, that arm counts even if the copy or skip-marker write fails. Arm-time request metadata alone does not count. |
+| `auto_cooldown_seconds` | float | `300` | Minimum seconds between auto dumps. Refunding an arm clears its cooldown. |
 | `manual_dump` | bool \| int | `false` | Manual dump watermark: `false`, positive int N (catch-up: dump once per armed wave while process `done < N`; **prefer bump 1→2→3**), or `true` (continuous; **not recommended**). Never rewritten by the process. If disk value ≤ `done`, skip. Setting N=5 with `done=0` fires about five dumps across subsequent waves. Reports / `.pt` carry `manual_dump_count` (1-based seq). Multi-DP: each replica tracks its own `done`. **Ops:** start the server first, then raise N in the live JSON (hot-reload required). |
 | `dump_dir` | str \| null | derived | KV dump root (default `<report_dir>/kv_cache`). Layout: `<dump_root>/<incident_type>/<req_id>/dp*_tp*_pp*_cp*/*.pt`. Coverage is last PP × all TP (not other PP). |
 

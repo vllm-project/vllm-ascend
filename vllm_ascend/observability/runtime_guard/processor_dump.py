@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -209,6 +210,7 @@ class RuntimeGuardDumpMixin:
                 incident_type = str(job.get("incident_type") or "unknown")
                 wave_i = parse_dump_arm_wave(job.get("wave"))
                 wave_dir = kv_dump_wave_dirname(wave_i)
+                out_dir = dump_root / incident_type / req_id / wave_dir / rank_tag
 
                 def _skip(
                     reason: str,
@@ -218,6 +220,7 @@ class RuntimeGuardDumpMixin:
                     _incident_type: str = incident_type,
                     _wave_i: int | None = wave_i,
                     _arm_id: str = arm_id,
+                    _out_dir: Path = out_dir,
                 ) -> None:
                     path = write_kv_dump_skipped(
                         dump_root,
@@ -229,8 +232,8 @@ class RuntimeGuardDumpMixin:
                         wave=_wave_i,
                         detail=detail,
                     )
-                    # Skip marker mkdir's the dump tree → counts as one dump.
-                    if path is not None:
+                    # mkdir may succeed even when writing the marker fails.
+                    if path is not None or os.path.isdir(_out_dir):
                         arms[_arm_id]["ok"] = True
 
                 # Armed jobs always attempt D2H (①). Prefer frozen arm-time
@@ -249,7 +252,6 @@ class RuntimeGuardDumpMixin:
                     )
                     _skip("empty_block_ids")
                     continue
-                out_dir = dump_root / incident_type / req_id / wave_dir / rank_tag
                 # Creating the dump directory consumes the arm's auto_max_times
                 # unit even if subsequent D2H / save fails.
                 try:

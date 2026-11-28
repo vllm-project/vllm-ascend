@@ -1654,7 +1654,8 @@ def test_v19e_queue_fail_refunds_quota():
     quota.refund.assert_called_once_with(consume_quota=True)
 
 
-def test_v19f_multi_job_arm_keeps_quota_when_skip_marker_written(tmp_path: Path):
+@pytest.mark.parametrize("marker_writable", [True, False])
+def test_v19f_multi_job_arm_keeps_quota_when_directory_exists(tmp_path: Path, monkeypatch, marker_writable):
     """Same arm_id + empty block_ids: dump_skipped tree counts as dumped → no refund.
 
     Quota semantics: once drain creates a dump directory / skip marker, the arm
@@ -1689,10 +1690,13 @@ def test_v19f_multi_job_arm_keeps_quota_when_skip_marker_written(tmp_path: Path)
                 "arm_id": arm,
             },
         ]
+        if not marker_writable:
+            monkeypatch.setattr(Path, "write_text", MagicMock(side_effect=OSError("disk full")))
         RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
         quota.refund.assert_not_called()
         assert (tmp_path / "token_repeat" / "r1").is_dir()
         assert (tmp_path / "token_repeat" / "r2").is_dir()
+        assert len(list(tmp_path.rglob("dump_skipped.json"))) == (2 if marker_writable else 0)
     finally:
         RequestGuardStore.reset_for_tests()
 
