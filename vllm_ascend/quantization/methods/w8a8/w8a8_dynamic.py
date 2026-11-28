@@ -161,6 +161,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
         self.in_dtype = vllm_config.model_config.dtype
+        if ascend_config.enable_moonep:
+            self.moe_all_to_all_group_name = ""
+            return
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group

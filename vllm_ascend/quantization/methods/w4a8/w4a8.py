@@ -146,6 +146,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
             raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
 
+        if get_ascend_config().enable_moonep:
+            self.moe_all_to_all_group_name = ""
+            return
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
