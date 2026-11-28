@@ -17,6 +17,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -28,11 +29,35 @@ from vllm.model_executor.model_loader.reload import (
 
 from vllm_ascend.attention.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
+    AscendGatedDeltaNetAttention,
     _get_base_conv1d,
     _get_packed_conv_weights,
     _split_head_first_conv_output,
     initialize_packed_conv_weight,
 )
+
+
+def test_asymmetric_mtp_gdn_uses_decode_state_geometry():
+    layer = SimpleNamespace(
+        tp_size=4,
+        num_k_heads=16,
+        num_v_heads=32,
+        head_k_dim=128,
+        head_v_dim=128,
+        conv_kernel_size=4,
+        num_spec=3,
+    )
+    decode_shape = AscendGatedDeltaNetAttention.get_state_shape(layer)
+
+    layer.num_spec = 1
+    assert AscendGatedDeltaNetAttention.get_state_shape(layer) != decode_shape
+    layer.num_mamba_state_speculative_tokens = 3
+    assert AscendGatedDeltaNetAttention.get_state_shape(layer) == decode_shape
+    assert layer.num_spec == 1
+
+    layer.use_gdn_recoverssm = True
+    with pytest.raises(ValueError, match="RecoverSSM requires matching"):
+        AscendGatedDeltaNetAttention.get_state_shape(layer)
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):
