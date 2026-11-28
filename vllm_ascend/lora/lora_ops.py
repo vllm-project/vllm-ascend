@@ -20,6 +20,8 @@ from typing import Any
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
 try:
     import triton  # type: ignore[import-untyped]
     import triton.language as tl  # type: ignore[import-untyped]
@@ -327,8 +329,20 @@ if _HAS_TRITON:
 
 
 def _lora_is_capturing() -> bool:
+    if is_forward_context_available():
+        try:
+            if bool(getattr(get_forward_context(), "capturing", False)):
+                return True
+        except RuntimeError:
+            pass
+        try:
+            if bool(getattr(_EXTRA_CTX, "capturing", False)):
+                return True
+        except (AssertionError, AttributeError, RuntimeError):
+            pass
     try:
-        return is_forward_context_available() and bool(get_forward_context().capturing)
+        npu = getattr(torch, "npu", None)
+        return bool(npu is not None and npu.is_current_stream_capturing())
     except (AttributeError, RuntimeError):
         return False
 
@@ -478,6 +492,8 @@ def lora_linear(
             f"LoRA Punica wrapper id {wrapper_id} is no longer registered "
             "(the PunicaWrapperNPU instance may have been garbage-collected)."
         )
+    if getattr(wrapper, "no_lora", False):
+        return
     packed = len(lora_a_stacked) == 1 or (packed_lora_a is not None and packed_lora_b is not None)
     use_kernel = not wrapper._single_lora_slot or not packed
     if use_kernel:
