@@ -218,6 +218,30 @@ to fit the largest checkpoint tensor. Leave additional NPU memory for the
 trainer to stage an input tensor. If memory is tight, use unpacked IPC or move
 the trainer to a separate NPU and use HCCL.
 
+#### NPU IPC version alignment
+
+With the upstream IPC device extension points, NPU IPC uses the common vLLM
+trainer and worker transfer lifecycle for both packed and unpacked updates.
+Ascend supplies physical-device identity, native tensor reconstruction, and
+post-send completion. Device initialization, registered export, synchronization,
+and the default wire schemas are inherited. These interfaces are provided by the vLLM
+[IPC extension PR](https://github.com/vllm-project/vllm/pull/70027).
+Keep the rest of the runtime aligned with the vLLM and Torch versions supported
+by the Ascend build; the transfer hooks alone do not establish runtime compatibility.
+
+Set `packed=True` in `NPUIPCTrainerInitInfo` to use the upstream chunk layout:
+buffers are rounded down to a multiple of 16 bytes, tensors larger than one
+chunk are split and reassembled, and only the first chunk of a transfer with
+data carries an IPC handle. Transfers containing only empty tensors export no
+buffer. The worker checks that the last chunk arrived before finishing the
+update.
+
+Use matching trainer and worker versions that include the device extension
+points. This backend supports the shared `chunk_capacity`/`last` protocol only;
+the legacy `tensor_sizes` implementation has been removed. Older vLLM builds
+without the required hooks fail with a version-alignment error. Upgrade vLLM
+and vLLM Ascend together before selecting `npu_ipc`.
+
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:

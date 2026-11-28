@@ -1,0 +1,8 @@
+pr: 23330
+entries:
+  - category: breaking
+    text: >-
+      NPU IPC weight updates now require a matching vLLM build with IPC device
+      extension hooks. Upgrade vLLM and vLLM Ascend together; the legacy
+      `tensor_sizes` transfer protocol is no longer supported. Existing
+      `npu_ipc` configuration remains unchanged for the supported pairing.
