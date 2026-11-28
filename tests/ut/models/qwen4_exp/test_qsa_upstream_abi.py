@@ -306,6 +306,7 @@ def test_pcp_indexer_compresses_complete_groups_across_ranks(monkeypatch) -> Non
     indexer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(indexer)
     indexer.compress_ratio = 4
+    indexer._fused_norm_rope_eligible = Mock(return_value=False)
     indexer.raw_key_cache = SimpleNamespace(key_cache=torch.empty(1), rope_position_cache=None)
     indexer.compressed_key_cache = SimpleNamespace(kv_cache=torch.empty(1))
     indexer.normalize_compressed_keys = lambda keys, positions: keys

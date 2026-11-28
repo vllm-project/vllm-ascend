@@ -227,12 +227,22 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         self,
         tensor: torch.Tensor,
         positions: torch.Tensor,
+        compressed_cache: torch.Tensor | None = None,
     ) -> bool:
+        # Compression fusion uses the operator's tensor contract; the standalone
+        # Norm/RoPE path also supports multiple heads and strided norm weights.
+        if compressed_cache is not None:
+            tensor_eligible = can_fuse_qsa_compress_norm_store(tensor, self.k_layernorm.weight, compressed_cache)
+        else:
+            tensor_eligible = (
+                tensor.dtype == torch.bfloat16
+                and tensor.ndim == 3
+                and tensor.shape[-1] == 128
+                and self.k_layernorm.weight.dtype == tensor.dtype
+            )
         return bool(
-            tensor.dtype == torch.bfloat16
-            and tensor.ndim == 3
-            and tensor.shape[-1] == self.index_head_dim == 128
-            and self.k_layernorm.weight.dtype == tensor.dtype
+            tensor_eligible
+            and self.index_head_dim == 128
             and getattr(self.rotary_emb, "rotary_dim", None) == 64
             and getattr(self.rotary_emb, "is_neox_style", False)
             and (
@@ -387,9 +397,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 device=raw_key_cache.device
             )
         compressed_cache = self.compressed_key_cache.kv_cache
-        if self._fused_norm_rope_eligible(token_k, positions) and can_fuse_qsa_compress_norm_store(
-            token_k, self.k_layernorm.weight, compressed_cache
-        ):
+        if self._fused_norm_rope_eligible(token_k, positions, compressed_cache):
             rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
             qsa_compress_groups_with_ratio(
                 token_k[:num_tokens],
