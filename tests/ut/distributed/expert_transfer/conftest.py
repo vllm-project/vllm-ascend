@@ -57,7 +57,7 @@ def load_hook_class():
 def expert_factory(load_hook_class, monkeypatch):
     monkeypatch.setattr("vllm_ascend.quantization.nz.torch_npu.npu_format_cast", lambda tensor, *args, **kwargs: tensor)
 
-    def make(kind="mxfp4", *, experts=6, layer_name="model.layers.0.mlp.experts"):
+    def make(kind="mxfp4", *, experts=6, top_k=2, slots=2, layer_name="model.layers.0.mlp.experts"):
         is_fp8 = kind == "mxfp8"
         filename, class_name = (
             ("w8a8/w8a8_mxfp8.py", "AscendW8A8MXFP8DynamicFusedMoEMethod")
@@ -92,7 +92,7 @@ def expert_factory(load_hook_class, monkeypatch):
         scheme.quant_type = QuantType.W8A8MXFP if is_fp8 else QuantType.W4A8MXFP
         scheme.use_expert_weight_list = False
         layer = torch.nn.Module()
-        layer.layer_name, layer.local_num_experts, layer.top_k, layer.activation = layer_name, experts, 2, "silu"
+        layer.layer_name, layer.local_num_experts, layer.top_k, layer.activation = layer_name, experts, top_k, "silu"
         layer.moe_config = SimpleNamespace(device="cpu", is_sequence_parallel=False, has_bias=False)
         for name in MXFPExpertAdapter.tensor_names:
             output = 128 if name.startswith("w13") else 64
@@ -101,7 +101,7 @@ def expert_factory(load_hook_class, monkeypatch):
             param = torch.nn.Parameter(torch.empty(experts, output, width, dtype=dtype), requires_grad=False)
             layer.register_parameter(name, param)
         layer._expert_offload_binding = LayerOffloadBinding(
-            layer, scheme, ExpertOffloadConfig(enabled=True, num_device_experts=2)
+            layer, scheme, ExpertOffloadConfig(enabled=True, num_device_experts=slots)
         )
         for name, param in layer.named_parameters():
             for expert_id in range(experts):

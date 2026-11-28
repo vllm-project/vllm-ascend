@@ -58,6 +58,7 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
     ]
     cache_config: Any = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
     runner_state: Any = default.AscendModelState.__new__(default.AscendModelState)
+    runner_state.model = torch.nn.Module()
     runner_state.vllm_config = config
     runner_state.model_config = SimpleNamespace(max_model_len=1024)
     runner_state.decoder_replay = None

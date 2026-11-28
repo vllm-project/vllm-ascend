@@ -8,13 +8,17 @@ from itertools import takewhile
 from typing import TYPE_CHECKING, cast
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from .expert_offload_config import validate_expert_offload_layer
 from .expert_offload_utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
 from .expert_weight_transfer import TorchExpertTransfer
 
 if TYPE_CHECKING:
+    from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 ACL_MEMCPY_DEVICE_TO_HOST = 2
@@ -77,19 +81,31 @@ class HostExpertStore:
 
         Only one conversion bundle is live on the NPU. Physical copies bypass
         ND interpretation of NZ padding and preserve packed scale strides.
+        Native tensors must start at their storage base and have a consistent
+        physical size across experts; zero-offset layout views are supported.
         Raw checkpoint tensors are retired after the complete layer succeeds.
         """
         import acl  # type: ignore[import-not-found]
         import torch_npu
 
-        prepared = {}
+        prepared: dict[str, PreparedExpertTensor] = {}
         for expert_id in range(self.num_experts):
             expert_weights = adapter.load_experts(self, (expert_id,), device)
             # Loading only: complete format conversion before reading its storage.
             torch.npu.current_stream(device).synchronize()
             for name, tensor in expert_weights.items():
                 # Include native padding in weights and packed scale storage.
+                # A shifted pointer cannot copy the complete physical allocation.
+                if tensor.storage_offset() != 0:
+                    raise ValueError(
+                        f"expert offload requires zero-offset native tensors; {name} for expert {expert_id} "
+                        f"has storage offset {tensor.storage_offset()}"
+                    )
                 expert_bytes = int(torch_npu.get_storage_size(tensor)) * tensor.element_size()
+                if not 0 < expert_bytes <= tensor.untyped_storage().nbytes():
+                    raise ValueError(f"invalid native storage size for {name} of expert {expert_id}: {expert_bytes}")
+                if expert_id > 0 and expert_bytes != prepared[name].expert_bytes:
+                    raise ValueError(f"inconsistent native expert storage size for {name} of expert {expert_id}")
                 if expert_id == 0:
                     # The host allocator rounds large pinned allocations up to a
                     # power of two. Splitting 288 experts into 32-expert chunks
@@ -113,7 +129,7 @@ class HostExpertStore:
                 error = acl.rt.memcpy(
                     chunk[row].data_ptr(),
                     expert_bytes,
-                    tensor.untyped_storage().data_ptr(),
+                    tensor.data_ptr(),
                     expert_bytes,
                     ACL_MEMCPY_DEVICE_TO_HOST,
                 )
@@ -145,9 +161,16 @@ class LayerOffloadBinding:
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.slot_to_expert: tuple[int, ...]
         self.manager: ExpertOffloadManager | None = None
+        self._uses_dspark_expert_pool = False
         self.resident: dict[str, torch.Tensor] = {}
         self.mapping: ExpertMapBuffer | None = None
         self.topk_ids_cpu: torch.Tensor
+
+    @property
+    def dspark_expert_pool(self) -> DSparkExpertPool | None:
+        if self._uses_dspark_expert_pool and self.manager is not None:
+            return self.manager.dspark_expert_pool
+        return None
 
     def initialize_storage(self, layer) -> None:
         self.host_store.copy_from_layer(layer, pin_memory=self.device.type == "npu")
@@ -165,14 +188,22 @@ class LayerOffloadBinding:
             getattr(layer, name).data = tensor
         self.slot_to_expert = tuple(range(self.num_slots))
 
-    def prepare(self, layer, topk_ids):
+    def prepare(self, layer, topk_ids, topk_weights):
         # Loading attaches the manager and creates the map before any forward.
         manager = cast(ExpertOffloadManager, self.manager)
         mapping = cast(ExpertMapBuffer, self.mapping)
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
+            padding = get_forward_context().is_padding
+            if padding is not None:
+                padding = padding[: topk_ids.shape[0], None]
+                # Real rows form the prefix. Reuse the first row's IDs so padding
+                # needs no extra expert loads and still maps to valid slots.
+                topk_ids = torch.where(padding, topk_ids[:1], topk_ids)
+                topk_weights = topk_weights.masked_fill(padding, 0)
             return (
                 ExpertWeightView(layer, self.resident),
                 self.prepare_graph(topk_ids),
+                topk_weights,
                 manager.get_comm(self, layer.moe_config, self.num_slots),
             )
         if not manager.has_prefill:
@@ -185,12 +216,14 @@ class LayerOffloadBinding:
                 return (
                     ExpertWeightView(layer, self.resident),
                     mapping.remap(topk_ids),
+                    topk_weights,
                     manager.get_comm(self, layer.moe_config, self.num_slots),
                 )
         # Prefill and decode batches exceeding resident capacity use all experts.
         return (
             ExpertWeightView(layer, manager.full_pool.load_layer(self)),
             topk_ids,
+            topk_weights,
             manager.get_comm(self, layer.moe_config, self.num_experts),
         )
 
@@ -293,11 +326,84 @@ class ExpertOffloadManager:
 
     def __init__(self):
         self.bindings: dict[str, LayerOffloadBinding] = {}
+        self.dspark_expert_pool: DSparkExpertPool | None = None
         self.full_pool = FullExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
+        self.verify_graph_eligible = True
         self.graph_load_stream = None
         self.graph_streams = set()
+
+    @staticmethod
+    def _verify_graph_eligible(batch_state, *, num_speculative_tokens: int) -> bool:
+        rows = batch_state.num_scheduled_tokens
+        drafts = batch_state.num_draft_tokens_np
+        verify_width = num_speculative_tokens + 1
+        return (
+            drafts is not None
+            and len(rows) == len(drafts) > 0
+            and not any(batch_state.is_prefilling_np)
+            and all(count == num_speculative_tokens for count in drafts)
+            and all(count == verify_width for count in rows)
+        )
+
+    def prepare_batch(self, batch_state) -> None:
+        # Dummy batches have no request state and use the full expert pool.
+        self.has_prefill = batch_state is None or batch_state.has_prefill
+        pool = self.dspark_expert_pool
+        if pool is not None:
+            # Both real and dummy forwards pass this hook before input staging.
+            # Capture preparation may explicitly enable the pool again.
+            pool.active = False
+        self.verify_graph_eligible = (
+            pool is None
+            or batch_state is None
+            or self._verify_graph_eligible(batch_state, num_speculative_tokens=pool.num_speculative_tokens)
+        )
+
+    def can_dispatch_graph(self, uniform_token_count: int | None) -> bool:
+        return self.dspark_expert_pool is None or uniform_token_count in (None, 1) or self.verify_graph_eligible
+
+    def dispatch_graph(
+        self,
+        dispatch_fn,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        num_ubatches: int = 1,
+    ) -> BatchExecutionDescriptor:
+        # Pool graphs capture pure verification routing. Recheck the current
+        # batch before selecting one, including prefill promoted to decode.
+        if not self.can_dispatch_graph(uniform_token_count):
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=num_ubatches,
+            )
+        return dispatch_fn(
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras,
+            max_query_len=max_query_len,
+            num_ubatches=num_ubatches,
+        )
+
+    def prepare_inputs(self, input_batch) -> None:
+        if self.dspark_expert_pool is not None:
+            self.dspark_expert_pool.prepare(input_batch)
+
+    def prepare_capture(self, input_batch) -> None:
+        if self.dspark_expert_pool is not None:
+            self.dspark_expert_pool.prepare_capture(input_batch)
+
+    def shutdown(self) -> None:
+        self.unsubscribe_graph_streams()
+        self.dspark_expert_pool = None
 
     def capture_stream(self, _desc):
         # Use the actual NPU stream rather than torch_cuda_wrapper's CUDA cache.
@@ -324,6 +430,12 @@ class ExpertOffloadManager:
         )
 
     def prepare_graph_capture(self, graph_manager, needs_capture) -> None:
+        if self.dspark_expert_pool is not None:
+            dispatch_fn = graph_manager.dispatch
+            # Keep the policy local to this target graph manager. Repeated
+            # initialization must not add another check to every dispatch.
+            if not isinstance(dispatch_fn, partial) or dispatch_fn.func != self.dispatch_graph:
+                graph_manager.dispatch = partial(self.dispatch_graph, dispatch_fn)
         # Capture and dispatch must use the same padded descriptor capacity.
         graph_manager._capture_descs = {
             mode: [desc for desc in descs if self._supports_graph_descriptor(desc)]
@@ -356,9 +468,48 @@ class ExpertOffloadManager:
             for layer in model.modules()
             if (binding := getattr(layer, "_expert_offload_binding", None)) is not None
         }
+        if not self.bindings:
+            raise ValueError("expert offload is enabled but found no layers with expert offload bindings")
         for binding in self.bindings.values():
             binding.manager = self
         self.full_pool.allocate(self.bindings.values())
+
+    def initialize_dspark_expert_pool(self, runner: NPUModelRunner) -> None:
+        """Allocate one optional pool inside the offload loading-memory window."""
+        self.dspark_expert_pool = None
+        for binding in self.bindings.values():
+            binding._uses_dspark_expert_pool = False
+        offload_config = runner.ascend_config.expert_offload_config
+        protected_positions = offload_config.dspark_protected_positions
+        suffix_experts = offload_config.dspark_suffix_experts
+        if protected_positions is None and suffix_experts is None:
+            return
+
+        # Import only for enabled pools; router compatibility imports MoE code.
+        from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool, supports_router
+
+        layers = [
+            layer
+            for layer in runner.model.modules()
+            if getattr(layer, "_expert_offload_binding", None) is not None and supports_router(layer)
+        ]
+        if not layers:
+            raise ValueError("dspark_expert_pool found no supported target routed expert layer")
+        assert protected_positions is not None and suffix_experts is not None
+        assert runner.speculative_config is not None and runner.speculative_config.num_speculative_tokens is not None
+        assert offload_config.num_device_experts is not None
+        self.dspark_expert_pool = DSparkExpertPool(
+            runner.device,
+            runner.max_num_tokens,
+            protected_positions,
+            suffix_experts,
+            num_speculative_tokens=runner.speculative_config.num_speculative_tokens,
+            num_device_experts=offload_config.num_device_experts,
+        )
+        for layer in layers:
+            binding = layer._expert_offload_binding
+            binding._uses_dspark_expert_pool = True
+            layer.router._expert_pool_binding = binding
 
     def get_comm(self, binding, moe_config, num_physical_experts):
         # Lazy import avoids an initialization cycle with quantization and routed experts.
@@ -378,6 +529,7 @@ def initialize_expert_offload(runner: NPUModelRunner) -> None:
     expert_offload_manager = ExpertOffloadManager()
     memory_allocated_before = torch.npu.memory_allocated(runner.device)
     expert_offload_manager.initialize(runner.model)
+    expert_offload_manager.initialize_dspark_expert_pool(runner)
     runner.model._expert_offload_manager = expert_offload_manager
     # The shared pool is allocated after the parent's loading profiler.
     runner.model_memory_usage += torch.npu.memory_allocated(runner.device) - memory_allocated_before
