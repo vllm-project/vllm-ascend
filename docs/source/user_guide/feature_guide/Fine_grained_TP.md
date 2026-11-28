@@ -50,7 +50,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | Deployment Scenario | Embedding and LM head TP support standalone MoE serving or PD decode nodes. o_proj, MLP and QKV IProj TP require a PD decode node. |
 | Standard TP | o_proj, MLP and QKV IProj TP require `tensor_parallel_size == 1`. Embedding and LM head TP can be combined with standard TP. See [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement). |
 | Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with fine-grained TP. o_proj, MLP and QKV IProj TP require `prefill_context_parallel_size == 1`. PCP embedding and LM head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding or LM head TP. |
-| Weight NZ layout | On A5 (Ascend 950DT), for multimodal models with vision input, `mlp_tensor_parallel_size > 1` cannot be combined with `weight_nz_mode=2`. Found on GLM-5.3-Flash; see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp). |
+| Weight NZ layout | On A5 (Ascend 950DT), for multimodal models with vision input, `mlp_tensor_parallel_size > 1` cannot be combined with `weight_nz_mode=2`. Found on GLM-5.3-Flash; see [Preconditions for o_proj / MLP TP](#preconditions-for-o_proj-mlp-tp). |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
 #### Models
