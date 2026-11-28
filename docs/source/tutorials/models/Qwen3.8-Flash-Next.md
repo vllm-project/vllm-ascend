@@ -54,7 +54,7 @@ Select the image for your target hardware.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -192,7 +192,7 @@ Verify that all host device and file paths exist before running Docker.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend-qwen38-pool
 
     docker run --rm \
@@ -2809,6 +2809,40 @@ For instructions, see [Optix-for-PD-disaggregation](https://gitcode.com/Ascend/m
 ### 9.3 Model Runner V2 Decode Submission
 
 Model Runner V2 automatically reduces CPU synchronization during decode when the target and MTP attention implementations support it; no extra configuration switch is required. Exact token counts and state remain on the device. Unsupported configurations retain exact CPU synchronization; runtime compatibility checks select the behavior.
+
+### 9.4 First-Request Latency and Compilation Cache
+
+Qwen3.8-Flash-Next uses a large set of Ascend Triton kernels (QSA, hyper-connection, GBSA, PLE lookup, and others). They are compiled lazily on the shapes a request actually uses, so the first request after a fresh container is noticeably slower than steady state. Measured on A2 (TP8, `Qwen3___8-Flash-Next-w8a8-mtp`, v0.32.0rc1):
+
+| Phase | Latency |
+| --- | --- |
+| First request, cold Triton cache | ~45 s |
+| Second request, same prompt | 0.4 s |
+| New prompt, warm cache | 4.0–4.4 s |
+
+The startup log reports this explicitly:
+
+```text
+WARNING [kernel_warmup.py:222] JIT kernel warmup found no registered kernels;
+Triton kernels will compile lazily at runtime.
+```
+
+To keep this one-off cost out of production traffic:
+
+1. **Persist the compilation caches across container restarts.** They live in `/root/.triton` and `/root/.cache/vllm` inside the container. Mount both from the host so a recreated container reuses them:
+
+   ```bash
+   docker run ... \
+     -v /path/on/host/triton:/root/.triton \
+     -v /path/on/host/vllm_cache:/root/.cache/vllm \
+     <image>
+   ```
+
+   You can also pin them explicitly with `TRITON_CACHE_DIR` and `VLLM_CACHE_ROOT`.
+
+2. **Warm up the service after startup.** Send a few representative requests (short and long prompts, thinking on and off, and multimodal if used) before exposing the endpoint to clients.
+
+With a warm cache the spike does not recur; keeping the cache persistent is enough to remove it from steady-state operation.
 
 ## 10 FAQ
 
