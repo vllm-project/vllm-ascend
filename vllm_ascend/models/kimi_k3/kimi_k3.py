@@ -1352,7 +1352,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.end_layer,
             self.config.attn_res_block_size,
         )
-        block_residual = hidden_states.new_empty(
+        # Zero-init: attn_res_fwd reads prev_valid_blocks slots of this tensor;
+        # in PP1 residual is None and the buffer is never written, so
+        # new_empty feeds the op uninitialized memory -> NaN in hidden states.
+        block_residual = hidden_states.new_zeros(
             hidden_states.size(0),
             attn_res_block_num,
             hidden_states.size(1),
