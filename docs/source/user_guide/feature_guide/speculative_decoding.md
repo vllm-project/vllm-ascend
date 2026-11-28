@@ -1,28 +1,17 @@
 # Speculative Decoding Guide
 
+## Feature Introduction
+
 This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
 
-## Overview
+### Working Principle
 
 vLLM Ascend implements speculative decoding through a **speculator-verifier** architecture.
 
 1. The **Speculator** generates draft (speculative) tokens using various methods, from simple n-gram matching to neural-network-based draft models.
 2. The **Rejection Sampler** verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
 
-## Quickstart
-
-For offline inference, set `speculative_config` in `LLM()`. For online serving, pass the same
-settings as JSON to `vllm serve --speculative-config` (`-sc`). Each example below
-shows both forms. Use local checkpoint paths when you already have the weights.
-
-- `num_speculative_tokens` sets the draft length `K`. Some checkpoints supply
-    it through `n_predict`.
-- Set `model` inside `speculative_config` for methods that load a separate
-    draft checkpoint. Use a local path or a checkpoint ID.
-- Set `draft_tensor_parallel_size` to 1 or the target TP size, subject to the
-    drafter's requirements.
-
-## Speculative Decoding Methods
+### Use Cases
 
 | `method` | Draft source or purpose |
 | --- | --- |
@@ -35,7 +24,21 @@ shows both forms. Use local checkpoint paths when you already have the weights.
 | [`draft_model`](#standalone-draft-model) | A compatible standalone draft LLM with the same vocabulary size |
 | [`extract_hidden_states`](#hidden-state-extraction) | Target hidden states for draft-model training |
 
-### N-gram
+### Constraints and Limitations
+
+See [DFlash](#dflash) for draft checkpoint and graph requirements, [Sampling Configuration](#sampling-configuration) for verification constraints, and [Other Speculative Decoding Settings](#other-speculative-decoding-settings) for deployment limits.
+
+## Feature Usage
+
+### Configuration Examples
+
+For offline inference, set `speculative_config` in `LLM()`. For online serving, pass the same
+settings as JSON to `vllm serve --speculative-config` (`-sc`). Each example below
+shows both forms. Use local checkpoint paths when you already have the weights.
+
+The examples use `K` for the draft length set by `num_speculative_tokens`.
+
+#### N-gram
 
 With `ngram_gpu`, set `prompt_lookup_min` and `prompt_lookup_max` to bound the
 n-gram lengths to search.
@@ -66,7 +69,7 @@ vllm serve Qwen/Qwen3-1.7B \
   --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
 ```
 
-### EAGLE
+#### EAGLE
 
 Set `method` to `eagle`, `model` to the matching draft checkpoint, and
 `draft_tensor_parallel_size` to 1. The example uses ModelScope checkpoints.
@@ -105,7 +108,7 @@ VLLM_USE_MODELSCOPE=True vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct \
   }'
 ```
 
-### EAGLE-3
+#### EAGLE-3
 
 Set `method` to `eagle3` and `model` to the matching draft checkpoint.
 
@@ -136,7 +139,7 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"eagle3","model":"RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
 ```
 
-### MTP
+#### MTP
 
 Set `method` to `mtp`. For a target with built-in MTP weights, omit `model`
 from the speculative config.
@@ -180,12 +183,12 @@ speculative config to the matching assistant checkpoint. See the
     DeepSeek checkpoints with one MTP prediction layer reuse it for longer
     drafts. Start with `K=1` and check accuracy and throughput before increasing it.
 
-### DFlash
+#### DFlash
 
 Set `method` to `dflash` and `model` to a checkpoint trained for the target.
 The checkpoint's architecture selects the DFlash variant.
 
-#### DFlash2
+##### DFlash2
 
 Use a `DFlash2DraftModel` checkpoint and the target's unquantized,
 full-vocabulary LM head. The checkpoint supplies the candidate selector
@@ -230,7 +233,7 @@ vllm serve Qwen/Qwen3.8-27B \
 Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
 `FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
 
-#### LiLiCorr
+##### LiLiCorr
 
 Use a matching `LiLiCorrDraftModel` checkpoint and set `K` at or below the
 trained block size minus one. Both plain and convolutional checkpoints support
@@ -240,7 +243,7 @@ Set `"enforce_eager":true` inside `speculative_config` for the draft.
 Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
 unsupported. Quantized draft weights require an Ascend-supported format.
 
-### DSpark
+#### DSpark
 
 Set `method` to `dspark`, `model` to a matching draft checkpoint, and `K` to
 a length supported by that checkpoint. If an MLA draft uses BF16 while the
@@ -284,7 +287,7 @@ drafts fall back to FIA if the FlashMLA query-head layout is unsupported.
 
 For per-request verification lengths, see [Adaptive Verification](#adaptive-verification).
 
-### Standalone Draft Model
+#### Standalone Draft Model
 
 Set `method` to `draft_model` and `model` to a compatible standalone draft.
 
@@ -317,7 +320,7 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"draft_model","model":"Qwen/Qwen3-0.6B","num_speculative_tokens":3}'
 ```
 
-### Hidden State Extraction
+#### Hidden State Extraction
 
 Use `extract_hidden_states` with `num_speculative_tokens=1` to collect training
 data for EAGLE-style drafts. Select layers with
@@ -378,9 +381,9 @@ vllm serve Qwen/Qwen3-8B \
     `include_output_tokens` in the request's `kv_transfer_params` to collect
     generated-token hidden states as well.
 
-## Sampling Configuration
+### Sampling Configuration
 
-### Draft Sampling
+#### Draft Sampling
 
 Draft sampling is greedy by default. For drafters that support probabilistic
 sampling, add this to `speculative_config` to sample at the request temperature.
@@ -424,7 +427,7 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
-### Block Verification
+#### Block Verification
 
 Add this to `speculative_config` to verify draft tokens as a block while
 preserving the target sampling distribution.
@@ -471,7 +474,7 @@ vllm serve Qwen/Qwen3-8B \
 Greedy requests retain greedy verification. Use Block Verification separately
 from Entropy Verify and synthetic rejection sampling.
 
-### Entropy Verify
+#### Entropy Verify
 
 Entropy Verify changes the acceptance threshold for
 non-greedy requests to improve throughput.
@@ -543,7 +546,7 @@ using entropy computed after request sampling settings.
     Changing the acceptance threshold can change generated tokens. Evaluate
     output quality on your workload before using Entropy Verify in production.
 
-### Synthetic Rejection Sampling
+#### Synthetic Rejection Sampling
 
 Set `"rejection_sample_method":"synthetic"` to
 benchmark the verifier at controlled acceptance rates.
@@ -610,16 +613,16 @@ vllm serve Qwen/Qwen3-8B \
     independently of the target distribution. Use it only for benchmarks and
     validation.
 
-#### Ascend-specific Notes
+##### Ascend-specific Notes
 
 Ascend supports synthetic acceptance for both greedy and non-greedy
 requests. The NPU rejection kernel draws uniform values with FP32 Triton
 `tl.rand` and clamps them away from zero. The configuration fields match
 upstream vLLM.
 
-## Other Speculative Decoding Settings
+### Other Speculative Decoding Settings
 
-### P/D Separation
+#### P/D Separation
 
 Set `num_speculative_tokens` on the prefill and decode roles when speculative decoding is enabled.
 
@@ -628,7 +631,7 @@ Set `num_speculative_tokens` on the prefill and decode roles when speculative de
 
 See the [P/D deployment guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for role-specific serving and parallelism settings.
 
-### Adaptive Verification
+#### Adaptive Verification
 
 With a DSpark checkpoint that has a confidence head, set
 `"enable_adaptive_verification":true` to select a verification length per
@@ -681,13 +684,13 @@ workloads. Gains can be limited when draft acceptance is already high.
 Check scheduled and admitted draft counts in DEBUG logs when diagnosing
 performance.
 
-#### Hybrid Gated DeltaNet Targets
+##### Hybrid Gated DeltaNet Targets
 
 Adaptive verification on hybrid GDN targets requires triton-ascend and is
 unsupported on 310P. See the
 [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
 
-### RecoverSSM
+#### RecoverSSM
 
 RecoverSSM reconstructs
 the accepted recurrent state from compact replay records during speculative
@@ -747,7 +750,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     method and window, draft checkpoint if used, prefix-caching settings,
     state dtypes, and convolution layout.
 
-### Dynamic Speculative Decoding
+#### Dynamic Speculative Decoding
 
 Add `num_speculative_tokens_per_batch_size` to `speculative_config`.
 Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
@@ -795,3 +798,12 @@ vllm serve Qwen/Qwen3-8B \
 Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a fixed
 draft length. Ascend rejects DCP greater than 1 when the dynamic schedule is
 active.
+
+## Configuration Parameters
+
+- `num_speculative_tokens` sets the draft length `K`. Some checkpoints supply
+    it through `n_predict`.
+- Set `model` inside `speculative_config` for methods that load a separate
+    draft checkpoint. Use a local path or a checkpoint ID.
+- Set `draft_tensor_parallel_size` to 1 or the target TP size, subject to the
+    drafter's requirements.
