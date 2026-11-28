@@ -277,7 +277,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `"enable_flashcomm1": true`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.
 - `"enable_mlapo": true`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `"enable_mlapo": false` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.
-- `"enable_balance_scheduling": true`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler.
+- `"enable_balance_scheduling": true`: Deprecated as of v0.33.0 and planned for removal in a future release. Enabled configurations remain active with a startup warning. Set `scheduler_config.enable_balance_scheduling=false` and remove the legacy top-level key to disable the global admission gate across DP ranks. This can change throughput, TTFT, and TPOT; remeasure them for your workload. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229).
 
 **Performance tuning notes for single-node:**
 

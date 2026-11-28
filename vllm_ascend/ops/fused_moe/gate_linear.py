@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import torch
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from vllm_ascend.ops.linear import AscendReplicatedLinear
@@ -39,8 +39,11 @@ class AscendGateLinear(GateLinear):
       upcast path, and ~6x faster at decode-time router shapes (e.g.
       K=7168 / N=896 on Kimi K3).
     - Tier 5: the ReplicatedLinear fallback with upstream's dtype
-      semantics: cast x to the weight dtype, compute, cast the output to
-      out_dtype.
+      semantics: for unquantized gates, cast x to the weight dtype,
+      compute, cast the output to out_dtype. Quantized gates keep the
+      activation dtype: their weight is stored packed (uint8 for MXFP4,
+      int8 for W8A8), and their quant method does the activation
+      quantization itself.
 
     ``out_dtype`` defaults to fp32 on NPU when the model passes None
     (upstream leaves None and computes natively): the fp32-logits
@@ -81,6 +84,14 @@ class AscendGateLinear(GateLinear):
             prefix=prefix,
             return_bias=return_bias,
         )
+        # Quantized gates store their weight in a packed dtype (uint8 for
+        # MXFP4, int8 for W8A8) instead of the activation dtype, so the
+        # tier-5 cast below is only valid for unquantized gates. This
+        # mirrors the guard in upstream GateLinear's ReplicatedLinear
+        # fallback. AscendUnquantizedLinearMethod subclasses the upstream
+        # UnquantizedLinearMethod, so this also covers layers that stay
+        # unquantized because the checkpoint has no entry for them.
+        self.is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
         # NPU default: fp32 logits when out_dtype is None (see class
         # docstring); out_dtype is immutable afterwards.
         self.out_dtype = out_dtype if out_dtype is not None else torch.float32
@@ -99,8 +110,10 @@ class AscendGateLinear(GateLinear):
             return output if not self.return_bias else (output, None)
         # Tier 5: cast x to the weight dtype, compute, cast the output to
         # out_dtype (upstream fallback semantics; out_dtype is always set
-        # after __init__).
-        if x.dtype != self.weight.dtype:
+        # after __init__). Quantized gates must keep the activation dtype:
+        # their weight dtype is the packed storage dtype, not a compute
+        # dtype, and the quant method quantizes the activation itself.
+        if self.is_unquantized and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         base_output = ReplicatedLinear.forward(self, x)
         output_bias = None

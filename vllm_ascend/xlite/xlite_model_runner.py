@@ -18,7 +18,6 @@
 #
 """xlite model runner mixin and the MRV2 subclass for `vllm-ascend`"""
 
-from collections.abc import Iterable
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
@@ -28,9 +27,18 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import is_hidden_state_cache_spec
+from vllm_ascend.worker.v2.attn_utils import _get_layer_kv_cache_specs
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 from vllm_ascend.xlite.utils import _TensorRepr
 from vllm_ascend.xlite.xlite import XliteWrapper
+
+
+def _hidden_state_cache_layers(kv_cache_config: KVCacheConfig) -> frozenset[str]:
+    """Names of hidden-state-only cache layers (per-layer specs, as the MRV2 reshape reads them)."""
+    return frozenset(
+        name for name, spec in _get_layer_kv_cache_specs(kv_cache_config).items() if is_hidden_state_cache_spec(spec)
+    )
 
 
 class XliteModelRunnerMixin:
@@ -42,6 +50,9 @@ class XliteModelRunnerMixin:
     """The xlite model forward backend; consistent with :data:`runner_cls`."""
     _runner_enabled: bool = False
     """If :data:`runner_model` is the current model forward backend; otherwise, :data:`fallback_model`."""
+    # Provided by the concrete runner base.
+    kv_caches: list[torch.Tensor]
+    device: torch.device
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         assert get_ascend_config().xlite_graph_config.enabled, "xlite graph must be enabled to use XliteModelRunner"
@@ -86,30 +97,26 @@ class XliteModelRunnerMixin:
         """If the current model forward backend is the xlite runner."""
         return self._runner_enabled
 
-    def _get_flattened_kv_caches(
-        self, kv_caches: list[torch.Tensor] | list[Iterable[torch.Tensor]], /, *, check_is_contiguous: bool = True
-    ) -> list[torch.Tensor]:
-        """Flattens the KV cache list to a single list of tensors.
+    def _attention_kv_caches(self, hidden_state_layers: frozenset[str]) -> list[torch.Tensor]:
+        """Flat attention-cache tensors, hidden-state-only layers excluded by spec.
 
-        Args:
-            kv_caches (list[torch.Tensor] | list[Iterable[torch.Tensor]]): The KV cache list to flatten.
-            check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
-                any tensor is not contiguous, a ValueError is raised. Default is True.
-
-        Returns:
-            list[torch.Tensor]: The flattened KV cache list.
+        The patched flatten (per-tensor device/None guards) over the name-keyed
+        ``kv_caches_by_layer``; falls back to the unfiltered ``kv_caches`` without it.
         """
-        flattened_kv_caches: list[torch.Tensor] = []
-        for cache in kv_caches:
-            if isinstance(cache, torch.Tensor):
-                flattened_kv_caches.append(cache)
-            elif isinstance(cache, Iterable) and all(isinstance(c, torch.Tensor) for c in cache):  # type: ignore[arg-type]
-                flattened_kv_caches.extend(cache)
-            else:
-                raise TypeError(f"Unexpected kv_cache type: {type(cache)}")
-        if check_is_contiguous and not all(tensor.is_contiguous() for tensor in flattened_kv_caches):
-            raise ValueError("xlite: Found non-contiguous tensor in the KV caches.")
-        return flattened_kv_caches
+        caches_by_layer: dict[str, Any] | None = getattr(self, "kv_caches_by_layer", None)
+        if caches_by_layer is None:
+            logger.warning_once(
+                "xlite: no name-keyed kv_caches_by_layer; registering the unfiltered "
+                "kv_caches list, hidden-state-only caches included."
+            )
+            return self.kv_caches
+        return [
+            tensor
+            for name, cache in caches_by_layer.items()
+            if name not in hidden_state_layers
+            for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
+            if tensor is not None and tensor.device == self.device
+        ]
 
 
 class XliteModelRunnerV2(XliteModelRunnerMixin, NPUModelRunnerV2):  # type: ignore[misc]
@@ -171,6 +178,9 @@ class XliteModelRunnerV2(XliteModelRunnerMixin, NPUModelRunnerV2):  # type: igno
         self, kv_cache_config: KVCacheConfig, kv_cache_allocation_context: AbstractContextManager | None = None
     ) -> None:
         super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
-        kv_caches: list[torch.Tensor] = self._get_flattened_kv_caches(self.kv_caches, check_is_contiguous=False)
+        # Drop hidden-state-only caches by spec (per-layer, as the MRV2 reshape does):
+        # xlite registers attention K/V pairs only.
+        hidden_state_layers = _hidden_state_cache_layers(kv_cache_config)
+        kv_caches: list[torch.Tensor] = self._attention_kv_caches(hidden_state_layers)
         logger.info_once("xlite: registering kv caches to runner model: %s", _TensorRepr(kv_caches, max_it=None))
         self.runner_model.register_kv_caches(kv_caches)

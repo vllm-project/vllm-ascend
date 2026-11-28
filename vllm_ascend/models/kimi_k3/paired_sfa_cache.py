@@ -13,7 +13,6 @@ from dataclasses import replace
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -170,13 +169,12 @@ def paired_sfa_pool_bytes(groups):
 def paired_sfa_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )
     pool_bytes = paired_sfa_pool_bytes(kv_cache_groups)
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
     backing_size = pool_bytes * num_blocks
     main_layer_size = main_page_size * num_blocks
     # Recurrent groups overlay the target MLA region. Their block IDs are

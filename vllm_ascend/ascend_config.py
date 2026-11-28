@@ -1646,12 +1646,14 @@ class XliteGraphConfig:
             return
 
         if spec := vllm_config.speculative_config:
-            # only support speculative methods with a sequential causal chain, e.g., `bonus_token, mtp_1, mtp_2, ...`
-            logger.info_once("xlite graph only supports MTP speculative methods, current method: %s.", spec.method)
-            if (meth := str(spec.method)) not in ("mtp", "draft_model", "extract_hidden_states"):
-                raise RuntimeError("xlite graph only supports SpecDecode with a sequential causal chain.")
-            if meth in ("eagle3", "extract_hidden_states", "dflash", "dspark"):
-                raise RuntimeError("xlite graph does not support SpecDecode methods with intermediate hidden states.")
+            xlite_supports = ("mtp", "eagle3", "extract_hidden_states", "dflash", "dspark", "draft_model")
+            logger.info_once(
+                "xlite graph supports speculative methods: %s; current: %s.", ", ".join(xlite_supports), spec.method
+            )
+            if (meth := str(spec.method)) not in xlite_supports:
+                raise RuntimeError(
+                    f"xlite does not support speculative method {meth!r}; supported: {', '.join(xlite_supports)}."
+                )
             if meth == "draft_model":
                 logger.warning_once("xlite graph may not be compatible with SpecDecode using draft_model.")
         if vllm_config.parallel_config.pipeline_parallel_size > 1:
@@ -1828,6 +1830,20 @@ class SchedulerConfig:
         # typos instead of the resolver silently dropping them.
         resolved.update({key: value for key, value in scheduler_config.items() if key not in resolved})
         return cls(**resolved)  # type: ignore[arg-type]
+
+    @model_validator(mode="after")
+    def _warn_balance_scheduling_deprecated(self) -> SchedulerConfig:
+        if self.enable_balance_scheduling:
+            logger.warning_once(
+                "Balance scheduling (scheduler_config.enable_balance_scheduling) is deprecated as of "
+                "vLLM Ascend v0.33.0 and will be removed in a future release. "
+                "It remains active while enabled. Set "
+                "additional_config.scheduler_config.enable_balance_scheduling=false (the default) "
+                "to use the normal scheduler path. See "
+                "https://github.com/vllm-project/vllm-ascend/issues/23229 for the sunset plan "
+                "and to share workloads that still require the global admission gate."
+            )
+        return self
 
 
 @config

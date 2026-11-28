@@ -221,6 +221,9 @@ def initialize_kv_cache(
         for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
         if tensor is not None and tensor.device == self.device
     ]
+    if not is_profiling:
+        # Mirror upstream core: consumers (e.g. xlite) need layer names to filter caches by spec.
+        self.kv_caches_by_layer = kv_caches_dict
     self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
     # Model-state initialization may allocate ReplaySSM trackers. Collect the
     # final tensors after that binding so scheduler copies keep live references.
