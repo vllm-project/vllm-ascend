@@ -229,16 +229,23 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
         model_version="glm5_next",
         tokens_per_state=4,
     )
+    original_specs = dict(specs)
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
+    assert specs == original_specs
+    planned_specs = {
+        name: group.kv_cache_spec.kv_cache_specs[name] for group in groups[:2] for name in group.layer_names
+    }
     plan = get_glm5_next_kv_cache_config(make_config(), groups, num_blocks=3)
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
-    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    (tail,) = view_kpool_tail_cache(tail_name, planned_specs[tail_name], raw, plan.num_blocks)
+    page_rows = planned_specs[tail_name].page_size_bytes // (
+        2 * planned_specs[tail_name].head_size * tail.element_size()
+    )
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
-    keys, scales = view_compressed_indexer_cache(indexer_name, specs[indexer_name], raw, backend, 128)
+    keys, scales = view_compressed_indexer_cache(indexer_name, planned_specs[indexer_name], raw, backend, 128)
     page_bytes = descriptor.size // plan.num_blocks
     assert keys.shape == (15, 32, 1, 128)
     assert scales.shape == (15, 32, 1, 1)
@@ -438,3 +445,43 @@ def test_glm5_next_collector_aligned_planner_characterization():
         (4 * main_page, main_page, 0, 0),
         (4 * 16384, 16384, 0, 0),
     ]
+
+
+def test_glm53_flash_small_pool_does_not_pad_main_pool():
+    config = make_config()
+    raw_specs = make_specs(pool=16)
+    small_page = raw_specs["model.layers.3.indexer.k_cache"].page_size_bytes
+    main_page = raw_specs["model.layers.3.attn"].page_size_bytes
+    assert small_page < main_page
+
+    groups = get_glm5_next_kv_cache_groups(config, raw_specs)
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    assert layout.main_page_size == main_page
+    assert layout.small_page_size == 16384
+
+
+def test_glm5_next_planner_is_identical_and_pure_across_raw_and_aligned_specs():
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    raw_specs = make_specs()
+    main_page = raw_specs["model.layers.3.attn"].page_size_bytes
+    aligned_specs = {
+        name: replace(spec, page_size_padded=main_page) if isinstance(spec, MambaSpec) else spec
+        for name, spec in raw_specs.items()
+    }
+    raw_padded_before = {name: spec.page_size_padded for name, spec in raw_specs.items()}
+    aligned_padded_before = {name: spec.page_size_padded for name, spec in aligned_specs.items()}
+
+    builder = AscendKVCacheConfigBuilder()
+    raw_groups = builder.get_kv_cache_groups(config, raw_specs)
+    aligned_groups = builder.get_kv_cache_groups(config, aligned_specs)
+    assert {name: spec.page_size_padded for name, spec in raw_specs.items()} == raw_padded_before
+    assert {name: spec.page_size_padded for name, spec in aligned_specs.items()} == aligned_padded_before
+    assert raw_groups == aligned_groups
+
+    raw_plan = builder.get_kv_cache_config_from_groups(config, raw_groups, num_blocks=4)
+    aligned_plan = builder.get_kv_cache_config_from_groups(config, aligned_groups, num_blocks=4)
+    assert raw_plan.kv_cache_tensors == aligned_plan.kv_cache_tensors

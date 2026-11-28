@@ -339,3 +339,37 @@ def test_paired_sfa_builder_characterization():
         (4 * 29048832, 1007616, 4 * 1007616, 0),
         (4 * 29048832, 202752, 4 * 202752, 24 * 4 * 1007616),
     ]
+
+
+def test_paired_sfa_dspark_planner_is_pure_and_preserves_input_dict():
+    config = make_config()
+    config.model_config.max_model_len = 8192
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    target = make_specs()
+    draft = {
+        "model.layers.93.attn": AscendMLAAttentionSpec(
+            block_size=1536,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_draft=True,
+            non_causal_multi_token_decode=True,
+        )
+    }
+    raw_specs = {**draft, **dict(reversed(target.items()))}
+    raw_keys = list(raw_specs.keys())
+    raw_copy = dict(raw_specs)
+
+    builder = AscendKVCacheConfigBuilder()
+    raw_groups = builder.get_kv_cache_groups(config, raw_specs)
+    assert raw_specs == raw_copy
+    assert list(raw_specs.keys()) == raw_keys
+
+    reordered = {**target, **draft}
+    reordered_groups = builder.get_kv_cache_groups(config, reordered)
+    assert raw_groups == reordered_groups
+
+    raw_plan = builder.get_kv_cache_config_from_groups(config, raw_groups, num_blocks=2)
+    reordered_plan = builder.get_kv_cache_config_from_groups(config, reordered_groups, num_blocks=2)
+    assert raw_plan.kv_cache_tensors == reordered_plan.kv_cache_tensors

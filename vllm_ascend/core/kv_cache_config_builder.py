@@ -101,6 +101,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
+            kv_cache_spec = dict(kv_cache_spec)
             unify_hybrid_kv_cache_specs(kv_cache_spec)
 
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
