@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -5,19 +7,27 @@ from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
+from vllm.model_executor.models.qwen2 import Qwen2MLP
 from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3DecoderLayer,
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
+    _resolve_layer_attention,
 )
+from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv as UpstreamDFlashGroupedConv
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
 from vllm_ascend.models.quarot_utils import align_draft_weights
+from vllm_ascend.ops.kimi_mla import kimi_mla_draft_window
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.vocab_parallel_embedding import (
     VocabParallelMode,
     gather_lm_head_hidden_states,
@@ -49,42 +59,13 @@ def _grouped_conv(
     # also keeps single-request short drafts from padding beyond the input.
     for tap in range(1, min(taps, block_size)):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-        output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
+        # Multiplying a cross-request NaN or Inf by zero would retain a NaN.
+        shifted = torch.where((position >= tap).view(-1, 1, 1), shifted, 0)
+        output += coefficients[:, tap] * shifted
     return output.flatten(-2)
 
 
-class DFlashGroupedConv(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        taps: int,
-        group_size: int,
-        block_size: int,
-        params_dtype: torch.dtype,
-        prefix: str,
-        quant_config: QuantizationConfig | None = None,
-    ) -> None:
-        super().__init__()
-        if hidden_size % group_size:
-            raise ValueError(f"conv_group_size={group_size} must divide hidden_size={hidden_size}.")
-        self.block_size = block_size
-        self.taps = taps
-        self.group_size = group_size
-        self.num_groups = hidden_size // group_size
-        self.base_kernel = nn.Parameter(
-            torch.empty(2, taps, hidden_size, dtype=params_dtype),
-            requires_grad=False,
-        )
-        self.kernel_projection = ReplicatedLinear(
-            hidden_size,
-            2 * taps * self.num_groups,
-            bias=False,
-            params_dtype=params_dtype,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "kernel_projection"),
-            return_bias=False,
-        )
-
+class DFlashGroupedConv(UpstreamDFlashGroupedConv):
     def _convolve(self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int) -> torch.Tensor:
         return _grouped_conv(
             hidden_states,
@@ -95,15 +76,6 @@ class DFlashGroupedConv(nn.Module):
             self.group_size,
             self.taps,
         )
-
-    def prepare(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        coefficients = self.kernel_projection(hidden_states).reshape(
-            hidden_states.shape[0], 2, self.taps, self.num_groups
-        )
-        return self._convolve(hidden_states, coefficients[:, 0], 0), coefficients[:, 1]
-
-    def finish(self, hidden_states: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
-        return self._convolve(hidden_states, coefficients, 1)
 
 
 class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
@@ -125,6 +97,11 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self._init_convs(vllm_config, config, quant_config, prefix)
+
+    def _init_convs(
+        self, vllm_config: VllmConfig, config, quant_config: QuantizationConfig | None, prefix: str
+    ) -> None:
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -323,14 +300,127 @@ def _gather_lm_head_candidates(
     return values, ids
 
 
+class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
+    """DFlash2 decoder layer with a DeepSeek-style MLA draft attention.
+
+    The MLA draft checkpoint stores the A-projections as separate
+    ``q_a_proj`` / ``kv_a_proj_with_mqa`` tensors and the norms/projections
+    under the DeepSeek names (``kv_a_layernorm``, ``kv_b_proj`` ...), which
+    match AscendKimiMLAAttention's module tree. The stacked mapper on
+    DFlash2Qwen3MLAModel fuses the two A-projections when loading.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        config,
+        layer_idx: int,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        self.hidden_size = config.hidden_size
+        if getattr(config, "q_lora_rank", None) is None:
+            raise ValueError("DFlash2 MLA draft requires q_lora_rank in the draft config.")
+        modes = [_resolve_layer_attention(config, i) for i in range(config.num_hidden_layers)]
+        sliding_window, causal = modes[layer_idx]
+        # One FlashMLA schedule is shared by all draft layers.
+        uniform_causal = sliding_window is not None and sliding_window > 0 and causal and len(set(modes)) == 1
+        with kimi_mla_draft_window(sliding_window, uniform_causal=uniform_causal):
+            self.self_attn = AscendKimiMLAAttention(
+                config=config,
+                hidden_size=config.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank,
+                kv_lora_rank=config.kv_lora_rank,
+                use_output_gate=False,
+                use_rope=True,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                non_causal_multi_token_decode=any(not layer_causal for _, layer_causal in modes),
+                disable_mlapo=True,
+            )
+        self.self_attn.causal = causal
+        self.mlp = Qwen2MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+        )
+        self._init_convs(vllm_config, config, quant_config, prefix)
+
+
+class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
+    """DFlash2 draft model whose decoder layers use MLA draft attention."""
+
+    decoder_layer_cls = DFlash2Qwen3MLADecoderLayer
+
+    hf_to_vllm_mapper = replace(
+        DFlashQwen3Model.hf_to_vllm_mapper,
+        orig_to_new_stacked={
+            **DFlashQwen3Model.hf_to_vllm_mapper.orig_to_new_stacked,
+            ".q_a_proj": (".fused_qkv_a_proj", 0),
+            ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+        },
+    )
+
+    def _build_fused_kv_buffers(self) -> None:
+        """The MLA writer uses the loaded per-layer projections directly."""
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        modules: list[nn.Module] = [self.hidden_norm]
+        for layer in self.layers:
+            attn = layer.self_attn
+            modules.extend((attn._attention_layer, attn.fused_qkv_a_proj, attn.kv_a_layernorm))
+            # A strided cache can select PROLOG_V3 after pruning. The fused op
+            # consumes both Q and KV, even when only the cache writes are used.
+            if attn.impl.supports_prolog_v3_writer():
+                modules.extend((attn.q_a_layernorm, attn.q_b_proj))
+        if self.use_aux_hidden_state:
+            modules.append(self.fc)
+        return modules
+
+    @torch.inference_mode()
+    def precompute_and_store_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
+    ) -> None:
+        if context_states.numel() == 0:
+            return
+        cos, sin = get_cos_and_sin_mla(context_positions)
+        store_mla_draft_context_kv(self.layers, self.hidden_norm(context_states), cos, sin, context_slot_mapping)
+
+
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # vLLM #52816 likewise routes the draft model through this class factory.
     model_cls = DFlash2Qwen3Model
+
+    speculator_config_class = DFlash2SpeculatorConfig
 
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        draft_hf_config = speculative_config.draft_model_config.hf_config
+        dflash_config = getattr(draft_hf_config, "dflash_config", None) or {}
+        if dflash_config.get("attention_mode") == "mla":
+            self.model_cls = DFlash2Qwen3MLAModel
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         draft_config = self.config.dflash_config
@@ -340,6 +430,14 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self.lmhead_tp_candidate_capacity = (
             vllm_config.scheduler_config.max_num_seqs * vllm_config.speculative_config.num_speculative_tokens
         )
+
+    def get_draft_kv_cache_layer_names(self) -> list[str]:
+        names = []
+        for layer in self.model.layers:
+            attn = layer.self_attn
+            inner = getattr(attn, "attn", None)
+            names.append(inner.layer_name if inner is not None else attn.layer_name)
+        return names
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:

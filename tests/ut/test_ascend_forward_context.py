@@ -686,19 +686,20 @@ def test_extra_ctx_uses_additional_kwargs(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "tp,pcp,tokens,requests,query,method,expected",
+    "tp,pcp,dcp,tokens,requests,query,method,expected",
     [
-        (1, 8, 16384, 500, 2, "mtp", 3923),
-        (8, 1, 16384, 500, 2, "mtp", 16384),
-        (3, 8, 513, 16, 1, "mtp", 111),
-        (1, 16, 16384, 512, 4, "mtp", 3968),
-        (1, 8, 16384, 64, 4, "dspark", 2400),
-        (1, 8, 16384, 64, 4, "dflash", 2400),
+        (1, 8, 1, 16384, 500, 2, "mtp", 3923),
+        (8, 1, 1, 16384, 500, 2, "mtp", 16384),
+        (3, 8, 1, 513, 16, 1, "mtp", 111),
+        (1, 16, 1, 16384, 512, 4, "mtp", 3968),
+        (1, 8, 1, 16384, 64, 4, "dspark", 2400),
+        (1, 8, 1, 16384, 64, 4, "dflash", 2400),
+        (1, 8, 8, 16384, 64, 4, "dspark", 3464),
     ],
 )
 @pytest.mark.parametrize("prefill_mc2", [True, False])
 def test_prefill_mc2_capacity_reuses_profile_budget(
-    monkeypatch, tp, pcp, tokens, requests, query, method, expected, prefill_mc2
+    monkeypatch, tp, pcp, dcp, tokens, requests, query, method, expected, prefill_mc2
 ):
     monkeypatch.setattr(
         afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=prefill_mc2, enable_fused_mc2=1)
@@ -706,6 +707,7 @@ def test_prefill_mc2_capacity_reuses_profile_budget(
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
     config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=tokens)
     config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
     config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=query - 1)
     afc.set_mc2_tokens_capacity(config, requests, query)
     assert afc.get_mc2_tokens_capacity() == expected

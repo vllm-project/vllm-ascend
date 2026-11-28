@@ -554,6 +554,26 @@ Modify `run_dp_template.sh` on each node.
         1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
         2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 
+#### Manual launch of external DP ranks
+
+!!! note
+
+    If you skip the launcher and template above, run one `vllm serve` command
+    per external DP rank. For ranks on the same node, follow the
+    [upstream vLLM guidance](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
+
+    > assign each process a disjoint device set with `CUDA_VISIBLE_DEVICES` or
+    > `--device-ids`; devices are not partitioned automatically between processes.
+
+    On Ascend, the visibility variable is `ASCEND_RT_VISIBLE_DEVICES`.
+
+    For example, with two TP2 ranks on one node, both `vllm serve`
+    processes can inherit `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`.
+    Give each process only its own device IDs.
+
+    - Rank 0: `--device-ids 8,9`
+    - Rank 1: `--device-ids 0,1`
+
 #### Layerwise
 
 === "Prefiller node 1"

@@ -64,6 +64,10 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
             prompt_lookup_max=5,
             num_speculative_tokens=k,
             enforce_eager=False,
+            custom_method=None,
+            speculator_config=SimpleNamespace(
+                speculator_class="vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
+            ),
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_model_len=max_model_len),

@@ -10,6 +10,8 @@ from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
 
 from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
 
+SLEEP_TAGS = ("weights", "runtime", "cudagraph")
+
 
 @pytest.fixture
 def allocator(monkeypatch):
@@ -20,21 +22,21 @@ def allocator(monkeypatch):
     return mock_allocator
 
 
-def test_backend_suspend_level_one(allocator):
+def test_backend_suspend_forwards_discardable(allocator):
     backend = CaMemBackend()
 
-    backend.suspend(1)
+    backend.suspend({0x1000, 0x2000})
 
-    allocator.sleep.assert_called_once_with(("weights",))
+    allocator.sleep.assert_called_once_with(SLEEP_TAGS, {0x1000, 0x2000})
     assert backend.state() == "SUSPENDED"
 
 
-def test_backend_suspend_level_two(allocator):
+def test_backend_suspend_defaults_to_no_discardable(allocator):
     backend = CaMemBackend()
 
-    backend.suspend(2)
+    backend.suspend()
 
-    allocator.sleep.assert_called_once_with(())
+    allocator.sleep.assert_called_once_with(SLEEP_TAGS, ())
 
 
 def test_backend_resume_and_discard(allocator):
@@ -52,9 +54,9 @@ def test_backend_resume_and_discard(allocator):
 def test_backend_accepts_allocator_factory(allocator):
     backend = CaMemBackend(lambda: allocator)
 
-    backend.suspend(1)
+    backend.suspend({0x1000})
 
-    allocator.sleep.assert_called_once_with(("weights",))
+    allocator.sleep.assert_called_once_with(SLEEP_TAGS, {0x1000})
 
 
 def test_backend_registered_with_upstream_factory():

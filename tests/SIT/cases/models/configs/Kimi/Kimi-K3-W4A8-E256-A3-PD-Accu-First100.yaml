@@ -1,0 +1,189 @@
+# Draft: A3 hardware execution and baseline calibration are pending.
+# Adapted from Task4_1_tcase_main_Kimi-K3_E256_PD_Disag_A5_TCase / tests/SIT/cases/models/configs/Kimi/Kimi-K3-W4A8-E256-A5-PD-Accu.yaml
+# Two A3 nodes: node 0 = Prefill, node 1 = Decode; TP16/EP per role.
+test_name: Kimi-K3-W4A8-E256-A3-PD-Accu-First100
+model: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-experts256
+num_nodes: 2
+npu_per_node: 16
+dp_load_balancing: external
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller:
+    - 0
+    decoder:
+    - 1
+config:
+- node_index: 0
+  port_start: 8100
+  dp_rpc_port: 13389
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 16
+  dp_address: ${NODE_0_IP}
+- node_index: 1
+  port_start: 8100
+  dp_rpc_port: 13390
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 16
+  dp_address: ${NODE_1_IP}
+templates:
+- node_index: 0
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    HCCL_OP_EXPANSION_MODE: AIV
+    HCCL_BUFFSIZE: '800'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    OMP_NUM_THREADS: '1'
+    PYTHONHASHSEED: '42'
+    VLLM_ENGINE_READY_TIMEOUT_S: '7200'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+    VLLM_HOST_IP: ${LOCAL_IP}
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    TORCH_EXTENSIONS_DIR: /tmp/task2_1_a3_kimi_k3_main_accuracy/node-${NODE_INDEX}/dp-${DP_RANK}
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --enable-expert-parallel
+  - --distributed-executor-backend
+  - mp
+  - --trust-remote-code
+  - --tokenizer-mode
+  - kimi_k3
+  - --reasoning-parser
+  - kimi_k3
+  - --quantization
+  - ascend
+  - --dtype
+  - bfloat16
+  - --generation-config
+  - vllm
+  - --seed
+  - '42'
+  - --default-chat-template-kwargs
+  - '{"thinking_effort":"low"}'
+  - --enforce-eager
+  - --max-model-len
+  - '4096'
+  - --max-num-seqs
+  - '100'
+  - --max-num-batched-tokens
+  - '3072'
+  - --enable-chunked-prefill
+  - --no-enable-prefix-caching
+  - --block-size
+  - '768'
+  - --cp-kv-cache-interleave-size
+  - '768'
+  - --gpu-memory-utilization
+  - '0.85'
+  - --mm-processor-cache-gb
+  - '0'
+  - --limit-mm-per-prompt
+  - '{"vision_chunk":0}'
+  - --additional-config
+  - '{"enable_flashcomm1":true}'
+  - --kv-transfer-config
+  - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":16},"decode":{"dp_size":1,"tp_size":16}}}'
+- node_index: 1
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    HCCL_OP_EXPANSION_MODE: AIV
+    HCCL_BUFFSIZE: '800'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    OMP_NUM_THREADS: '1'
+    PYTHONHASHSEED: '42'
+    VLLM_ENGINE_READY_TIMEOUT_S: '7200'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+    VLLM_HOST_IP: ${LOCAL_IP}
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    TORCH_EXTENSIONS_DIR: /tmp/task2_1_a3_kimi_k3_main_accuracy/node-${NODE_INDEX}/dp-${DP_RANK}
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --enable-expert-parallel
+  - --distributed-executor-backend
+  - mp
+  - --trust-remote-code
+  - --tokenizer-mode
+  - kimi_k3
+  - --reasoning-parser
+  - kimi_k3
+  - --quantization
+  - ascend
+  - --dtype
+  - bfloat16
+  - --generation-config
+  - vllm
+  - --seed
+  - '42'
+  - --default-chat-template-kwargs
+  - '{"thinking_effort":"low"}'
+  - --enforce-eager
+  - --max-model-len
+  - '4096'
+  - --max-num-seqs
+  - '100'
+  - --max-num-batched-tokens
+  - '768'
+  - --enable-chunked-prefill
+  - --no-enable-prefix-caching
+  - --block-size
+  - '768'
+  - --cp-kv-cache-interleave-size
+  - '768'
+  - --gpu-memory-utilization
+  - '0.85'
+  - --mm-processor-cache-gb
+  - '0'
+  - --limit-mm-per-prompt
+  - '{"vision_chunk":0}'
+  - --additional-config
+  - '{"enable_flashcomm1":true}'
+  - --kv-transfer-config
+  - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"30100","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":16},"decode":{"dp_size":1,"tp_size":16}}}'
+benchmarks:
+  gsm8k_first100_c60: &gsm8k_first100_c60
+    case_type: accuracy
+    dataset_path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
+    dataset_path_local: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
+    model_path: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-experts256
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_4_shot_cot_str
+    num_prompts: 100
+    max_out_len: 1024
+    batch_size: 60
+    temperature: 0
+    top_p: 1.0
+    seed: 42
+    baseline: 50
+    threshold: 50
+  gsm8k_first100_c60_r02: *gsm8k_first100_c60
+  gsm8k_first100_c60_r03: *gsm8k_first100_c60

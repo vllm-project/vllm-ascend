@@ -302,6 +302,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
+            --quantization ascend \
             --served-model-name qwen3.5 \
             --max-num-seqs 128 \
             --max-model-len 16384 \
@@ -331,6 +332,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
+            --quantization ascend \
             --served-model-name qwen3.6 \
             --max-num-seqs 128 \
             --max-model-len 16384 \
@@ -416,7 +418,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - Prefix caching is enabled by default, and the example above uses the default. Add `--no-enable-prefix-caching` to disable it if needed. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.6-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
-    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
+    - For short-sequence scenarios (e.g., 16k input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
@@ -556,7 +558,7 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 >
 > **Atlas 300I Duo**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios.
 >
-> **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
+> **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16k input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
 #### Table 1: Scenario Overview
 
@@ -575,11 +577,11 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|------------------|
-| High Throughput (128k) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133000 | 3 | On |
-| High Throughput (128k) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133000 | 3 | On |
-| Low Latency (128k) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133000 | 3 | On |
+| High Throughput (128k) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133120 | 3 | On |
+| High Throughput (128k) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133120 | 3 | On |
+| Low Latency (128k) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133120 | 3 | On |
 | Long Context (256k+) | Single-Node (A3) | 16 | 8 | 2 | 8 | 8192 | 262144 | 3 | On |
-| High Throughput (128k) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 133000 | 3 | On |
+| High Throughput (128k) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 133120 | 3 | On |
 | Long Context (256k+) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 262144 | 3 | On |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
