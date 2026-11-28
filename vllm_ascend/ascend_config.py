@@ -530,6 +530,7 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
+            "dsv41_pcp_prefill_max_inflight_layers": 0,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "mix_placement": false,
@@ -665,6 +666,8 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
+    # Cap host submission of eager V4.1 PCP prefill attention layers. Zero disables it.
+    dsv41_pcp_prefill_max_inflight_layers: int = Field(default=0, ge=0)
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     mix_placement: bool = False

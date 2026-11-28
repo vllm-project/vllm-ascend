@@ -9,7 +9,7 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from itertools import permutations
 from types import SimpleNamespace
@@ -874,6 +874,7 @@ def runtime(builders, monkeypatch):
             n_local_heads=2,
             head_dim=2,
             nope_head_dim=0,
+            shared_state=SimpleNamespace(prefill_layer_window=None),
             attn_sink=None,
             softmax_scale=1.0,
             wq_a=_linear(4, 4),
@@ -896,7 +897,7 @@ def runtime(builders, monkeypatch):
             None,
             None,
         )
-        context = SimpleNamespace(attn_metadata=None)
+        context = SimpleNamespace(attn_metadata=None, cudagraph_runtime_mode=CUDAGraphMode.NONE)
         for module in (dsa_v41, dsa_v41_cp):
             monkeypatch.setattr(module, "get_forward_context", lambda: context)
 
@@ -959,6 +960,36 @@ def runtime(builders, monkeypatch):
 
 
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize(
+        "scenario,mode,expected",
+        [
+            ("prefill", CUDAGraphMode.NONE, True),
+            ("mixed", CUDAGraphMode.NONE, True),
+            ("empty", CUDAGraphMode.NONE, True),
+            ("prefill", CUDAGraphMode.FULL, False),
+            ("decode", CUDAGraphMode.NONE, False),
+            ("dummy", CUDAGraphMode.NONE, False),
+        ],
+    )
+    def test_layer_window_wraps_only_eager_pcp_prefill(self, runtime, scenario, mode, expected):
+        state = runtime()
+        state.context.cudagraph_runtime_mode = mode
+
+        @contextmanager
+        def layer():
+            state.events.append("window_enter")
+            yield
+            state.events.append("window_exit")
+
+        state.attn.shared_state.prefill_layer_window = SimpleNamespace(layer=layer)
+        state.run(scenario)
+        if expected:
+            assert state.events[0] == "window_enter"
+            assert state.events[-1] == "window_exit"
+        else:
+            assert "window_enter" not in state.events
+            assert "window_exit" not in state.events
+
     @pytest.mark.parametrize("wrapped", [False, True])
     @pytest.mark.parametrize(
         "q_scheme,kv_scheme,quantizations",
@@ -1157,7 +1188,8 @@ class TestPCPBatchLifecycle:
         impl.index_k_source_prefix = PREFIXES["index_k"]
         impl.compressor_state_prefix = PREFIXES["compressor_state"]
         impl.topology = SimpleNamespace(index_topk=3)
-        attn.shared_state = SimpleNamespace(topk_indices=torch.zeros(64, 3, dtype=torch.int32), topk_lengths=None)
+        attn.shared_state.topk_indices = torch.zeros(64, 3, dtype=torch.int32)
+        attn.shared_state.topk_lengths = None
         attn.long_kv_cache = SimpleNamespace(kv_cache=torch.zeros(256, 2))
         k_cache, scale_cache = torch.zeros(256, 2), torch.zeros(256, 1)
         indexer = DeepseekV41Indexer.__new__(DeepseekV41Indexer)
@@ -1491,9 +1523,10 @@ class TestSparseLayerReuse:
         impl.long_kv_source_prefix, impl.index_k_source_prefix = PREFIXES["long_kv"], PREFIXES["index_k"]
         topk = torch.arange(64 * 3, dtype=torch.int32).view(64, 3)
         candidates = torch.full((64, 1, 2), 7, dtype=torch.int32)
-        attn.shared_state = SimpleNamespace(
-            topk_indices=topk, candidates=candidates, candidate_lengths=None, topk_lengths=None
-        )
+        attn.shared_state.topk_indices = topk
+        attn.shared_state.candidates = candidates
+        attn.shared_state.candidate_lengths = None
+        attn.shared_state.topk_lengths = None
         addresses = (topk.data_ptr(), candidates.data_ptr())
         index_cache, folded_cache, long_cache = (object(), object()), object(), torch.zeros(256, 2)
         state.context.no_compile_layers = {

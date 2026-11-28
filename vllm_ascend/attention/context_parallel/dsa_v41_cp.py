@@ -3,11 +3,12 @@
 """V4.1 replicated-cache adapters for MRV2 PCP."""
 
 import dataclasses
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import Any, ClassVar
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -751,11 +752,8 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     def forward(self, attn, positions, hidden_states, output=None):
         # Every layer has SWA metadata carrying the batch's PCP and prefill state.
-        metadata = (
-            get_forward_context().attn_metadata[self.swa_prefix]
-            if get_forward_context().attn_metadata is not None
-            else None
-        )
+        context = get_forward_context()
+        metadata = context.attn_metadata[self.swa_prefix] if context.attn_metadata is not None else None
         if isinstance(metadata, AscendDSAV41PCPMetadata):
             needs_global_metadata = True
             assert metadata.global_metadata is not None
@@ -763,8 +761,16 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         else:
             needs_global_metadata = False
             has_prefill = False
+        window = (
+            attn.shared_state.prefill_layer_window
+            if has_prefill and context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+            else None
+        )
         projector = attn.dsa_attn.dsa_attn.impl
         # V4 owns the quantized O modules and their batch-scoped collective mode.
         # V4.1 already projects padded output even on empty query ranks.
-        with projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
+        with (
+            window.layer() if window is not None else nullcontext(),
+            projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill),
+        ):
             return super().forward(attn, positions, hidden_states, output)

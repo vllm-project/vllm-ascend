@@ -65,6 +65,7 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
+from vllm_ascend.attention.context_parallel.prefill_layer_window import PrefillLayerWindow
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -583,13 +584,19 @@ class DeepseekV41Topology:
 
 
 class DeepseekV41SharedAttentionState:
-    """Per-forward handoff between index sources and their consumer layers."""
+    """Shared indexer buffers and prefill submission state for the target model."""
 
-    def __init__(self, topk_indices, candidates, candidate_lengths=None, topk_lengths=None):
+    def __init__(
+        self, topk_indices, candidates, candidate_lengths=None, topk_lengths=None, *, prefill_max_inflight_layers=0
+    ):
         self.topk_indices = topk_indices
         self.candidates = candidates
         self.candidate_lengths = candidate_lengths
         self.topk_lengths = topk_lengths
+        # All attention layers share the window, including the bounded replay tail.
+        self.prefill_layer_window = (
+            PrefillLayerWindow(prefill_max_inflight_layers) if prefill_max_inflight_layers else None
+        )
 
     def reset(self):
         # Source layers overwrite the active rows before any consumer reads
@@ -1248,6 +1255,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             candidate_buffer,
             candidate_lengths,
             topk_lengths,
+            prefill_max_inflight_layers=get_ascend_config().dsv41_pcp_prefill_max_inflight_layers,
         )
         for layer in self.layers:
             if isinstance(layer, DeepseekV41DecoderLayer):
