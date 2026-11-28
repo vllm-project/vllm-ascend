@@ -60,6 +60,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#include "moe/grouped_matmul_situ_quant_msd/grouped_matmul_situ_quant_msd_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -3053,6 +3054,35 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
     ops.impl("grouped_matmul_situ_quant_weight_nz.list", torch::kPrivateUse1,
              &ascend_kernel::gmm_situ_quant_v2_nz_list);
+
+    ops.def(
+        "gmm1_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
+        "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
+        "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
+        "float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("gmm1_situ_quant", torch::kPrivateUse1,
+             &ascend_kernel::gmm1_situ::gmm_situ_quant_v2_nd);
+    ops.def(
+        "gmm1_situ_quant.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("gmm1_situ_quant.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm1_situ::gmm_situ_quant_v2_nd_list);
+    ops.def(
+        "gmm1_situ_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, "
+        "Tensor? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("gmm1_situ_quant_weight_nz", torch::kPrivateUse1,
+             &ascend_kernel::gmm1_situ::gmm_situ_quant_v2_nz);
+    ops.def(
+        "gmm1_situ_quant_weight_nz.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("gmm1_situ_quant_weight_nz.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm1_situ::gmm_situ_quant_v2_nz_list);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops

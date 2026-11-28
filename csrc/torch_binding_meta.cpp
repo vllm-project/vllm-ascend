@@ -1739,6 +1739,41 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
     return make_grouped_matmul_situ_quant_meta_output(x, n);
 }
 
+std::tuple<at::Tensor, at::Tensor> make_gmm1_situ_quant_meta_output(
+    const at::Tensor &x, const c10::SymInt &n)
+{
+    TORCH_CHECK(x.scalar_type() == at::kChar, "A3 SiTU requires INT8 activations");
+    const auto m = x.sym_size(0);
+    return {at::empty_symint(c10::SymDimVector{m, n / 2}, x.options()),
+            at::empty_symint(c10::SymDimVector{m}, x.options().dtype(at::kFloat))};
+}
+
+std::tuple<at::Tensor, at::Tensor> gmm1_situ_quant_meta(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale,
+    const std::optional<at::Tensor> &, const std::optional<at::Tensor> &,
+    const at::Tensor &, const std::optional<at::Tensor> &, const at::Tensor &,
+    int64_t, int64_t, int64_t, int64_t,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &, double, double)
+{
+    const auto experts = weight.sym_size(0);
+    const auto n = weight_scale.sym_numel() / experts;
+    return make_gmm1_situ_quant_meta_output(x, n);
+}
+
+std::tuple<at::Tensor, at::Tensor> gmm1_situ_quant_list_meta(
+    const at::Tensor &x, const std::vector<at::Tensor> &weight, const std::vector<at::Tensor> &weight_scale,
+    const std::optional<std::vector<at::Tensor>> &, const std::optional<at::Tensor> &,
+    const at::Tensor &, const std::optional<at::Tensor> &, const at::Tensor &,
+    int64_t, int64_t, int64_t, int64_t,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &, double, double)
+{
+    TORCH_CHECK(!weight.empty() && !weight_scale.empty(), "SiTU weight and scale lists must not be empty");
+    const auto n = weight_scale[0].sym_numel();
+    return make_gmm1_situ_quant_meta_output(x, n);
+}
+
 void npu_fused_quant_lightning_indexer_manage_meta(
     const at::Tensor &index_weights,
     const at::Tensor &query_dequant_scale,
@@ -1838,6 +1873,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant_weight_nz.list",
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("gmm1_situ_quant", &vllm_ascend::meta::gmm1_situ_quant_meta);
+    ops.impl("gmm1_situ_quant.list", &vllm_ascend::meta::gmm1_situ_quant_list_meta);
+    ops.impl("gmm1_situ_quant_weight_nz", &vllm_ascend::meta::gmm1_situ_quant_meta);
+    ops.impl("gmm1_situ_quant_weight_nz.list",
+             &vllm_ascend::meta::gmm1_situ_quant_list_meta);
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
     // Launch host print from device

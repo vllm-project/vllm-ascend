@@ -25,6 +25,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -40,6 +41,7 @@ from vllm_ascend.utils import (
 from ..base import AscendLinearScheme, AscendMoEScheme, PreparedLinearInput, QuantType
 from ..registry import register_scheme
 
+ACL_FORMAT_FRACTAL_NZ_C0_16 = 50
 _MODELSLIM_SCALE_BIAS_PARTITIONS = 16
 _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
@@ -461,53 +463,75 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
         )
 
+    @staticmethod
+    def _apply_gmm1_situ_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        group_list: torch.Tensor,
+        group_list_type: int,
+        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        x_scale: torch.Tensor,
+        beta: float,
+        linear_beta: float,
+        weight_assist_matrix: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None = None,
+    ):
+        first_weight = weight[0] if isinstance(weight, (list, tuple)) else weight
+        # Both native NZ storage tags (FRACTAL_NZ and FRACTAL_NZ_C0_16) use the NZ entry.
+        op = (
+            torch.ops._C_ascend.gmm1_situ_quant_weight_nz
+            if torch_npu.get_npu_format(first_weight) in (ACL_FORMAT_FRACTAL_NZ, ACL_FORMAT_FRACTAL_NZ_C0_16)
+            else torch.ops._C_ascend.gmm1_situ_quant
+        )
+        if isinstance(weight, (list, tuple)):
+            op = op.list
+        return op(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_assist_matrix=weight_assist_matrix,
+            bias=None,
+            x_scale=x_scale,
+            smooth_scale=None,
+            group_list=group_list.to(torch.int64),
+            dequant_mode=0,
+            dequant_dtype=0,
+            quant_mode=0,
+            group_list_type=group_list_type,
+            tuning_config=None,
+            beta=beta,
+            linear_beta=linear_beta,
+        )
+
+    def supports_fused_activation(self, activation: MoEActivation | str) -> bool:
+        if not super().supports_fused_activation(activation):
+            return False
+        if MoEActivation(activation) == MoEActivation.SITU:
+            return get_current_hardware_profile().supports(HardwareCapability.GMM1_SITU_QUANT_MSD)
+        return True
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
-        w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
         if mlp_compute_input.activation == MoEActivation.SITU:
-            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
-            # activation with dynamic output quantization (Kimi K3 W4A8).
-            # W4A8 only supports per-channel weights (is_per_channel_weight is
-            # always True), so the A8W4 gmm scale must always be in [E, 1, N]
-            # layout (unsqueeze -2); otherwise the kernel tiling treats the
-            # flattened per-channel scale as the quant group count and fails.
-            scale = [item.to(w2_scale[0].dtype) if item.dtype != w2_scale[0].dtype else item for item in w1_scale]
-            scale = [item.unsqueeze(-2) for item in scale]
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=w1 if isinstance(w1, list) else [w1],
-                scale=scale,
-                bias=bias1,
-                per_token_scale=[pertoken_scale],
-                split_item=2,
-                group_type=0,
+            hidden_states, out_scale = self._apply_gmm1_situ_quant(
+                x=hidden_states,
+                weight=w1 if self.use_expert_weight_list else w1[0],
+                weight_scale=w1_scale if self.use_expert_weight_list else w1_scale[0],
+                weight_assist_matrix=bias1[0] if bias1 is not None and not self.use_expert_weight_list else bias1,
+                x_scale=pertoken_scale,
                 group_list=group_list,
                 group_list_type=group_list_type,
-                output_dtype=torch.bfloat16 if bias1 is not None else w2_scale[0].dtype,
-            )[0]
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
-                x=hidden_states,
-                weight_scale=None,
-                activation_scale=None,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                # The kernel reads the per-expert row counts as INT64 and
-                # skips the dead tail rows of the worst-case expanded
-                # buffer; group_list arrives as int32 from routing.
-                group_index=(group_list.to(torch.int64) if group_list is not None else None),
                 beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                activate_left=True,
-                quant_mode="dynamic",
             )
             dispose_tensor(mlp_compute_input.hidden_states)
-            return hidden_states, swiglu_out_scale
+            return hidden_states, out_scale
 
         hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
@@ -527,7 +551,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
-        w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
         # W4A8 only supports per-channel weights (is_per_channel_weight is
