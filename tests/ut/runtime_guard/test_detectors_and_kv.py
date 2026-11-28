@@ -307,6 +307,55 @@ def test_multi_group_dump_uses_per_group_block_ids(tmp_path: Path):
     assert torch.equal(by_layer["L1"]["tensor"][0], g1[2])
 
 
+def test_dump_uses_armed_rows_for_estimate_and_delayed_copy(tmp_path):
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+
+    pages = torch.arange(8, dtype=torch.float32).view(-1, 1)
+    state = SimpleNamespace(block_ids=([1], [2, 3, 4, 5], []))
+    guard = MagicMock()
+    runner = SimpleNamespace(
+        kv_caches={"A": pages, "B": pages + 100, "C": pages + 200},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in ("A", "B", "C")]
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=1),
+        requests={"r1": state},
+        runtime_guard=guard,
+    )
+    reader = KvCacheReader(runner)
+    ctx = _dump_ctx(
+        tmp_path=tmp_path,
+        incident=Incident(incident_type="token_repeat", req_id="r1", block_ids=[1], wave=7),
+        runner=runner,
+        kv_reader=reader,
+    )
+    DumpKvAction().run(ctx)
+    job = guard.queue_kv_dump.call_args.args[0]
+    rows = job["manager_block_ids_by_group"]
+    assert rows == [[1], [2, 3, 4, 5], []]
+    estimate = reader.estimate_dump_bytes(manager_block_ids_by_group=rows)
+    state.block_ids[0].append(6)
+    state.block_ids[1].clear()
+    state.block_ids[2].append(7)
+    proc = SimpleNamespace(
+        runner=runner,
+        runtime_config=ctx.runtime_config,
+        quota=ctx.quota,
+        action_executor=SimpleNamespace(_kv_reader=reader, submit_heavy=None),
+        wave_tracker=SimpleNamespace(current_wave=lambda: 8),
+    )
+    RuntimeGuardProcessor._run_kv_dumps(proc, [job])
+    shards = [torch.load(path, weights_only=True) for path in tmp_path.rglob("*.pt")]
+    assert {p["layer"]: p["block_ids"] for p in shards} == {"A": [1], "B": [2, 3, 4, 5]}
+    assert all((p["dump_arm_wave"], p["dump_copy_wave"]) == (7, 8) for p in shards)
+    assert estimate == sum(p["tensor"].nbytes for p in shards) == 20
+    values = {p["layer"]: p["tensor"].flatten().tolist() for p in shards}
+    assert values == {"A": [1], "B": [102, 103, 104, 105]}
+    info = json.loads(next(tmp_path.rglob("request_info.json")).read_text(encoding="utf-8"))
+    assert info["manager_block_ids_by_group"] == rows
+
+
 def test_draft_layer_in_non_zero_group_uses_that_group(tmp_path: Path):
     """Spec draft resident in group1 must use group1 block_ids (not group0)."""
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
@@ -437,6 +486,25 @@ def test_manager_block_ids_expanded_when_blocks_per_kv_gt_1():
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
 
 
+def test_capture_expanded_cpu_rows_preserves_repeated_manager_blocks():
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import request_manager_blocks
+
+    runner = SimpleNamespace(
+        req_states=SimpleNamespace(req_id_to_index={"r": 0}),
+        block_tables=SimpleNamespace(
+            blocks_per_kv_block=[2, 3],
+            block_tables_cpu=[np.array([[2, 3, 2, 3, 6, 7]]), np.array([[9, 10, 11]])],
+            num_blocks_np=np.array([[6], [3]]),
+        ),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[None, None]),
+    )
+    assert request_manager_blocks(runner, "r") == [[1, 1, 3], [3]]
+    runner.block_tables.num_blocks_np[0, 0] = 0
+    assert request_manager_blocks(runner, "r") == [[], [3]]
+
+
 def test_scalar_blocks_per_kv_block_expands_not_silent_r1():
     """Gemini: scalar ratio must expand (not TypeError→R=1)."""
     from vllm_ascend.observability.runtime_guard.dump import (
@@ -486,7 +554,7 @@ def test_blocks_per_kv_index_error_warns_and_marks_unknown(monkeypatch):
     assert calls and any("index out of range" in str(a) for a in calls[0])
 
 
-def test_derive_ratio_uses_storage_block_size_not_logical():
+def test_derive_ratio_uses_physical_states_not_logical_tokens():
     """Alex #3: dump tensor dim0 uses storage R, not logical block_size//kernel."""
     import numpy as np
 
@@ -496,7 +564,7 @@ def test_derive_ratio_uses_storage_block_size_not_logical():
     )
 
     # logical would be 128/32=4; storage layout is 64/32=2
-    spec = SimpleNamespace(block_size=128, storage_block_size=64)
+    spec = SimpleNamespace(block_size=128, num_states=64)
     runner = SimpleNamespace(
         requests={"r1": SimpleNamespace(block_ids=([1],))},
         block_tables=SimpleNamespace(),  # no blocks_per_kv_block (main path)
@@ -540,7 +608,7 @@ def test_underivable_compressed_ratio_warns_and_payload_marks_unknown(tmp_path: 
     monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
 
     # storage != block_size ⇒ compressed; no kernel_block_sizes ⇒ underivable
-    spec = SimpleNamespace(block_size=128, storage_block_size=64)
+    spec = SimpleNamespace(block_size=128, num_states=64)
     cache = torch.arange(0, 4 * 8, dtype=torch.float32).reshape(4, 8)
     runner = SimpleNamespace(
         requests={"r1": SimpleNamespace(block_ids=([1],))},
@@ -711,9 +779,15 @@ def test_free_bytes_at_returns_none_on_statvfs_error(tmp_path: Path, monkeypatch
 
 def test_estimate_dump_bytes_scales_with_blocks():
     cache = torch.zeros(4, 8, 2)
-    reader = KvCacheReader(SimpleNamespace(kv_caches={"L0": cache}))
-    empty = reader.estimate_dump_bytes(block_ids=[])
-    two = reader.estimate_dump_bytes(block_ids=[0, 1])
+    reader = KvCacheReader(
+        SimpleNamespace(
+            kv_caches={"L0": cache},
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+            block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        )
+    )
+    empty = reader.estimate_dump_bytes(manager_block_ids_by_group=[[]])
+    two = reader.estimate_dump_bytes(manager_block_ids_by_group=[[0, 1]])
     assert empty == 0
     assert two == int(cache.nbytes) // 2
 
@@ -723,8 +797,14 @@ def test_dump_kv_skips_when_free_below_payload_plus_headroom(tmp_path, monkeypat
     from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
 
     cache = torch.zeros(4, 8, 2)
-    reader = KvCacheReader(SimpleNamespace(kv_caches={"L0": cache}))
-    estimated = reader.estimate_dump_bytes(block_ids=[0])
+    reader = KvCacheReader(
+        SimpleNamespace(
+            kv_caches={"L0": cache},
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+            block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        )
+    )
+    estimated = reader.estimate_dump_bytes(manager_block_ids_by_group=[[0]])
     tp_size = 4
     headroom = DUMP_FREE_HEADROOM_BYTES
     monkeypatch.setattr(

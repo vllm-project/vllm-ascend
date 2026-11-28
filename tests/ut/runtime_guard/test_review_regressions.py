@@ -1123,7 +1123,11 @@ def test_v18d2_missing_kv_cache_groups_skips_dump(tmp_path: Path):
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
-def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
+@pytest.mark.parametrize(
+    "job_fields",
+    [{"incident_type": "token_repeat"}, {"incident_type": "manual_trigger", "manager_block_ids_by_group": [[]]}],
+)
+def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int, job_fields):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
     from vllm_ascend.observability.runtime_guard.rank_gate import dump_rank_tag
@@ -1153,19 +1157,16 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
             submit_heavy=None,
         ),
         quota=MagicMock(),
+        wave_tracker=SimpleNamespace(current_wave=lambda: 2),
     )
     jobs = [
         {
             "req_id": "r1",
-            "incident_type": "token_repeat",
+            **job_fields,
         }
     ]
-    with patch(
-        "vllm_ascend.observability.runtime_guard.processor_dump.block_ids_for_request",
-        return_value=[0],
-    ):
-        RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
-    shard = tmp_path / "kv_cache" / "token_repeat" / "r1" / "wave_unknown" / dump_rank_tag(runner)
+    RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
+    shard = tmp_path / "kv_cache" / job_fields["incident_type"] / "r1" / "wave_unknown" / dump_rank_tag(runner)
     assert shard.is_dir()
     assert list(shard.glob("*.pt"))
 

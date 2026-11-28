@@ -145,7 +145,7 @@ Code-path analysis and live verification are tracked separately; Status below re
 | PCP | Partial | Detection must use the post-`restore_for_sampling` batch (see [#22026](https://github.com/vllm-project/vllm-ascend/issues/22026)). Dump path tags need `pcp_manager.pcp_rank` ([#22028](https://github.com/vllm-project/vllm-ascend/issues/22028)). |
 | DCP / CP interleave | Partial | Each rank dumps its **local dense shard**; no CP stitch in-tree. Treat `.pt` as per-rank shards. |
 | Spec / MTP / adaptive | Partial | `spec_acceptance` needs real draft lengths, not padded row width ([#22027](https://github.com/vllm-project/vllm-ascend/issues/22027)). |
-| Hybrid / multi KV group / draft KV | Partial | `dump_kv` must resolve `block_ids` per group ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| Hybrid / multi KV group / draft KV | Partial | `request_info.json` records the frozen scheduler block IDs in `manager_block_ids_by_group`. Each layer shard lists the physical pages copied in `block_ids` and records `dump_arm_wave` and `dump_copy_wave`. KV contents reflect the copy wave. A manual dump armed before any blocks exist resolves its rows at copy time. |
 | C8 (INT8 KV cache) / TQ4 (quantized sparse flash-attention KV) / kernel pages | Partial | Prefer forward-context tuple KV; expand manager→kernel ids when `blocks_per_kv_block > 1` ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
 | Prefix cache / APC | Caveat | Finish / +1-wave dump may see freed or reused pages (`request_finished_at_dump`). |
 | KV Pool / Offload / PD disagg | Caveat | Dump reads **device** `kv_caches` only; not a first-class offload/remote source. |

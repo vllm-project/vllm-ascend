@@ -158,6 +158,7 @@ def write_kv_dump_request_info(
     rank_tag: str = "",
     wave: int | None = None,
     block_ids: list[int] | None = None,
+    manager_block_ids_by_group: list[list[int]] | None = None,
     tokenizer: Any | None = None,
     save_sensitive_info: bool = False,
     decode_token_ids: bool = True,
@@ -199,6 +200,8 @@ def write_kv_dump_request_info(
         "max_output_token_ids": int(max_output_token_ids),
         "detail": safe_detail,
     }
+    if manager_block_ids_by_group is not None:
+        payload["manager_block_ids_by_group"] = manager_block_ids_by_group
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(dumps_report_json(payload, indent=2) + "\n", encoding="utf-8")
@@ -229,8 +232,11 @@ def block_ids_for_request(
     *,
     kv_cache_group: int = 0,
     input_batch: Any = None,
+    manager_ids: bool = False,
 ) -> list[int]:
     """Return kernel-page block ids for ``req_id`` (group 0 by default).
+
+    With ``manager_ids=True``, keep scheduler IDs for later per-layer expansion.
 
     Id space contract (Ascend / Runtime Guard dump is MRV2-oriented):
 
@@ -258,6 +264,8 @@ def block_ids_for_request(
             raw = getattr(state, "block_ids", None)
             parsed = _normalize_block_ids(raw, kv_cache_group=kv_cache_group)
             if parsed:
+                if manager_ids:
+                    return parsed
                 # ``requests[].block_ids`` are scheduler/manager ids. Ascend
                 # kernel-paged caches use dim0 = manager_id * R + k; expand here.
                 # ``runner.block_tables`` path expands only when tables are
@@ -291,6 +299,7 @@ def block_ids_for_request(
             got = _block_ids_from_v2_block_tables(
                 runner,
                 state_idx=_state_idx_from_batch(input_batch, int(idx)),
+                manager_ids=manager_ids,
                 kv_cache_group=kv_cache_group,
             )
             if got:
@@ -300,6 +309,7 @@ def block_ids_for_request(
     return _block_ids_from_v2_block_tables(
         runner,
         state_idx=_state_idx_from_req_states(runner, req_id),
+        manager_ids=manager_ids,
         kv_cache_group=kv_cache_group,
     )
 
@@ -338,6 +348,7 @@ def _block_ids_from_v2_block_tables(
     *,
     state_idx: int | None,
     kv_cache_group: int,
+    manager_ids: bool = False,
 ) -> list[int]:
     """Read one request's block row from MRV2 ``runner.block_tables``.
 
@@ -351,25 +362,57 @@ def _block_ids_from_v2_block_tables(
     if block_tables is None:
         return []
     try:
-        num_blocks = int(block_tables.num_blocks.np[kv_cache_group, state_idx])
-        if num_blocks <= 0:
-            return []
-        # v2 rows live in StagedWriteTensor (``.gpu``, no host ``.np`` mirror):
-        # prefer a host numpy mirror when present, else sync the device row.
-        entry = block_tables.block_tables[kv_cache_group]
-        host = getattr(entry, "np", None)
-        if host is not None:
-            row = host[state_idx, :num_blocks]
+        # 310P owns expanded rows on CPU. Other MRV2 tables may only expose a device row.
+        cpu_tables = getattr(block_tables, "block_tables_cpu", None)
+        if cpu_tables is not None:
+            count = int(block_tables.num_blocks_np[kv_cache_group, state_idx])
+            row = cpu_tables[kv_cache_group][state_idx, :count]
         else:
-            row = entry.gpu[state_idx, :num_blocks].cpu()
+            count = int(block_tables.num_blocks.np[kv_cache_group, state_idx])
+            if count <= 0:
+                return []
+            entry = block_tables.block_tables[kv_cache_group]
+            host = getattr(entry, "np", None)
+            row = host[state_idx, :count] if host is not None else entry.gpu[state_idx, :count].cpu()
         ids = [int(x) for x in row.tolist()]
     except Exception:
         return []
     # Attribute present ⇒ table already kernel-expanded (_310p / older paths).
     if getattr(block_tables, "blocks_per_kv_block", None) is not None:
+        return _manager_ids_from_pages(runner, ids, kv_cache_group) if manager_ids else ids
+    if manager_ids:
         return ids
     ratio, _unknown = _blocks_per_kv_block_for_group(runner, kv_cache_group)
     return expand_manager_block_ids(ids, ratio)
+
+
+def _manager_ids_from_pages(runner: Any, pages: list[int], gid: int) -> list[int]:
+    ratio, _ = _blocks_per_kv_block_for_group(runner, gid)
+    return [page // ratio for page in pages[::ratio]] if ratio > 1 else list(pages)
+
+
+def group0_pages(runner: Any, rows: list[list[int]]) -> list[int]:
+    """Keep the existing group-0 kernel-page field for reports and legacy readers."""
+    if not rows or not rows[0]:
+        return []
+    ratio, _ = _blocks_per_kv_block_for_group(runner, 0)
+    return expand_manager_block_ids(rows[0], ratio)
+
+
+def request_manager_blocks(
+    runner: Any, req_id: str, req_idx: int | None = None, *, group0_pages: list[int] | None = None
+) -> list[list[int]]:
+    """Freeze one manager row per group. A supplied group-0 row is already in kernel pages."""
+    groups = getattr(getattr(runner, "kv_cache_config", None), "kv_cache_groups", None)
+    group0 = (
+        _manager_ids_from_pages(runner, group0_pages, 0)
+        if group0_pages
+        else block_ids_for_request(runner, req_id, req_idx, manager_ids=True)
+    )
+    return [group0] + [
+        block_ids_for_request(runner, req_id, req_idx, kv_cache_group=gid, manager_ids=True)
+        for gid in range(1, len(groups or ()))
+    ]
 
 
 def _normalize_block_ids(raw: Any, *, kv_cache_group: int) -> list[int]:
@@ -386,7 +429,7 @@ def _normalize_block_ids(raw: Any, *, kv_cache_group: int) -> list[int]:
             if kv_cache_group >= len(raw):
                 return []
             return [int(x) for x in raw[kv_cache_group]]
-        return [int(x) for x in raw]
+        return [int(x) for x in raw] if kv_cache_group == 0 else []
     return []
 
 
@@ -475,8 +518,8 @@ def _warn_underivable_blocks_per_kv(kv_cache_group: int, *, reason: str) -> None
     )
 
 
-def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, bool]:
-    """Match KV tensor dim0 bind: ``get_storage_block_size(spec) // kernel``.
+def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int, layer_name: str | None = None) -> tuple[int, bool]:
+    """Match the physical rows per manager block to the rows in a kernel page.
 
     Public ``AscendBlockTables`` on main no longer carries
     ``blocks_per_kv_block``; dump tensors are allocated with the *storage*
@@ -487,22 +530,23 @@ def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, 
     we fall back to ``R=1`` despite evidence that expansion may be required
     (silent R=1 would reintroduce wrong-page dumps).
     """
-    try:
-        from vllm_ascend.core.kv_cache_interface import get_storage_block_size
-    except Exception:
-        return 1, False
     cfg = getattr(runner, "kv_cache_config", None)
     groups = getattr(cfg, "kv_cache_groups", None) if cfg is not None else None
     if not groups or kv_cache_group < 0 or kv_cache_group >= len(groups):
         return 1, False
-    spec = getattr(groups[kv_cache_group], "kv_cache_spec", None)
+    group = groups[kv_cache_group]
+    spec = getattr(group, "kv_cache_spec", None)
+    if layer_name is None:
+        layer_name = next(iter(getattr(group, "layer_names", ()) or ()), None)
+    if layer_name is not None:
+        spec = getattr(spec, "kv_cache_specs", {}).get(layer_name, spec)
     if spec is None:
         _warn_underivable_blocks_per_kv(kv_cache_group, reason="missing kv_cache_spec")
         return 1, True
     try:
-        storage = int(get_storage_block_size(spec))
+        storage = int(spec.num_states)
     except Exception:
-        _warn_underivable_blocks_per_kv(kv_cache_group, reason="get_storage_block_size failed")
+        _warn_underivable_blocks_per_kv(kv_cache_group, reason="num_states unavailable")
         return 1, True
     kbs: int | None = None
     sizes = getattr(runner, "kernel_block_sizes", None)
@@ -511,20 +555,17 @@ def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, 
             kbs = int(sizes[kv_cache_group])
         except (IndexError, TypeError, ValueError):
             kbs = None
-    if not kbs:
-        for group_list in getattr(runner, "attn_groups", None) or ():
-            for ag in group_list:
-                if int(getattr(ag, "kv_cache_group_id", -1)) != kv_cache_group:
-                    continue
-                raw = getattr(ag, "kernel_block_size", None)
-                if raw is not None:
-                    try:
-                        kbs = int(raw)
-                    except (TypeError, ValueError):
-                        kbs = None
+    # The bound attention backend may override the group's default kernel size.
+    target_groups = getattr(runner, "attn_groups", None) or ()
+    draft_groups = getattr(getattr(runner, "speculator", None), "attn_groups", None) or ()
+    for groups in (*target_groups, *draft_groups):
+        for ag in groups:
+            if ag.kv_cache_group_id == kv_cache_group and (layer_name is None or layer_name in ag.layer_names):
+                kbs = ag.kernel_block_size or kbs
                 break
-            if kbs:
-                break
+        else:
+            continue
+        break
     if not kbs or kbs <= 0:
         # Compressed specs often have storage != logical block_size; missing
         # kernel size then makes R underivable.
@@ -536,7 +577,14 @@ def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, 
             )
             return 1, True
         return 1, False
-    if storage <= 0 or storage % kbs:
+    if getattr(spec, "indexes_kv_by_block_stride", False):
+        # Both sizes must count physical rows (compressed keys or a complete tail ring).
+        kernel_states = getattr(spec, "get_num_kernel_states", None)
+        if kernel_states is None:
+            _warn_underivable_blocks_per_kv(kv_cache_group, reason="missing kernel-state layout")
+            return 1, True
+        kbs = int(kernel_states(kbs))
+    if kbs <= 0 or storage <= 0 or storage % kbs:
         _warn_underivable_blocks_per_kv(
             kv_cache_group,
             reason=f"storage={storage} not divisible by kernel={kbs}",
@@ -545,7 +593,7 @@ def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> tuple[int, 
     return max(1, storage // kbs), False
 
 
-def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> tuple[int, bool]:
+def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int, layer_name: str | None = None) -> tuple[int, bool]:
     """Kernel pages per manager block for ``kv_cache_group``.
 
     Returns ``(ratio, expansion_unknown)``.
@@ -566,7 +614,7 @@ def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> tuple[in
     block_tables = getattr(runner, "block_tables", None)
     ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
     if ratios is None:
-        return _derive_blocks_per_kv_block(runner, kv_cache_group)
+        return _derive_blocks_per_kv_block(runner, kv_cache_group, layer_name)
     # Scalar ratio shared by all groups (Python int/float; not bool).
     if isinstance(ratios, (int, float)) and not isinstance(ratios, bool):
         return max(1, int(ratios)), False
@@ -754,62 +802,43 @@ class KvCacheReader:
             _pp_start_layer(self._runner),
         )
 
-    def _block_ids_for_layer(
-        self,
-        *,
-        req_id: str,
-        layer_name: str,
-        fallback_ids: list[int],
-        group_cache: dict[int, list[int]],
-        layer_to_group: dict[str, int],
-    ) -> list[int] | None:
-        """Resolve block ids for ``layer_name``.
-
-        Returns ``None`` when the layer's ``kv_cache_group`` cannot be resolved
-        (empty map or name missing). Callers must skip rather than treat that
-        as group 0.
-
-        ``fallback_ids`` (group-0 arm-time hint) must already be in **kernel**
-        page space — same address space as ``block_ids_for_request`` returns.
-        Do not pass raw manager-granularity ids here (would silently slice the
-        wrong pages when mixed with expanded group tables).
-        """
-        gid = _group_for_layer(layer_name, layer_to_group)
-        if gid is None:
-            return None
-        if gid not in group_cache:
-            got = block_ids_for_request(self._runner, req_id, None, kv_cache_group=gid)
-            if not got and gid == 0 and fallback_ids:
-                # Kernel-space hint only; do not re-expand.
-                got = list(fallback_ids)
-            group_cache[gid] = list(got)
-        return group_cache[gid]
-
-    def estimate_dump_bytes(self, *, block_ids: list[int]) -> int:
-        """Host-side size estimate of a request dump (no D2H)."""
-        # Conservative: use the provided ids (typically group 0) across layers.
-        ids = list(block_ids)
+    def _request_tensors(self, rows: list[list[int]]) -> Iterator[tuple[str, str, torch.Tensor, int, list[int], bool]]:
+        """Resolve physical pages for each bound tensor from the frozen manager rows."""
         names, start = self._list_layer_meta()
-        total = 0
-        for _src, kv_caches in self._kv_sources():
-            for _name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
-                total += _block_payload_bytes(tensor, ids)
-        return total
+        layer_to_group = _layer_name_to_kv_cache_group(self._runner)
+        pages: dict[tuple[int, int], list[int]] = {}
+        for source, caches in self._kv_sources():
+            for layer, tensor in _iter_kv_tensors(caches, list_names=names, start_layer=start):
+                gid = _group_for_layer(layer, layer_to_group)
+                if gid is None:
+                    logger.warning("[runtime_guard dump_kv] skip layer=%s: kv_cache_group unresolved", layer)
+                    continue
+                if gid >= len(rows) or not rows[gid]:
+                    logger.warning_once(
+                        "[runtime_guard dump_kv] skip layer=%s: no saved blocks for group %s", layer, gid
+                    )
+                    continue
+                ratio, unknown = _blocks_per_kv_block_for_group(self._runner, gid, _logical_layer_name(layer))
+                key = (gid, ratio)
+                if key not in pages:
+                    pages[key] = expand_manager_block_ids(rows[gid], ratio)
+                yield source, layer, tensor, gid, pages[key], unknown
+
+    def estimate_dump_bytes(self, *, manager_block_ids_by_group: list[list[int]]) -> int:
+        """Count the same tensor pages that the reader will copy, without D2H."""
+        return sum(
+            _block_payload_bytes(tensor, ids)
+            for _, _, tensor, _, ids, _ in self._request_tensors(manager_block_ids_by_group)
+        )
 
     def iter_request_snapshots(
         self,
         *,
         req_id: str,
-        block_ids: list[int],
+        manager_block_ids_by_group: list[list[int]],
         out_dir: Path,
     ) -> Iterator[KvDumpSnapshot]:
-        """Yield per-layer CPU snapshots for one request (D2H per layer).
-
-        ``block_ids`` is the arm-time group-0 hint. Each layer resolves its own
-        ``kv_cache_group`` block table (hybrid / draft / multi-group) and expands
-        manager ids to kernel pages when ``blocks_per_kv_block > 1``.
-        """
-        fallback_ids = list(block_ids)
+        """Copy this request's frozen manager blocks using each layer's physical layout."""
         out_dir.mkdir(parents=True, exist_ok=True)
         produced = False
         # Record which shard produced the dump so cross-rank comparisons can
@@ -821,86 +850,44 @@ class KvCacheReader:
         rank_tag = dump_rank_tag(self._runner)
         pp_rank = runner_pp_rank(self._runner)
         cp_rank = runner_cp_rank(self._runner)
-        names, start = self._list_layer_meta()
-        layer_to_group = _layer_name_to_kv_cache_group(self._runner)
-        if not layer_to_group:
-            logger.warning_once(
-                "[runtime_guard dump_kv] kv_cache_groups missing/empty; "
-                "refusing silent group-0 fallback (layers will be skipped)"
-            )
-        group_cache: dict[int, list[int]] = {}
-        skipped_empty_group = False
-        skipped_unresolved_group = False
-        for src_name, kv_caches in self._kv_sources():
-            for layer_name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
-                ids = self._block_ids_for_layer(
-                    req_id=req_id,
-                    layer_name=layer_name,
-                    fallback_ids=fallback_ids,
-                    group_cache=group_cache,
-                    layer_to_group=layer_to_group,
-                )
-                if ids is None:
-                    skipped_unresolved_group = True
-                    logger.warning(
-                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: "
-                        "kv_cache_group unresolved (not in layer→group map)",
-                        layer_name,
-                        req_id,
-                    )
-                    continue
-                if not ids:
-                    skipped_empty_group = True
-                    logger.warning(
-                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: empty block_ids for group",
-                        layer_name,
-                        req_id,
-                    )
-                    continue
-                num_kv_heads = int(tensor.shape[-2]) if tensor.dim() >= 3 else None
-                sliced = _slice_blocks(tensor, ids)
-                if sliced is None:
-                    logger.warning(
-                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: no valid blocks in %s",
-                        layer_name,
-                        req_id,
-                        ids,
-                    )
-                    continue
-                payload_tensor, used_ids = sliced
-                safe_layer = layer_name.replace("/", "_")
-                path = out_dir / f"{req_id}_{safe_layer}_req.pt"
-                produced = True
-                gid = _group_for_layer(layer_name, layer_to_group)
-                assert gid is not None  # resolved above via _block_ids_for_layer
-                _ratio, expansion_unknown = _blocks_per_kv_block_for_group(self._runner, int(gid))
-                payload: dict[str, Any] = {
-                    "req_id": req_id,
-                    "block_ids": used_ids,
-                    "layer": layer_name,
-                    "kv_cache_group": int(gid),
-                    "source": src_name,
-                    "rank_tag": rank_tag,
-                    "tp_rank": tp_rank,
-                    "pp_rank": pp_rank,
-                    "cp_rank": cp_rank,
-                    "num_kv_heads": num_kv_heads,
-                    "tensor": payload_tensor,
-                }
-                if expansion_unknown:
-                    payload["expansion"] = "unknown"
-                yield KvDumpSnapshot(
-                    path=path,
-                    payload=payload,
-                )
-        if not produced:
-            if not fallback_ids and not skipped_empty_group and not skipped_unresolved_group:
+        for src_name, layer_name, tensor, gid, ids, expansion_unknown in self._request_tensors(
+            manager_block_ids_by_group
+        ):
+            num_kv_heads = int(tensor.shape[-2]) if tensor.dim() >= 3 else None
+            sliced = _slice_blocks(tensor, ids)
+            if sliced is None:
                 logger.warning(
-                    "[runtime_guard dump_kv] skip req_id=%s: empty block_ids (refusing full-cache D2H)",
+                    "[runtime_guard dump_kv] skip layer=%s req_id=%s: no valid blocks in %s",
+                    layer_name,
                     req_id,
+                    ids,
                 )
-            else:
-                logger.warning("[runtime_guard dump_kv] no kv tensors found req_id=%s", req_id)
+                continue
+            payload_tensor, used_ids = sliced
+            safe_layer = layer_name.replace("/", "_")
+            path = out_dir / f"{req_id}_{safe_layer}_req.pt"
+            produced = True
+            payload: dict[str, Any] = {
+                "req_id": req_id,
+                "block_ids": used_ids,
+                "layer": layer_name,
+                "kv_cache_group": int(gid),
+                "source": src_name,
+                "rank_tag": rank_tag,
+                "tp_rank": tp_rank,
+                "pp_rank": pp_rank,
+                "cp_rank": cp_rank,
+                "num_kv_heads": num_kv_heads,
+                "tensor": payload_tensor,
+            }
+            if expansion_unknown:
+                payload["expansion"] = "unknown"
+            yield KvDumpSnapshot(
+                path=path,
+                payload=payload,
+            )
+        if not produced:
+            logger.warning("[runtime_guard dump_kv] no matching KV pages for req_id=%s", req_id)
 
     def snapshot_request_blocks(
         self,
@@ -913,7 +900,7 @@ class KvCacheReader:
         return list(
             self.iter_request_snapshots(
                 req_id=req_id,
-                block_ids=block_ids,
+                manager_block_ids_by_group=request_manager_blocks(self._runner, req_id, group0_pages=block_ids),
                 out_dir=out_dir,
             )
         )
