@@ -81,7 +81,8 @@ def test_mtp_specific_embedding_takes_precedence(mtp, shared_first, monkeypatch)
     monkeypatch.setattr(parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1))
     with _draft_pp_context(1):
         eagle_utils.maybe_share_target_embed(mtp, mtp.model, target_inner)
-    release_unshared_target_embedding(target, mtp, SimpleNamespace())
+    config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1))
+    release_unshared_target_embedding(target, mtp, config)
     assert target_inner.embed_tokens is target_embed
     assert mtp.has_own_embed_tokens
     torch.testing.assert_close(mtp.model.embed_tokens.weight, own[1])

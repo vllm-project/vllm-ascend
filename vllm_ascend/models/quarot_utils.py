@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from torch import nn
-from vllm.distributed import get_pp_group, parallel_state
+from vllm.distributed import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.utils import PPMissingLayer
@@ -24,7 +24,6 @@ from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
     lmhead_tp_enable,
-    vllm_version_is,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,10 +143,9 @@ def _shares_embedding(candidate, embedding):
     return candidate is embedding or (weight is not None and getattr(candidate, "weight", None) is weight)
 
 
-def _unused_target_embed_owner(target_model, vllm_config, pp):
-    is_last_pp_stage = pp.world_size > 1 and pp.is_last_rank
-    # The runner only loads drafts on the physical last rank inside single_pp_stage().
-    if not is_last_pp_stage and (vllm_version_is("0.34.0") or not parallel_state.in_single_pp_stage()):
+def _unused_target_embed_owner(target_model, vllm_config):
+    # The target config keeps the real PP size when the draft runs as a single stage.
+    if vllm_config.parallel_config.pipeline_parallel_size <= 1 or not get_pp_group().is_last_rank:
         return None
     if getattr(vllm_config.model_config.hf_text_config, "tie_word_embeddings", False):
         return None
@@ -164,19 +162,16 @@ def _unused_target_embed_owner(target_model, vllm_config, pp):
 
 def release_unshared_target_embedding(target_model, draft_model, vllm_config):
     # A draft can load a private embedding from the checkpoint without QuaRot.
-    if draft_model is None:
-        return
-    target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
-    if target_inner is None:
-        return
     draft_embed = getattr(getattr(draft_model, "model", None), "embed_tokens", None)
-    if draft_embed is not None and not isinstance(draft_embed, PPMissingLayer):
-        if not _shares_embedding(draft_embed, target_inner.embed_tokens):
-            target_inner.embed_tokens = PPMissingLayer()
+    if draft_embed is None or isinstance(draft_embed, PPMissingLayer):
+        return
+    target_inner = _unused_target_embed_owner(target_model, vllm_config)
+    if target_inner is not None and not _shares_embedding(draft_embed, target_inner.embed_tokens):
+        target_inner.embed_tokens = PPMissingLayer()
 
 
 def _release_target_embedding_after_rotation(target_model, vllm_config):
-    target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
+    target_inner = _unused_target_embed_owner(target_model, vllm_config)
     if target_inner is not None:
         target_inner.embed_tokens = PPMissingLayer()
 
