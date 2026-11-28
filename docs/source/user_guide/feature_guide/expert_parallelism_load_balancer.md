@@ -179,6 +179,13 @@ Additional rules:
 - A batch that does not match `load_collection_phase` contributes zero load
   but still advances the shared EPLB window. This keeps load-window slots,
   scheduling, and communication aligned across data-parallel ranks.
+- On MoE communication paths other than AllGather, the rank that holds an
+  expert counts its load and cannot tell which data-parallel rank sent a
+  token. Such a step is collected only when every active data-parallel rank in
+  the EP group matches `load_collection_phase`; a step that mixes phases
+  across ranks is skipped. Idle data-parallel ranks still execute tokens sent
+  by the other ranks, so their load is collected together with the active
+  ranks' load.
 - If no rank has recorded fresh load since the last rearrangement (for
   example, `prefill` is selected but traffic is pure decode), the next
   rearrangement is skipped instead of running on an empty window.

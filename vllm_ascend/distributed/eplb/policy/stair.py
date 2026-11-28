@@ -283,15 +283,31 @@ class StairEplbPolicy(AbstractEplbPolicy):
         boundaries = np.arange(num_bins + 1) * num_samples // num_bins
         return boundaries, np.diff(boundaries).astype(np.int64)
 
-    def prepare_local_load_stats(self, load_samples: torch.Tensor) -> PreparedLoadStats:
+    def prepare_local_load_stats(
+        self,
+        load_samples: torch.Tensor,
+        slot_indices: torch.Tensor | None = None,
+    ) -> PreparedLoadStats:
         """Compress local temporal samples into weighted STAIR bins."""
-        boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
-        load_sums_per_bin = torch.stack(
-            [
-                load_samples[start:end].sum(dim=0, dtype=load_samples.dtype)
-                for start, end in zip(boundaries[:-1], boundaries[1:])
-            ]
-        )
+        num_samples = load_samples.shape[0] if slot_indices is None else slot_indices.numel()
+        boundaries, samples_per_bin = self._load_bin_boundaries(num_samples, self.config.load_window_bins)
+        if slot_indices is None:
+            load_sums_per_bin = torch.stack(
+                [
+                    load_samples[start:end].sum(dim=0, dtype=load_samples.dtype)
+                    for start, end in zip(boundaries[:-1], boundaries[1:])
+                ]
+            )
+        else:
+            if slot_indices.ndim != 1:
+                raise ValueError("slot_indices must be a 1D index tensor")
+            slot_indices = slot_indices.to(device=load_samples.device, dtype=torch.long, non_blocking=True)
+            load_sums_per_bin = torch.stack(
+                [
+                    load_samples.index_select(0, slot_indices[start:end]).sum(dim=0, dtype=load_samples.dtype)
+                    for start, end in zip(boundaries[:-1], boundaries[1:])
+                ]
+            )
         return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
 
     @staticmethod

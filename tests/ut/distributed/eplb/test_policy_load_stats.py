@@ -5,13 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
 def _custom_policy():
@@ -27,7 +28,8 @@ def _model_state(**kwargs):
     return SimpleNamespace(**defaults)
 
 
-def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
+def _step_state(monkeypatch, **overrides):
+    """A state with a two-slot window whose upstream step is mocked."""
     upstream_step = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
     state = AscendEplbState.__new__(AscendEplbState)
@@ -37,77 +39,68 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     state.model_states = {"model": _model_state()}
     state.expert_load_window_size = 2
     state.expert_load_window_step = 0
-    state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
+    state._slot_active = torch.zeros(2, dtype=torch.int32)
+    state._slot_out_of_phase = torch.zeros(2, dtype=torch.int32)
     state._physical_load_sample_slots = torch.full((2,), -1)
+    state._slot_gathered = None
+    state.allgather_record_tensor = None
     state._num_recorded_load_steps = 0
     state._load_stats_window_start_index = 0
     state._load_stats_window_write_index = 0
     state._is_load_sampling_step = True
-    state._should_collect_local_load = False
+    state._load_collection_phase_matched = True
+    for name, value in overrides.items():
+        setattr(state, name, value)
+    return state, upstream_step
 
-    state.step()
+
+def test_step_books_every_sampling_slot_and_writes_it(monkeypatch):
+    # An idle rank whose batch is outside the phase still holds load sent by
+    # the other ranks, so its slot is written like any other.
+    state, upstream_step = _step_state(monkeypatch)
+    state._load_collection_phase_matched = False
+
+    state.step(is_dummy=True)
     state.expert_load_window_step = 1
     state._is_load_sampling_step = True
-    state._should_collect_local_load = True
+    state._load_collection_phase_matched = True
     state.step()
 
-    torch.testing.assert_close(
-        state._local_load_collection_mask,
-        torch.tensor([0, 1], dtype=torch.int32),
-    )
-    torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([-1, 1]))
+    assert upstream_step.call_args_list[0].kwargs["is_dummy"] is False
+    assert upstream_step.call_args_list[1].kwargs["is_dummy"] is False
+    torch.testing.assert_close(state._slot_active, torch.tensor([0, 1], dtype=torch.int32))
+    torch.testing.assert_close(state._slot_out_of_phase, torch.tensor([0, 0], dtype=torch.int32))
+    torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([0, 1]))
     assert state._num_recorded_load_steps == 2
-    assert upstream_step.call_count == 2
 
 
-@pytest.mark.parametrize(
-    "is_dummy,source_eligible,gathered,expected",
-    [
-        (True, False, 1, True),
-        (False, False, 1, True),
-        (False, True, 0, False),
-        (True, False, 0, False),
-    ],
-)
-def test_allgather_step_uses_remote_eligibility_for_owner_load(
-    monkeypatch, is_dummy, source_eligible, gathered, expected
-):
-    upstream_step = MagicMock()
-    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
-    state = AscendEplbState.__new__(AscendEplbState)
-    state._hixl_session = None
-    state._close_error = None
-    state.policy = None
-    state._is_load_sampling_step = True
-    state._should_collect_local_load = source_eligible
-    state._uses_phase_filter = True
-    state.allgather_record_tensor = torch.tensor(gathered)
-    state._has_fresh_recorded_load = False
-    state.step(is_dummy=is_dummy)
-    assert state._has_fresh_recorded_load == expected
-    assert upstream_step.call_args.kwargs["is_dummy"] == (is_dummy and not expected)
+def test_step_passes_non_sampling_steps_through(monkeypatch):
+    state, upstream_step = _step_state(monkeypatch)
+    state._is_load_sampling_step = False
+
+    state.step(is_dummy=True)
+
+    assert upstream_step.call_args.kwargs["is_dummy"] is True
+    assert state._num_recorded_load_steps == 0
+    assert bool((state._physical_load_sample_slots == -1).all())
 
 
-def test_a5_default_policy_marks_freshness_only_on_actual_step(monkeypatch):
-    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
-    state = AscendEplbState.__new__(AscendEplbState)
-    state._hixl_session = None
-    state._close_error = None
-    state.policy = None
-    state._is_load_sampling_step = True
-    state._should_collect_local_load = True
-    state.allgather_record_tensor = torch.tensor(1)
-    state._has_fresh_recorded_load = False
-    state.step(is_profile=True)
-    assert not state._has_fresh_recorded_load
-    state._is_load_sampling_step = True
-    state.step()
-    # step consumes the forward flags: a new forward must publish eligibility.
-    assert not state._has_fresh_recorded_load
-    state._is_load_sampling_step = True
-    state._should_collect_local_load = True
-    state.step()
-    assert state._has_fresh_recorded_load
+class _NoHostReadTensor(torch.Tensor):
+    """A scalar that fails the test when it is read on the host."""
+
+    def item(self):
+        raise AssertionError("the AllGather decision was read on the host during a step")
+
+
+def test_step_copies_the_allgather_decision_without_a_host_read(monkeypatch):
+    # The decision is a device scalar; reading it per step would sync the NPU.
+    state, _ = _step_state(monkeypatch)
+    state._slot_gathered = torch.full((2,), -1, dtype=torch.int32)
+    state.allgather_record_tensor = torch.tensor(1, dtype=torch.int32).as_subclass(_NoHostReadTensor)
+
+    state.step(is_dummy=True)
+
+    assert state._slot_gathered.tolist() == [1, -1]
 
 
 def test_mapping_change_discards_old_samples():
@@ -117,16 +110,20 @@ def test_mapping_change_discards_old_samples():
         _observed_load_mapping_generation=1,
     )
     state.model_states = {"model": model_state}
-    state._local_load_collection_mask = torch.ones(3, dtype=torch.int32)
+    state._slot_active = torch.ones(3, dtype=torch.int32)
+    state._slot_out_of_phase = torch.ones(3, dtype=torch.int32)
     state._physical_load_sample_slots = torch.arange(3)
+    state._slot_gathered = torch.ones(3, dtype=torch.int32)
     state._num_recorded_load_steps = 3
     state._load_stats_window_start_index = 1
     state._load_stats_window_write_index = 2
 
     state._discard_samples_from_old_mapping()
 
-    assert not state._local_load_collection_mask.any()
+    assert not state._slot_active.any()
+    assert not state._slot_out_of_phase.any()
     assert bool((state._physical_load_sample_slots == -1).all())
+    assert bool((state._slot_gathered == -1).all())
     assert state._num_recorded_load_steps == 0
     assert model_state._observed_load_mapping_generation == 2
 
@@ -134,6 +131,7 @@ def test_mapping_change_discards_old_samples():
 def test_initialize_load_stats_adds_empty_commit_anchors():
     state = AscendEplbState.__new__(AscendEplbState)
     state.expert_load_window_size = 3
+    state.policy = _custom_policy()
     model_state = _model_state(model=SimpleNamespace(num_moe_layers=2))
 
     state._initialize_load_stats_state(model_state)
@@ -145,12 +143,19 @@ def test_initialize_load_stats_adds_empty_commit_anchors():
 
 
 def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
-    cpu_group = object()
-    device_group = object()
+    ep_cpu_group = MagicMock()
+    ep_cpu_group.size.return_value = 2
+    ep_device_group = object()
+    monkeypatch.setattr(
+        state_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(cpu_group=ep_cpu_group, device_group=ep_device_group),
+    )
+    eplb_device_group = object()
     monkeypatch.setattr(
         state_module,
         "get_eplb_group",
-        lambda: SimpleNamespace(cpu_group=cpu_group, device_group=device_group),
+        lambda: SimpleNamespace(cpu_group=object(), device_group=eplb_device_group),
     )
     all_reduce = MagicMock()
     monkeypatch.setattr(state_module, "all_reduce", all_reduce)
@@ -160,10 +165,12 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
         expert_load_window=torch.tensor([[[2, 3, 5]], [[7, 11, 13]], [[17, 19, 23]]]),
     )
     state = AscendEplbState.__new__(AscendEplbState)
+    state.device = torch.device("cpu")
     state.policy = _custom_policy()
     state.model_states = {"model": model_state}
     state.expert_load_window_size = 3
-    state._local_load_collection_mask = torch.tensor([1, 0, 1])
+    state._slot_active = torch.tensor([1, 0, 1], dtype=torch.int32)
+    state._slot_out_of_phase = torch.zeros(3, dtype=torch.int32)
     state._physical_load_sample_slots = torch.tensor([0, -1, 2])
     state._num_recorded_load_steps = 3
     state._load_stats_window_start_index = 0
@@ -175,10 +182,72 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
         result["model"].values,
         torch.tensor([[[3, 7]], [[19, 40]]]),
     )
+    # Slot flags reduce on the EP CPU group; load stats reuse the EP device
+    # group so ``eplb_group.device_group`` never lazily initializes HCCL buffers.
     assert [call.kwargs["group"] for call in all_reduce.call_args_list] == [
-        cpu_group,
-        device_group,
+        ep_cpu_group,
+        ep_device_group,
     ]
+
+
+def test_collect_global_load_stats_streams_stair_bins_without_full_window_copy(monkeypatch):
+    ep_cpu_group = MagicMock()
+    ep_cpu_group.size.return_value = 2
+    ep_device_group = object()
+    monkeypatch.setattr(
+        state_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(cpu_group=ep_cpu_group, device_group=ep_device_group),
+    )
+    monkeypatch.setattr(state_module, "all_reduce", MagicMock())
+    window = torch.tensor(
+        [
+            [[10, 20, 30]],
+            [[99, 99, 99]],
+            [[1, 2, 3]],
+            [[4, 5, 6]],
+            [[7, 8, 9]],
+        ],
+        dtype=torch.int32,
+    )
+    policy = StairEplbPolicy(StairConfig(load_window_bins=2))
+    observed_calls = []
+    original_prepare = policy.prepare_local_load_stats
+
+    def spy_prepare(load_samples, slot_indices=None):
+        observed_calls.append((load_samples, slot_indices))
+        return original_prepare(load_samples, slot_indices=slot_indices)
+
+    monkeypatch.setattr(policy, "prepare_local_load_stats", spy_prepare)
+    model_state = _model_state(
+        model=SimpleNamespace(num_logical_experts=2),
+        physical_to_logical_map=torch.tensor([[1, 0, 1]]),
+        expert_load_window=window,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.device = torch.device("cpu")
+    state.policy = policy
+    state.model_states = {"model": model_state}
+    state.expert_load_window_size = 5
+    # Ring buffer starts at step 2 -> ordered steps [2, 3, 4, 0, 1]; step 1 excluded.
+    state._slot_active = torch.tensor([1, 0, 1, 1, 1], dtype=torch.int32)
+    state._slot_out_of_phase = torch.zeros(5, dtype=torch.int32)
+    state._physical_load_sample_slots = torch.tensor([0, 1, 2, 3, 4])
+    state._num_recorded_load_steps = 5
+    state._load_stats_window_start_index = 2
+
+    result = state.collect_global_load_stats()
+
+    assert result is not None
+    assert len(observed_calls) == 1
+    passed_window, passed_slots = observed_calls[0]
+    assert passed_window is window
+    assert passed_slots is not None
+    assert passed_slots.tolist() == [2, 3, 4, 0]
+    expected_physical = original_prepare(window.index_select(0, torch.tensor([2, 3, 4, 0])))
+    expected_logical = AscendEplbState._map_physical_stats_to_logical(model_state, expected_physical)
+    torch.testing.assert_close(result["model"].values, expected_logical.values)
+    np.testing.assert_array_equal(result["model"].sample_counts, [2, 2])
 
 
 def test_maps_aggregated_physical_stats_to_logical():

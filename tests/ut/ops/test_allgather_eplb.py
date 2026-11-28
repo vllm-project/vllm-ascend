@@ -207,6 +207,24 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     assert prepare.all_gather_eplb_mask.call_count == 2
 
 
+def test_allgather_source_gate_excludes_a_source_outside_the_phase(monkeypatch):
+    # Operator-counted layers record from ``should_record_tensor`` whatever the
+    # batch phase is; AllGather layers keep their own per-source phase gate.
+    state = _mask_layer_state()
+    state.allgather_source_record_tensor = torch.tensor(False)
+    prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
+    prepare.all_gather_eplb_mask.side_effect = lambda mask: mask
+    monkeypatch.setattr(state_module, "get_forward_context", _forward_context)
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+
+    _record(state, prepare.all_gather_eplb_mask)
+
+    assert prepare.all_gather_eplb_mask.call_args.args[0].tolist() == [False, False]
+    assert state.expert_load_view.item() == 0
+    assert state.allgather_record_tensor.item() == 0
+
+
 def _mask_layer_state():
     state = AscendEplbLayerState()
     state.num_unpadded_tokens_tensors = [torch.tensor(2), torch.tensor(2)]
