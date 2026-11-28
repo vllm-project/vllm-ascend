@@ -751,8 +751,9 @@ vLLM Ascend revision.
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
     the proxy inside the 950DT container in a separate terminal on a node that
-    can reach both servers. The image contains the non-layerwise proxy used
-    by MooncakeConnectorV2. Register all eight endpoints from each role:
+    can reach both servers. This proxy serves `MooncakeConnectorV2` in
+    non-layerwise pull mode. The command starts four proxy workers on port
+    `1999` and registers all eight API endpoints for each role.
 
     ```shell
     P_IP="<PREFILL_IP>"
@@ -761,6 +762,7 @@ vLLM Ascend revision.
     python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 \
         --port 1999 \
+        --workers 4 \
         --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
         --prefiller-ports 7100 7101 7102 7103 7104 7105 7106 7107 \
         --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
@@ -1765,6 +1767,35 @@ Select the tab for the target hardware.
     for supported limits; `max.dram.size: 25GB` is an upper bound, not a pool
     allocation.
 
+    The `mmc-local.conf` example with `storage.enabled = false` uses two-tier
+    pooling. For three-tier pooling with `25GB` of DRAM per LocalService, set
+    `ock.mmc.local_service.storage.enabled = true` and use the complete
+    `mmc-local.conf` below.
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+    ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_urma
+    ock.mmc.local_service.dram.size = 25GB
+    ock.mmc.local_service.max.dram.size = 25GB
+    ock.mmc.local_service.hbm.size = 0GB
+    ock.mmc.local_service.max.hbm.size = 0GB
+    # Three-tier pooling
+    ock.mmc.local_service.storage.enabled = true
+    ubsio.disk.path = <DEDICATED_NVME_DEVICE>
+    ubsio.mem.size_in_gb = 5
+    ubsio.standalone.device_count = 8
+    ubsio.standalone.force_new_disk = true
+    ock.mmc.log_level = error
+    ```
+
+    On each host, run `lsblk -o NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS` to find an
+    unassigned NVMe disk with no partitions or mount points. Run
+    `sudo wipefs --no-act '<DEDICATED_NVME_DEVICE>'` with the candidate disk's
+    path to check for existing signatures. If the check succeeds and lists no
+    signatures, set `ubsio.disk.path` to the disk's absolute device path.
+
     Start one MetaService before starting vLLM:
 
     ```shell
@@ -1858,7 +1889,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_consumer",
-                        "kv_port": 27010
+                        "kv_port": 27010,
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
@@ -1966,7 +2000,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector": "MooncakeConnectorV2",
                         "kv_role": "kv_producer",
-                        "kv_port": 26010
+                        "kv_port": 26010,
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector": "AscendStoreConnector",
