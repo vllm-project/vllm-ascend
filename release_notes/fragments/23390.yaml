@@ -1,0 +1,8 @@
+pr: 23390
+entries:
+  - category: feature
+    text: >-
+      SFA target and MTP layers can now use native preprocessing by setting
+      "sfa_preprocess_mode": "native" in --additional-config and restarting the
+      serving instance. The default "auto" preserves automatic preprocessing
+      selection; configure each instance where the override is needed.
