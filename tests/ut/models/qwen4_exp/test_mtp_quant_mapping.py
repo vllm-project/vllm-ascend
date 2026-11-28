@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from vllm_ascend.models.qwen4_exp import mtp
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_long_context_config(
@@ -191,7 +192,7 @@ def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> 
     assert actual is draft_config
 
 
-def test_text_target_strips_mrope_from_mtp_draft() -> None:
+def test_text_target_uses_lane_specific_mtp_rope() -> None:
     target_model_config = _rope_model_config(uses_mrope=False)
     draft_model_config = _rope_model_config(uses_mrope=True)
     config = SimpleNamespace(
@@ -204,7 +205,13 @@ def test_text_target_strips_mrope_from_mtp_draft() -> None:
 
     mtp._align_draft_rope_with_target(config)
 
-    assert draft_model_config.hf_text_config.rope_parameters == {}
+    if vllm_version_is("0.34.0"):
+        assert draft_model_config.hf_text_config.rope_parameters == {}
+    else:
+        assert draft_model_config.hf_text_config.rope_parameters == {
+            "mrope_section": [24, 20, 20],
+            "mrope_interleaved": True,
+        }
 
 
 def test_mrope_target_preserves_mrope_on_mtp_draft() -> None:

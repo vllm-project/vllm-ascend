@@ -20,12 +20,12 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
 
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+from vllm_ascend.utils import vllm_version_is
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -109,12 +109,17 @@ _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 
 
 def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
-    """Keep the Qwen4Exp MTP draft on the target's actual RoPE contract.
+    """Keep the v0.34.0 Qwen4Exp MTP draft on the target's RoPE contract.
 
     vLLM rebuilds the draft ``ModelConfig`` without propagating the target's
     ``language_model_only`` option.  By this point the target has already had
     M-RoPE removed, so mirror that canonical transformation onto the draft.
     """
+    if not vllm_version_is("0.34.0"):
+        # vLLM #69882 keeps M-RoPE to match the multimodal QSA cache layout.
+        return
+    from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
+
     speculative_config = vllm_config.speculative_config
     if speculative_config is None or speculative_config.draft_model_config is None:
         return
