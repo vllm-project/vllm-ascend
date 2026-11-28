@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
+    inject_qos,
     tensor_storage_key,
     validate_register_region_count,
 )
@@ -372,6 +373,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.handshake_port = self.side_channel_port + device_index
 
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        inject_qos(self.kv_transfer_config.kv_connector_extra_config)
         self.engine = self._get_transfer_engine(device_name)
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None

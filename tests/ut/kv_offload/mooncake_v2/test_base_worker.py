@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ctypes
+import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -635,6 +637,7 @@ def make_worker_config(
             is_kv_producer=is_producer,
             kv_role="kv_consumer" if is_consumer else "kv_producer",
             kv_port=6000,
+            kv_connector_extra_config={},
         ),
         cache_config=SimpleNamespace(block_size=16),
         parallel_config=SimpleNamespace(
@@ -680,6 +683,27 @@ def patch_worker_runtime(
         )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=7))
     return global_te, tp_group
+
+
+@pytest.mark.parametrize(
+    ("is_producer", "extra", "expected_qos"),
+    [(False, {}, 3), (False, {"qos_priority": 0}, 0), (True, {"qos_priority": 7}, 7)],
+)
+def test_worker_qos_at_engine_initialization(monkeypatch, is_producer, extra, expected_qos):
+    config = make_worker_config(is_consumer=not is_producer, is_producer=is_producer)
+    config.kv_transfer_config.kv_connector_extra_config = extra
+    env = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+    initial = {"comm_resource_config.qos": 3, "store": {"comm_resource_config.qos": 2}}
+    monkeypatch.setenv(env, json.dumps(initial))
+    global_te, _ = patch_worker_runtime(monkeypatch)
+
+    def get_engine(host, device_name):
+        assert json.loads(os.environ[env]) == {**initial, "comm_resource_config.qos": expected_qos}
+        return global_te.get_transfer_engine.return_value
+
+    global_te.get_transfer_engine.side_effect = get_engine
+    MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))
+    global_te.get_transfer_engine.assert_called_once()
 
 
 @pytest.mark.parametrize("independent_dp", [True, False], ids=["dense", "moe"])
