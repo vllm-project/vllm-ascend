@@ -31,8 +31,7 @@ written to a file, inspected, diffed and shipped to another deployment.
 | BF16 / FP16 | Yes | Unquantized expert weights and biases. |
 | W8A8 / W8A8 Dynamic | Yes | Per-expert weight and scale tensors. |
 | W4A8 | Yes | Per-expert weight, scale and scale-bias tensors. |
-| W4A4 MXFP / W8A8 MXFP | Yes | 950PR&950DT, native ND expert tensors. |
-| W4A8 MXFP, W4A16, W4A16 MXFP | No | Layout cannot be moved; startup fails with `EPLB is not supported ...`. |
+| W4A4 MXFP / W8A8 MXFP / W4A8 MXFP | Yes | 950PR&950DT, native ND expert tensors. |
 
 ## Feature Usage
 
