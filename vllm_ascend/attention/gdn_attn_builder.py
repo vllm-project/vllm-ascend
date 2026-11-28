@@ -433,7 +433,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         self.supports_update_block_table = (
             type(self) in (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder)
-            and vllm_config.use_v2_model_runner
             # Checkpoint offsets are masked against each group's actual state pages.
             and not self._ascend_gdn_checkpoints
             and vllm_config.parallel_config.prefill_context_parallel_size == 1
@@ -444,7 +443,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._spec_state_view: torch.Tensor | None = None
         if self.supports_update_block_table:
             self.mamba_aligned_state_indices: torch.Tensor | None = None
-            # Lazy load for MRV2; MRV1 keeps its existing graph input path.
+            # Lazy load for MRV2 graph-state updates.
             from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
 
             self.graph_state_updater = GDNGraphStateUpdater()
@@ -1042,7 +1041,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         aligned_indices = getattr(self, "mamba_aligned_state_indices", None)
         if aligned_indices is not None:
             block_table_tensor = aligned_indices[: m.num_reqs]
-        elif self.vllm_config.use_v2_model_runner and m.num_reqs == 0 and mamba_cache_mode == "align":
+        elif m.num_reqs == 0 and mamba_cache_mode == "align":
             # Match the helper's (0, state_slots) shape without device work.
             block_table_tensor = mamba_block_table[:0, : 1 + self.kv_cache_spec.num_speculative_blocks]
         else:
