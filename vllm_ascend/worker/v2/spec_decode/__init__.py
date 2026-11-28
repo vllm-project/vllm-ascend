@@ -30,7 +30,10 @@ if TYPE_CHECKING:
 
 _NGRAM_SPECULATOR_QUALNAME = "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
 
+_SUFFIX_SPECULATOR_QUALNAME = "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"
+
 _UPSTREAM_TO_ASCEND_SPECULATOR: dict[str, str] = {
+    _SUFFIX_SPECULATOR_QUALNAME: _SUFFIX_SPECULATOR_QUALNAME,
     _NGRAM_SPECULATOR_QUALNAME: _NGRAM_SPECULATOR_QUALNAME,
     "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator": (
         "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator"
@@ -78,13 +81,6 @@ def init_speculator(
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
 
-    if speculative_config.method == "suffix":
-        if req_states is None:
-            raise ValueError("MRV2 suffix speculative decoding requires request states")
-        from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator
-
-        return SuffixSpeculator(vllm_config, device, req_states)
-
     speculator_config = speculative_config.speculator_config
     qualname = speculator_config.speculator_class
     if qualname is None:
@@ -93,11 +89,12 @@ def init_speculator(
     target_qualname = _UPSTREAM_TO_ASCEND_SPECULATOR.get(qualname)
     if target_qualname is not None:
         factory = cast(Callable[..., Any], resolve_obj_by_qualname(target_qualname))
-        if target_qualname == _NGRAM_SPECULATOR_QUALNAME:
+        if target_qualname in (_NGRAM_SPECULATOR_QUALNAME, _SUFFIX_SPECULATOR_QUALNAME):
             if req_states is None:
-                raise ValueError("MRV2 n-gram speculative decoding requires request states")
-            # MRV2 postprocess has already updated history. The MRV1 NPU kernel
-            # appends sampled tokens itself and cannot be used here unchanged.
+                method_name = "suffix" if target_qualname == _SUFFIX_SPECULATOR_QUALNAME else "n-gram"
+                raise ValueError(f"MRV2 {method_name} speculative decoding requires request states")
+            # Both upstream speculators consume history maintained by MRV2
+            # postprocess through the current request states.
             return factory(vllm_config, device, req_states)
         return factory(vllm_config, device)
 

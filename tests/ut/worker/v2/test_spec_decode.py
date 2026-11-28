@@ -13,6 +13,7 @@ import torch
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.suffix.config import SuffixSpeculatorConfig
 
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -88,40 +89,8 @@ def test_init_speculator_ngram_requires_request_state():
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, enforce_eager):
-    config = _make_config(method)
-    config.speculative_config.enforce_eager = enforce_eager
-    config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
-    device = torch.device("cpu")
-    req_states = object()
-    speculator_cls = _mock_speculator_module(
-        monkeypatch,
-        "vllm.v1.worker.gpu.spec_decode.ngram.speculator",
-        "NgramGPUSpeculator",
-    )
-    result = init_speculator(config, device, req_states)
-    assert result is speculator_cls.return_value
-    speculator_cls.assert_called_once()
-    draft_config, draft_device, draft_states = speculator_cls.call_args.args
-    assert draft_device == device
-    assert draft_states is req_states
-    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    if enforce_eager:
-        assert draft_config is not config
-        assert draft_config.compilation_config is not config.compilation_config
-        assert draft_config.compilation_config.mode == CompilationMode.NONE
-    else:
-        assert draft_config is config
-
-
-def test_init_speculator_ngram_requires_request_state():
-    with pytest.raises(ValueError, match="requires request states"):
-        init_speculator(_make_config("ngram_gpu"), torch.device("cpu"))
-
-
-@pytest.mark.parametrize("enforce_eager", [False, True])
 def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_eager):
-    config = _make_config("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator")
+    config = _make_config("suffix", SuffixSpeculatorConfig.speculator_class)
     config.speculative_config.enforce_eager = enforce_eager
     config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
     device = torch.device("cpu")
@@ -144,9 +113,7 @@ def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_
 
 def test_init_speculator_suffix_requires_request_state():
     with pytest.raises(ValueError, match="requires request states"):
-        init_speculator(_make_config("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"), torch.device("cpu"))
-
-
+        init_speculator(_make_config("suffix", SuffixSpeculatorConfig.speculator_class), torch.device("cpu"))
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False, None])
@@ -279,6 +246,13 @@ def test_mtp_routing_uses_actual_native_config(
 @pytest.mark.parametrize(
     "method,upstream_class,target_module,target_class,with_req_states",
     [
+        (
+            "suffix",
+            SuffixSpeculatorConfig.speculator_class,
+            "vllm.v1.worker.gpu.spec_decode.suffix.speculator",
+            "SuffixSpeculator",
+            True,
+        ),
         (
             "ngram_gpu",
             "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator",
