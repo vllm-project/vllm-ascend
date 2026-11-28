@@ -16,6 +16,7 @@
 #
 
 import inspect
+import itertools
 import unittest
 from dataclasses import dataclass, replace
 from unittest.mock import patch
@@ -25,7 +26,7 @@ from weakref import ref
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
@@ -55,6 +56,98 @@ def _sliding_spec(block_size: int, sliding_window: int) -> SlidingWindowSpec:
         dtype=torch.float32,
         sliding_window=sliding_window,
     )
+
+
+class TestReplayLookup(unittest.TestCase):
+    def _coordinator(self, state_spec, retention=None):
+        return AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _full_spec(16)), KVCacheGroupSpec(["layer.1"], state_spec)],
+            scheduler_block_size=state_spec.block_size,
+            hash_block_size=16,
+            group_block_sizes=[16, state_spec.block_size],
+            group_cache_families=["default", "default"],
+            use_eagle=True,
+            retention_interval=retention,
+        )
+
+    def test_one_query_matches_independent_solves_across_sparse_layouts(self):
+        hashes = _hashes(4)
+        for family, block_size, retention in itertools.product(("mamba", "swa"), (16, 32), (None, 0, 32)):
+            state = (
+                MambaSpec(block_size=block_size, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+                if family == "mamba"
+                else _sliding_spec(block_size, block_size)
+            )
+            coord = self._coordinator(state, retention)
+            for full_mask, state_mask, local in itertools.product(range(16), range(16), (0, 16, 48)):
+                present = [
+                    {h for i, h in enumerate(hashes) if full_mask & (1 << i)},
+                    {h for i, h in enumerate(hashes) if state_mask & (1 << i)},
+                ]
+                calls: list[int] = []
+
+                def query(group, group_hashes, mask, calls=calls, present=present):
+                    calls.append(group)
+                    return [h for i, h in enumerate(group_hashes) if h in present[group] and (mask is None or mask[i])]
+
+                cap = 64 - block_size
+                raw = coord.find_reachable_hit_tokens(hashes, 64, query, hbm_hit_tokens=local)
+                replay = raw
+                if raw > cap:
+                    replay = (
+                        coord.find_reachable_hit_tokens(hashes, cap, query, hbm_hit_tokens=local) if cap > local else 0
+                    )
+                calls.clear()
+                actual = coord.find_reachable_hits_with_replay(
+                    hashes,
+                    64,
+                    query,
+                    replay_token_limit=cap,
+                    hbm_hit_tokens=local,
+                )
+                self.assertEqual(
+                    actual,
+                    StoreLookupResult(raw, replay_hit_tokens=replay),
+                    (family, block_size, retention, full_mask, state_mask, local),
+                )
+                self.assertEqual(calls, [0, 1])
+
+    def test_whole_page_lookup_covers_shorter_manager_masks(self):
+        # A full lookup includes every aligned resume boundary, even when the
+        # manager probes only recurrent checkpoints or sliding-window tails.
+        for state_size, retention in itertools.product((16, 32), (None, 0, 32)):
+            for state in (
+                MambaSpec(block_size=state_size, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+                _sliding_spec(state_size, 2 * state_size),
+            ):
+                coord = self._coordinator(state, retention)
+                step = coord.lcm_block_size
+                original = coord.lookup_mask(4 * step)
+                for limit in range(step, 4 * step, step):
+                    for group, bounded in enumerate(coord.lookup_mask(limit)):
+                        count = limit // coord.group_effective_block_sizes[group]
+                        for index in range(count):
+                            if bounded is None or bounded[index]:
+                                assert original[group] is None or original[group][index]
+
+    def test_zero_replay_limit_and_no_cross_lookup_existence_cache(self):
+        state = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        coord = self._coordinator(state)
+        hashes = _hashes(1)
+        present = True
+
+        def query(group, group_hashes, mask):
+            return group_hashes if present else []
+
+        self.assertEqual(
+            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0),
+            StoreLookupResult(16, replay_hit_tokens=0),
+        )
+        present = False
+        self.assertEqual(
+            coord.find_reachable_hits_with_replay(hashes, 16, query, replay_token_limit=0),
+            StoreLookupResult(0, replay_hit_tokens=0),
+        )
 
 
 @dataclass(frozen=True)

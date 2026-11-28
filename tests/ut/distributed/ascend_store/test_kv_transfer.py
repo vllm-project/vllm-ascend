@@ -19,6 +19,7 @@ import ctypes
 import threading
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -1355,6 +1356,22 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual([key.rsplit("@", 1)[1] for key in keys], ["h1"])
         self.assertEqual(db.masks[0], [True, True, False])
 
+    def test_zero_load_keeps_unqueried_local_pages_and_skips_remote_pages_across_chunks(self):
+        thread, store = self._make_thread()
+        hashes = [f"h{i}" for i in range(5)]
+        tracker = RequestTracker(req_id="r", token_len=32, allocated_block_ids=[1, 2, 3, 4, 5])
+        # The first 16 tokens were already local. Only [16, 64) was probed.
+        hit = LoadSpec(16, 0, can_load=False, kvpool_store_skip_tokens=64, resolved_resume=True)
+        for length, spec in ((32, hit), (48, None), (80, None)):
+            tracker.token_len = length
+            meta = ReqMeta.from_request_tracker(tracker, 16, load_spec=spec, block_hashes=hashes)
+            if meta is not None and meta.can_save:
+                self.assertIsNone(meta.load_spec)
+                thread.add_stored_request(meta)
+                thread.request_queue.put(meta)
+                thread._handle_request(meta)
+        self.assertEqual([key.rsplit("@", 1)[1] for keys, _, _ in store.put_calls for key in keys], ["h0", "h4"])
+
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
         t, store = self._make_thread([0, 0], block_size=64)
         t.token_database.group_cache_families["kv"][0] = "c4"
@@ -1845,8 +1862,8 @@ class TestLayerBatchBuilder(unittest.TestCase):
         )
 
     @staticmethod
-    def _make_request(**overrides):
-        values = {
+    def _make_request(**overrides: Any) -> ReqMeta:
+        values: dict[str, Any] = {
             "req_id": "r1",
             "block_ids_by_group": [[2, 3]],
             "block_ids_by_group_np": [np.asarray([2, 3])],

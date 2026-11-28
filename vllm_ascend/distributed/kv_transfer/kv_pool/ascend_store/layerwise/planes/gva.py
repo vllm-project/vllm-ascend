@@ -481,7 +481,7 @@ class GvaDataPlane(LayerwiseDataPlane):
         assert request.load_spec is not None
         cached_tokens = request.load_spec.kvpool_cached_tokens
         if not getattr(worker, "use_eagle", False):
-            cached_tokens = request.load_spec.pool_hit_tokens
+            cached_tokens = request.load_spec.physical_load_tokens
         if (
             getattr(worker, "use_eagle", False)
             and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1

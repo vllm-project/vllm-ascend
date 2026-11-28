@@ -185,7 +185,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
             if not worker.use_eagle:
-                cached_tokens = load_spec.pool_hit_tokens
+                cached_tokens = load_spec.physical_load_tokens
             start_block = load_spec.vllm_cached_tokens // worker.block_size
             cached_full_blocks = cached_tokens // worker.block_size
             group_block_hashes = get_block_hashes(request.block_hashes, worker.block_size, worker.hash_block_size)
@@ -260,7 +260,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             if request.load_spec is not None and request.load_spec.can_load:
                 cached_tokens = request.load_spec.kvpool_cached_tokens
                 if not worker.use_eagle and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups:
-                    cached_tokens = request.load_spec.pool_hit_tokens
+                    cached_tokens = request.load_spec.physical_load_tokens
             resident_prefix = (
                 self._retain_running_prefix
                 and request.load_spec is None

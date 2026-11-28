@@ -230,6 +230,12 @@ class BaseKVPoolScheduler(ABC):
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
+    @property
+    def _requires_aligned_state(self) -> bool:
+        return len(self.cacheable_group_ids) != len(self.original_block_size) or (
+            self.layerwise_offload and bool(self.num_mamba_speculative_blocks_by_group)
+        )
+
     def _infer_mamba_groups(self) -> dict[int, int]:
         """Validate Mamba cache modes and return hybrid group scratch counts."""
         if self.kv_cache_config is None:
@@ -277,44 +283,30 @@ class BaseKVPoolScheduler(ABC):
         # it drops a local sub-block tail only if the remote hit strictly
         # extends it.
 
-        lookup_result = self._lookup_external_hit_tokens(request, num_computed_tokens)
+        reuse_limit = None
+        if self.cache_coordinator is not None and not self.enable_partial_hash_hits:
+            reuse_limit = max(0, request.num_tokens - 1)
+            if self.use_eagle or self._requires_aligned_state:
+                reuse_limit = self._floor_to_cache_transfer_granularity(reuse_limit)
+        lookup_result = self._lookup_external_hit_tokens(request, num_computed_tokens, reuse_limit)
         if lookup_result is None or not lookup_result.hit_length:
             return 0, False
         num_external_hit_tokens = lookup_result.hit_length
 
         store_skip_tokens = num_external_hit_tokens
-        if self.use_eagle and not self.enable_partial_hash_hits:
-            # Keep the draft model's recomputation zone intact: the
-            # generation-point hidden states must be freshly computed, and the
-            # local prefix-cache path already drops its trailing block
-            # (drop_eagle_block). Only trim the external hit when it reaches
-            # into the prompt's final granularity block, so that (local +
-            # external) never covers the last block whose KV the engine will
-            # rewrite during MTP draft/verify steps. Partial hits that stop on
-            # an interior block boundary carry a valid mamba state snapshot
-            # at that boundary and can be loaded as-is.
-            # The final granularity block starts at the lcm-aligned boundary
-            # containing the last token; num_tokens - lcm_block_size equals
-            # that boundary only for lcm-aligned prompts and over-trims
-            # unaligned prompts whose hit stops exactly on the boundary.
-            final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
-            hit_reaches_final_block = num_external_hit_tokens > final_block_start
-            if hit_reaches_final_block:
-                num_external_hit_tokens = max(
-                    num_computed_tokens,
-                    num_external_hit_tokens - self.lcm_block_size,
-                )
-        if num_external_hit_tokens == request.num_tokens:
-            num_external_hit_tokens -= 1
-        if len(self.cacheable_group_ids) != len(self.original_block_size):
-            # Private compressor state is rebuilt locally. Recompute the last
-            # whole token page rather than resume inside a compressed block.
-            num_external_hit_tokens = self._floor_to_cache_transfer_granularity(num_external_hit_tokens)
-
-        if num_external_hit_tokens < num_computed_tokens:
-            need_to_allocate = 0
+        if lookup_result.replay_hit_tokens is not None:
+            num_external_hit_tokens = lookup_result.replay_hit_tokens
         else:
-            need_to_allocate = num_external_hit_tokens - num_computed_tokens
+            if self.use_eagle and not self.enable_partial_hash_hits:
+                final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+                if num_external_hit_tokens > final_block_start:
+                    num_external_hit_tokens = max(num_computed_tokens, num_external_hit_tokens - self.lcm_block_size)
+            if num_external_hit_tokens == request.num_tokens:
+                num_external_hit_tokens -= 1
+            if len(self.cacheable_group_ids) != len(self.original_block_size):
+                num_external_hit_tokens = self._floor_to_cache_transfer_granularity(num_external_hit_tokens)
+
+        need_to_allocate = max(0, num_external_hit_tokens - num_computed_tokens)
 
         logger.info(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
@@ -325,7 +317,7 @@ class BaseKVPoolScheduler(ABC):
         )
 
         process_hit_without_alloc = self._process_hit_without_alloc(store_skip_tokens)
-        if need_to_allocate <= 0 and not process_hit_without_alloc:
+        if need_to_allocate <= 0 and not process_hit_without_alloc and lookup_result.replay_hit_tokens is None:
             return 0, False
 
         self.load_specs[request.request_id] = LoadSpec(
@@ -333,6 +325,7 @@ class BaseKVPoolScheduler(ABC):
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=process_hit_without_alloc,
             kvpool_store_skip_tokens=store_skip_tokens,
+            resolved_resume=lookup_result.replay_hit_tokens is not None,
             tail_key_boundaries=lookup_result.tail_key_boundaries,
         )
         logger.debug(
@@ -346,7 +339,7 @@ class BaseKVPoolScheduler(ABC):
             self.use_layerwise,
         )
 
-        return need_to_allocate, self.load_async
+        return need_to_allocate, self.load_async and (need_to_allocate > 0 or process_hit_without_alloc)
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         """Whether to process an external hit without allocating new blocks."""
@@ -361,7 +354,9 @@ class BaseKVPoolScheduler(ABC):
         return None
 
     @abstractmethod
-    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> StoreLookupResult | None:
+    def _lookup_external_hit_tokens(
+        self, request: "Request", num_computed_tokens: int, reuse_limit: int | None = None
+    ) -> StoreLookupResult | None:
         """Return the external cache hit using the selected transfer mode."""
 
     def register_finished_partial_tail(
@@ -617,8 +612,10 @@ class BaseKVPoolScheduler(ABC):
         if not load_spec:
             return None
         num_tokens_to_compute = load_spec.kvpool_cached_tokens
-        if (num_tokens_to_compute % self._block_size != 0) and (
-            num_tokens_to_compute == len(request.prompt_token_ids) - 1
+        if (
+            not load_spec.resolved_resume
+            and (num_tokens_to_compute % self._block_size != 0)
+            and (num_tokens_to_compute == len(request.prompt_token_ids) - 1)
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
@@ -1045,7 +1042,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
+    def _lookup_external_hit_tokens(
+        self, request: Request, num_computed_tokens: int, reuse_limit: int | None = None
+    ) -> StoreLookupResult | None:
         # Core may reschedule the request with zero computed tokens after an
         # import failure. A key can still be visible to lookup while GET fails.
         if request.request_id in self._failed_external_load_req_ids:
@@ -1054,7 +1053,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         if self.enable_partial_hash_hits:
             # Preserve the prompt end so the worker can reserve the final token for recomputation.
             token_len = prompt_token_len
-        elif len(self.cacheable_group_ids) != len(self.original_block_size):
+        elif reuse_limit is None and len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
         else:
@@ -1067,6 +1066,14 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
+        if reuse_limit is not None and token_len > reuse_limit:
+            return self.client.lookup_with_replay(
+                token_len,
+                request.block_hashes,
+                self.kv_cache_group_ids,
+                replay_token_limit=reuse_limit,
+                hbm_hit_tokens=num_computed_tokens,
+            )
         return self.client.lookup(
             token_len,
             request.block_hashes,

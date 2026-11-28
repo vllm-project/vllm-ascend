@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    StoreLookupResult,
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
@@ -376,6 +377,12 @@ class AscendStoreCoordinator:
         external hits; locally computed complete blocks are marked lazily for
         the existing managers, including each group's terminal-hash selection.
         """
+        exists = self._query_reachable_blocks(block_hashes, token_len, query_group_hits)
+        return self._resolve_hit(block_hashes, token_len, exists, hbm_hit_tokens, log_context)
+
+    def _query_reachable_blocks(
+        self, block_hashes: list[BlockHash], token_len: int, query_group_hits: GroupHitQuery
+    ) -> set[tuple[int, bytes]]:
         aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
         lookup_masks = self.lookup_mask(aligned_len)
         exists: set[tuple[int, bytes]] = set()
@@ -387,6 +394,16 @@ class AscendStoreCoordinator:
             hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
 
+        return exists
+
+    def _resolve_hit(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        exists: set[tuple[int, bytes]],
+        hbm_hit_tokens: int,
+        log_context: str,
+    ) -> int:
         if not exists and hbm_hit_tokens <= 0:
             logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
             return 0
@@ -402,6 +419,26 @@ class AscendStoreCoordinator:
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
+
+    def find_reachable_hits_with_replay(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        replay_token_limit: int,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+    ) -> StoreLookupResult:
+        """Whole-page lookup already probes every aligned boundary within token_len."""
+        exists = self._query_reachable_blocks(block_hashes, token_len, query_group_hits)
+        raw = self._resolve_hit(block_hashes, token_len, exists, hbm_hit_tokens, log_context)
+        if raw <= replay_token_limit:
+            return StoreLookupResult(raw, replay_hit_tokens=raw)
+        resume = 0
+        if replay_token_limit > hbm_hit_tokens:
+            resume = self._resolve_hit(block_hashes, replay_token_limit, exists, hbm_hit_tokens, log_context)
+        return StoreLookupResult(raw, replay_hit_tokens=resume)
 
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes

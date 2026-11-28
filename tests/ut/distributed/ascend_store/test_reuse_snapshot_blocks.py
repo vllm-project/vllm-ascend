@@ -176,6 +176,31 @@ def test_mixed_public_and_private_pages_preserve_logical_positions():
     assert w._step_load_keys == {"full:h0", private_key}
 
 
+def test_resolved_gva_hit_loads_to_32_and_skips_saving_to_64():
+    w = worker()
+    w.grouped_block_size, w.hash_block_size, w.cache_transfer_granularity = [16], 16, 16
+    hashes = [f"h{i}" for i in range(5)]
+    keys = [f"full:{h}" for h in hashes]
+    w.m_store.batch_alloc(keys[:4], [4096] * 4, 0)
+    w.m_store.committed.update(keys[:4])
+    req = ReqMeta(
+        "resume",
+        target_token_len=80,
+        save_end_token=80,
+        can_save=True,
+        block_hashes=hashes,
+        block_ids_by_group_np=[np.array([11, 12, 13, 14, 15])],
+        load_spec=LoadSpec(0, 32, True, kvpool_store_skip_tokens=64, resolved_resume=True),
+    )
+    with patch.object(w.m_store, "batch_is_exist", wraps=w.m_store.batch_is_exist) as save_probe:
+        w._data_plane.prepare_sessions([req])
+    w._process_load_for_layer_batch([req], 1)
+    assert set(w.m_store.queries) == set(keys[:2])
+    assert transferred(w, False) == {11: w.m_store.data[keys[0]], 12: w.m_store.data[keys[1]]}
+    save_probe.assert_called_once_with(keys[4:])
+    assert req.save_keys == keys[4:]
+
+
 @pytest.mark.parametrize("owner", [True, False], ids=["writer", "replica"])
 def test_window_continuation_uses_native_full_keys_and_private_unhashed_pages(owner):
     import torch

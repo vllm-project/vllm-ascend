@@ -304,6 +304,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
                 load_meta = next((item for item in meta.requests if item.load_spec and item.load_spec.can_load), None)
                 if load_meta is not None and len(starts) == 1:
                     assert load_meta.load_spec.kvpool_cached_tokens == expected_hit
+                    if req_id == "complete-hit":
+                        assert load_meta.load_spec.kvpool_store_skip_tokens == len(tokens)
                     loaded = True
                 for layer in range(4):
                     name = f"model.layers.{layer}.attn"
@@ -312,9 +314,9 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
                     worker.wait_for_layer_load(name)
                     # Validate restored bytes BEFORE simulating the next model operation.
                     if load_meta is not None:
-                        stored_prefix = load_meta.load_spec.kvpool_store_skip_tokens or start
+                        restored_prefix = load_meta.load_spec.kvpool_cached_tokens
                         for index, bid in enumerate(blocks[group_id]):
-                            if bid and (index + 1) * spec.block_size <= stored_prefix:
+                            if bid and (index + 1) * spec.block_size <= restored_prefix:
                                 for plane, cache in enumerate(caches[name]):
                                     assert torch.all(
                                         cache[bid] == payload(tokens, (index + 1) * spec.block_size, layer, plane)
@@ -377,8 +379,11 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             cache.fill_(-1)
     assert run_request("warm", producer + [128], 128) == 128
     assert scheduler.reset_prefix_cache()
-    # Preserve main's complete-hit policy: reserve the final token for replay.
-    assert run_request("complete-hit", producer, 127) == 127
+    # A 127-token upper bound can resume only at the last joint 32-token boundary.
+    for values in caches.values():
+        for cache in values:
+            cache.fill_(-1)
+    assert run_request("complete-hit", producer, 96) == 96
     assert scheduler.reset_prefix_cache()
     assert run_request("boundary", producer[:-1], 96) == 96
     assert scheduler.reset_prefix_cache()
