@@ -19,6 +19,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any, cast
 
 import torch
@@ -40,18 +41,21 @@ from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runti
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
+def _disable_forced_aot_cache():
+    if is_torch_equal_or_newer("2.14.0"):
+        # The outer AOT artifact forces an inner cache entry that requires
+        # Inductor OutputCode. Ascend backends return their own compiled graphs.
+        return torch._functorch.config.patch(force_autograd_cache=False)
+    return nullcontext()
+
+
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
     if not graph_returns_tuple(graph):
         return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
-    backend = aot_autograd(fw_compiler=inner_compile)
-    if is_torch_equal_or_newer("2.14.0"):
-        # The fusion compiler returns an FX graph. PyTorch's outer AOT compilation
-        # forces a cache entry, which requires Inductor OutputCode for each piece.
-        with torch._functorch.config.patch(force_autograd_cache=False):
-            return backend(graph, example_inputs)
-    return backend(graph, example_inputs)
+    with _disable_forced_aot_cache():
+        return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
 
 
 def fusion_pass_compile(
@@ -212,10 +216,11 @@ def npugraph_ex_compile(
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         backend = nge.get_npu_backend(compiler_config=config)
         # torch.compile requires the output of the fx graph to be a tuple
-        if not graph_returns_tuple(graph):
-            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-        else:
-            compiled_fn = backend(graph, example_inputs)
+        with _disable_forced_aot_cache():
+            if not graph_returns_tuple(graph):
+                compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+            else:
+                compiled_fn = backend(graph, example_inputs)
         nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
