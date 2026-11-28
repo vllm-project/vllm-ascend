@@ -199,9 +199,43 @@ jobs:
               - '!**/*.md'
               - '!vllm_ascend/patch/__init__.py'
 
+      # This trial belongs to the November 26 main snapshot of PR #22176.
+      # Edit the job checkout before building or installing Ascend so its
+      # runtime and build-system requirements select the same Torch ABI.
+      - name: Set up the PR-specific PyTorch 2.14 dependencies
+        id: torch-214
+        if: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && inputs.vllm == '4fd24951cc374300b8172debd2e550863ce7115b' }}
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          pins = {
+              "torch": "2.14.0+cpu",
+              "torch-npu": "2.14.0",
+              "torchvision": "0.29.0",
+              "torchaudio": "2.11.1",
+          }
+          for filename in ("requirements.txt", "pyproject.toml"):
+              path = Path(filename)
+              text = path.read_text()
+              for package, version in pins.items():
+                  if filename == "pyproject.toml" and package == "torchaudio":
+                      continue
+                  text, count = re.subn(
+                      rf'^([ \t]*"?){package}(?:==[0-9.]+(?:\.post[0-9]+)?)?("?,?)$',
+                      rf"\g<1>{package}=={version}\g<2>",
+                      text,
+                      flags=re.MULTILINE,
+                  )
+                  if count != 1:
+                      raise ValueError(f"Expected one {package} requirement in {filename}, found {count}")
+              path.write_text(text)
+          PY
+
       - name: Get csrc hash
         id: get_csrc_hash
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         run: |
           # Fail closed so a git error cannot be converted into sha256(empty)
           # and then appear to be a legitimate cache miss.
@@ -221,7 +255,7 @@ jobs:
 
       - name: Get architecture
         id: get_arch
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
@@ -232,7 +266,7 @@ jobs:
 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' }}
         uses: runs-on/cache/restore@v5
         with:
           path: |
@@ -248,13 +282,13 @@ jobs:
 
       # Stage manifests where both the job container and runner can read them.
       - name: Check layout and stage actions
-        if: ${{ startsWith(inputs.request_id, 'daily-') || (matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true') }}
+        if: ${{ startsWith(inputs.request_id, 'daily-') || (matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' && steps.cache-csrc.outputs.cache-hit != 'true') }}
         shell: bash
         run: bash .github/workflows/scripts/stage_ci_actions.sh
 
       - name: Restore incremental cache
         id: fallback-l1
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.torch-214.outcome != 'success' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
@@ -361,6 +395,28 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install --no-deps flash-linear-attention-npu-a3==26.11.0.dev20261126
           uv pip install -e .
+
+      - name: Record the PR-specific Torch runtime
+        if: ${{ steps.torch-214.outcome == 'success' }}
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: ${{ matrix.group.npu_type == 'cpu' && '0' || '1' }}
+          NPU_TYPE: ${{ matrix.group.npu_type }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from importlib.metadata import version
+
+          import torch
+          from torch._custom_class_base import CustomClassBase
+
+          assert torch.__version__ == "2.14.0+cpu", torch.__version__
+          assert version("torch-npu") == "2.14.0", version("torch-npu")
+          print(f"torch {torch.__version__}; {CustomClassBase.__name__}")
+          if os.environ["NPU_TYPE"] != "cpu":
+              import torch_npu
+
+              print(f"torch_npu {torch_npu.__version__}; devices {torch.npu.device_count()}")
+          PY
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
