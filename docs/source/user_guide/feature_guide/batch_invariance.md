@@ -195,6 +195,17 @@ Request preemption is triggered when the KV cache runs out: the preempted reques
 
 Use the startup logs (`NPU KV cache size` and `Maximum concurrency for ... tokens per request`) to size your workload against the KV cache capacity, and watch the engine stats: `NPU KV cache usage` approaching 100% signals imminent preemption. See the [preemption FAQ](../../faqs.md#22-why-does-tpot-increase-drastically-as-concurrency-grows) for details.
 
+## Graph Mode
+
+Graph mode can be enabled together with batch invariance.
+
+| Model | Verified on Atlas A2/A3 | Verified on Atlas 950DT |
+| --- | :---: | :---: |
+| `Qwen/Qwen3-30B-A3B` | ✅ | ✅ |
+| `Qwen/Qwen3.5-35B-A3B` | ✅ | ✅ |
+
+The verification used `cudagraph_mode=FULL_DECODE_ONLY`. Models that are not listed have not been verified with graph mode and batch invariance enabled together.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
