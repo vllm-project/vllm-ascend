@@ -58,6 +58,17 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+def is_mega_mhc_supported() -> bool:
+    """Whether the Atlas A3 MegaMHC fused seam operator is registered at runtime."""
+    try:
+        import torch
+
+        ascend_ops = getattr(torch.ops, "_C_ascend", None)
+        return ascend_ops is not None and hasattr(ascend_ops, "npu_mega_mhc_seam")
+    except Exception:
+        return False
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
