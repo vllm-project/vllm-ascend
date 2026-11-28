@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -321,6 +322,166 @@ class TestNPUWorkerV2(TestBase):
         self.assertIs(result, pooling_output)
         worker.model_runner.execute_model.assert_called_once()
         worker.model_runner.pool.assert_called_once_with()
+
+
+class TestNPUWorkerV2WeightUpdate(TestBase):
+    def setUp(self):
+        super().setUp()
+        ascend_config = patch(
+            "vllm_ascend.worker.worker.get_ascend_config",
+            return_value=SimpleNamespace(weight_nz_mode=0),
+        )
+        ascend_config.start()
+        self.addCleanup(ascend_config.stop)
+
+    @staticmethod
+    def _make_worker():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        target = torch.nn.Linear(2, 2)
+        draft = torch.nn.Linear(2, 2)
+        worker.weight_transfer_engine = MagicMock(supports_draft_weight_update=True)
+        worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker._incomplete_weight_updates = set()
+        worker._kv_cache_reclaimable = False
+        worker._weight_update_kv_cache_loan = ExitStack()
+        worker.use_v2_model_runner = True
+        worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1, data_parallel_index=0, world_size=1)
+        worker.rank = 0
+        worker.vllm_config = SimpleNamespace(
+            weight_transfer_config=SimpleNamespace(backend="hccl"),
+            speculative_config=SimpleNamespace(draft_model_config=object(), prefill_context_kv_only=False),
+        )
+        worker.speculative_config = worker.vllm_config.speculative_config
+        worker.vllm_config.parallel_config = worker.parallel_config
+        worker.model_runner = SimpleNamespace(
+            get_model=lambda: target,
+            get_draft_model=lambda: draft,
+            extensible_kv_cache=None,
+            reset_lora_state=MagicMock(),
+            on_target_weights_replaced=MagicMock(),
+        )
+        return worker, draft
+
+    def test_draft_update_then_target_update(self):
+        worker, draft = self._make_worker()
+        engine = worker.weight_transfer_engine
+        worker.start_draft_weight_update()
+        if not vllm_version_is("0.33.0"):
+            assert worker.has_incomplete_weight_update()
+        engine.set_weight_update_target.assert_called_once_with(
+            draft, worker.vllm_config.speculative_config.draft_model_config
+        )
+        worker.update_weights({})
+        worker.finish_weight_update()
+        self.assertFalse(worker._weight_update_active)
+        if not vllm_version_is("0.33.0"):
+            assert not worker.has_incomplete_weight_update()
+        worker.model_runner.reset_lora_state.assert_not_called()
+        worker.model_runner.on_target_weights_replaced.assert_not_called()
+        engine.reset_weight_update_target.assert_called_once_with()
+
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        engine.update_weights.assert_called_once_with({})
+        self.assertEqual(engine.start_weight_update.call_count, 2)
+        self.assertEqual(engine.finish_weight_update.call_count, 2)
+        self.assertEqual(engine.reset_weight_update_target.call_count, 2)
+        if vllm_version_is("0.34.0"):
+            worker.model_runner.reset_lora_state.assert_called_once_with()
+            worker.model_runner.on_target_weights_replaced.assert_not_called()
+        else:
+            worker.model_runner.on_target_weights_replaced.assert_called_once_with()
+            worker.model_runner.reset_lora_state.assert_not_called()
+
+    def test_update_weights_selects_dp2_tp2_worker_payload(self):
+        dp_size, tp_size = 2, 2
+        payloads = [{"names": [f"worker_{rank}.weight"], "size": rank + 1} for rank in range(dp_size * tp_size)]
+        for is_draft in (False, True):
+            for dp_index in range(dp_size):
+                for tp_rank in range(tp_size):
+                    with self.subTest(is_draft=is_draft, dp_index=dp_index, tp_rank=tp_rank):
+                        worker, _ = self._make_worker()
+                        worker.rank = tp_rank
+                        worker.parallel_config = SimpleNamespace(
+                            data_parallel_index=dp_index,
+                            tensor_parallel_size=tp_size,
+                            pipeline_parallel_size=1,
+                            world_size=tp_size,
+                        )
+                        worker.vllm_config.parallel_config = worker.parallel_config
+                        if is_draft:
+                            worker.start_draft_weight_update()
+                        else:
+                            worker.start_weight_update()
+
+                        engine = worker.weight_transfer_engine
+                        expected_payload = payloads[dp_index * tp_size + tp_rank]
+                        worker.update_weights(payloads)
+                        engine.update_weights.assert_called_once_with(expected_payload)
+                        assert engine.update_weights.call_args.args[0] is expected_payload
+
+                        engine.update_weights.reset_mock()
+                        worker.update_weights(expected_payload)
+                        engine.update_weights.assert_called_once_with(expected_payload)
+                        assert engine.update_weights.call_args.args[0] is expected_payload
+                        worker.finish_weight_update()
+
+    def test_failed_draft_update_follows_upstream_lifecycle(self):
+        for operation in ("start_weight_update", "update_weights", "finish_weight_update"):
+            with self.subTest(operation=operation), patch.dict("os.environ", {"VLLM_RELOAD_MODE": "layerwise"}):
+                worker, _ = self._make_worker()
+                engine = worker.weight_transfer_engine
+
+                def fail_reload(*args, worker=worker):
+                    if not vllm_version_is("0.33.0"):
+                        assert worker.has_incomplete_weight_update()
+                    raise RuntimeError("reload failed")
+
+                getattr(engine, operation).side_effect = fail_reload
+                with self.assertRaisesRegex(RuntimeError, "reload failed"):
+                    worker.start_draft_weight_update()
+                    worker.update_weights({})
+                    worker.finish_weight_update()
+                # Upstream layerwise FINISH retains the session for finalization;
+                # START/UPDATE errors restore the default receiver immediately.
+                if operation == "finish_weight_update":
+                    engine.reset_weight_update_target.assert_not_called()
+                    assert worker._weight_update_active
+                else:
+                    engine.reset_weight_update_target.assert_called_once_with()
+                    assert not worker._weight_update_active
+                worker.model_runner.reset_lora_state.assert_not_called()
+                worker.model_runner.on_target_weights_replaced.assert_not_called()
+                if not vllm_version_is("0.33.0"):
+                    from vllm.v1.engine.core import EngineCore
+
+                    core = SimpleNamespace(
+                        is_sleeping=lambda: False,
+                        collective_rpc=lambda method, worker=worker: [getattr(worker, method)()],
+                    )
+                    assert not EngineCore.is_inference_ready(core)
+
+    def test_draft_capability_follows_engine_support(self):
+        for engine_support in (True, False):
+            with self.subTest(engine_support=engine_support):
+                worker, _ = self._make_worker()
+                worker.weight_transfer_engine.supports_draft_weight_update = engine_support
+                self.assertEqual(worker.supports_draft_weight_updates(), engine_support)
+                if not engine_support:
+                    with self.assertRaisesRegex(RuntimeError, "does not support draft model weight updates"):
+                        worker.start_draft_weight_update()
+                    worker.weight_transfer_engine.set_weight_update_target.assert_not_called()
+
+    def test_draft_update_rejects_runner_without_draft_model(self):
+        worker, _ = self._make_worker()
+        worker.model_runner.get_draft_model = lambda: None
+        self.assertFalse(worker.supports_draft_weight_updates())
+        with self.assertRaisesRegex(RuntimeError, "no draft model is configured"):
+            worker.start_draft_weight_update()
+        worker.weight_transfer_engine.start_weight_update.assert_not_called()
 
 
 @pytest.mark.parametrize("with_kv_transfer", [False, True])

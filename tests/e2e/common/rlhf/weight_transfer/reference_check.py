@@ -4,14 +4,19 @@
 """Startup-load reference and two-update equivalence checks."""
 
 import base64
+import hashlib
 import json
+from collections.abc import Callable
 from contextlib import contextmanager
 from io import BytesIO
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+import torch
 from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FIXED_WEIGHT_SEED,
@@ -31,6 +36,10 @@ def _common_serve_args(
     port: int,
     gpu_memory_utilization: float,
     tensor_parallel_size: int,
+    max_model_len: int = 1024,
+    enable_sleep_mode: bool = True,
+    compilation_config: str | None = FULL_DECODE_ONLY_CONFIG,
+    additional_config: str = '{"weight_nz_mode": 0}',
 ) -> list[str]:
     """Flags a live-update lane and its reference share.
 
@@ -40,20 +49,11 @@ def _common_serve_args(
     dtype, graph mode, NZ layout, memory budget, max length, tokenizer/executor
     backend and config overrides all stay identical.
     """
-    return [
+    args = [
         "--dtype",
         "bfloat16",
-        "--compilation-config",
-        FULL_DECODE_ONLY_CONFIG,
-        # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
-        # trainer only gets the HBM it needs once the rollout engine sleeps, so
-        # the lane releases the engine with a level-2 sleep before every
-        # transfer. That requires the CaMem pool, and both builders enable it so
-        # the reference stays a plain startup load of the same payload under the
-        # very same allocation pool; the reference itself never sleeps.
-        "--enable-sleep-mode",
         "--max-model-len",
-        "1024",
+        str(max_model_len),
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--tensor-parallel-size",
@@ -62,9 +62,16 @@ def _common_serve_args(
         str(port),
         "--trust-remote-code",
         "--additional-config",
-        '{"weight_nz_mode": 0}',
+        additional_config,
         *case.server_args(),
     ]
+    if compilation_config is not None:
+        args += ["--compilation-config", compilation_config]
+    # Colocated IPC transfers need the CaMem pool for level-2 sleep. Draft
+    # HCCL transfers use separate NPUs and do not need sleep mode.
+    if enable_sleep_mode:
+        args.append("--enable-sleep-mode")
+    return args
 
 
 def live_update_serve_args(
@@ -321,3 +328,213 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class WeightUpdateTestWorkerExtension:
+    """Read real worker parameters through the development collective RPC."""
+
+    if TYPE_CHECKING:
+        # Supplied by the worker class when the extension is composed at runtime.
+        get_model: Callable[[], torch.nn.Module]
+        get_draft_model: Callable[[], torch.nn.Module | None]
+        model_runner: Any
+
+    def draft_model_architecture(self):
+        return type(self.get_draft_model()).__name__
+
+    def _weight_update_graph_managers(self):
+        managers = {}
+        seen = set()
+        for role, owner in (("target", self.model_runner), ("draft", self.model_runner.speculator)):
+            for name, manager in vars(owner).items():
+                if name.endswith("cudagraph_manager") and manager is not None and id(manager) not in seen:
+                    managers[f"{role}.{name}"] = manager
+                    seen.add(id(manager))
+        return managers
+
+    def start_graph_execution_capture(self):
+        self._graph_methods: list[tuple[Any, Callable, Callable]] = []
+        self._graph_replays: dict[str, int] = {}
+        self._graph_captures: dict[str, int] = {}
+        for name, manager in self._weight_update_graph_managers().items():
+            run, capture = manager.run_fullgraph, manager.capture
+            self._graph_methods.append((manager, run, capture))
+            self._graph_replays[name] = self._graph_captures[name] = 0
+
+            def record_replay(desc, *args, _run=run, _name=name, **kwargs):
+                # run_fullgraph replays the captured graph for desc. Count
+                # only after it succeeds, rather than counting dispatch attempts.
+                result = _run(desc, *args, **kwargs)
+                self._graph_replays[_name] += 1
+                return result
+
+            def record_capture(*args, _capture=capture, _name=name, **kwargs):
+                self._graph_captures[_name] += 1
+                return _capture(*args, **kwargs)
+
+            manager.run_fullgraph, manager.capture = record_replay, record_capture
+        return self.snapshot_graph_execution()
+
+    def snapshot_graph_execution(self):
+        # Discover current managers again so replacing a manager during reload
+        # cannot hide a recapture behind hooks attached to the previous one.
+        return {
+            "graphs": {
+                name: {
+                    "manager_id": id(manager),
+                    "graph_ids": {str(desc): id(graph) for desc, graph in manager.graphs.items()},
+                }
+                for name, manager in self._weight_update_graph_managers().items()
+            },
+            "replays": dict(self._graph_replays),
+            "captures": dict(self._graph_captures),
+        }
+
+    def finish_graph_execution_capture(self):
+        for manager, run, capture in self._graph_methods:
+            manager.run_fullgraph, manager.capture = run, capture
+        self._graph_methods.clear()
+
+    def start_draft_output_capture(self):
+        speculator = self.model_runner.speculator
+        self._draft_propose = speculator.propose
+        self._draft_output: list[list[int]] | None = None
+
+        def capture(input_batch, *args, **kwargs):
+            tokens = self._draft_propose(input_batch, *args, **kwargs)
+            # Observe the first proposal for a fixed prompt before target
+            # verification. Copy it before the runner reuses its output buffer.
+            if self._draft_output is None and input_batch.num_reqs:
+                self._draft_output = tokens[: input_batch.num_reqs].detach().cpu().tolist()
+            return tokens
+
+        speculator.propose = capture
+
+    def finish_draft_output_capture(self):
+        self.model_runner.speculator.propose = self._draft_propose
+        return self._draft_output
+
+    def snapshot_draft_context_projections(self):
+        draft_model = self.get_draft_model()
+        assert draft_model is not None, "Draft model is missing"
+        # In these BF16 cases, EAGLE3/MTP need no separate weight-derived
+        # snapshot; DSpark's merged context WKV is also a registered Parameter.
+        # The full parameter snapshot covers their contents and storage.
+        # DFlash keeps fused/stacked weights and a norm alias as plain Tensors,
+        # outside named_parameters(), so check them separately after reload.
+        if not type(draft_model).__name__.endswith("DFlashQwen3ForCausalLM"):
+            return {}
+        model = draft_model.model
+        result = {}
+        for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight"):
+            value = getattr(model, name, None)
+            assert isinstance(value, torch.Tensor), f"Missing required DFlash derived tensor: {name}"
+            result[name] = {
+                "digest": hashlib.sha256(
+                    value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                ).hexdigest(),
+                "data_ptr": value.data_ptr(),
+            }
+        return result
+
+    def snapshot_weight_update_models(self):
+        result = {}
+        for name, model in (("target", self.get_model()), ("draft", self.get_draft_model())):
+            assert model is not None, f"{name} model is missing"
+            result[name] = {
+                key: {
+                    "digest": hashlib.sha256(
+                        value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    ).hexdigest(),
+                    "data_ptr": value.data_ptr(),
+                }
+                for key, value in model.named_parameters()
+            }
+            if name == "draft" and type(model).__name__.endswith("DSparkDeepseekV4ForCausalLM"):
+                assert "model.context_wkv_proj.weight" in result[name], (
+                    "DSpark merged context WKV must be covered by the parameter snapshot"
+                )
+            if name == "draft":
+                # These BF16 cases omit draft embeddings/heads and share the
+                # target copies. Check the relationship on every snapshot;
+                # existing digest/address comparisons cover reload correctness.
+                target = self.get_model()
+                if hasattr(target, "get_language_model"):
+                    target = target.get_language_model()
+                shared_weights = [("embedding", model.model.embed_tokens.weight, target.model.embed_tokens.weight)]
+                if type(model).__name__.endswith("DeepSeekV4MTP"):
+                    # MTP computes logits through each layer's shared head.
+                    shared_weights.extend(
+                        (f"mtp.{layer_id}.lm_head", layer.shared_head.head.weight, target.lm_head.weight)
+                        for layer_id, layer in model.model.layers.items()
+                    )
+                else:
+                    shared_weights.append(("lm_head", model.lm_head.weight, target.lm_head.weight))
+                for label, draft_weight, target_weight in shared_weights:
+                    assert draft_weight.data_ptr() == target_weight.data_ptr(), (
+                        f"Draft {label} no longer shares storage with the target"
+                    )
+        return result
+
+
+def snapshot_weight_update_models(server):
+    response = post_control(server, "collective_rpc", json={"method": "snapshot_weight_update_models"})
+    results = response.json()["results"]
+    assert len(results) == 1
+    return results[0]
+
+
+def parameter_digests(snapshot):
+    return {model: {name: value["digest"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def parameter_addresses(snapshot):
+    return {model: {name: value["data_ptr"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+    case = speculative_case.target
+    args = [
+        "--tokenizer",
+        case.model,
+        "--served-model-name",
+        case.id,
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "128",
+        "--no-enable-prefix-caching",
+        "--kv-cache-memory-bytes",
+        str(128 * 2**20),
+        *_common_serve_args(
+            case,
+            port=port,
+            gpu_memory_utilization=0.2,
+            tensor_parallel_size=1,
+            max_model_len=128,
+            enable_sleep_mode=False,
+            compilation_config=None,
+            additional_config='{"rl_config": {"enabled": true}}',
+        ),
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": speculative_case.method,
+                "model": str(checkpoint / "draft"),
+                "num_speculative_tokens": speculative_case.num_speculative_tokens,
+                "draft_sample_method": speculative_case.draft_sample_method,
+            }
+        ),
+        "--worker-extension-cls",
+        "tests.e2e.common.rlhf.weight_transfer.reference_check.WeightUpdateTestWorkerExtension",
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    else:
+        args += [
+            "--compilation-config",
+            '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        ]
+    if live:
+        args += ["--weight-transfer-config", '{"backend": "hccl"}']
+    return args

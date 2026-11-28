@@ -4,26 +4,45 @@
 """HCCL transactions with a TP1 rollout server and a separate trainer NPU.
 
 Direct reload alternates two checkpoints and checks each round against cold loading.
+Draft coverage sends draft, target, then different draft weights.
 """
 
+import json
 import os
+from pathlib import Path
 
 import pytest
+import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from modelscope import snapshot_download  # type: ignore[import-untyped]
+from prometheus_client.parser import text_string_to_metric_families
+from vllm import envs
 from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
-from tests.e2e.common.rlhf.common import post_control, register_engines_once, server_visible_devices
+from tests.e2e.common.rlhf.common import (
+    post_control,
+    register_engines_once,
+    rlhf_server,
+    server_visible_devices,
+    wait_for_free_device_memory,
+)
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     UPDATE_ROUNDS,
+    draft_serve_args,
     generation_signature,
+    parameter_addresses,
+    parameter_digests,
     reference_signature,
+    snapshot_weight_update_models,
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
+    FixedRandomWeightSource,
+    fixed_startup_checkpoint,
     make_weight_source,
     packed_buffer_size_for,
 )
@@ -85,20 +104,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
             assert reference != references[seed_b], f"{case.id}: cold A and B produced identical signatures"
         client = server.get_client()
 
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
-
-        register_engines_once()
-        engine = WeightTransferTrainerFactory.trainer_init(
-            HCCLTrainerInitInfo(
-                rank=0,
-                master_address=get_ip(),
-                master_port=get_open_port(),
-                world_size=INFERENCE_WORLD_SIZE + 1,
-                packed=packed,
-                packed_buffer_size_bytes=packed_buffer_size_for(source),
-            ),
-            client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT),
-            source=source,
+        engine = create_hccl_trainer(
+            HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT), source, packed
         )
         try:
             for update_round, seed in enumerate(seeds, start=1):
@@ -115,3 +122,241 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                 )
         finally:
             engine.shutdown()
+
+
+class WeightUpdateClient(HTTPVLLMWeightSyncClient):
+    """Select the draft START endpoint without changing the trainer protocol."""
+
+    def __init__(self, base_url: str):
+        super().__init__(base_url=base_url, timeout=UPDATE_TIMEOUT)
+        self.is_draft = False
+
+    def start_weight_update(self) -> None:
+        self._post("start_draft_weight_update" if self.is_draft else "start_weight_update")
+
+
+def create_hccl_trainer(client, source, packed: bool, buffer_source=None):
+    """Initialize HCCL for either a target or draft synchronization client."""
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+    register_engines_once()
+    return WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=INFERENCE_WORLD_SIZE + 1,
+            packed=packed,
+            packed_buffer_size_bytes=packed_buffer_size_for(source if buffer_source is None else buffer_source),
+        ),
+        client=client,
+        source=source,
+    )
+
+
+def draft_metrics(server) -> dict[str, float]:
+    response = requests.get(server.url_for("metrics"), timeout=5)
+    response.raise_for_status()
+    names = ("vllm:spec_decode_num_drafts_total", "vllm:spec_decode_num_draft_tokens_total")
+    counters: dict[str, float] = {}
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name in names:
+                counters[sample.name] = counters.get(sample.name, 0.0) + sample.value
+    assert all(name in counters for name in names), f"Missing speculative decoding counters: {counters}"
+    return counters
+
+
+def assert_graph_execution_reused(before, after):
+    assert len(before) == len(after) == INFERENCE_WORLD_SIZE, "Missing worker graph execution records"
+    for rank, (previous, current) in enumerate(zip(before, after)):
+        assert current["graphs"] == previous["graphs"], f"Worker {rank}: captured graphs or managers changed"
+        assert current["captures"] == previous["captures"], f"Worker {rank}: unexpected graph recapture"
+        for role in ("target", "draft"):
+            previous_replays = sum(n for name, n in previous["replays"].items() if name.startswith(f"{role}."))
+            current_replays = sum(n for name, n in current["replays"].items() if name.startswith(f"{role}."))
+            assert current_replays > previous_replays, f"Worker {rank}: {role} executed no full graph replay"
+
+
+def collect_draft_observation(server, case: WeightUpdateModelCase, *, capture_graphs: bool = False):
+    """Measure startup and updated models after generation refreshes derived state."""
+    metrics_before = draft_metrics(server)
+    signature, draft_outputs = [], []
+    for prompt in case.prompts:
+        post_control(server, "collective_rpc", json={"method": "start_draft_output_capture"})
+        try:
+            signature.extend(generation_signature(server.get_client(), case.id, prompts=(prompt,)))
+        finally:
+            outputs = post_control(server, "collective_rpc", json={"method": "finish_draft_output_capture"}).json()[
+                "results"
+            ]
+        assert len(outputs) == INFERENCE_WORLD_SIZE and all(outputs), "No draft proposal was captured"
+        draft_outputs.append(outputs)
+
+    # Non-streaming generation has completed. Check participation without
+    # requiring an acceptance rate for randomly initialized weights.
+    metrics_after = draft_metrics(server)
+    assert all(metrics_after[name] > value for name, value in metrics_before.items()), (
+        f"{case.id}: speculative decoding counters did not increase: before={metrics_before}, after={metrics_after}"
+    )
+    snapshot = snapshot_weight_update_models(server)
+    projections = post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
+        "results"
+    ]
+    # Contents are comparable across cold/live servers; addresses are only
+    # comparable before/after reload within the same live server.
+    observation = {
+        "parameters": parameter_digests(snapshot),
+        "generation": signature,
+        "draft_outputs": draft_outputs,
+        "context_projections": [{name: value["digest"] for name, value in rank.items()} for rank in projections],
+    }
+    runtime = {
+        "projection_addresses": [{name: value["data_ptr"] for name, value in rank.items()} for rank in projections],
+    }
+    if capture_graphs:
+        runtime["graph_execution"] = post_control(
+            server, "collective_rpc", json={"method": "snapshot_graph_execution"}
+        ).json()["results"]
+    return snapshot, observation, runtime
+
+
+def run_draft_hccl_weight_transfer(
+    tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case, *, reload_mode: str = "layerwise"
+):
+    """Compare draft -> target -> draft updates with independent loads."""
+    if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
+        pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
+
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    torch.npu.set_device(TRAINER_DEVICE_INDEX)
+    device = torch.device("npu", TRAINER_DEVICE_INDEX)
+    case, draft_case = speculative_case.target, speculative_case.draft
+    # Prepare tokenizer files before the server loads from its offline cache.
+    if envs.VLLM_USE_MODELSCOPE:
+        snapshot_download(case.model, allow_file_pattern=["*.json"], local_files_only=False)
+    initial_source = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=0)
+    first_draft_updated = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=1)
+    target_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=1)
+    second_draft_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=2)
+    env_dict = {
+        "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_RELOAD_MODE": reload_mode,
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
+    }
+
+    # Cold-load the complete target/draft state expected after each update.
+    references = {}
+    for role, source in (
+        ("draft-1", first_draft_updated),
+        ("target", target_updated),
+        ("draft-2", second_draft_updated),
+    ):
+        wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
+        port = get_open_port()
+        with (
+            fixed_startup_checkpoint(source) as checkpoint,
+            rlhf_server(
+                checkpoint,
+                vllm_serve_args=draft_serve_args(
+                    Path(checkpoint), speculative_case, port, enforce_eager=enforce_eager, live=False
+                ),
+                server_host="127.0.0.1",
+                server_port=port,
+                env_dict=env_dict,
+            ) as server,
+        ):
+            _, references[role], _ = collect_draft_observation(server, case)
+            (tmp_path / f"{role}-reference.json").write_text(json.dumps(references[role], indent=2))
+
+    wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
+    port = get_open_port()
+    with (
+        fixed_startup_checkpoint(initial_source) as initial_path,
+        rlhf_server(
+            initial_path,
+            vllm_serve_args=draft_serve_args(
+                Path(initial_path), speculative_case, port, enforce_eager=enforce_eager, live=True
+            ),
+            server_host="127.0.0.1",
+            server_port=port,
+            env_dict=env_dict,
+        ) as server,
+    ):
+        sync_client = WeightUpdateClient(server.url_root)
+        assert first_draft_updated.draft_source is not None
+        assert second_draft_updated.draft_source is not None
+        engine = create_hccl_trainer(sync_client, first_draft_updated.draft_source, packed, target_updated)
+        graph_capture_started = False
+        try:
+            # Exercise startup-captured graphs before recording storage baselines.
+            # Keep monitoring active through every transfer and generation.
+            architectures = post_control(server, "collective_rpc", json={"method": "draft_model_architecture"}).json()[
+                "results"
+            ]
+            assert len(architectures) == INFERENCE_WORLD_SIZE and all(
+                name.endswith(speculative_case.draft_architecture) for name in architectures
+            ), architectures
+            if not enforce_eager:
+                previous_graph_execution = post_control(
+                    server, "collective_rpc", json={"method": "start_graph_execution_capture"}
+                ).json()["results"]
+                graph_capture_started = True
+            before, _, original_runtime = collect_draft_observation(server, case, capture_graphs=not enforce_eager)
+            if not enforce_eager:
+                (tmp_path / "initial-graph-execution.json").write_text(
+                    json.dumps(original_runtime["graph_execution"], indent=2)
+                )
+                assert_graph_execution_reused(previous_graph_execution, original_runtime["graph_execution"])
+                previous_graph_execution = original_runtime["graph_execution"]
+            original_addresses = parameter_addresses(before)
+            (tmp_path / "initial-snapshot.json").write_text(json.dumps(before, indent=2))
+            assert parameter_digests(before)["draft"] != references["draft-1"]["parameters"]["draft"], (
+                "Draft payload is not observable"
+            )
+
+            updates = (
+                ("draft", first_draft_updated.draft_source, "draft-1"),
+                ("target", target_updated, "target"),
+                ("draft", second_draft_updated.draft_source, "draft-2"),
+            )
+            for update_round, (role, source, reference_name) in enumerate(updates, start=1):
+                print(f"[trainer] {speculative_case.id}: {role} update round={update_round}", flush=True)
+                sync_client.is_draft = role == "draft"
+                engine.source = source
+                post_control(server, "pause")
+                # Failed transfers leave partially updated weights; keep generation paused.
+                engine.send_weights()
+                post_control(server, "resume")
+                after, observation, runtime = collect_draft_observation(server, case, capture_graphs=not enforce_eager)
+                assert runtime["projection_addresses"] == original_runtime["projection_addresses"], (
+                    f"{speculative_case.id}: {role} update {update_round} changed derived tensor storage"
+                )
+                if not enforce_eager:
+                    (tmp_path / f"update-{update_round}-{role}-graph-execution.json").write_text(
+                        json.dumps(runtime["graph_execution"], indent=2)
+                    )
+                    assert_graph_execution_reused(previous_graph_execution, runtime["graph_execution"])
+                    previous_graph_execution = runtime["graph_execution"]
+                (tmp_path / f"update-{update_round}-{role}-snapshot.json").write_text(json.dumps(after, indent=2))
+                (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(
+                    json.dumps(observation["generation"], indent=2)
+                )
+                (tmp_path / f"update-{update_round}-{role}-draft-outputs.json").write_text(
+                    json.dumps(observation["draft_outputs"], indent=2)
+                )
+                # Full parameter comparison also verifies update isolation:
+                # the cold reference retains the other model's expected weights.
+                assert observation == references[reference_name], (
+                    f"{speculative_case.id}: {role} update {update_round} differs from startup"
+                )
+                assert parameter_addresses(after) == original_addresses, (
+                    f"{speculative_case.id}: {role} update {update_round} changed parameter storage"
+                )
+        finally:
+            try:
+                if graph_capture_started:
+                    post_control(server, "collective_rpc", json={"method": "finish_graph_execution_capture"})
+            finally:
+                engine.shutdown()

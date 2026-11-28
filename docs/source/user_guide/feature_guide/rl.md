@@ -238,6 +238,50 @@ EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and pack
 sparse updates are unsupported. Updates apply in place: after a failed update,
 keep generation paused until the baseline is restored or the engine restarts.
 
+### Speculative draft weight updates
+
+Target and draft weights are updated in separate sessions. The current draft
+weight-update support is:
+
+| Transfer backend | Deployment | Draft weight updates | NZ mode |
+| --- | --- | --- | --- |
+| `hccl` | Trainer and rollout server use separate NPUs | Supported; E2E coverage for MTP, EAGLE3, DFlash and DSpark | Unsupported |
+| NPU IPC (`ipc` in server configuration) | Trainer and rollout server share NPUs | Not validated | Unsupported |
+
+Draft updates require `--pipeline-parallel-size 1` and `weight_nz_mode=0`.
+RL mode disables NZ automatically. Use HCCL for the workflow below.
+
+Start an HCCL-enabled server with compatible target and draft checkpoints:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 VLLM_WORKER_MULTIPROC_METHOD=spawn \
+vllm serve /path/to/target-checkpoint \
+    --speculative-config '{"method": "eagle3", "model": "/path/to/eagle3-draft-checkpoint", "num_speculative_tokens": 2}' \
+    --pipeline-parallel-size 1 \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+Replace the method and draft checkpoint with a compatible `mtp`, `eagle3`,
+`dflash` or `dspark` configuration. Reserve a separate NPU for the trainer.
+
+The control flow is:
+
+1. initialize the HCCL transfer engine;
+2. pause generation;
+3. start the draft weight update;
+4. transfer the draft weights;
+5. finish the weight update;
+6. resume generation only after success.
+
+After a failed update, keep generation paused and restart the affected workers
+with complete, known-good checkpoints before resuming.
+
+The repository contains runnable tests for draft weight transfer:
+
+- [`test_qwen_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/4194b1810a2ae90407a5c523d72f6ca5f9365940/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py)
+- [`test_deepseek_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/4194b1810a2ae90407a5c523d72f6ca5f9365940/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_deepseek_hccl.py)
+
 ### Pause and resume generation
 
 With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.

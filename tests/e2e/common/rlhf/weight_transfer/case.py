@@ -9,16 +9,19 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from vllm import envs
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_checkpoint_name,
+    deepseek_v4_draft_parameters,
     deepseek_v4_vision_params,
     expand_fused_expert_params,
     expand_minimax_m3_params,
     minimax_m3_checkpoint_name,
+    qwen3_draft_parameters,
 )
 
 if TYPE_CHECKING:
@@ -44,6 +47,7 @@ class WeightUpdateModelCase:
     checkpoint_param_expander: Callable[[str, tuple[int, ...]], list[tuple[str, tuple[int, ...]]]] = (
         expand_fused_expert_params
     )
+    checkpoint_parameter_adapter: Callable | None = None
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
@@ -107,13 +111,18 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 QWEN_CASES = (QWEN35_CASE,)
 
-
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(
-    id="deepseek-v4-flash-bf16-derived-gate",
-    model="kylesayrs/DeepSeek-V4-Flash-bf16",
+    id="deepseek-v4-flash-bf16",
+    model="deepseek-ai/DeepSeek-V4-Flash",
     hf_overrides={
         "num_hidden_layers": 4,
         "n_routed_experts": 8,
+        # The official checkpoint is quantized; this fixture generates BF16 weights.
+        "quantization_config": None,
+        # Transformers aliases these fields; override both to avoid its 18432 default.
+        "intermediate_size": 2048,
+        "moe_intermediate_size": 2048,
+        "compress_ratios": [0, 0, 4, 128],
     },
     checkpoint_name_map=deepseek_v4_checkpoint_name,
     # The HF ``from_config`` model sizes every expert MLP by
@@ -324,6 +333,137 @@ PACKED_LANE_SKIP_REASON = (
 
 
 MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE)
+
+
+@dataclass(frozen=True)
+class DraftWeightUpdateCase:
+    """A target/draft pair exercising a real speculative architecture."""
+
+    id: str
+    target: WeightUpdateModelCase
+    draft: WeightUpdateModelCase
+    method: str
+    draft_architecture: str
+    num_speculative_tokens: int = 2
+    draft_sample_method: str = "greedy"
+
+
+# Keep the published hidden/MLP/head dimensions, vocabulary and tokenizer.
+# Like the target cases above, reduce depth rather than inventing a tiny width.
+QWEN3_DRAFT_TARGET = WeightUpdateModelCase(
+    id="qwen3-reduced",
+    model="Qwen/Qwen3-8B",
+    hf_overrides={"num_hidden_layers": 4, "layer_types": ["full_attention"] * 4},
+)
+
+
+QWEN3_EAGLE3_CASE = DraftWeightUpdateCase(
+    id="qwen3-eagle3",
+    target=QWEN3_DRAFT_TARGET,
+    method="eagle3",
+    draft_architecture="Eagle3Qwen3ForCausalLM",
+    draft=replace(
+        QWEN3_DRAFT_TARGET,
+        id="qwen3-eagle3-draft",
+        hf_overrides={
+            "num_hidden_layers": 1,
+            "layer_types": ["full_attention"],
+            "architectures": ["Eagle3Qwen3ForCausalLM"],
+            "draft_vocab_size": 151936,
+            # MRV2 uses 1-based capture-after indices.
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+        },
+        checkpoint_parameter_adapter=qwen3_draft_parameters,
+    ),
+)
+QWEN3_DFLASH_CASE = DraftWeightUpdateCase(
+    id="qwen3-dflash",
+    target=QWEN3_DRAFT_TARGET,
+    method="dflash",
+    draft_architecture="DFlashQwen3ForCausalLM",
+    draft=replace(
+        QWEN3_DRAFT_TARGET,
+        id="qwen3-dflash-draft",
+        hf_overrides={
+            "num_hidden_layers": 1,
+            "layer_types": ["full_attention"],
+            "architectures": ["DFlashDraftModel"],
+            "draft_vocab_size": 151936,
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+            "block_size": 3,
+            "num_target_layers": 4,
+            # DFlash uses zero-based target decoder indices.
+            "dflash_config": {"mask_token_id": 151669, "target_layer_ids": [0, 1, 2]},
+        },
+        checkpoint_parameter_adapter=qwen3_draft_parameters,
+    ),
+)
+DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
+    id="deepseek-v4-flash-dspark",
+    method="dspark",
+    draft_architecture="DSparkDeepseekV4ForCausalLM",
+    draft_sample_method="probabilistic",
+    target=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-dspark-target",
+        model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        skip_reason=None,
+    ),
+    draft=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-dspark-draft",
+        model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        skip_reason=None,
+        checkpoint_parameter_adapter=partial(deepseek_v4_draft_parameters, method="dspark"),
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            "quantization_config": None,
+            "intermediate_size": 2048,
+            "moe_intermediate_size": 2048,
+            "num_hash_layers": 0,
+            "mlp_layer_types": ["moe"] * 4,
+            "compress_ratios": [0] * 5,
+            "n_mtp_layers": 1,
+            "dspark_num_mtp_layers": 1,
+            "dspark_block_size": 2,
+            "dspark_target_layer_ids": [0, 1, 2],
+            "dspark_markov_rank": 256,
+            "enable_confidence_head": True,
+            "dspark_noise_token_id": 128799,
+        },
+    ),
+)
+
+DEEPSEEK_V4_MTP_CASE = DraftWeightUpdateCase(
+    id="deepseek-v4-flash-mtp",
+    method="mtp",
+    draft_architecture="DeepSeekV4MTP",
+    target=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-mtp-target",
+        skip_reason=None,
+    ),
+    draft=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-mtp-draft",
+        skip_reason=None,
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            "quantization_config": None,
+            "intermediate_size": 2048,
+            "moe_intermediate_size": 2048,
+            "num_hash_layers": 0,
+            "mlp_layer_types": ["moe"] * 4,
+            "compress_ratios": [0] * 5,
+            "num_nextn_predict_layers": 1,
+        },
+        checkpoint_parameter_adapter=partial(deepseek_v4_draft_parameters, method="mtp"),
+    ),
+)
+
+DRAFT_MODEL_CASES = (QWEN3_EAGLE3_CASE, QWEN3_DFLASH_CASE, DEEPSEEK_V4_DSPARK_CASE, DEEPSEEK_V4_MTP_CASE)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:

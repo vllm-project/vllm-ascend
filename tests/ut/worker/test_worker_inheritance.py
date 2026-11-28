@@ -20,14 +20,12 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
     "_get_cudagraph_capture_context",
-    "_set_draft_weight_update_target",
     "get_compilation_match_table",
     "get_encoder_timing_stats",
     "annotate_profile",
     "randomize_dummy_inputs",
     "save_sharded_state",
     "save_tensorized_model",
-    "start_draft_weight_update",
     "elastic_ep_execute",
 )
 
@@ -51,14 +49,6 @@ def test_unverified_interface_rejects_calls_without_worker_state(name):
     kwargs = {p.name: object() for p in required if p.kind is p.KEYWORD_ONLY}
     with pytest.raises(NotImplementedError, match=name):
         method(*args, **kwargs)
-
-
-def test_weight_update_hook_rejects_draft_without_worker_state():
-    from vllm_ascend.worker.worker import NPUWorker
-
-    worker = object.__new__(NPUWorker)
-    with pytest.raises(NotImplementedError, match="Draft weight updates"):
-        worker._start_weight_update(is_draft=True)
 
 
 def test_shutdown_weight_transfer_engine_is_inherited():

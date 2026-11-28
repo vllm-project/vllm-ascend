@@ -6,10 +6,14 @@
 import pytest
 
 from tests.e2e.common.rlhf.weight_transfer.case import (
+    PACKED_LANE_SKIP_REASON,
+    QWEN3_DFLASH_CASE,
+    QWEN3_EAGLE3_CASE,
     WeightUpdateModelCase,
     pytest_qwen_reload_cases,
 )
 from tests.e2e.common.rlhf.weight_transfer.hccl import (
+    run_draft_hccl_weight_transfer,
     run_hccl_weight_transfer_transaction,
 )
 
@@ -17,3 +21,20 @@ from tests.e2e.common.rlhf.weight_transfer.hccl import (
 @pytest.mark.parametrize(("case", "packed", "reload_mode"), pytest_qwen_reload_cases("hccl"))
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, reload_mode: str):
     run_hccl_weight_transfer_transaction(case, packed, reload_mode=reload_mode)
+
+
+@pytest.mark.parametrize(
+    "packed",
+    [False, pytest.param(True, marks=pytest.mark.skip(reason=PACKED_LANE_SKIP_REASON))],
+    ids=["unpacked", "packed"],
+)
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "aclgraph"])
+@pytest.mark.parametrize(
+    "speculative_case",
+    [
+        pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.target.model))
+        for case in (QWEN3_EAGLE3_CASE, QWEN3_DFLASH_CASE)
+    ],
+)
+def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed, enforce_eager, speculative_case):
+    run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed, enforce_eager, speculative_case)

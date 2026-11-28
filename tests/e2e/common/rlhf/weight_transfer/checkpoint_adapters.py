@@ -83,6 +83,82 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
+def qwen3_draft_parameters(config, parameters):
+    """Adapt a meta Qwen3 schema to upstream's EAGLE3/DFlash loaders.
+
+    These loaders prepend ``model.`` themselves. Embedding and output weights
+    are omitted intentionally: the proposer shares the target's copies.
+    """
+    architecture = config.architectures[0]
+    eagle = architecture == "Eagle3Qwen3ForCausalLM"
+    result = []
+    for name, shape, dtype in parameters:
+        if name in ("model.embed_tokens.weight", "lm_head.weight"):
+            continue
+        name = name.removeprefix("model.")
+        if (
+            eagle
+            and name.startswith("layers.0.self_attn.")
+            and name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight"))
+        ):
+            shape = (shape[0], 2 * shape[1])
+        result.append((name, shape, dtype))
+    hidden = config.hidden_size
+    result.append(("fc.weight", (hidden, 3 * hidden), torch.bfloat16))
+    if eagle:
+        result.extend(
+            (f"layers.{i}.hidden_norm.weight", (hidden,), torch.bfloat16) for i in range(config.num_hidden_layers)
+        )
+    else:
+        result.append(("hidden_norm.weight", (hidden,), torch.bfloat16))
+    return result
+
+
+def deepseek_v4_draft_parameters(config, parameters, *, method: str):
+    """Convert a V4 decoder and append method-specific ``mtp.0.*`` parameters."""
+    result = []
+    for name, shape, dtype in parameters:
+        name = name.removeprefix("model.")
+        if not name.startswith("layers.0."):
+            continue
+        name = "mtp.0." + name.removeprefix("layers.0.")
+        name = name.replace(".self_attn.", ".attn.").replace(".mlp.", ".ffn.")
+        name = name.replace(".input_layernorm.", ".attn_norm.").replace(".post_attention_layernorm.", ".ffn_norm.")
+        result.append((name, shape, dtype))
+    hidden, hc = config.hidden_size, config.hc_mult
+    result.extend(
+        [
+            ("mtp.0.norm.weight", (hidden,), torch.bfloat16),
+            ("mtp.0.hc_head_fn", (hc, hc * hidden), torch.float32),
+            ("mtp.0.hc_head_base", (hc,), torch.float32),
+            ("mtp.0.hc_head_scale", (1,), torch.float32),
+        ]
+    )
+    if method == "mtp":
+        result.extend(
+            [
+                ("mtp.0.e_proj.weight", (hidden, hidden), torch.bfloat16),
+                ("mtp.0.h_proj.weight", (hidden, hidden), torch.bfloat16),
+                ("mtp.0.enorm.weight", (hidden,), torch.bfloat16),
+                ("mtp.0.hnorm.weight", (hidden,), torch.bfloat16),
+            ]
+        )
+    elif method == "dspark":
+        rank = config.dspark_markov_rank
+        result.extend(
+            [
+                ("mtp.0.main_proj.weight", (hidden, hidden * len(config.dspark_target_layer_ids)), torch.bfloat16),
+                ("mtp.0.main_norm.weight", (hidden,), torch.bfloat16),
+                ("mtp.0.markov_head.markov_w1.weight", (config.vocab_size, rank), torch.bfloat16),
+                ("mtp.0.markov_head.markov_w2.weight", (config.vocab_size, rank), torch.bfloat16),
+                ("mtp.0.confidence_head.proj.weight", (1, hidden + rank), torch.float32),
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported DeepSeek V4 draft method: {method}")
+    return result
+
+
 def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
     """Describe vision and router parameters absent from the HF text meta model.
 

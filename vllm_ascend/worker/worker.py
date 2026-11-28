@@ -288,12 +288,6 @@ class NPUWorker(GPUWorker):
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         raise NotImplementedError("GPUWorker._get_cudagraph_capture_context is not validated on Ascend.")
 
-    def supports_draft_weight_updates(self) -> bool:
-        return False
-
-    def _set_draft_weight_update_target(self) -> None:
-        raise NotImplementedError("GPUWorker._set_draft_weight_update_target is not validated on Ascend.")
-
     def get_compilation_match_table(self) -> dict[str, int]:
         raise NotImplementedError("GPUWorker.get_compilation_match_table is not validated on Ascend.")
 
@@ -317,9 +311,6 @@ class NPUWorker(GPUWorker):
 
     def save_tensorized_model(self, tensorizer_config: "TensorizerConfig") -> None:
         raise NotImplementedError("GPUWorker.save_tensorized_model is not validated on Ascend.")
-
-    def start_draft_weight_update(self) -> None:
-        raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")
@@ -436,14 +427,8 @@ class NPUWorker(GPUWorker):
             )
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
-        if is_draft:
-            raise NotImplementedError("Draft weight updates are not supported on Ascend.")
-        # Report a missing engine before checking the Ascend layout.
-        self._check_weight_transfer_engine()
         self._check_nz_disabled()
-        # The inherited lifecycle tracks session state, dispatches rank payloads
-        # and refreshes the model runner once the target weights are in place.
-        super()._start_weight_update()
+        super()._start_weight_update(is_draft=is_draft)
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
