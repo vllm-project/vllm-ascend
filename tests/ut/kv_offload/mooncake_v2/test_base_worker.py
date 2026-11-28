@@ -34,6 +34,12 @@ def test_transfer_max_workers() -> None:
             MooncakeBaseConnectorWorker._get_transfer_max_workers(config)
 
 
+def make_block_shape_worker(tp_size: int = 1) -> MooncakeBaseConnectorWorker:
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.tp_size = tp_size
+    return worker
+
+
 @pytest.mark.parametrize(
     ("pcp_rank", "tp_rank", "target_index"),
     [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)],
@@ -154,17 +160,27 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
 
 
 @pytest.mark.parametrize(
-    ("heads", "shape", "step", "error"),
+    ("tp_size", "heads", "shape", "step", "error"),
     [
-        (2, (2, 16, 2, 8), 1, "exactly one KV head"),
-        (16, (2, 16, 16, 8), 1, "cannot distinguish HND from NHD"),
-        (1, (2, 16, 1, 16), 2, "contiguous bytes"),
+        (2, 2, (2, 16, 2, 8), 1, "only supported when TP size is 1"),
+        (1, 16, (2, 16, 16, 8), 1, "cannot distinguish HND from NHD"),
+        (1, 1, (2, 16, 1, 16), 2, "contiguous bytes"),
     ],
 )
-def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, error) -> None:
+def test_transfer_block_shape_rejects_unsupported_cache(tp_size, heads, shape, step, error) -> None:
     cache = torch.empty(shape, dtype=torch.float16)[..., ::step]
     with pytest.raises(ValueError, match=error):
-        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=heads), cache)
+        make_block_shape_worker(tp_size)._get_transfer_block_shape(make_full_spec(num_kv_heads=heads), cache)
+
+
+def test_transfer_block_shape_preserves_contiguous_multi_head_nhd_for_tp1() -> None:
+    cache = torch.empty((2, 16, 2, 8), dtype=torch.float16)
+
+    assert make_block_shape_worker(tp_size=1)._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache) == (
+        2,
+        16,
+        8,
+    )
 
 
 @pytest.mark.parametrize(
@@ -178,7 +194,7 @@ def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, erro
 def test_transfer_block_shape_preserves_packed_head_major_gqa(shape) -> None:
     cache = torch.empty(shape, dtype=torch.uint8)
 
-    assert MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache) == tuple(
+    assert make_block_shape_worker()._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache) == tuple(
         shape[1:]
     )
 
@@ -193,7 +209,7 @@ def test_transfer_block_shape_preserves_packed_head_major_gqa(shape) -> None:
 def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(shape, step, error) -> None:
     cache = torch.empty(shape, dtype=torch.uint8)[..., ::step]
     with pytest.raises(ValueError, match=error):
-        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache)
+        make_block_shape_worker()._get_transfer_block_shape(make_full_spec(num_kv_heads=2), cache)
 
 
 @pytest.mark.parametrize("spare", [0, 64, 256])

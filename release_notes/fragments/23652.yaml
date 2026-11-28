@@ -1,0 +1,7 @@
+pr: 23652
+entries:
+  - category: bugfix
+    text: >-
+      Allow MooncakeConnectorV2 to transfer contiguous multi-head NHD KV-cache
+      blocks when tensor parallel size is one, while retaining the KV-head
+      topology in transfer metadata.
