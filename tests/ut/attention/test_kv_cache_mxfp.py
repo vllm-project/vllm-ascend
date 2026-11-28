@@ -6,9 +6,11 @@ from dataclasses import replace
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
 from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackend,
+    is_mxfp_cache_spec,
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
     mxfp_packet_section_sizes,
@@ -134,3 +136,74 @@ def test_invalid_scheduler_geometry_is_rejected():
         mxfp_cache_views_for_spec(torch.empty(1, dtype=torch.int8), _spec(), 512)
     with pytest.raises(ValueError, match="smaller"):
         mxfp_cache_spec(replace(_spec(), page_size_padded=1))
+
+
+@pytest.mark.parametrize("block_size", [1, 512])
+def test_mxfp_backend_customize_spec_supports_real_and_per_token_probe(block_size):
+    original = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=2, head_size=64, head_size_v=128, dtype=torch.bfloat16
+    )
+    customized = AscendC8MXFPAttentionBackend.customize_spec(original)
+    expected_state_bytes = 64 + 128 + (64 + 128) // 32
+    assert is_mxfp_cache_spec(customized)
+    assert customized.dtype == torch.float8_e4m3fn
+    assert customized.state_content_bytes == expected_state_bytes
+    assert customized.page_size_bytes == 2 * block_size * expected_state_bytes
+
+    plain_fp8 = replace(original, dtype=torch.float8_e4m3fn)
+    assert not is_mxfp_cache_spec(original)
+    assert not is_mxfp_cache_spec(plain_fp8)
+
+    swa = SlidingWindowSpec(block_size=512, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=128)
+    assert AscendC8MXFPAttentionBackend.customize_spec(swa) is swa
+    assert not is_mxfp_cache_spec(swa)
+
+
+@pytest.mark.parametrize("mamba_bytes", [262144, 532480])
+def test_platform_hybrid_alignment_uses_mxfp_customized_page_size(monkeypatch, mamba_bytes):
+    from types import SimpleNamespace
+
+    from vllm.config import CacheConfig
+    from vllm.model_executor.models import ModelRegistry
+
+    import vllm_ascend.core.kv_cache_dtype_handlers  # noqa: F401
+    from vllm_ascend.platform import NPUPlatform
+
+    class _FakeHybridModel:
+        @staticmethod
+        def get_mamba_state_shape_from_config(_cfg):
+            return ((mamba_bytes // 2,),)
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_cfg):
+            return (torch.bfloat16,)
+
+    cache_config = CacheConfig(block_size=512, cache_dtype="mxfp8", mamba_cache_mode="none")
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            use_mla=False,
+            is_hybrid=True,
+            architecture="Qwen3_5ForCausalLM",
+            hf_config=SimpleNamespace(model_type="qwen3_5"),
+            hf_text_config=SimpleNamespace(model_type="qwen3_5"),
+            max_model_len=32768,
+            get_num_kv_heads=lambda _pc: 2,
+            get_head_size=lambda: 256,
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=None,
+        use_flashinfer_replayssm=False,
+    )
+    monkeypatch.setattr(
+        NPUPlatform, "_find_non_ssm_backends", classmethod(lambda cls, _cfg: [AscendC8MXFPAttentionBackend])
+    )
+    monkeypatch.setattr(ModelRegistry, "resolve_model_cls", lambda *_args, **_kwargs: (_FakeHybridModel, "FakeHybrid"))
+
+    NPUPlatform.update_block_size_for_backend(vllm_config)
+
+    expected_page = mxfp_packet_size_bytes(2, 512, 256, 256)
+    assert cache_config.block_size == 512
+    assert cache_config.mamba_page_size_padded == expected_page

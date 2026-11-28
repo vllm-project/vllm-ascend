@@ -27,7 +27,6 @@ shared by the backend and the model runner.
 
 import math
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
@@ -36,6 +35,7 @@ from vllm.v1.attention.backend import (  # type: ignore
     AttentionCGSupport,
     AttentionLayer,
 )
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -52,10 +52,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.utils import uses_ascend_store_memcache, uses_mooncake_connector
-
-if TYPE_CHECKING:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
 
 # KV cache MXFP8 scale layouts, PA_NZ flavor (QFA layout_kv="PA_NZ"; golden
 # reference: quant_flash_attn_golden.py "PA_NZ: fp8=[Bn,N,D//32,Bs,32],
@@ -182,15 +178,34 @@ def mxfp_packet_size_bytes(num_kv_heads: int, block_size: int, k_dim: int, v_dim
     return sum(mxfp_packet_section_sizes(num_kv_heads, block_size, k_dim, v_dim))
 
 
-def mxfp_cache_spec(spec: "FullAttentionSpec") -> "FullAttentionSpec":
+def _mxfp_state_content_bytes(k_dim: int, v_dim: int) -> int:
+    """Per-token byte budget for FP8 K/V plus per-32-element E8M0 scales."""
+    return k_dim + v_dim + (k_dim + v_dim) // MXFP8_GROUP_SIZE
+
+
+def is_mxfp_cache_spec(spec: KVCacheSpec) -> bool:
+    """Whether ``spec`` carries the C8-MXFP packet layout (FP8 K/V + E8M0 scales)."""
+    if type(spec) is not FullAttentionSpec:
+        return False
+    return (
+        spec.dtype == torch.float8_e4m3fn
+        and spec.tokens_per_state == 1
+        and spec.num_heads == spec.num_kv_heads
+        and spec.state_content_bytes == _mxfp_state_content_bytes(spec.head_size, spec.head_size_v)
+    )
+
+
+def mxfp_cache_spec(spec: FullAttentionSpec) -> FullAttentionSpec:
     """Budget scales through upstream state_content_bytes, preserving real D."""
     k_dim, v_dim = spec.head_size, spec.head_size_v
     if spec.tokens_per_state != 1 or spec.num_heads != spec.num_kv_heads:
         raise ValueError("MXFP cache requires one stored state per token and one slot per KV head.")
-    mxfp_packet_section_sizes(spec.num_kv_heads, spec.block_size, k_dim, v_dim)
-    result = replace(
-        spec, dtype=torch.float8_e4m3fn, state_content_bytes=k_dim + v_dim + (k_dim + v_dim) // MXFP8_GROUP_SIZE
-    )
+    if spec.num_kv_heads <= 0:
+        raise ValueError("MXFP cache requires at least one KV head.")
+    validate_mxfp_k_scale_head_dim(k_dim)
+    if v_dim <= 0 or v_dim % MXFP_KV_NZ_DIM_FRAG:
+        raise ValueError(f"MXFP V head_dim must be a positive multiple of 32, got {v_dim}.")
+    result = replace(spec, dtype=torch.float8_e4m3fn, state_content_bytes=_mxfp_state_content_bytes(k_dim, v_dim))
     if result.page_size_padded is not None and result.page_size_padded < result.unpadded_page_size_bytes:
         raise ValueError("MXFP padded page is smaller than its K/V and scale payload.")
     return result
@@ -405,6 +420,12 @@ class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [512]
+
+    @classmethod
+    def customize_spec(cls, spec):
+        if type(spec) is FullAttentionSpec:
+            return mxfp_cache_spec(spec)
+        return super().customize_spec(spec)
 
 
 class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
