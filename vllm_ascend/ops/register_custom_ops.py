@@ -223,6 +223,16 @@ def _quantize_impl_fake(
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset, torch.qint8, -1, False)
 
 
+def _projection_quantize_impl(x: torch.Tensor, reciprocal: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+    from vllm_ascend.ops.triton.static_quantize import quantize
+
+    return quantize(x, reciprocal, offset)
+
+
+def _projection_quantize_fake(x: torch.Tensor, reciprocal: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+    return torch.empty(x.shape, dtype=torch.int8, device=x.device)
+
+
 def _rope_forward_oot_impl_fake(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -285,6 +295,14 @@ direct_register_custom_op(
     op_name="quantize",
     op_func=_quantize_impl,
     fake_impl=_quantize_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="ascend_triton_projection_quantize",
+    op_func=_projection_quantize_impl,
+    fake_impl=_projection_quantize_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

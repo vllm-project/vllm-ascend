@@ -1,0 +1,8 @@
+pr: 22884
+entries:
+  - category: performance
+    text: >-
+      Static W8A8 deployments on Ascend can opt into Triton activation quantization for attention
+      output projections and Indexer query projections independently with
+      `enable_oproj_triton_quant` and `enable_indexer_q_triton_quant` in `--additional-config`.
+      Both options default to false.

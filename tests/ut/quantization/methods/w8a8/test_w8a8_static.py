@@ -17,6 +17,52 @@ class TestAscendW8A8LinearMethod(TestBase):
         get_current_vllm_config.return_value = mock_vllm_config
         self.method = AscendW8A8LinearMethod()
 
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.maybe_trans_nz", side_effect=identity)
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.HAS_TRITON", True)
+    def test_projection_quantizer_selection_and_overlap(self, get_config, trans_nz):
+        for prefix, o_proj, indexer, use_triton in (
+            ("attn.o_proj", True, False, True),
+            ("attn.indexer.wq_b", False, True, True),
+            ("attn.o_proj", False, True, False),
+            ("attn.indexer.wq_b", True, False, False),
+            ("attn.q_proj", True, True, False),
+        ):
+            with self.subTest(prefix=prefix, o_proj=o_proj, indexer=indexer):
+                get_config.return_value = Mock(enable_oproj_triton_quant=o_proj, enable_indexer_q_triton_quant=indexer)
+                with patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.get_current_vllm_config"):
+                    method = AscendW8A8LinearMethod()
+                layer = torch.nn.Module()
+                layer.prefix = prefix
+                layer.weight = torch.nn.Parameter(torch.ones(4, 8, dtype=torch.int8), requires_grad=False)
+                layer.input_scale = torch.ones(1)
+                layer.input_offset = torch.zeros(1, dtype=torch.int8)
+                layer.weight_scale = torch.ones(4, 1)
+                layer.weight_offset = torch.zeros(4, 1)
+                layer.deq_scale = torch.ones(4)
+                layer.quant_bias = None
+                layer.params_dtype = torch.float32
+                method.process_weights_after_loading(layer)
+                # Weight switching can replace these tensors after initialization.
+                layer.aclnn_input_scale_reciprocal = torch.full((8,), 2.0)
+                x = torch.ones(3, 8)
+                quantized = torch.ones_like(x, dtype=torch.int8)
+                with (
+                    patch("torch.ops.vllm.quantize", return_value=quantized) as native,
+                    patch("torch.ops.vllm.ascend_triton_projection_quantize", return_value=quantized) as triton_quant,
+                    patch("torch_npu.npu_quant_matmul") as matmul,
+                ):
+                    method.apply(layer, x)
+                    prepared = method.prepare_input_for_overlap(layer, x)
+                    self.assertIs(prepared.quantized, quantized)
+                    method.apply(layer, prepared)
+                    method.apply(layer, quantized)
+                    chosen, other = (triton_quant, native) if use_triton else (native, triton_quant)
+                    self.assertEqual(chosen.call_count, 2)
+                    self.assertIs(chosen.call_args.args[-2], layer.aclnn_input_scale_reciprocal)
+                    other.assert_not_called()
+                    self.assertEqual(matmul.call_count, 3)
+
     def test_get_weight(self):
         sizes = [(64, 128), (256, 512), (1024, 2048), (1, 1)]
         for input_size, output_size in sizes:
