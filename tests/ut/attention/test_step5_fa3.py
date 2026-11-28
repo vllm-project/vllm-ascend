@@ -120,3 +120,33 @@ def test_step5_mtp_graph_padding_bounds_scheduler_batch(fa3, num_reqs):
 
     fa3.get_scheduler_metadata.side_effect = scheduler
     builder.build(0, common)
+
+
+def test_step5_fa3_refreshes_tiling_at_actual_rounded_graph_size(fa3, monkeypatch):
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.capture_sizes, builder.capture_query_len = {10, 24}, 8
+    builder.max_num_reqs, builder.block_size = 16, 128
+    spec = (16, 1, 128, torch.bfloat16, 0.1, 0.0, None)
+    builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
+    common = NS(
+        num_reqs=2,
+        num_actual_tokens=16,
+        num_input_tokens=16,
+        max_query_len=8,
+        query_start_loc=torch.tensor([0, 8, 16], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 8, 16], dtype=torch.int32),
+        seq_lens=torch.tensor([137, 73], dtype=torch.int32),
+        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(16),
+        causal=True,
+    )
+    monkeypatch.setattr(fa3, "get_graph_params", lambda: NS(events={16: []}))
+    fa3.get_scheduler_metadata.side_effect = lambda **kwargs: kwargs["cache_seqlens"].clone()
+
+    first = builder.build(0, common)
+    common.seq_lens.copy_(torch.tensor([145, 81], dtype=torch.int32))
+    second = builder.build(0, common)
+
+    assert first.scheduler_metadata[spec] is second.scheduler_metadata[spec]
+    torch.testing.assert_close(first.scheduler_metadata[spec], torch.tensor([145, 81], dtype=torch.int32))
+    assert len(builder.scheduler_buffers) == 1

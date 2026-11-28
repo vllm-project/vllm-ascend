@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
+from vllm_ascend.compilation.acl_graph import get_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 
@@ -228,7 +229,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         seq_lens = common.seq_lens[:active_reqs]
         block_tables = common.block_table_tensor[:active_reqs]
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
-        is_graph_capture_size = num_input_tokens in self.capture_sizes and (
+        graph_params = get_graph_params()
+        capture_sizes = self.capture_sizes if graph_params is None else graph_params.events.keys()
+        is_graph_capture_size = num_input_tokens in capture_sizes and (
             self.capture_query_len is None or common.max_query_len <= self.capture_query_len
         )
         # FA3 sizes split workspace from the per-request query bound. Using the
