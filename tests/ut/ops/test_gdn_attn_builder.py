@@ -1344,7 +1344,12 @@ def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
     config.cache_config.hash_block_size = 16
     config.cache_config.cache_hit_alignment_tokens = 128
     config.compilation_config.static_forward_context = {
-        name: SimpleNamespace(_ascend_internal_checkpoint_enabled=True) for name in ("g0", "g1")
+        name: Mock(
+            spec=AscendGatedDeltaNetAttention,
+            _ascend_internal_checkpoint_enabled=True,
+            get_kv_cache_checkpoint_alignment=lambda _: 16,
+        )
+        for name in ("g0", "g1")
     }
     spec = LegacyMambaSpec(
         block_size=128,
