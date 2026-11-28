@@ -629,18 +629,10 @@ def _merge_mamba_state_groups(
 
 def _get_qwen4_exp_cache_slots(
     kv_cache_groups: list[KVCacheGroupSpec],
-    vllm_config: VllmConfig | None,
 ) -> list[tuple[int, list[str]]]:
     collected = _collect_qwen4_role_members(kv_cache_groups)
     if collected is None:
-        if vllm_config is None or not is_qwen4_exp_model(vllm_config):
-            return []
-        # A PP rank without QSA still uses the same backing for its local owners.
-        slots = []
-        for group in kv_cache_groups:
-            specs = _group_member_specs(group)
-            slots.extend((specs[name].page_size_bytes, [name]) for name in group.layer_names)
-        return slots
+        return []
 
     role_members = collected.role_members
     owner_group_ids = collected.owner_group_ids
@@ -690,7 +682,8 @@ def get_qwen4_exp_pool_bytes_per_block(
     vllm_config: VllmConfig | None = None,
 ) -> int | None:
     """Charge each shared slot and each private bank once."""
-    slots = _get_qwen4_exp_cache_slots(kv_cache_groups, vllm_config)
+    del vllm_config
+    slots = _get_qwen4_exp_cache_slots(kv_cache_groups)
     return sum(round_up(page_size, _CACHE_BANK_ALIGNMENT) for page_size, _ in slots) or None
 
 
@@ -730,7 +723,7 @@ def get_qwen4_exp_kv_cache_config(
     available_memory: int,
 ) -> KVCacheConfig | None:
     """Plan shared QSA/GDN slots and their companion banks in one backing."""
-    slots = _get_qwen4_exp_cache_slots(kv_cache_groups, vllm_config)
+    slots = _get_qwen4_exp_cache_slots(kv_cache_groups)
     if not slots:
         return None
 

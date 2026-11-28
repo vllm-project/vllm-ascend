@@ -183,7 +183,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_qwen4_exp_model(vllm_config):
-            return get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
+            qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
+            if qwen_bytes is not None:
+                return qwen_bytes
+            return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)

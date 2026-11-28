@@ -622,6 +622,8 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
 
 
 def test_qwen4_exp_worker_without_qsa_uses_unified_allocation(monkeypatch) -> None:
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
     from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
 
     runtime = SimpleNamespace(
@@ -629,29 +631,65 @@ def test_qwen4_exp_worker_without_qsa_uses_unified_allocation(monkeypatch) -> No
             hf_config=SimpleNamespace(model_type="qwen4_exp"),
             hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
         ),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
         kv_transfer_config=None,
     )
-    groups = [
+    gdn_group = next(
         group
         for group in _groups()
         if isinstance(group.kv_cache_spec, MambaSpec) and not group.kv_cache_spec.tp_replicated
-    ]
-    config = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
-    names = groups[0].layer_names
-    assert len(config.kv_cache_tensors) == len(names)
-    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendGDNAttentionBackend) for name in names}
+    )
+    second_gdn_group = KVCacheGroupSpec(
+        [f"model.layers.{index + 2}.linear_attn" for index in range(len(gdn_group.layer_names))],
+        gdn_group.kv_cache_spec,
+    )
+    groups = [gdn_group, second_gdn_group]
+
+    assert get_qwen4_exp_pool_bytes_per_block(groups, runtime) is None
+    assert get_qwen4_exp_kv_cache_config(runtime, groups, 10**9) is None
+
+    builder = AscendKVCacheConfigBuilder()
+    default_builder = planning.DefaultKVCacheConfigBuilder()
+    pool_bytes = builder._get_pool_bytes_per_block(runtime, groups)
+    expected_pool_bytes = default_builder._get_pool_bytes_per_block(runtime, groups)
+    assert pool_bytes == expected_pool_bytes == len(gdn_group.layer_names) * gdn_group.kv_cache_spec.page_size_bytes
+
+    config = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    expected_config = default_builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    assert config.num_blocks == expected_config.num_blocks == 3
+    assert config.kv_cache_tensors == expected_config.kv_cache_tensors
+    assert {tensor.size for tensor in config.kv_cache_tensors} == {3 * pool_bytes}
+    layer_starts = {
+        name: tensor.offset + index * tensor.layer_stride
+        for tensor in config.kv_cache_tensors
+        for index, name in enumerate(tensor.layers)
+    }
+    first_group_starts = [layer_starts[name] for name in gdn_group.layer_names]
+    second_group_starts = [layer_starts[name] for name in second_gdn_group.layer_names]
+    assert min(first_group_starts) == min(second_group_starts) == 0
+    assert first_group_starts == second_group_starts
+
+    all_names = [name for group in groups for name in group.layer_names]
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendGDNAttentionBackend) for name in all_names}
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
 
-    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, [128])
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, [128, 128])
 
-    assert set(caches) == set(names)
-    first, second = (caches[name][0] for name in names)
-    assert first.shape == second.shape == (3, 64, 4)
-    assert first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+    assert set(caches) == set(all_names)
+    first, second = (caches[name][0] for name in gdn_group.layer_names)
+    other_first, other_second = (caches[name][0] for name in second_gdn_group.layer_names)
+    assert first.shape == second.shape == other_first.shape == other_second.shape == (3, 64, 4)
+    assert len({tensor.untyped_storage().data_ptr() for tensor in (first, second, other_first, other_second)}) == 1
     assert first.data_ptr() != second.data_ptr()
+    assert other_first.data_ptr() != other_second.data_ptr()
+    assert first.data_ptr() == other_first.data_ptr()
+    assert second.data_ptr() == other_second.data_ptr()
 
 
 def _plan_qsa_runtime_cache(monkeypatch, text_model_type, outer_model_type, manager_block_size, indexer_dtype):
