@@ -1,0 +1,4 @@
+pr: 19389
+entries:
+  - category: bugfix
+    text: Pad empty MoE inputs before MC2 dispatch so idle ranks participate with nonempty tensors while retaining empty logical outputs.
