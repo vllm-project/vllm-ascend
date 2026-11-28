@@ -95,17 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.models.qwen4_exp.cache_config import (
-    GDN,
-    HIDDEN,
-    PLE,
-    QSA_COMPRESSED,
-    QSA_MAIN,
-    QSA_RAW,
-    build_qwen4_kv_cache_layout,
-    make_qsa_kernel_page_cache,
-    make_slab_view,
-)
+from vllm_ascend.models.qwen4_exp.cache_config import is_qwen4_exp_model
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -1078,36 +1068,6 @@ def _allocate_kv_cache(
         "step5_mtp",
     )
 
-    # Qwen4 QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
-    # build the layout from the cache groups themselves. Allocate
-    # slot_count shared slabs plus one dense bank per PLE/hidden owner.
-    # Reshape must preserve the physical byte strides used by this planner.
-    qwen4_cache_layout = build_qwen4_kv_cache_layout(
-        kv_cache_config.kv_cache_groups,
-        kv_cache_config.num_blocks,
-    )
-    if qwen4_cache_layout is not None:
-        backing = _allocate_int8_cache_tensor(
-            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
-            alignment,
-            device,
-        )
-        for cache_owner in qwen4_cache_layout.owners:
-            if cache_owner.role in (PLE, HIDDEN):
-                # PLE indexed updates require dense blocks; r2's larger
-                # stride would materialize the entire state pool.
-                size = (
-                    cache_owner.spec.state_content_size_bytes
-                    if isinstance(cache_owner.spec, MambaSpec)
-                    else cache_owner.spec.page_size_bytes
-                )
-                kv_cache_raw_tensors[cache_owner.layer_name] = _allocate_int8_cache_tensor(
-                    kv_cache_config.num_blocks * size, alignment, device
-                )
-            else:
-                kv_cache_raw_tensors[cache_owner.layer_name] = backing
-        return kv_cache_raw_tensors
-
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
     step_backings: dict[tuple[int, int], torch.Tensor] = {}
@@ -1441,6 +1401,8 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
+    *,
+    qwen4_exp: bool = False,
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
     placements = {
@@ -1460,6 +1422,38 @@ def create_kv_cache_runtime_views(
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
+            if qwen4_exp:
+                raw_cache = backing[start : start + span]
+                block_stride = descriptor.block_stride
+                # Migrate allocation callers from get_kv_cache_shape to this interface gradually.
+                # Keep the legacy hook for other models and allocation paths until they migrate.
+                # The backend describes the cache views bound to the layer.
+                # For token-compressed caches, the token axis counts stored rows after compression.
+                # The last axis counts elements of each component's storage dtype.
+                cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
+                    spec,
+                    num_blocks,
+                    kernel_block_size=(
+                        group.kernel_block_size
+                        if group.kernel_block_size is not None
+                        else kernel_block_sizes[group.kv_cache_group_id]
+                    ),
+                )
+
+                if cache_shapes and cache_shapes[0][0] != num_blocks:
+                    runtime_blocks = cache_shapes[0][0]
+                    if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
+                        raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+                    kernel_blocks_per_manager = runtime_blocks // num_blocks
+                    if block_stride != spec.page_size_bytes:
+                        raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+                    if block_stride % kernel_blocks_per_manager:
+                        raise ValueError("Physical pages must split into whole kernel slots.")
+                    block_stride //= kernel_blocks_per_manager
+                components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
+                format_views = getattr(group.backend, "format_runtime_views", None)
+                caches[name] = format_views(spec, components) if format_views is not None else components
+                continue
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
@@ -1509,6 +1503,10 @@ def unified_allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = get_shared_kv_cache_layers(vllm_config)
+    qwen4_exp = is_qwen4_exp_model(vllm_config)
+    attn_groups = _get_cache_attention_groups(
+        kv_cache_config, attn_layers, shared_layers, kernel_block_sizes if qwen4_exp else ()
+    )
     backing_size = sizes.pop()
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
@@ -1518,10 +1516,11 @@ def unified_allocate_kv_cache(
     return create_kv_cache_runtime_views(
         kv_cache_config,
         buf,
-        _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
+        attn_groups,
         kernel_block_sizes,
         shared_layers,
         layout,
+        qwen4_exp=qwen4_exp,
     )
 
 
@@ -1544,7 +1543,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+    if is_qwen4_exp_model(vllm_config) or model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
@@ -1617,13 +1616,6 @@ def _reshape_kv_cache_v2(
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
-    # view from the same deterministic layout that _allocate_kv_cache used:
-    # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
-    qwen4_cache_layout = build_qwen4_kv_cache_layout(
-        kv_cache_config.kv_cache_groups,
-        kv_cache_config.num_blocks,
-    )
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
@@ -1654,115 +1646,6 @@ def _reshape_kv_cache_v2(
                     raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
                 kv_caches[layer_name] = mxfp_cache_views_for_spec(raw_cache, kv_cache_spec, kernel_block_size)
                 continue
-
-            if qwen4_cache_layout is not None:
-                # Model-owned Qwen4 hybrid view construction: each
-                # owner addresses its role's regions inside its own slot of
-                # the shared contiguous backing.
-                owner = qwen4_cache_layout.owner(layer_name)
-                raw_slab = kv_cache_raw_tensors[layer_name]
-                if not isinstance(raw_slab, torch.Tensor):
-                    raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
-                slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
-                if get_layerwise_reuse_layout(kv_cache_config) is not None and owner.role not in (PLE, HIDDEN):
-                    # Reuse allocation already returns this owner's byte window.
-                    # Keep component offsets relative to that window.
-                    region_name = qwen4_cache_layout.region_name_for_owner(layer_name)
-                    slot_offset = -qwen4_cache_layout.region(region_name).offset
-                if owner.role == QSA_MAIN:
-                    assert isinstance(kv_cache_spec, FullAttentionSpec)
-                    region = qwen4_cache_layout.region("r0")
-                    kv_caches[layer_name] = make_qsa_kernel_page_cache(
-                        raw_slab,
-                        dtype=kv_cache_spec.dtype,
-                        num_blocks=kv_cache_config.num_blocks,
-                        manager_block_size=kv_cache_spec.block_size,
-                        kernel_block_size=kernel_block_size,
-                        num_kv_heads=kv_cache_spec.num_kv_heads,
-                        head_size=kv_cache_spec.head_size,
-                        head_size_v=kv_cache_spec.head_size_v,
-                        storage_offset=slot_offset + region.offset,
-                        block_stride=region.block_stride,
-                    )
-                    continue
-                if owner.role in (QSA_RAW, QSA_COMPRESSED):
-                    assert isinstance(kv_cache_spec, AttentionSpec)
-                    # ``tokens_per_state`` is the compressed cache's physical
-                    # row ratio on current vLLM. QSA_RAW keeps the logical
-                    # 768-token scheduler block; QSA_COMPRESSED stores
-                    # block_size/ratio states per page.
-                    storage_block_size = kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
-                    region = qwen4_cache_layout.region("r4" if owner.role == QSA_RAW else "r5")
-                    expected_page_bytes = (
-                        storage_block_size
-                        * kv_cache_spec.num_kv_heads
-                        * kv_cache_spec.head_size
-                        * get_dtype_size(kv_cache_spec.dtype)
-                    )
-                    if expected_page_bytes != region.page_size_bytes:
-                        raise ValueError(
-                            f"{layer_name} Qwen4 hybrid page mismatch: "
-                            f"view={expected_page_bytes}, "
-                            f"region={region.page_size_bytes}."
-                        )
-                    num_view_blocks = kv_cache_config.num_blocks
-                    if owner.role == QSA_COMPRESSED:
-                        # Match MRV2's virtual block table and builder spec:
-                        # each kernel page owns selected_kernel_block_size / ratio keys.
-                        kernel_pages = kv_cache_spec.block_size // selected_kernel_block_size
-                        num_view_blocks *= kernel_pages
-                        storage_block_size = kv_cache_spec.get_num_kernel_states(selected_kernel_block_size)
-                    kv_caches[layer_name] = make_slab_view(
-                        raw_slab,
-                        dtype=kv_cache_spec.dtype,
-                        num_blocks=num_view_blocks,
-                        item_shape=(
-                            kv_cache_spec.num_kv_heads,
-                            storage_block_size,
-                            kv_cache_spec.head_size,
-                        ),
-                        storage_offset=slot_offset + region.offset,
-                    ).transpose(1, 2)
-                    continue
-                if owner.role == PLE:
-                    assert isinstance(kv_cache_spec, MambaSpec)
-                    kv_caches[layer_name] = [
-                        make_slab_view(
-                            raw_slab,
-                            dtype=kv_cache_spec.dtypes[0],
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=tuple(kv_cache_spec.shapes[0]),
-                            storage_offset=0,
-                        )
-                    ]
-                    continue
-                if owner.role == GDN:
-                    assert isinstance(kv_cache_spec, MambaSpec)
-                    region_names = ("r1", "r2")
-                    if len(region_names) != len(kv_cache_spec.shapes):
-                        raise RuntimeError(
-                            f"Invalid Qwen4 hybrid Mamba role/shape for {layer_name}: "
-                            f"role={owner.role}, shapes={kv_cache_spec.shapes}."
-                        )
-                    kv_caches[layer_name] = [
-                        make_slab_view(
-                            raw_slab,
-                            dtype=dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=tuple(shape),
-                            storage_offset=slot_offset + qwen4_cache_layout.region(region_name).offset,
-                            block_stride=qwen4_cache_layout.region(region_name).block_stride,
-                        )
-                        for shape, dtype, region_name in zip(
-                            kv_cache_spec.shapes,
-                            kv_cache_spec.dtypes,
-                            region_names,
-                            strict=True,
-                        )
-                    ]
-                    continue
-                if owner.role != HIDDEN:
-                    raise RuntimeError(f"Unsupported Qwen4 hybrid owner {owner}.")
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None

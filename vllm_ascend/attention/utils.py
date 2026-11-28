@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
+KVCacheRuntimeShapesAndDtypes = tuple[tuple[tuple[int, ...], ...], tuple[torch.dtype, ...]]
+
 
 def apply_prefill_as_decode_mask(
     is_prefilling: np.ndarray | torch.Tensor,

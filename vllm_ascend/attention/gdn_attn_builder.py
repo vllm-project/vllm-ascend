@@ -31,8 +31,9 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
+from vllm_ascend.attention.utils import KVCacheRuntimeShapesAndDtypes
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
@@ -1550,6 +1551,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
+    @staticmethod
+    def get_runtime_shapes_and_dtypes(
+        spec: MambaSpec,
+        num_blocks: int,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        # The leading state dimension indexes manager blocks.
+        return tuple((num_blocks, *shape) for shape in spec.shapes), spec.dtypes
+
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Decode kernels consume device boundaries; CPU lengths only size

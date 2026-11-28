@@ -23,6 +23,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
 
 # Upstream model and QSA import each other; initialize the model first when
 # this submodule is imported directly, independently of lazy package exports.
@@ -33,11 +34,14 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, HiddenStateCacheSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapesAndDtypes,
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
@@ -722,6 +726,30 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
     def get_builder_cls() -> type[AscendQSAMetadataBuilder]:
         return AscendQSAMetadataBuilder
 
+    @staticmethod
+    def get_runtime_shapes_and_dtypes(
+        spec: AttentionSpec,
+        num_blocks: int,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Describe the two [block, token, head, width] views used by GBSA."""
+        block_size = GBSA_PAGE_SIZE if kernel_block_size is None else kernel_block_size
+        if block_size != GBSA_PAGE_SIZE or spec.block_size % block_size:
+            raise ValueError("QSA manager blocks must split into 128-token kernel pages")
+        if spec.head_size != spec.head_size_v:
+            raise ValueError("QSA page-major K/V slots require symmetric head sizes")
+        pages = spec.block_size // block_size
+        pair_bytes = 2 * block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        if spec.page_size_bytes != pages * pair_bytes:
+            raise ValueError("QSA manager pages must contain contiguous kernel K/V pairs")
+        shape = (num_blocks * pages, block_size, spec.num_kv_heads, spec.head_size)
+        return (shape, shape), (spec.dtype, spec.dtype)
+
+    @staticmethod
+    def format_runtime_views(_spec: AttentionSpec, components: list[torch.Tensor]) -> QSAKVCache:
+        key, value = components
+        return key, value
+
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Store main K/V in two page-major slots of one descriptor page."""
@@ -750,10 +778,69 @@ upstream_qsa.Qwen4ExpQSAImpl = AscendQSAImpl  # type: ignore[attr-defined]
 upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 
 
-# Indexer-cache descriptors use the same block-outermost layout as main QSA KV.
-# Their physical block stride is honored by the runner, so no compact copy is
-# required before LightningIndexer or the Triton QSA selector consumes them.
-QSAIndexerBackend.uses_descriptor_cache_view = True
+class AscendQSAIndexerBackend(QSAIndexerBackend):
+    """Describe key-only raw rings and compressed pages for Ascend QSA."""
+
+    uses_descriptor_cache_view = True
+
+    @staticmethod
+    def get_runtime_shapes_and_dtypes(
+        spec: AttentionSpec,
+        num_blocks: int,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        if isinstance(spec, CircularBufferSpec):
+            # A request owns one full raw ring, independent of GBSA's pages.
+            block_size = spec.block_size
+        else:
+            block_size = GBSA_PAGE_SIZE if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size or block_size % spec.tokens_per_state:
+            raise ValueError("QSA indexer block size must divide the manager block and align to compression")
+        shape = (
+            num_blocks * (spec.block_size // block_size),
+            spec.num_kv_heads,
+            spec.get_num_kernel_states(block_size),
+            spec.head_size,
+        )
+        return (shape,), (spec.dtype,)
+
+    @staticmethod
+    def format_runtime_views(_spec: AttentionSpec, components: list[torch.Tensor]) -> torch.Tensor:
+        (keys,) = components
+        return keys.transpose(1, 2)
+
+
+qsa_indexer.QSAIndexerBackend = AscendQSAIndexerBackend
+
+
+def _get_hidden_state_runtime_shapes_and_dtypes(
+    spec: HiddenStateCacheSpec,
+    num_blocks: int,
+    kernel_block_size: int | None = None,
+) -> KVCacheRuntimeShapesAndDtypes:
+    shape = (
+        num_blocks,
+        spec.num_heads,
+        spec.num_states,
+        spec.state_content_size_bytes // get_dtype_size(spec.dtype),
+    )
+    return (shape,), (spec.dtype,)
+
+
+def _format_hidden_state_runtime_views(_spec: HiddenStateCacheSpec, components: list[torch.Tensor]) -> torch.Tensor:
+    (cache,) = components
+    return cache
+
+
+# Flash Next's companion caches also need runtime views from the unified pool.
+# PLE uses the same manager-block state indexing as GDN.
+PleShortConvAttentionBackend.get_runtime_shapes_and_dtypes = staticmethod(  # type: ignore[attr-defined]
+    AscendGDNAttentionBackend.get_runtime_shapes_and_dtypes
+)
+CacheOnlyAttentionBackend.get_runtime_shapes_and_dtypes = staticmethod(  # type: ignore[attr-defined]
+    _get_hidden_state_runtime_shapes_and_dtypes
+)
+CacheOnlyAttentionBackend.format_runtime_views = staticmethod(_format_hidden_state_runtime_views)  # type: ignore[attr-defined]
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
@@ -810,7 +897,7 @@ class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):
         return metadata
 
 
-class AscendPCPQSAIndexerBackend(QSAIndexerBackend):
+class AscendPCPQSAIndexerBackend(AscendQSAIndexerBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         return True

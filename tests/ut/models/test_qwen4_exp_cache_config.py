@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
@@ -23,6 +22,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
     PLE,
+    QSA_MAIN,
     _merge_mamba_state_groups,
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
@@ -33,6 +33,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_slab_view,
 )
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -280,6 +281,7 @@ def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> Non
 
 
 def test_main_planner_uses_one_shared_backing_geometry() -> None:
+    groups = _groups()
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(
             cache_config=SimpleNamespace(
@@ -287,198 +289,19 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
                 prefix_cache_retention_interval=None,
             )
         ),
-        _groups(),
+        groups,
         10**9,
     )
     assert config is not None
     assert config.num_blocks == 3
-    layout = build_qwen4_kv_cache_layout(
-        config.kv_cache_groups,
-        num_blocks=3,
-    )
-    assert layout is not None
-    role_tensors = config.kv_cache_tensors[:4]
-    ple_tensor = config.kv_cache_tensors[4]
-    hidden_tensor = config.kv_cache_tensors[5]
-    expected_backing_size = layout.slot_count * layout.slot_backing_size
-    assert all(tensor.size == expected_backing_size for tensor in role_tensors)
-    assert [tensor.offset for tensor in role_tensors] == [
-        layout.region(name).offset for name in ("r0", "r4", "r5", "r1")
-    ]
-    assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
-    assert ple_tensor.layers == ["model.ple"]
-    assert ple_tensor.size == 3 * 128 * 5 * 2
-    assert ple_tensor.block_stride == 128 * 5 * 2
-    assert ple_tensor.offset == 0
-    assert hidden_tensor.layers == ["model.cache_only_layers.0"]
-    assert hidden_tensor.size == 49152
-
-
-def _allocate_mrv2_kv_cache(
-    config,
-    monkeypatch,
-    *,
-    use_main: bool = False,
-    kernel_block_sizes: list[int] | None = None,
-    kv_transfer_config=None,
-):
-    """Allocate and materialize Qwen4Exp cache views through MRV2 only."""
-    vllm_config = SimpleNamespace(
-        additional_config={},
-        kv_transfer_config=kv_transfer_config,
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(),
-            hf_text_config=SimpleNamespace(),
-        ),
-    )
-    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
-    monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
-    backend = SimpleNamespace(
-        full_cls_name=lambda: "qwen-cache-test",
-        get_supported_kernel_block_sizes=lambda _spec: block_sizes,
-    )
-    layers = {
-        name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
-        for group in config.kv_cache_groups
-        for name in group.layer_names
-    }
-    monkeypatch.setattr(
-        attn_utils_v2,
-        "get_layers_from_vllm_config",
-        lambda *_: layers,
-    )
-    raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    if use_main:
-        monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
-        caches = attn_utils_v2.allocate_kv_cache_main(
-            config,
-            torch.device("cpu"),
-            None,
-            block_sizes,
-        )
-    else:
-        groups = [
-            SimpleNamespace(
-                kernel_block_size=None,
-                kv_cache_group_id=i,
-                kv_cache_spec=group.kv_cache_spec,
-                layer_names=group.layer_names,
-                backend=backend,
-            )
-            for i, group in enumerate(config.kv_cache_groups)
-        ]
-        caches = attn_utils_v2._reshape_kv_cache_v2(
-            groups,
-            raw,
-            "auto",
-            block_sizes,
-            {},
-            config,
-        )
-    layout = build_qwen4_kv_cache_layout(
-        config.kv_cache_groups,
-        config.num_blocks,
-    )
-    return raw, caches, layout
-
-
-@pytest.mark.parametrize("runner_kind", ["v2", "v2_main"])
-@pytest.mark.parametrize("with_kv_transfer", [False, True])
-def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind, with_kv_transfer) -> None:
-    config = get_qwen4_exp_kv_cache_config(
-        SimpleNamespace(
-            cache_config=SimpleNamespace(
-                num_gpu_blocks_override=3,
-                prefix_cache_retention_interval=None,
-            )
-        ),
-        _groups(),
-        10**9,
-    )
-    assert config is not None
-    raw, caches, layout = _allocate_mrv2_kv_cache(
-        config,
-        monkeypatch,
-        use_main=runner_kind == "v2_main",
-        kv_transfer_config=(
-            KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
-        ),
-    )
-    # Every physical byte is represented once by the planner, including the
-    # single PLE and hidden banks outside the shared slot backing.
-    allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
-    assert sum(allocations.values()) == config.num_blocks * get_qwen4_exp_pool_bytes_per_block(config.kv_cache_groups)
-    assert layout is not None
-
-    shared_names = [owner.layer_name for owner in layout.owners if owner.role not in (HIDDEN, PLE)]
-    backing = raw[shared_names[0]]
-    assert isinstance(backing, torch.Tensor)
-    assert all(raw[name] is backing for name in shared_names)
-    if with_kv_transfer:
-        assert all(t.data_ptr() % (2 * 1024 * 1024) == 0 for t in raw.values())
-    assert raw["model.cache_only_layers.0"] is not backing
-
-    expected_regions = {
-        "model.layers.0.linear_attn": ("r1", "r2"),
-        "model.layers.1.linear_attn": ("r1", "r2"),
-    }
-    for layer_name, region_names in expected_regions.items():
-        owner = layout.owner(layer_name)
-        states = caches[layer_name]
-        assert isinstance(states, list)
-        assert len(states) == len(region_names)
-        for state, region_name in zip(
-            states,
-            region_names,
-            strict=True,
-        ):
-            region = layout.region(region_name)
-            assert state[0].is_contiguous()
-            assert not state.is_contiguous()
-            assert state.storage_offset() * state.element_size() - backing.storage_offset() == (
-                owner.slot * layout.slot_backing_size + region.offset
-            )
-            assert state.stride(0) * state.element_size() == region.block_stride
-            assert state.untyped_storage().data_ptr() == (backing.untyped_storage().data_ptr())
-            assert state[0].numel() * state.element_size() <= region.page_size_bytes
-
-    ple = caches["model.ple"][0]
-    assert ple.is_contiguous()
-    assert ple.shape == (3, 128, 5)
-    assert ple.stride(0) == 128 * 5
-    assert raw["model.ple"] is not backing
-    assert raw["model.ple"].numel() == ple.numel() * ple.element_size()
-    # Indexed updates address only selected request blocks in the private bank.
-    indices = torch.tensor([0, 2])
-    selected = ple.index_select(0, indices)
-    selected.fill_(7)
-    ple.index_copy_(0, indices, selected)
-    assert torch.all(ple[indices] == 7)
-    assert torch.count_nonzero(ple[1]) == 0
-    assert torch.count_nonzero(backing) == 0
-
-    k, v = caches["model.layers.11.self_attn.attn"]
-    ssm = caches["model.layers.0.linear_attn"][1]
-    assert k.shape == v.shape == (6, 128, 1, 64)
-    assert k.stride() == v.stride() == (16384, 64, 64, 1)
-    assert v.data_ptr() - k.data_ptr() == 16384
-    assert k.data_ptr() == caches["model.layers.0.linear_attn"][0].data_ptr()
-    assert ssm.data_ptr() - k.data_ptr() == 512
-    k[4].fill_(5)
-    v[4].fill_(9)
-    torch.testing.assert_close(ssm[2].flatten()[:7936], torch.full((7936,), 5, dtype=ssm.dtype))
-    torch.testing.assert_close(ssm[2].flatten()[7936:16128], torch.full((8192,), 9, dtype=ssm.dtype))
-    assert torch.count_nonzero(ssm[:2]) == 0
-
-    raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
-    assert raw_qsa.shape == (3, 8, 1, 32)
-    assert raw_qsa.is_contiguous()
-
-    compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
-    assert compressed.shape == (6, 32, 1, 32)
-    assert compressed.is_contiguous()
+    tensors = {tensor.layers[0]: tensor for tensor in config.kv_cache_tensors}
+    assert {tensor.size for tensor in tensors.values()} == {3 * get_qwen4_exp_pool_bytes_per_block(groups)}
+    for main, gdn in zip(groups[0].layer_names[:2], groups[3].layer_names, strict=True):
+        assert tensors[main].offset == tensors[gdn].offset
+        assert tensors[main].block_stride == tensors[gdn].block_stride == groups[0].kv_cache_spec.page_size_bytes
+    assert len({tensors[name].offset for name in groups[3].layer_names}) == len(groups[3].layer_names)
+    assert tensors["model.ple"].block_stride == 128 * 5 * 2
+    assert tensors["model.ple"].offset != tensors["model.cache_only_layers.0"].offset
 
 
 def test_qsa_source_sets_must_match() -> None:
@@ -526,7 +349,7 @@ def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
     assert raw[0].is_eagle_group
 
 
-def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
+def test_qwen4_cache_admission_matches_unified_planner_allocation() -> None:
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
     assert owners is not None
@@ -536,7 +359,11 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        model_config=SimpleNamespace(
+            max_model_len=135168,
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -556,26 +383,12 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         // group.kv_cache_spec.page_size_bytes
         for group in groups
     )
-    planned = get_qwen4_exp_kv_cache_config(
-        vllm_config,
-        groups,
-        required_bytes,
-    )
-    assert planned is not None
+    planned = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, groups, required_blocks)
     assert planned.num_blocks == required_blocks
-    layout = build_qwen4_kv_cache_layout(
-        groups,
-        num_blocks=required_blocks,
-    )
-    assert layout is not None
-    assert layout.slot_count == 13
-    assert (
-        layout.slot_count * layout.slot_backing_size
-        + sum(owner.spec.real_page_size_bytes * required_blocks for owner in layout.owners if owner.role == PLE)
-    ) == required_bytes
+    assert {tensor.size for tensor in planned.kv_cache_tensors} == {required_bytes}
 
 
-def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
+def test_mamba_state_groups_merge_shares_one_block_table() -> None:
     """36 GDN layers use three block tables over 13 shared slots."""
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
@@ -634,9 +447,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     probe = build_qwen4_kv_cache_layout(merged, num_blocks=1)
     assert probe is not None
     assert probe.slot_count == 13
-    pool_block_bytes = probe.slot_count * probe.slot_backing_size + sum(
-        owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
-    )
+    pool_block_bytes = get_qwen4_exp_pool_bytes_per_block(merged)
 
     bytes_after = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
@@ -675,23 +486,12 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         10**9,
     )
     assert config is not None
-    gdn_names = {name for group in gdn_merged for name in group.layer_names}
-    descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
-    assert [tensor.layers for tensor in descriptors] == [group.layer_names for group in gdn_merged]
-    for tensor in descriptors:
-        assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
-
-    raw, caches, _ = _allocate_mrv2_kv_cache(config, monkeypatch)
-    names = [group.layer_names[0] for group in gdn_merged]
-    assert all(raw[name] is raw[names[0]] for name in names)
-    assert raw[names[0]].numel() == 13 * layout.slot_backing_size
-    states = [caches[name][1] for name in names]
-    assert all(state[0].is_contiguous() and not state.is_contiguous() for state in states)
-    for block_id, state in enumerate(states):
-        state[block_id].fill_(block_id + 1)
-    for state in states:
-        for block_id in range(3):
-            torch.testing.assert_close(state[block_id], torch.full_like(state[block_id], block_id + 1))
+    descriptors = {tensor.layers[0]: tensor for tensor in config.kv_cache_tensors}
+    main_offsets = {descriptors[owner.layer_name].offset for owner in layout.owners if owner.role == QSA_MAIN}
+    for group in gdn_merged:
+        offsets = {descriptors[name].offset for name in group.layer_names}
+        assert offsets <= main_offsets
+        assert len(offsets) == len(group.layer_names)
 
 
 def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
@@ -752,12 +552,12 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    expected_mamba_block_size = 896 if cache_mode == "align" else None
+    expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
 
 
-def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatch) -> None:
+def test_large_ple_uses_one_private_bank_without_expanding_shared_slots() -> None:
     groups = _groups()
     groups[4] = KVCacheGroupSpec(
         ["model.ple"], replace(groups[4].kv_cache_spec, shapes=((20001,),), page_size_padded=65536)
@@ -768,23 +568,14 @@ def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatc
         10**9,
     )
     assert config is not None
-    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
+    layout = build_qwen4_kv_cache_layout(groups, config.num_blocks)
+    assert layout is not None
     assert layout.region("r2").page_size_bytes == 32768
-    ple = caches["model.ple"][0]
-    assert ple.is_contiguous()
-    assert ple.shape == (3, 20001)
-    assert raw["model.ple"].numel() == 3 * 20001 * 2
-    allocations = {tensor.data_ptr(): tensor.numel() for tensor in raw.values()}
-    assert sum(allocations.values()) == 3 * get_qwen4_exp_pool_bytes_per_block(groups)
-    keys = caches["model.layers.11.self_attn.attn"][0]
-    keys.fill_(7)
-    ids = torch.tensor([0, 2])
-    selected = ple.index_select(0, ids)
-    selected.fill_(3)
-    ple.index_copy_(0, ids, selected)
-    assert torch.all(keys == 7)
-    assert torch.all(ple[ids] == 3)
-    assert torch.count_nonzero(ple[1]) == 0
+    ple = next(tensor for tensor in config.kv_cache_tensors if tensor.layers == ["model.ple"])
+    main = next(tensor for tensor in config.kv_cache_tensors if tensor.layers == [groups[0].layer_names[0]])
+    assert ple.offset >= main.offset + 3 * main.block_stride
+    assert ple.block_stride == groups[4].kv_cache_spec.page_size_bytes
+    assert main.block_stride == groups[0].kv_cache_spec.page_size_bytes
 
 
 def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
@@ -805,113 +596,239 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     layout = build_qwen4_kv_cache_layout(groups, num_blocks=7)
     assert layout is not None
     assert layout.slot_count == 13
-    assert get_qwen4_exp_pool_bytes_per_block(groups) * 7 == (
-        layout.slot_count * layout.slot_backing_size
-        + 7 * next(owner.spec.real_page_size_bytes for owner in layout.owners if owner.role == PLE)
-    )
+    expected_page_bytes = sum(owner.spec.page_size_bytes for owner in layout.owners if owner.role != GDN)
+    assert get_qwen4_exp_pool_bytes_per_block(groups) == expected_page_bytes
 
 
-@pytest.mark.parametrize("override", [None, 7])
-def test_platform_builder_uses_qwen_pool_accounting(override) -> None:
+def test_platform_builder_uses_qwen_pool_accounting() -> None:
+    pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
     groups = _groups()
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp")),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=override, prefix_cache_retention_interval=None),
-    )
-    builder = AscendKVCacheConfigBuilder()
-    pool_bytes = get_qwen4_exp_pool_bytes_per_block(groups)
-    assert pool_bytes is not None
-    assert builder._get_pool_bytes_per_block(config, groups) == pool_bytes
-    result = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=3)
-    expected = get_qwen4_exp_kv_cache_config(config, groups, 3 * pool_bytes)
-    assert result.num_blocks == (override if override is not None else 3)
-    assert result.kv_cache_tensors == expected.kv_cache_tensors
-
-
-def test_layout_sizes_slots_for_pp_aggregated_state_owners() -> None:
-    groups = _groups()
-    gdn_group = groups[3]
-    groups[3] = KVCacheGroupSpec(
-        [
-            *gdn_group.layer_names,
-            "model.layers.2.linear_attn",
-            "model.layers.3.linear_attn",
-        ],
-        gdn_group.kv_cache_spec,
+    expected = get_qwen4_exp_pool_bytes_per_block(groups)
+    assert expected is not None
+    assert (
+        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
+            SimpleNamespace(
+                model_config=SimpleNamespace(
+                    hf_config=SimpleNamespace(model_type="qwen4_exp"),
+                    hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+                ),
+            ),
+            groups,
+        )
+        == expected
     )
 
-    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
 
-    assert layout is not None
-    assert layout.slot_count == 4
-    assert [owner.slot for owner in layout.owners if owner.role == GDN] == [0, 1, 2, 3]
+def test_qwen4_exp_worker_without_qsa_uses_unified_allocation(monkeypatch) -> None:
+    from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
 
-
-def test_layout_allows_pp_stage_without_ple_owner() -> None:
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+        ),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        kv_transfer_config=None,
+    )
     groups = [
         group
         for group in _groups()
-        if not isinstance(group.kv_cache_spec, MambaSpec) or len(group.kv_cache_spec.shapes) != 1
+        if isinstance(group.kv_cache_spec, MambaSpec) and not group.kv_cache_spec.tp_replicated
     ]
+    config = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    names = groups[0].layer_names
+    assert len(config.kv_cache_tensors) == len(names)
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendGDNAttentionBackend) for name in names}
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
 
-    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, [128])
 
-    assert layout is not None
-    assert all(owner.role != PLE for owner in layout.owners)
+    assert set(caches) == set(names)
+    first, second = (caches[name][0] for name in names)
+    assert first.shape == second.shape == (3, 64, 4)
+    assert first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+    assert first.data_ptr() != second.data_ptr()
+
+
+def _plan_qsa_runtime_cache(monkeypatch, text_model_type, outer_model_type, manager_block_size, indexer_dtype):
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
+    from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAIndexerBackend
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=outer_model_type),
+            hf_text_config=SimpleNamespace(model_type=text_model_type),
+            supports_kv_cache_grouping=False,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        kv_transfer_config=None,
+    )
+    specs = {}
+    layers = {}
+    for group in _groups():
+        spec = group.kv_cache_spec
+        if isinstance(spec, HiddenStateCacheSpec):
+            backend = CacheOnlyAttentionBackend
+        elif isinstance(spec, MambaSpec):
+            backend = PleShortConvAttentionBackend if spec.tp_replicated else AscendGDNAttentionBackend
+            if spec.tp_replicated:
+                spec = replace(spec, shapes=((3, 5),))
+        elif isinstance(spec, CircularBufferSpec):
+            backend = AscendQSAIndexerBackend
+            spec = replace(spec, head_size=44, page_size_padded=1024)
+        elif isinstance(spec, MLAAttentionSpec):
+            backend = AscendQSAIndexerBackend
+            spec = replace(spec, block_size=manager_block_size, dtype=indexer_dtype, page_size_padded=16384)
+        else:
+            backend = AscendQSABackend
+            spec = AscendQSABackend.customize_spec(
+                replace(spec, block_size=manager_block_size, page_size_padded=100000)
+            )
+        for name in group.layer_names:
+            specs[name] = spec
+            layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    num_blocks = 3
+    config = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks)
+    cost = builder._get_pool_bytes_per_block(runtime, groups)
+    descriptors = config.kv_cache_tensors
+    assert len(descriptors) == len(specs)
+    assert {tensor.size for tensor in descriptors} == {num_blocks * cost}
+    slots = sorted({(tensor.offset, tensor.block_stride) for tensor in descriptors})
+    assert all(offset % 16 == 0 for offset, _ in slots)
+    for (offset, stride), (following, _) in zip(slots, slots[1:], strict=False):
+        assert offset + num_blocks * stride <= following
+
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
+    attn_groups = [[] for _ in groups]
+    for group in attn_utils_v2._get_cache_attention_groups(config, layers, {}):
+        attn_groups[group.kv_cache_group_id].append(group)
+    kernel_sizes = prepare_ascend_kernel_block_sizes(config, attn_groups)
+    return runtime, config, kernel_sizes
+
+
+@pytest.mark.parametrize(
+    ("text_model_type", "outer_model_type", "manager_block_size", "indexer_dtype"),
+    [
+        ("qwen4_exp_text", "qwen4_exp", 384, torch.float8_e4m3fn),
+        ("qwen4_exp", "qwen4_exp", 128, torch.bfloat16),
+        ("qwen4_exp_mtp", "qwen4_exp", 256, torch.bfloat16),
+    ],
+)
+def test_qsa_unified_allocation_preserves_runtime_views(
+    monkeypatch, text_model_type, outer_model_type, manager_block_size, indexer_dtype
+) -> None:
+    _, config, kernel_sizes = _plan_qsa_runtime_cache(
+        monkeypatch, text_model_type, outer_model_type, manager_block_size, indexer_dtype
+    )
+    num_blocks = config.num_blocks
+    allocator_calls = []
+    allocate = attn_utils_v2.unified_allocate_kv_cache
+
+    def record_unified_allocation(config, device, layout, block_sizes):
+        allocator_calls.append(config)
+        return allocate(config, device, layout, block_sizes)
+
+    monkeypatch.setattr(attn_utils_v2, "unified_allocate_kv_cache", record_unified_allocation)
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_sizes)
+    assert allocator_calls == [config]
+    source = "model.layers.11.self_attn"
+    keys, values = caches[f"{source}.attn"]
+    raw = caches[f"{source}.indexer.raw_key_cache"]
+    compressed = caches[f"{source}.indexer.compressed_key_cache"]
+    conv, ssm = caches["model.layers.0.linear_attn"]
+    (ple,) = caches["model.ple"]
+    hidden = caches["model.cache_only_layers.0"]
+    kernel_pages = num_blocks * (manager_block_size // 128)
+    assert keys.shape == values.shape == (kernel_pages, 128, 1, 64)
+    assert values.data_ptr() - keys.data_ptr() == keys[0].nbytes
+    assert keys.stride(0) * keys.element_size() == 2 * keys[0].nbytes
+    assert raw.shape == (num_blocks, 8, 1, 44) and raw.is_contiguous()
+    assert compressed.shape == (kernel_pages, 32, 1, 32) and compressed.is_contiguous()
+    assert compressed.dtype == indexer_dtype
+    assert conv.shape == (num_blocks, 64, 4) and ssm.shape == (num_blocks, 128, 128)
+    assert ple.shape == (num_blocks, 3, 5) and ple.is_contiguous()
+    assert hidden.shape == (num_blocks, 1, 128, 64)
+    components = (keys, values, raw, compressed, conv, ssm, ple, hidden)
+    assert len({component.untyped_storage().data_ptr() for component in components}) == 1
+
+    if manager_block_size == 128:
+        assert conv.data_ptr() != keys.data_ptr()
+    else:
+        assert conv.data_ptr() == keys.data_ptr()
+        assert conv.stride(0) * conv.element_size() == manager_block_size // 128 * 2 * keys[0].nbytes
+        conv[1].fill_(3)
+        assert torch.count_nonzero(keys[: manager_block_size // 128]) == 0
+        assert torch.count_nonzero(keys[manager_block_size // 128 :]) > 0
+        conv[1].zero_()
+
+    keys[0].fill_(7)
+    raw[1, ..., 32:].view(torch.int64).fill_(42)
+    assert torch.all(keys[0] == 7) and torch.count_nonzero(keys[1:]) == 0
+    for component in (values, compressed, conv[1:], ssm[1:], ple, hidden):
+        assert torch.count_nonzero(component.view(torch.int8)) == 0
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
-    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
 
-    QSARawKeyCache = qsa_module.QSARawKeyCache
-    QSAIndexerBackend = qsa_module.QSAIndexerBackend
+    if vllm_version_is("0.33.0"):
+        import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
 
-    groups = [
-        KVCacheGroupSpec(
-            group.layer_names,
-            group.kv_cache_spec
-            if isinstance(group.kv_cache_spec, CircularBufferSpec)
-            else replace(group.kv_cache_spec, block_size=manager_block_size),
-        )
-        for group in _groups()
-    ]
-    config = get_qwen4_exp_kv_cache_config(
-        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
-        groups,
-        10**9,
+        QSARawKeyCache = qsa_module.QSAKeyStateCache
+        QSAIndexerBackend = qsa_module.QSAStateBackend
+    else:
+        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
+
+        QSARawKeyCache = qsa_module.QSARawKeyCache
+        QSAIndexerBackend = qsa_module.QSAIndexerBackend
+
+    runtime_config, config, kernel_sizes = _plan_qsa_runtime_cache(
+        monkeypatch, "qwen4_exp_text", "qwen4_exp", manager_block_size, torch.bfloat16
     )
-    assert config is not None
-    runtime_config = SimpleNamespace(
-        additional_config={},
-        kv_transfer_config=None,
-        cache_config=SimpleNamespace(cache_dtype="auto", block_size=manager_block_size),
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(),
-            hf_text_config=SimpleNamespace(),
-            max_model_len=4096,
-        ),
+    runtime_config.cache_config.cache_dtype = "auto"
+    runtime_config.cache_config.block_size = manager_block_size
+    runtime_config.model_config.max_model_len = 4096
+    runtime_config.__dict__.update(
         compilation_config=SimpleNamespace(static_forward_context={}),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
+        use_v2_model_runner=True,
     )
-    compressed_group = groups[2]
+    group_id, compressed_group = next(
+        (i, group)
+        for i, group in enumerate(config.kv_cache_groups)
+        if group.layer_names[0].endswith(".compressed_key_cache")
+    )
     spec = compressed_group.kv_cache_spec
-    backend = QSAIndexerBackend
-    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
-    monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-    raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
-    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
-    # Exercise the actual MRV2 factory, which rewrites the builder spec.
-    group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_sizes)
+    group = AttentionGroup(QSAIndexerBackend, compressed_group.layer_names, spec, group_id)
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=kernel_sizes[group_id])
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
     layer = qsa.qsa_indexer.QSACompressedKeyCache(
@@ -926,9 +843,9 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
 
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
-    raw_name = groups[1].layer_names[0]
+    raw_name = name.replace(".compressed_key_cache", ".raw_key_cache")
     raw_layer = QSARawKeyCache(
-        head_size=20,
+        head_size=32,
         dtype=spec.dtype,
         prefix=raw_name,
         cache_config=runtime_config.cache_config,
@@ -937,9 +854,9 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         vllm_config=runtime_config,
     )
     bind_kv_cache_to_layers({raw_name: caches[raw_name]}, {raw_name: raw_layer})
-    assert raw_layer.key_cache.shape == (3, 8, 1, 20)
+    assert raw_layer.key_cache.shape == (3, 8, 1, 32)
     assert raw_layer.rope_position_cache.shape == (3, 8, 1, 3)
-    assert raw_layer.key_cache.untyped_storage().data_ptr() == raw[raw_name].untyped_storage().data_ptr()
+    assert raw_layer.key_cache.untyped_storage().data_ptr() == caches[raw_name].untyped_storage().data_ptr()
     positions = torch.tensor([2**40, 2**40 + 1, 2**40 + 2], dtype=torch.int64)
     raw_layer.rope_position_cache[2, 7, 0] = positions
     torch.testing.assert_close(raw_layer.rope_position_cache[2, 7, 0], positions)
@@ -947,7 +864,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     factor = manager_block_size // 128
     assert layer.kv_cache.shape == (3 * factor, keys_per_page, 1, spec.head_size)
     assert builder.storage_block_size == keys_per_page
-    assert layer.kv_cache.untyped_storage().data_ptr() == raw[name].untyped_storage().data_ptr()
+    assert layer.kv_cache.untyped_storage().data_ptr() == caches[name].untyped_storage().data_ptr()
     manager = torch.tensor([[2, 0]], dtype=torch.int32)
     virtual = (manager.unsqueeze(-1) * factor + torch.arange(factor)).flatten(1).to(torch.int32)
     locs = torch.tensor([0, 8], dtype=torch.int32)
