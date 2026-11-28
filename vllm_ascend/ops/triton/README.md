@@ -83,6 +83,7 @@ configuration rather than the runner input or sampling interface.
 | [batch_invariant/softmax.py](batch_invariant/softmax.py) | Batch-invariant operations |
 | [build_window_indices.py](build_window_indices.py) | Model/attention primitive or shared utility |
 | [c2_ring_metadata.py](c2_ring_metadata.py) | Model/attention primitive or shared utility |
+| [c8_prefill.py](c8_prefill.py) | Paged INT8 KV preparation for cached prefill ([operator guide](docs/c8_prefill.md)) |
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention and [packed DCP output combine](docs/fused_dcp_lse_combine.md#head-scatter-implementation) |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |

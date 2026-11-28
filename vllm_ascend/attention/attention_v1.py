@@ -24,6 +24,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -1578,11 +1579,31 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize."""
+        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
+        # Both cached-prefill callers consume packed dense K/V in FIA. The
+        # launcher returns None when the existing gather path is required.
+        if HAS_TRITON and key.device.type == "npu":
+            from vllm_ascend.ops.triton.c8_prefill import try_fused_c8_prefill
+
+            dense_kv = try_fused_c8_prefill(
+                key,
+                value,
+                block_table,
+                seq_lens,
+                block_size,
+                self.num_kv_heads,
+                self.head_size,
+                target_dtype,
+                layer._c8_k_scale,
+                layer._c8_v_scale,
+            )
+            if dense_kv is not None:
+                return dense_kv
+
         batch_size = block_table.shape[0]
         max_blocks_per_seq = block_table.shape[1]
 
         # NZ 5D view: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)
-        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
         max_tokens_padded = max_blocks_per_seq * block_size
 
         flat_ids = block_table.reshape(-1)
