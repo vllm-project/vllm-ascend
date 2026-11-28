@@ -24,6 +24,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.core.compressor_checkpoint import TailBlockCopy, TailRestorePlan
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -143,6 +144,51 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
         is_prefilling_np=is_prefilling,
         has_prefill=bool(is_prefilling.any()),
     )
+
+
+def test_checkpoint_restore_follows_page_zeroing():
+    runner = _make_runner(False)
+    pages = torch.tensor([[4, 7], [0, 0]])
+    runner._compressor_checkpoint_pages = {0: [pages]}
+    output = SimpleNamespace(compressor_restores=(TailRestorePlan(1, 16384, (TailBlockCopy(0, 0, 1),)),))
+    with patch.object(GPUModelRunner, "update_requests", side_effect=lambda step: pages[1].zero_()):
+        runner.update_requests(output)
+    torch.testing.assert_close(pages[1], pages[0])
+
+
+@pytest.mark.parametrize("copy_kind", ["none", "save", "restore"])
+def test_checkpoint_step_fences_all_TP_copies_before_deferred_sampling(copy_kind):
+    runner = _make_runner(False)
+    runner._compressor_checkpoint_pages = {}
+    output = SimpleNamespace(
+        compressor_saves=("save",) if copy_kind == "save" else (),
+        compressor_restores=("restore",) if copy_kind == "restore" else (),
+        total_num_scheduled_tokens=16,
+        num_scheduled_tokens={"request": 16},
+    )
+    order = []
+    runner.model_state.finish_execution.side_effect = lambda *, failed: order.append(("metadata_retired", failed))
+    done = SimpleNamespace(
+        record=lambda stream: order.append("record"), synchronize=lambda: order.append("device_complete")
+    )
+    with (
+        patch.object(GPUModelRunner, "execute_model", side_effect=lambda *a, **k: order.append("forward")),
+        patch("vllm_ascend.worker.v2.model_runner.has_kv_transfer_group", return_value=False),
+        patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.copy_compressor_tail_pages", side_effect=lambda *a: order.append("save")
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.torch.npu.Event", return_value=done),
+        patch("vllm_ascend.worker.v2.model_runner.get_tp_group") as group,
+    ):
+        group.return_value.barrier.side_effect = lambda: order.append("TP_complete")
+        assert runner.execute_model(output) is None
+    expected = ["forward", ("metadata_retired", False)]
+    if copy_kind == "save":
+        expected.append("save")
+    if copy_kind != "none":
+        expected.extend(["record", "device_complete", "TP_complete"])
+    assert order == expected
 
 
 def test_pd_decode_reclassifies_pd_tail_in_mixed_decode_batch():
