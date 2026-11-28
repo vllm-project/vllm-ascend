@@ -733,7 +733,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
     stochastic rounding. With prefix caching, use Mamba cache mode `align`
     and a block size of at least `K + 1`. Without prefix caching, use `none`.
 
-    For direct prefill/decode (P/D) transfer, use `MooncakePullConnector`.
+    For direct prefill/decode (P/D) transfer, use `MooncakePullConnector` or
+    `MooncakeConnectorV2` in its default pull mode (`use_layerwise=false`).
     Enable RecoverSSM on both roles and match the model weights, speculative
     method and window, draft checkpoint if used, prefix-caching settings,
     state dtypes, and convolution layout.
