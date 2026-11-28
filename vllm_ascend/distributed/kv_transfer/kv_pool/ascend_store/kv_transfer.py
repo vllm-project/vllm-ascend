@@ -18,11 +18,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    ChunkedTokenDatabase,
-    ReqMeta,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (
+    ChunkedTokenDatabase,
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
