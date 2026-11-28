@@ -132,8 +132,9 @@ remain in #22552.
 CPU tests cover event order, exception propagation, shutdown, target and
 connector fences, group-specific page preservation, compatible group merging,
 NULL-page startup capture, complete bucket coverage, no-capture request fallback,
-pre-KV budget deduction and probe cleanup. The metadata staging kernel has a separate exact
-integer reference test covering mappings, strided sources and graph padding.
+pre-KV budget deduction and probe cleanup. The metadata staging kernel has a
+separate exact integer reference test covering mappings, strided sources and
+graph padding.
 It also checks that later groups preserve the shared sampled-count buffer.
 
 Before merge, NPU validation must check graph replay and state equivalence,
