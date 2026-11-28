@@ -100,7 +100,7 @@ from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.logprob import (
     compute_token_logprobs,
-    compute_topk_logprobs,
+    compute_topk_scores,
 )
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
@@ -133,9 +133,10 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # Upstream renamed compute_topk_logprobs to compute_topk_scores and
     # moved the definition into logprob.py; the other three modules
     # from-import it. One registration covers the three from-import copies
-    # of the retired patch. The impl keeps our historical name; its
-    # signature matches the upstream compute_topk_scores.
-    "vllm.v1.worker.gpu.sample.logprob.compute_topk_scores": compute_topk_logprobs,
+    # of the retired patch. The Ascend impl carries the same name and
+    # signature as upstream and wires the custom logprob_token_ids branch
+    # through the Ascend fill wrapper.
+    "vllm.v1.worker.gpu.sample.logprob.compute_topk_scores": compute_topk_scores,
     # TODO: Remove when upstream guards empty launch grids (Ascend
     # rejects an empty grid with coreDim=0).
     "vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens": apply_trace_tokens,
@@ -161,12 +162,13 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # TODO: Remove when Triton-Ascend can compile and efficiently lower
     # the upstream kernel.
     "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": sampling_mask_from_logits_npu,
-    # Production-dead today: upstream's only call site sits inside
-    # compute_topk_scores, which the registration above replaces with
-    # the Ascend host path -- that path warns and falls back to default
-    # topk (worker/v2/sample/logprob.py) and never launches this kernel.
-    # Revives as-is once the Ascend host grows the custom
-    # logprob_token_ids branch.
+    # Upstream's only call site sits inside its compute_topk_scores, which
+    # the registration above replaces with the Ascend host path; that
+    # path wires the custom logprob_token_ids branch and calls the Ascend
+    # fill wrapper directly (worker/v2/sample/logprob.py), so the upstream
+    # kernel definition swapped here is not launched on the production
+    # path. The raw swap stays as the defensive passthrough for direct
+    # callers.
     # TODO: Remove once the compiler and Triton-Ascend toolkit support
     # the upstream fill_logprob_token_ids_kernel.
     "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": _fill_logprob_token_ids_kernel,
