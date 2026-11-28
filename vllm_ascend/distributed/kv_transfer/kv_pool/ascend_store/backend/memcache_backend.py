@@ -183,6 +183,11 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
 class MemcacheBackend(Backend):
     layerwise_data_plane = "gva"
 
+    @property
+    def uses_local_sdma(self) -> bool:
+        """Whether bulk transfers use the local device-SDMA protocol."""
+        return _get_memcache_protocol() == "device_sdma"
+
     @classmethod
     def bind_layerwise_keys(
         cls,
