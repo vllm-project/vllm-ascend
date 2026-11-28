@@ -590,7 +590,8 @@
             "Eco-Tech/GLM-5.3-w8a8c8",
             "Eco-Tech/GLM-5.3-Flash-w8a8",
             "Eco-Tech/Kimi-K3.1-Pro-w4a8",
-            "Eco-Tech/Qwen3.6-27B-W8A8-310P"
+            "Eco-Tech/Qwen3.6-27B-W8A8-310P",
+            "vllm-ascend/MiniMax-M3.1-Flash-W4A8"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

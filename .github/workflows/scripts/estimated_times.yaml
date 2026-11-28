@@ -100,6 +100,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_level2_reload.py: 120
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 30
   tests/e2e/pull_request/one_card/test_vlm.py: 480
@@ -132,6 +133,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_ec_mooncake_encoder_output.py: 900
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 290
   tests/e2e/pull_request/two_card/test_hixl_eplb_registration.py: 300
+  tests/e2e/pull_request/two_card/test_group_coordinator_destroy_npu.py: 120
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 650
   tests/e2e/pull_request/two_card/test_pipeline_parallel.py: 280
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 470
@@ -204,6 +206,8 @@ estimated_times:
   # Conservative scheduling estimate; refine after the first A5 run.
   tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py: 180
   tests/e2e/pull_request/one_card/test_glm5next_pooled_cache_write.py: 30
+  # Bootstrap estimate; refine after the first NPU run.
+  tests/e2e/pull_request/one_card/test_gdn_metadata_reuse_v2.py: 600
 
   # Initial A3 per-file wall times, including pytest startup; 10% buffer, rounded to 10s.
   tests/e2e/pull_request/two_card/ops/test_attn_res_fwd.py: 30
@@ -216,6 +220,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/test_kda_gate_cumsum_vllm.py: 30
   tests/e2e/pull_request/two_card/ops/test_kda_layout_swap12.py: 30
   tests/e2e/pull_request/two_card/ops/test_moe_gating_top_k_hash.py: 30
+  tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_bad_words.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_batch_memcpy.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_bincount.py: 50

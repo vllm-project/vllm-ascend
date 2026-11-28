@@ -964,6 +964,20 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             num_prompt_tokens=64,
         )
 
+    @staticmethod
+    def _make_offload_scheduler(config):
+        spec = FullAttentionSpec(
+            block_size=config.cache_config.block_size, num_kv_heads=1, head_size=4, dtype=torch.int8
+        )
+        group = KVCacheGroupSpec(["model.layers.0.attn"], spec)
+        cache_config = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=[group])
+        cache_config.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 4096}
+        )
+        return create_kv_pool_scheduler(
+            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache_config)
+        )
+
     def _make_running_chunk_output(self, new_block_ids, num_computed_tokens=16):
         sched_output = MagicMock()
         sched_output.finished_req_ids = set()
@@ -1211,18 +1225,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        cache = SimpleNamespace(
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["model.layers.1.attn"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.int8),
-                ),
-            ],
-            kv_transfer_config=SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 128}),
-        )
-        scheduler = create_kv_pool_scheduler(
-            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache)
-        )
+        scheduler = self._make_offload_scheduler(config)
         self._set_running_chunk(scheduler)
 
         meta = self._build_connector_meta(scheduler, self._make_running_chunk_output([]))
@@ -1234,6 +1237,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(load_spec.vllm_cached_tokens, 16)
         self.assertEqual(load_spec.kvpool_cached_tokens, 16)
         self.assertTrue(load_spec.can_load)
+        self.assertTrue(load_spec.layerwise_previous_step)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_prefill_preserves_partial_block_with_layer_reuse(self, mock_client_cls):
@@ -1244,18 +1248,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        cache = SimpleNamespace(
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["model.layers.1.attn"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.int8),
-                ),
-            ],
-            kv_transfer_config=SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 128}),
-        )
-        scheduler = create_kv_pool_scheduler(
-            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache)
-        )
+        scheduler = self._make_offload_scheduler(config)
         request = MagicMock()
         request.num_computed_tokens = 32
         request.num_prompt_tokens = 48
@@ -2682,7 +2675,13 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
 
 @pytest.mark.parametrize(
     "mode,discard_partial_chunks",
-    [("bulk", True), ("bulk", False), ("mooncake_layerwise", True), ("memcache_layerwise", True)],
+    [
+        ("bulk", True),
+        ("bulk", False),
+        ("mooncake_layerwise", True),
+        ("memcache_layerwise", True),
+        ("memcache_offload", True),
+    ],
 )
 @pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("family", ["mamba", "swa"])
@@ -2705,7 +2704,7 @@ def test_hybrid_lookup_loads_only_reachable_prefixes(
     mode, discard_partial_chunks, use_eagle, family, snapshots, local_tokens, prompt_tokens, expected
 ):
     """A full hit must not turn into a load of a missing predecessor state."""
-    config = make_config(extra_config={"backend": "memcache" if mode == "memcache_layerwise" else "mooncake"})
+    config = make_config(extra_config={"backend": "memcache" if mode.startswith("memcache") else "mooncake"})
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.speculative_config.use_eagle.return_value = use_eagle
     state_spec = (
@@ -2719,12 +2718,11 @@ def test_hybrid_lookup_loads_only_reachable_prefixes(
         ),
         KVCacheGroupSpec(["layer.1"], state_spec),
     ]
+    cache = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=groups)
+    if mode == "memcache_offload":
+        cache.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 4096})
     scheduler = create_kv_pool_scheduler(
-        config,
-        use_layerwise=mode != "bulk",
-        kv_cache_config=make_resolved_cache_config(
-            config, KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=groups)
-        ),
+        config, use_layerwise=mode != "bulk", kv_cache_config=make_resolved_cache_config(config, cache)
     )
     scheduler._discard_partial_chunks = discard_partial_chunks
     init_none_hash(sha256)
@@ -2800,7 +2798,14 @@ def test_hybrid_lookup_loads_only_reachable_prefixes(
         }
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable_keys for key in keys]
 
-    hit, is_async = scheduler.get_num_new_matched_tokens(request, local_tokens)
+    with patch.object(
+        coordinator, "find_reachable_hits_with_replay", wraps=coordinator.find_reachable_hits_with_replay
+    ) as lookup_pair:
+        hit, is_async = scheduler.get_num_new_matched_tokens(request, local_tokens)
+    if mode == "memcache_offload" and family == "mamba" and prompt_tokens == 64:
+        assert scheduler.layerwise_offload
+        assert lookup_pair.call_args.args[1] == 64
+        assert lookup_pair.call_args.kwargs["replay_token_limit"] == 48
     assert hit == expected - local_tokens
     assert not is_async
     if hit:

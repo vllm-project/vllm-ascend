@@ -230,6 +230,12 @@ class BaseKVPoolScheduler(ABC):
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
+    @property
+    def _requires_aligned_state(self) -> bool:
+        return len(self.cacheable_group_ids) != len(self.original_block_size) or (
+            self.layerwise_offload and bool(self.num_mamba_speculative_blocks_by_group)
+        )
+
     def _infer_mamba_groups(self) -> dict[int, int]:
         """Validate Mamba cache modes and return hybrid group scratch counts."""
         if self.kv_cache_config is None:
@@ -280,7 +286,7 @@ class BaseKVPoolScheduler(ABC):
         reuse_limit = None
         if self.cache_coordinator is not None and not self.enable_partial_hash_hits:
             reuse_limit = max(0, request.num_tokens - 1)
-            if self.use_eagle or len(self.cacheable_group_ids) != len(self.original_block_size):
+            if self.use_eagle or self._requires_aligned_state:
                 reuse_limit = self._floor_to_cache_transfer_granularity(reuse_limit)
         lookup_result = self._lookup_external_hit_tokens(request, num_computed_tokens, reuse_limit)
         if lookup_result is None or not lookup_result.hit_length:

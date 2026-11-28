@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.linear import AscendRowParallelLinear
 from vllm_ascend.ops.linear_op import OProjRowParallelOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
@@ -856,6 +857,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    _decode_o_proj_out: bool = False
+
     # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe): the flag is
     # flipped on in process_weights_after_loading once the weights are loaded.
     enable_sparse_sfa_hif8: bool = False
@@ -938,6 +941,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        self._decode_o_proj_out = (
+            self.is_kimi_k31
+            and not self.pcp_enabled
+            and self.vllm_config.lora_config is None
+            and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+        )
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
         config_candidates = (hf_config, hf_text_config)
         index_cache_enabled = _get_config_bool(
@@ -2462,10 +2471,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             else:
                 gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)
+        dst = output[:num_input_tokens]
         if o_capacity is not None:
-            self._project_finegrained_o(attn_output, output[:num_input_tokens], o_capacity)
-        else:
-            self._finalize_o_proj(attn_output, output[:num_input_tokens])
+            self._project_finegrained_o(attn_output, dst, o_capacity)
+        elif not (
+            self._decode_o_proj_out
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and isinstance(self.o_proj, AscendRowParallelLinear)
+            and self.o_proj.try_forward_into(attn_output, dst)
+        ):
+            self._finalize_o_proj(attn_output, dst)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

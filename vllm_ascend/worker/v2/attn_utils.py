@@ -76,6 +76,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
+    use_component_major_mla_pd_layout,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -83,7 +84,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
     requires_padded_page_layout,
-    supports_component_major_mla_pd,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -872,7 +872,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config):
+    if not use_component_major_mla_pd_layout(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
@@ -1664,6 +1664,11 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_slab, torch.Tensor):
                     raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
                 slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
+                if get_layerwise_reuse_layout(kv_cache_config) is not None and owner.role not in (PLE, HIDDEN):
+                    # Reuse allocation already returns this owner's byte window.
+                    # Keep component offsets relative to that window.
+                    region_name = qwen4_cache_layout.region_name_for_owner(layer_name)
+                    slot_offset = -qwen4_cache_layout.region(region_name).offset
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")

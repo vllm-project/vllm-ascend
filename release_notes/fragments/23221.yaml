@@ -1,0 +1,8 @@
+pr: 23221
+entries:
+  - category: feature
+    text: >-
+      Added native device-side MLA scheduling for supported A3 Kimi K3.1 DSpark
+      decode, with support for page-layout-preserving Mooncake PD configurations.
+      Eligible Kimi target and draft configurations now skip the corrected
+      token-count copy to the host and its next-step wait.

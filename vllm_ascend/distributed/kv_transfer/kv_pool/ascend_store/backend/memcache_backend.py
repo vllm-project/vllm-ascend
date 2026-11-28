@@ -61,7 +61,14 @@ def require_hisparse_host_tcp() -> None:
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
-_HISPARSE_HOST_GET_MAX_BYTES = 256 * 1024 * 1024
+_HISPARSE_GET_MAX_BYTES = 256 * 1024 * 1024
+
+# memfabric (hybm) validates the host Ascend driver against its internal
+# minimum-version whitelist at store init time. The Innerversion field is read
+# from the driver version.info; a missing or empty file (e.g. a container that
+# only mounts driver/lib64) makes that check fail with a misleading
+# "driver does not support mf" error, so surface the file path explicitly.
+ASCEND_DRIVER_VERSION_INFO_PATH = "/usr/local/Ascend/driver/version.info"
 
 
 def _validate_device_ub_qos() -> None:
@@ -84,6 +91,33 @@ def _validate_device_ub_qos() -> None:
         raise ValueError(
             f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
         )
+
+
+def _read_driver_innerversion() -> str | None:
+    """Read the Ascend driver Innerversion used by memfabric's whitelist check.
+
+    Returns ``None`` when the version file is missing, empty, or lacks both the
+    ``Innerversion`` and ``Version`` fields, which is exactly the situation
+    that makes memfabric fail with a misleading "driver does not support mf".
+    """
+    if not os.path.isfile(ASCEND_DRIVER_VERSION_INFO_PATH):
+        return None
+    innerversion = None
+    fallback_version = None
+    try:
+        with open(ASCEND_DRIVER_VERSION_INFO_PATH, encoding="utf-8", errors="replace") as version_file:
+            for line in version_file:
+                key, separator, value = line.strip().partition("=")
+                if not separator:
+                    continue
+                key = key.strip()
+                if key == "Innerversion":
+                    innerversion = value.strip() or None
+                elif key == "Version":
+                    fallback_version = value.strip() or None
+    except OSError:
+        return None
+    return innerversion or fallback_version
 
 
 class MmcDirect(Enum):
@@ -230,6 +264,13 @@ class MemcacheBackend(Backend):
             self.set_device()
         store = DistributedObjectStore()
 
+        # memfabric validates the host driver version during init. Surface the
+        # effective version for diagnosis; the init failure below includes the
+        # missing-file and mount hints when validation fails.
+        driver_version = _read_driver_innerversion()
+        if driver_version is not None:
+            logger.info("Memcache driver Innerversion=%s", driver_version)
+
         try:
             res = store.init(self.device_id, init_bm=self._init_bm)
         except ValueError as e:
@@ -239,7 +280,17 @@ class MemcacheBackend(Backend):
             logger.error("Store initialization failed. error=%s. Check memcache setup and dependencies.", exc)
             raise
 
-        assert res == 0
+        if res != 0:
+            raise RuntimeError(
+                f"MemCache (hybm) store initialization failed with return code {res}. "
+                "A common cause is an Ascend driver version that does not meet "
+                "the memfabric minimum requirement, or a missing/empty driver "
+                f"version file at {ASCEND_DRIVER_VERSION_INFO_PATH} "
+                f"(detected Innerversion: {driver_version or '<unknown>'}). "
+                "Ensure the host Ascend driver directory is mounted into the "
+                "container (e.g. -v /usr/local/Ascend/driver:/usr/local/Ascend/driver) "
+                "and that the installed driver is supported by memfabric."
+            )
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
@@ -275,18 +326,15 @@ class MemcacheBackend(Backend):
             raise ValueError("MemCache bulk GET requires one buffer list per key")
         self.ensure_initialized()
         assert self.store is not None
-        is_host = memory_location is MemoryLocation.HOST
-        direction = MmcDirect.COPY_G2H if is_host else MmcDirect.COPY_G2L
+        direction = MmcDirect.COPY_G2H if memory_location is MemoryLocation.HOST else MmcDirect.COPY_G2L
         result = []
         begin, batch_bytes = 0, 0
+        # Both copy directions acquire read leases per SDK call. Bound each
+        # call's payload, and send an indivisible oversized key on its own.
         try:
             for end in range(len(keys) + 1):
                 key_bytes = sum(sizes[end]) if end < len(keys) else 0
-                # Only Host GETs hold a host_tcp lease. An indivisible key
-                # larger than the lease batch budget is transferred alone.
-                if end > begin and (
-                    end == len(keys) or (is_host and batch_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES)
-                ):
+                if end > begin and (end == len(keys) or batch_bytes + key_bytes > _HISPARSE_GET_MAX_BYTES):
                     result.extend(
                         require_aligned_batch_results(
                             "HiSparse Memcache GET",

@@ -70,7 +70,7 @@ grid_size = min(num_tokens * num_heads, get_vectorcore_num())
 grid = (grid_size,)
 ```
 
-Each program processes additional rows with a grid-stride loop. This limits
+The scalar combine kernel processes additional rows with a grid-stride loop. This limits
 the program count to the physical vector-core count while still covering large
 prefill and decode shapes. Each row uses one `BLOCK_D` vector, where
 `BLOCK_D = next_power_of_2(head_dim)`.
@@ -79,8 +79,13 @@ The scalar combine kernel keeps one FP32 output accumulator and scalar LSE state
 It first finds the maximum valid LSE, then accumulates
 `exp(lse - lse_max) * partial_output`. Invalid LSE rows contribute zero; when
 all ranks are invalid, the output row is zero.
-The eligible BF16 path batches eight rows per program and masks partial
-tiles. Eligible remaining BF16 head-scatter shapes use rank tiling; other shapes use the scalar-row kernel.
+Eligible BF16 head scatter with a unit-stride local contribution can use
+rank tiling first. For remaining BF16 head-scatter inputs with `D <= 512`,
+unit local feature stride (if supplied), and no returned LSE, each program
+owns a balanced contiguous interval of rows. For each row it decodes the
+LSE fields once, computes the rank weights, and streams the received and
+optional local outputs into one FP32 accumulator. Other supported shapes
+use the scalar-row kernel.
 
 ## Custom-op registration and graph tracing
 
@@ -138,12 +143,12 @@ whose logical PCP config is disabled. Repeated layer layouts register once.
 
 The compile-only owners in `dcp/dcp_jit.py` and `dcp/dcp_warmup.py` use the same
 JITFunction objects and launch-construction functions as runtime. They cover
-scalar/batched pack and combine, T1/full-vector/tiled exchange packing, and
+scalar/batched pack, scalar and mode-specialized head-scatter combine, T1/full-vector/tiled exchange packing, and
 fast merge. SFA uses its contiguous native/QSFA output and FP32 max/sum views;
 TurboQuant supplies already-computed LSE. MLA additionally covers FIA output,
 single-batch BSND LSE views, transposed FlashMLA output/LSE, and deferred history
 combine with or without one local contribution. Only the owner's dtype and
-geometry are registered. `FROM_STATS`, block sizes, rank unroll and compiler
+geometry are registered. `FROM_STATS`, block sizes and compiler
 options follow the production launcher.
 
 Representative token counts cover each dispatch interval and its modulo-16
@@ -177,7 +182,7 @@ precision and performance validation remain outstanding.
 ## Follow-up optimization
 
 The existing `head_dim == 512` / `tokens >= 128` pack routing, 8/32-row pack
-tiles, eight-row combine tiles, rank-unroll bound, and full-vector versus tiled
+tiles, and full-vector versus tiled
 exchange thresholds are deliberately retained. Optimizing those implementation
 choices requires separate shape-range measurements on A3/A5. In particular,
 measure the dynamic merge rank-stride change against the former specialization;
