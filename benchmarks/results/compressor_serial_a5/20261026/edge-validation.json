@@ -1,0 +1,49 @@
+{
+  "autoload": true,
+  "cases": [
+    {
+      "layout": "bsh",
+      "cache_mode": 2,
+      "dtype": "torch.float16",
+      "rotary": 1,
+      "optional_metadata": false,
+      "cache_stride0": 16400,
+      "eager": true,
+      "graph": true,
+      "cache_padding_unchanged": true
+    },
+    {
+      "layout": "bsh",
+      "cache_mode": 1,
+      "dtype": "torch.bfloat16",
+      "rotary": 2,
+      "optional_metadata": true,
+      "cache_stride0": 16400,
+      "eager": true,
+      "graph": true,
+      "cache_padding_unchanged": true
+    },
+    {
+      "layout": "tnd",
+      "cache_mode": 2,
+      "dtype": "torch.bfloat16",
+      "rotary": 1,
+      "optional_metadata": false,
+      "cache_stride0": 16400,
+      "eager": true,
+      "graph": true,
+      "cache_padding_unchanged": true
+    },
+    {
+      "layout": "tnd",
+      "cache_mode": 1,
+      "dtype": "torch.float16",
+      "rotary": 2,
+      "optional_metadata": false,
+      "cache_stride0": 16400,
+      "eager": true,
+      "graph": true,
+      "cache_padding_unchanged": true
+    }
+  ]
+}
