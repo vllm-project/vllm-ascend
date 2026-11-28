@@ -218,7 +218,7 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
     assert is_deepseek_v41_cache(groups)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
     assert _pool_bytes_per_block(runtime, groups) == page_bytes
-    cache_config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    cache_config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, num_blocks=10)
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
@@ -247,11 +247,7 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
     assert group_cache_specs(specs) == uniform  # Replanning cannot accumulate padding.
     assert group_cache_specs(dict(reversed(list(original.items())))) == uniform
     page_sizes, layer_tuples = get_layer_tuples(specs)
-    cache_config = get_deepseek_v41_kv_cache_config(
-        runtime,
-        groups,
-        get_deepseek_v41_pool_bytes_per_block(groups) * 10 + 1,
-    )
+    cache_config = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=10)
     blocks = cache_config.num_blocks
     placements = {d.layers[0]: d for d in cache_config.kv_cache_tensors}
     assert blocks == 10 and len(placements) == len(original)
@@ -293,7 +289,7 @@ def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     assert tuples[source_slot][:3] == (long_name, index_name, name)
     assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
     groups = make_cache_groups(group_cache_specs(specs))
-    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=2)
     placements = {d.layers[0]: d for d in planned.kv_cache_tensors}
     slot_offset = planned.num_blocks * sum(page_sizes[:source_slot])
     assert placements[long_name].offset == slot_offset
@@ -335,7 +331,7 @@ def test_mrv2_unified_pool_preserves_slot_layout(runtime, monkeypatch, block_siz
     long_kv = folded.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
     specs[folded] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
     groups = make_cache_groups(group_cache_specs(specs))
-    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    planned = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=2)
     layer_specs = attn_utils._get_layer_kv_cache_specs(planned)
     layers = {name: DeepseekV41CacheLayer(runtime, name, spec) for name, spec in layer_specs.items()}
     runtime.model_config.hf_text_config.model_type = "deepseek_v41_text"
@@ -421,7 +417,7 @@ def test_production_layout_matches_design(config, runtime):
         if n.endswith(".swa_cache") and ".mtp." not in f".{n}"
     ]
     assert swa_padding.count(0) == 30 and swa_padding.count(16640) == 10
-    cache_config = get_deepseek_v41_kv_cache_config(runtime, groups, 540928 * 3)
+    cache_config = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=3)
     assert cache_config.num_blocks == 3
     _, caches = allocate_cache_views(cache_config)
     assert sum(caches[n].is_contiguous() for n in padded if n.endswith(".swa_cache") and ".mtp." not in f".{n}") == 30
@@ -430,11 +426,7 @@ def test_production_layout_matches_design(config, runtime):
 def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     count = len(groups) + 1
-    cfg = get_deepseek_v41_kv_cache_config(
-        runtime,
-        groups,
-        get_deepseek_v41_pool_bytes_per_block(groups) * count,
-    )
+    cfg = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=count)
     _, caches = allocate_cache_views(cfg)
     expected = []
     for group_idx, group in enumerate(groups):
@@ -490,12 +482,12 @@ def test_request_accounting_counts_merged_full_context_once(runtime):
     assert required // page == 1024 // 64 + bounded
 
 
-def test_safe_override_capacity(runtime):
+def test_materialization_preserves_core_capacity(runtime):
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
     runtime.cache_config.num_gpu_blocks_override = 3
-    config = get_deepseek_v41_kv_cache_config(runtime, groups, 5 * page + 1)
-    assert config.num_blocks == 3 and {t.size for t in config.kv_cache_tensors} == {3 * page}
+    config = get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=5)
+    assert config.num_blocks == 5 and {t.size for t in config.kv_cache_tensors} == {5 * page}
 
 
 def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
@@ -503,7 +495,7 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     runtime.max_in_flight_tokens = 128
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 100 * page)
+    config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, num_blocks=100)
     assert config.num_blocks == 100
     assert {t.size for t in config.kv_cache_tensors} == {100 * page}
     demand = _max_memory_usage_bytes_from_groups(runtime, groups) // page
@@ -1822,7 +1814,6 @@ def test_v41_query_bound_is_independent_of_adaptive_policy(method, enabled, num_
             max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
-        use_v2_model_runner=True,
     )
     # No parallel_config is needed to report the backend's query-width bound.
     # Unsupported CP combinations are rejected at platform config validation.

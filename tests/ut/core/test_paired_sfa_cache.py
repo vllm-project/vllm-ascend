@@ -77,7 +77,8 @@ def test_token_blocks_unchanged_and_components_share_ids():
     assert {s.block_size for s in specs.values()} == {1536}
     assert {s.page_size_bytes for s in specs.values()} == {1007616, 202752}
     assert paired_sfa_pool_bytes(groups) == 29048832
-    plan = paired_sfa_cache_config(config, groups, 17556701184)
+    config.cache_config.num_gpu_blocks_override = 99
+    plan = paired_sfa_cache_config(config, groups, num_blocks=604)
     assert plan.num_blocks == 604
     backing_size = 29048832 * 604
     assert backing_size <= 17556701184
@@ -105,7 +106,7 @@ def test_paired_config_propagates_prefix_cache_retention_interval(interval):
     config = make_config()
     config.cache_config.prefix_cache_retention_interval = interval
     groups = paired_sfa_cache_groups(config, make_specs())
-    plan = paired_sfa_cache_config(config, groups, 17556701184)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=604)
     assert plan.prefix_cache_retention_interval == interval
 
 
@@ -181,7 +182,7 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
     assert (draft_group is groups[0]) == dcp_sharded
     assert groups[1:4] == target_groups[1:]
     assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft.page_size_bytes
-    plan = paired_sfa_cache_config(config, groups, 2**30)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=(2**30) // paired_sfa_pool_bytes(groups))
     draft_tensor = next(tensor for tensor in plan.kv_cache_tensors if tensor.layers == [name])
     assert draft_tensor.block_stride == draft.page_size_bytes
     assert draft_tensor.offset + draft_tensor.layer_stride == draft_tensor.size
@@ -278,7 +279,7 @@ def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
     assert {spec.page_size_bytes for spec in specs.values()} == {503808, 99840}
     assert {spec.block_size for spec in specs.values()} == {768}
     assert paired_sfa_pool_bytes(groups) == 14487552
-    plan = paired_sfa_cache_config(config, groups, 115900539)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=8)
     assert plan.num_blocks == 8
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {115900416}
     assert all(
@@ -313,7 +314,7 @@ def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups()
     assert {spec.page_size_bytes for spec in draft.values()} == {draft_page_bytes}
     assert paired_sfa_pool_bytes(groups) == 29048832 + 5 * draft_page_bytes == 33472512
 
-    plan = paired_sfa_cache_config(config, groups, 2 * paired_sfa_pool_bytes(groups))
+    plan = paired_sfa_cache_config(config, groups, num_blocks=2)
     assert plan.num_blocks == 2
     assert len(plan.kv_cache_tensors) == 10
     draft_tensors = plan.kv_cache_tensors[-5:]

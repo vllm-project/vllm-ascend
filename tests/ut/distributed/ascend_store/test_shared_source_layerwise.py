@@ -175,7 +175,6 @@ def make_shared_worker(
         config.parallel_config.use_ubatching = config.parallel_config.use_sequence_parallel_moe = False
         config.cache_config.swa_bounded_replay = bounded
         config.cache_config.enable_prefix_caching = enable_prefix_caching
-        config.use_v2_model_runner = True
         config.speculative_config = None
         return create_kv_pool_worker(config, use_layerwise, kv_cache_config)
 

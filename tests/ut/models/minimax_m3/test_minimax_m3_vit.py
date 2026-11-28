@@ -96,9 +96,6 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
             return SimpleNamespace(
                 model_config=model_config,
                 quant_config=None,
-                # Retain the release model-runner setting; main no longer
-                # gates pipeline-rank lookup on this flag after #63373.
-                use_v2_model_runner=False,
             )
 
         test_cases = [

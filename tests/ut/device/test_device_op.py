@@ -560,3 +560,84 @@ def test_c8_selector_reuses_builder_metadata_across_layers(topk):
         assert call.kwargs["metadata"] is prepared.metadata
         assert call.kwargs["cu_seqlens_q"] is prepared.query_start_loc
         assert call.kwargs["seqused_k"] is prepared.seq_lens
+
+
+@pytest.mark.parametrize("topk", [1024, 2048])
+@pytest.mark.parametrize("prepared_in_builder", [True, False])
+@pytest.mark.parametrize(
+    "query_lengths,cache_indices,weights_dtype",
+    [
+        pytest.param([1], (0, 1), torch.float16, id="single-decode"),
+        pytest.param([1, 1], (1, 0), torch.float32, id="batched-decode-swapped-cache"),
+        pytest.param([3, 2], (0, 1), torch.float16, id="variable-query-lengths"),
+    ],
+)
+def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
+    prepared_in_builder, query_lengths, cache_indices, weights_dtype, topk
+):
+    tokens, heads, logical_dim = sum(query_lengths), 32, 128
+    query = torch.zeros(tokens * heads, logical_dim // 2, dtype=torch.uint8)
+    query_scale = torch.ones(tokens, heads, logical_dim // 64, 2, dtype=torch.uint8)
+    key = torch.zeros(4, 128, 1, logical_dim // 2, dtype=torch.uint8)
+    key_scale = torch.ones(4, 128, 1, logical_dim // 64, 2, dtype=torch.uint8)
+    cache = (key, key_scale) if cache_indices == (0, 1) else (key_scale, key)
+    query_ends = torch.tensor(query_lengths, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    cumulative = torch.cat((torch.zeros(1, dtype=torch.int32), query_ends))
+    lengths = torch.full((len(query_lengths),), 256, dtype=torch.int32)
+    config = QLIMetadataConfig(heads, logical_dim, 5, topk=topk)
+    metadata_op = mock.Mock(return_value=torch.arange(1024, dtype=torch.int32))
+    prepared = (
+        QLIMetadataBuffers(config, 4).build("target", cumulative, lengths, metadata_op) if prepared_in_builder else None
+    )
+    indices = torch.full((tokens, 1, topk), -1, dtype=torch.int32)
+    select_op = mock.Mock(return_value=(indices, None))
+    metadata = SimpleNamespace(block_table=torch.zeros(len(query_lengths), 2, dtype=torch.int32), qli_inputs=prepared)
+    weights = torch.ones(tokens, heads, dtype=weights_dtype)
+    with mock.patch.object(
+        A5DeviceAdaptor, "_load_cann_quant_lightning_indexer_ops", return_value=(metadata_op, select_op)
+    ):
+        for _ in range(4):
+            result = A5DeviceAdaptor.indexer_select_post_process(
+                query,
+                query_scale,
+                (tokens, heads, logical_dim),
+                weights,
+                cache,
+                *cache_indices,
+                metadata,
+                query_ends,
+                lengths,
+                False,
+                True,
+                True,
+                topk=topk,
+            )
+            assert result is indices
+    assert metadata_op.call_count == (1 if prepared_in_builder else 4)
+    assert select_op.call_count == 4
+    assert metadata_op.call_args.kwargs["head_dim"] == logical_dim
+    assert metadata_op.call_args.kwargs["quant_mode"] == 5
+    for call in metadata_op.call_args_list:
+        assert call.kwargs["topk"] == topk
+    for call in select_op.call_args_list:
+        q, k, w, q_scale, k_scale = call.args
+        assert q.shape == (tokens, heads, logical_dim // 2)
+        assert q.data_ptr() == query.data_ptr()
+        assert k is key and q_scale is query_scale and k_scale is key_scale
+        assert w.dtype == torch.float32
+        assert call.kwargs["quant_mode"] == 5
+        assert call.kwargs["topk"] == topk
+        torch.testing.assert_close(call.kwargs["cu_seqlens_q"], cumulative)
+        torch.testing.assert_close(call.kwargs["seqused_k"], lengths)
+        if prepared is not None:
+            assert call.kwargs["metadata"] is prepared.metadata
+            assert call.kwargs["cu_seqlens_q"] is prepared.query_start_loc
+
+
+@pytest.mark.parametrize("topk", [1024, 2048])
+def test_c4_selector_metadata_config_uses_logical_head_dim(topk):
+    spec = SimpleNamespace(cache_sparse_li_c4=True, cache_sparse_li_c8=False, dtype=torch.uint8, head_size=64)
+    config = A5DeviceAdaptor.get_indexer_metadata_config(
+        spec, SimpleNamespace(index_n_heads=32, index_head_dim=128, index_topk=topk)
+    )
+    assert config == QLIMetadataConfig(32, 128, 5, topk=topk)

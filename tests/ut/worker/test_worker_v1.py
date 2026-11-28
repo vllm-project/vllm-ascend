@@ -122,7 +122,6 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.kernel_config.ir_op_priority.set_default = MagicMock()
         self.vllm_config_mock.profiler_config = MagicMock()
         self.vllm_config_mock.profiler_config.profiler = None
-        self.vllm_config_mock.use_v2_model_runner = False
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None

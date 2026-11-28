@@ -1,0 +1,6 @@
+pr: 23102
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a sampling bias with `rejection_sample_method="block"` when
+      speculative decoding revisits a token position at nonzero temperature.

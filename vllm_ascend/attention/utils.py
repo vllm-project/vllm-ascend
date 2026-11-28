@@ -107,8 +107,7 @@ def use_component_major_mla_pd_layout(vllm_config: VllmConfig) -> bool:
     if getattr(vllm_config.kv_transfer_config, "kv_connector", None) != "MultiConnector":
         return True
     return (
-        getattr(vllm_config, "use_v2_model_runner", False)
-        and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+        vllm_config.model_config.hf_config.model_type == "kimi_k31"
         and vllm_config.speculative_config is not None
         and vllm_config.speculative_config.method == "dspark"
         and vllm_config.parallel_config.pipeline_parallel_size == 1

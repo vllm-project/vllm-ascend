@@ -43,8 +43,10 @@ curated_tests:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
+    - tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5.py
     - tests/e2e/pull_request/one_card/test_expert_offload_a5.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
     - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
@@ -116,11 +118,17 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  # CANN V2 QLI selection and graph replay require A5.
+  tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5\.py$:
+    default: a5-4
   tests/e2e/pull_request/one_card/test_expert_offload_a5\.py$:
     default: a5-4
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
     default: a3-2
+  # A2 mooncake KV-pool cases run on the shared a2-1 pool (NUMA-cpuset bound).
+  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2\.py$:
+    default: a2-1
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
@@ -132,6 +140,8 @@ runner_mapping:
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card/test_hisparse_(attention|integration|prefill_staging)\.py$:
+    default: a5-4
+  tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1

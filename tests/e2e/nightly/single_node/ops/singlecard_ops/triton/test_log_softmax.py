@@ -49,7 +49,7 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, num_logprobs):
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,
-        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
+        TOPK_BLOCK_SIZE=max(triton.next_power_of_2(num_logprobs), 2),
     )
     torch.npu.synchronize()
 

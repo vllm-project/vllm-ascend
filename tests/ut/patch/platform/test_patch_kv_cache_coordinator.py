@@ -272,11 +272,11 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
         kv_transfer_config=kv_transfer_config,
     )
     monkeypatch.setattr(
-        builder_module,
-        "_upstream_get_kv_cache_config_from_groups",
+        builder_module.DefaultKVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
         lambda *args, **kwargs: sentinel_config,
     )
-    result = builder_module.get_ascend_kv_cache_config_from_groups(vllm_config, [], 0)
+    result = builder_module.get_ascend_kv_cache_config_from_groups(vllm_config, [], num_blocks=0)
     # The builder owns every config it materializes, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
     assert result is sentinel_config

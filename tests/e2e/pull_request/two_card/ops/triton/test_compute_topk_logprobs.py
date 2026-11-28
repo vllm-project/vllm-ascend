@@ -4,7 +4,7 @@ import torch
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
+from vllm_ascend.worker.v2.sample.logprob import compute_topk_scores
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
     ],
 )
 def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
-    """Test compute_topk_logprobs for correctness of IDs, logprobs, and ranks.
+    """Test compute_topk_scores for correctness of IDs, logprobs, and ranks.
     Args:
         batch_size: Number of sequences in the batch
         vocab_size: Size of the vocabulary
@@ -37,7 +37,7 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     sampled_token_ids = torch.randint(0, vocab_size, (batch_size,), device=device, dtype=torch.int64)
 
     # ========== 2. Execute Triton implementation ==========
-    triton_output = compute_topk_logprobs(logits, num_logprobs, sampled_token_ids)
+    triton_output = compute_topk_scores(logits, num_logprobs, sampled_token_ids)
     torch.npu.synchronize()
 
     # ========== 3. Compute reference values using PyTorch ==========
@@ -90,7 +90,7 @@ def test_selected_token_rank_is_one_based():
         )
     ).to(torch.int64)
 
-    output = compute_topk_logprobs(logits, 0, sampled_token_ids)
+    output = compute_topk_scores(logits, 0, sampled_token_ids)
     torch.npu.synchronize()
 
     ranks = output.selected_token_ranks.cpu().tolist()

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import spec_step_seed
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -159,6 +160,7 @@ def _categorical_sample_kernel(
     logits_stride,
     expanded_idx_mapping_ptr,
     seeds_ptr,
+    draft_step_ptr,
     pos_ptr,
     temp_ptr,
     num_tokens,
@@ -170,6 +172,7 @@ def _categorical_sample_kernel(
     PADDED_NUM_BLOCKS: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
 ):
     worker_id = tl.program_id(0).to(tl.int64)
     num_workers = tl.num_programs(0).to(tl.int64)
@@ -215,6 +218,9 @@ def _categorical_sample_kernel(
         if IS_DRAFTING:
             DRAFT_NOISE_SALT: tl.constexpr = 1 << 30
             position += DRAFT_NOISE_SALT
+            if draft_step_ptr is not None:
+                step = tl.load(draft_step_ptr + token_idx) if PER_TOKEN_COL else tl.load(draft_step_ptr)
+                seed = spec_step_seed(seed, step)
         uniform = tl.max(
             tl.rand(tl.randint(seed, position), tl.arange(0, 1)).to(tl.float32),
             axis=0,
@@ -393,6 +399,7 @@ def _categorical_sample(
         logits.stride(0),
         expanded_idx_mapping,
         seed,
+        logits_cache_col if logits_cache is not None else None,
         pos,
         temperature,
         num_tokens,
@@ -404,6 +411,7 @@ def _categorical_sample(
         PADDED_NUM_BLOCKS=padded_num_blocks,
         APPLY_TEMPERATURE=apply_temperature,
         IS_DRAFTING=is_drafting,
+        PER_TOKEN_COL=per_token_col,
     )
     return sampled
 

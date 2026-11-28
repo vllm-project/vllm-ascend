@@ -1024,21 +1024,6 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     num_blocks = 3
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
-    monkeypatch.setattr(
-        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
-        lambda _config, value: value,
-    )
-    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
-        groups,
-        backing_size,
-    )
-    assert planned_num_blocks == num_blocks
-    kv_cache_config = KVCacheConfig(
-        num_blocks=planned_num_blocks,
-        kv_cache_tensors=descriptors,
-        kv_cache_groups=groups,
-    )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend)
         for name in (small_name, large_name, aliased_large_name, mtp_name)
@@ -1047,11 +1032,15 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context=layers),
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="deepseek_v4"),
             hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
+    kv_cache_config = _get_kv_cache_config_deepseek_v4_main(vllm_config, groups, num_blocks=num_blocks)
+    assert kv_cache_config.num_blocks == num_blocks
+    descriptors = kv_cache_config.kv_cache_tensors
     monkeypatch.setattr(
         attn_utils,
         "get_current_vllm_config",
