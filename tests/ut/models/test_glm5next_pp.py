@@ -108,7 +108,10 @@ def test_spec_decode_pp_embedding_is_loaded_by_target(monkeypatch, pp_rank, draf
                 num_nextn_predict_layers=0,
             )
         ),
-        parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        parallel_config=SimpleNamespace(
+            use_sequence_parallel_moe=False,
+            eplb_config=SimpleNamespace(num_redundant_experts=0),
+        ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
         speculative_config=(
             # v0.33.0 checks the method; the main pin checks these capabilities.

@@ -1,0 +1,11 @@
+pr: 23459
+entries:
+  - category: bugfix
+    text: >-
+      Fixed GLM-5.3-Flash speculative decoding losing most accepted draft tokens
+      when EPLB is enabled with redundant expert slots (`--enable-eplb` plus a
+      non-zero `--eplb-config.num_redundant_experts`, set explicitly or computed
+      automatically when the expert count is not divisible by the EP size).
+      Redundant expert slots are now loaded from the checkpoint for both the
+      target model and the MTP draft model.
+    model: glm-5.3-flash
