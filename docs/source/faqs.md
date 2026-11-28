@@ -148,13 +148,13 @@ For each release, we'll publish the performance test and accuracy test report in
 
 ### 11. How to fix the error "InvalidVersion" when using vllm-ascend?
 
-The problem is usually caused by installing a development or editable version of the vLLM package. vLLM Ascend uses the detected vLLM version to select version-specific code paths, so a development build based on a release may need to be identified by that release version. This can apply even when the development version is valid and no `InvalidVersion` error occurs. For example, if a vLLM 0.32.1 development build is based on vLLM 0.32.0 and the matching vLLM Ascend code expects the 0.32.0 APIs, set:
+This problem can occur when a development or editable build reports a valid version that differs from the vLLM source it was built from. vLLM Ascend uses the detected vLLM version to select version-specific code paths. For example, suppose the installed vLLM development build reports version `0.32.1`, but was built from the vLLM `0.32.0` source. To make vLLM Ascend select the compatibility path for the vLLM `0.32.0` APIs, set:
 
 ```bash
 export VLLM_VERSION=0.32.0
 ```
 
-This may also resolve import errors such as `No module named 'vllm.v1.core.kv_cache_planning'` when that module is not present in the vLLM source version you built. Set `VLLM_VERSION` to the release version your vLLM source is based on; it overrides version detection only and does not install or upgrade vLLM. See the [versioning policy](community/versioning_policy.md#backward-compatibility) for details.
+`VLLM_VERSION` overrides the vLLM version that vLLM Ascend uses for compatibility checks; it does not change the installed version of either package. This may also resolve import errors such as `No module named 'vllm.v1.core.kv_cache_planning'` when that module is not present in the vLLM source version you built. Set `VLLM_VERSION` to the release version that source is based on. See the [versioning policy](community/versioning_policy.md#backward-compatibility) for details.
 
 ### 12. How to handle the out-of-memory issue?
 
