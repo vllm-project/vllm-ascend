@@ -127,6 +127,18 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: Kimi-K2.6-w4a8-A3
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Kimi-K2.6-w4a8-A3.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
+      - name: kimi-k2.6_max_model_len
+        os: linux-aarch64-a3-800i-16
+        config_file_path: kimi-k2.6_max_model_len.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
+      - name: Kimi-K2.6-W4A8-PCP-DCP
+        os: linux-aarch64-a3-800i-8
+        config_file_path: Kimi-K2.6-W4A8-PCP-DCP.yaml
+        config_base_path: tests/SIT/cases/features/context_parallel
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
