@@ -5,11 +5,12 @@
 Constants, environment diagnostics, the stall watchdog, the leg context
 manager, the three measurement phases and the gated A/B runner live here.
 The per-backend test files import :func:`run` and call it with their backend;
-``test_qwen38_mooncake_pool_ab_a2.py`` is the driver shipped in this PR, and
-the memcache driver (``test_qwen38_memcache_pool_ab_a2.py``) lands once the
-loop-1 runner reserves the hugepages its local service needs. The memcache
-implementation below is therefore exercised only on demand
-(``QWEN38_POOL_ENABLE_MEMCACHE=1``) until that driver returns.
+``test_qwen38_memcache_pool_ab_a2.py`` is the driver shipped in this PR. This
+is the bring-up PR for the memcache scenarios on the dedicated a2-loop-1
+runner: it runs them by default so the loop device (raw UBS IO block node)
+and the host's hugepage reservation can be validated in CI; the mooncake
+driver ships in the sibling PR #21844. Use ``QWEN38_POOL_ENABLE_MEMCACHE=0``
+to skip the memcache scenarios on a host without the prerequisites.
 
 Environment knobs:
 
@@ -45,8 +46,9 @@ Environment knobs:
   set: a TP=1 layerwise save pre-allocates ~4.5GB for one 16128-token prefix;
 - ``KV_POOL_MEMCACHE_TIER3_ALLOW_TP1``: ``1`` runs the memcache tier-3 leg on
   TP=1 even when the measured DRAM tier is below 8GB;
-- ``QWEN38_POOL_ENABLE_MEMCACHE``: ``1`` un-parks the memcache scenarios (they
-  skip by default until the runner reserves hugepages);
+- ``QWEN38_POOL_ENABLE_MEMCACHE``: ``0`` skips the memcache scenarios (they run
+  by default in this bring-up PR; the runner prerequisites are probed and
+  reported before each leg starts);
 - ``QWEN38_POOL_DEVICE_ROCE``: ``1`` pins the mooncake legs to the device RoCE
   transport (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
   ``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
@@ -274,7 +276,7 @@ PERF_ATTEMPTS = int(os.environ.get("QWEN38_POOL_PERF_ATTEMPTS", "3"))
 # local service never starts, which reaches pytest only as an opaque "Engine core
 # initialization failed". Keep the memcache scenarios opt-in so such a slice
 # reports a skip with the reason instead of a failure.
-ENABLE_MEMCACHE = os.environ.get("QWEN38_POOL_ENABLE_MEMCACHE", "0") == "1"
+ENABLE_MEMCACHE = os.environ.get("QWEN38_POOL_ENABLE_MEMCACHE", "1") == "1"
 # memcache reports its init failures as an opaque "Engine core initialization
 # failed" while the reason (hybm / driver mf capability) only appears on stderr.
 # "error" keeps CI logs small; "debug" adds the configuration and start-up trace.
@@ -1452,24 +1454,16 @@ def run(backend: str, use_layerwise: bool) -> None:
     _apply_collective_if_env(case)
 
     if backend == "memcache" and not ENABLE_MEMCACHE:
-        # The memcache scenarios are parked until the loop-1 runner finishes
-        # stabilising: the job container still reports no reserved hugepages,
-        # and the hybm host-memory fabric then aborts the local service with
-        # ENOMEM whenever the pooled DRAM tier (4GB tier-2, 8GB tier-3) cannot
-        # be mmap'd (runs 45219536792, 45305264291, 45528263688, 45535186724;
-        # the scenarios passed on the same runner whenever the host happened to
-        # have the memory free, so this is infra, not the pool). Both scenarios
-        # pass on demand: single-scenario runs and 148/145 dev boxes all report
-        # full 16128-token hits and PASS verdicts. Re-enable by removing this
-        # skip once the runner reserves hugepages (nr_hugepages) or the node's
-        # free memory is stable.
-        pytest.skip(
-            "memcache scenarios are parked on this runner: the container reports "
-            "no reserved 2MB hugepages and the hybm local service aborts with "
-            "ENOMEM when the pooled DRAM tier cannot be mmap'd. Passes on demand "
-            "(dev boxes + single-scenario runs); re-enable once the runner "
-            "reserves hugepages."
-        )
+        # This bring-up PR runs the memcache scenarios by default; this skip is
+        # the opt-out for hosts that lack the prerequisites. The runners that
+        # matter are probed below and reported before anything fails: the UBS
+        # IO block device (the loop node the device plugin injects) and the
+        # host's 2MB hugepage reservation, which the hybm local service needs
+        # to mmap its pooled DRAM tier (4GB tier-2, 8GB tier-3). Without the
+        # reservation the service intermittently aborts with ENOMEM (runs
+        # 45219536792, 45305264291, 45528263688, 45535186724), while the same
+        # scenarios pass whenever the host has the memory free.
+        pytest.skip("memcache scenarios disabled via QWEN38_POOL_ENABLE_MEMCACHE=0")
 
     if (
         backend == "memcache"

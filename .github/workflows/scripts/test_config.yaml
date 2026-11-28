@@ -129,6 +129,10 @@ runner_mapping:
   # A2 mooncake KV-pool cases run on the shared a2-1 pool (NUMA-cpuset bound).
   tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2\.py$:
     default: a2-1
+  # A2 memcache KV-pool bring-up: needs the loop-1 runner's raw UBS IO device
+  # and the host's hugepage reservation. Must precede the one_card catch-all.
+  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_memcache_pool_ab_a2\.py$:
+    default: a2-loop-1
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
@@ -172,6 +176,11 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b1b3-1-hk-001
     count: 7
+  # Dedicated single-card A2 host for the memcache KV-pool bring-up (raw UBS IO
+  # loop device + hugepages).
+  a2-loop-1:
+    runner_label: linux-aarch64-a2b3-loop-1
+    count: 1
   a3-2:
     runner_label: linux-aarch64-a3-800i-2
     count: 5
