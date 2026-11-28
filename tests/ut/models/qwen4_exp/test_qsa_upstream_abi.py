@@ -13,8 +13,9 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
 from vllm.v1.worker.utils import AttentionGroup
 
+from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.qwen4_exp import model, qsa
+from vllm_ascend.models.qwen4_exp import gbsa, input_adapter, model, qsa
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -438,8 +439,11 @@ def cpu_token_to_req(monkeypatch):
     monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
 
 
-@pytest.mark.parametrize("full_graph, expected_rows", [(True, 56), (False, 52)])
-def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, expected_rows):
+@pytest.mark.parametrize("full_graph", [True, False])
+@pytest.mark.parametrize("live_reqs", [13, 14])
+def test_qsa_decode_maps_only_live_rows(cpu_token_to_req, full_graph, live_reqs):
+    live_tokens = live_reqs * 4
+    expected_rows = 56 if full_graph else live_tokens
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=14, max_num_batched_tokens=56),
@@ -467,9 +471,9 @@ def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, exp
     metadata = build_attn_metadata(
         attn_groups=[groups],
         num_reqs=14,
-        num_actual_reqs=13,
+        num_actual_reqs=live_reqs,
         num_tokens=56,
-        num_actual_tokens=52,
+        num_actual_tokens=live_tokens,
         query_start_loc_gpu=starts,
         query_start_loc_cpu=starts,
         max_query_len=4,
@@ -483,8 +487,14 @@ def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, exp
         skip_ring_state_update=False,
     )
     assert metadata["indexer"].num_actual_tokens == metadata["main"].num_actual_tokens == expected_rows
-    assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * 13 + [-1] * (expected_rows - 52)
-    assert metadata["other"].num_actual_tokens == 52
+    assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * live_reqs + [-1] * (
+        expected_rows - live_tokens
+    )
+    assert metadata["other"].num_actual_tokens == live_tokens
+    if live_reqs == 14 and not full_graph:
+        torch.testing.assert_close(metadata["main"].qsa_request_cu_q, starts.long())
+    else:
+        assert getattr(metadata["main"], "qsa_request_cu_q", None) is None
 
 
 @pytest.mark.parametrize("local_live_tokens", [0, 1, 2])
@@ -714,3 +724,60 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
     )
     assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
     assert not parent.state_dict()
+
+
+def test_packed_qsa_dispatch_consumes_prepared_request_metadata(monkeypatch):
+    starts = torch.tensor([0, 3, 5], dtype=torch.int32)
+    seq_lens = torch.tensor([6, 9], dtype=torch.int32)
+    pages = torch.tensor([[1], [0]], dtype=torch.int32)
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=starts,
+        query_start_loc_cpu=starts,
+        seq_lens=seq_lens,
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=3,
+        max_seq_len=9,
+        block_table_tensor=pages,
+        slot_mapping=torch.arange(5),
+        is_prefilling=torch.zeros(2, dtype=torch.bool),
+    )
+    builder = qsa.AscendQSAMetadataBuilder.__new__(qsa.AscendQSAMetadataBuilder)
+    main = builder.build(0, common)
+    raw = SimpleNamespace(
+        token_to_req=torch.tensor([0, 0, 0, 1, 1]),
+        logical_positions=torch.tensor([3, 4, 5, 7, 8]),
+        seq_lens=seq_lens,
+    )
+    layer = SimpleNamespace(
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=128,
+        indexer=SimpleNamespace(token_topk=2048, compress_ratio=4),
+        topk_indices_buffer=torch.zeros((5, 515), dtype=torch.int32),
+    )
+    query = torch.zeros(5, 2, 128, dtype=torch.bfloat16)
+    cache = torch.zeros(2, 128, 1, 128, dtype=query.dtype)
+    schedule = torch.tensor([17], dtype=torch.int32)
+    generate = Mock(return_value=schedule)
+    attention = Mock(return_value=(query, None))
+    monkeypatch.setattr(input_adapter, "generic_block_sparse_attention_metadata", generate)
+    monkeypatch.setattr(gbsa, "generic_block_sparse_attention", attention)
+    monkeypatch.setattr(gbsa, "prepare_qsa_gbsa_inputs", load_cpu_preparation())
+    adapter = input_adapter.Qwen4ExpPreparedInputAdapter(torch.nn.Module())
+    adapter._prepare_gbsa(layer, main, raw, full_graph=False, prepared_this_step={})
+    impl = qsa.AscendQSAImpl(2, 128, 128**-0.5, 1, "auto")
+    impl._dispatch_qsa(
+        layer, query, (cache, cache), main, torch.empty_like(query), raw.token_to_req, raw.logical_positions, seq_lens
+    )
+
+    generate.assert_called_once()
+    attention.assert_called_once()
+    prepared = generate.call_args.kwargs
+    executed = attention.call_args.kwargs
+    torch.testing.assert_close(prepared["cu_seqlens_q"], starts.long())
+    assert prepared["max_seqlen_q"] == 3
+    assert executed["cu_seqlens_q"] is prepared["cu_seqlens_q"]
+    assert executed["seqused_kv"] is prepared["seqused_kv"] is seq_lens
+    assert executed["block_table"] is pages
+    assert executed["metadata"] is schedule
