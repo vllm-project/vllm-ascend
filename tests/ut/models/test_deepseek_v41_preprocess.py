@@ -269,8 +269,90 @@ def test_preprocess_equivalence_and_stream_dependencies(
     query_done = trace[handoff - 1]
     assert query_done[:2] == ("main", "record")
     assert trace.index(("aux", "wait", query_done[2])) < trace.index(("aux", "kv", "norm"))
-    join = trace.index(("main", "join", "aux"))
     cache_on_main = a5_batch in {"prefill", "mixed", "dummy"}
     store = trace.index(("main" if cache_on_main else "aux", "cache", "scatter"))
-    assert (join < store) == cache_on_main
-    assert join < trace.index(("main", "rope", "apply"))
+    q_rope = trace.index(("main", "rope", "apply"))
+    if cache_on_main:
+        join = trace.index(("main", "join", "aux"))
+        assert join < store
+        assert join < q_rope
+    else:
+        swa_done = trace[store + 1]
+        assert swa_done[:2] == ("aux", "record")
+        join = trace.index(("main", "wait", swa_done[2]))
+        assert store < join
+        assert q_rope < join
+
+
+def test_swa_aux_vector_core_budget_and_stream_limit(monkeypatch):
+    from vllm_ascend.attention import dsa_v1
+    from vllm_ascend.ops.triton import dsv41_swa_rope, triton_utils
+
+    monkeypatch.setattr(triton_utils, "get_vectorcore_num", lambda: 40)
+    assert dsv41_swa_rope.swa_aux_vector_core_budget() == 8
+
+    monkeypatch.setattr(triton_utils, "get_vectorcore_num", lambda: 48)
+    assert dsv41_swa_rope.swa_aux_vector_core_budget() == 9
+
+    monkeypatch.setattr(triton_utils, "get_vectorcore_num", lambda: 12)
+    assert dsv41_swa_rope.swa_aux_vector_core_budget() == 4
+
+    monkeypatch.setattr(triton_utils, "get_vectorcore_num", lambda: 40)
+    calls: list[tuple[object, int, int]] = []
+    monkeypatch.setattr(
+        torch_npu.npu,
+        "set_stream_limit",
+        lambda stream, cube, vec: calls.append((stream, cube, vec)),
+        raising=False,
+    )
+    fake_stream = object()
+    monkeypatch.setattr(dsa_v1, "_LIMITED_AUX_STREAM_IDS", set())
+    assert dsa_v1._ensure_aux_stream_vector_limit(fake_stream) is fake_stream
+    assert dsa_v1._ensure_aux_stream_vector_limit(fake_stream) is fake_stream
+    assert calls == [(fake_stream, -1, 8)]
+
+    # Main stream (including distinct wrapper with same NPU stream identity) must never be throttled.
+    main_stream = SimpleNamespace(device_type=20, device_index=0, stream_id=101)
+    main_alias = SimpleNamespace(device_type=20, device_index=0, stream_id=101)
+    aux_stream = SimpleNamespace(device_type=20, device_index=0, stream_id=202)
+    aux_alias = SimpleNamespace(device_type=20, device_index=0, stream_id=202)
+    monkeypatch.setattr(torch_npu.npu, "current_stream", lambda: main_stream, raising=False)
+    monkeypatch.setattr(dsa_v1, "_LIMITED_AUX_STREAM_IDS", set())
+    calls.clear()
+    assert dsa_v1._ensure_aux_stream_vector_limit(main_stream) is main_stream
+    assert dsa_v1._ensure_aux_stream_vector_limit(main_alias) is main_alias
+    assert calls == []
+    assert dsa_v1._ensure_aux_stream_vector_limit(aux_stream) is aux_stream
+    assert dsa_v1._ensure_aux_stream_vector_limit(aux_alias) is aux_alias
+    assert calls == [(aux_stream, -1, 8)]
+
+
+def test_store_swa_with_rope_caps_persistent_grid(monkeypatch):
+    from vllm_ascend.ops.triton import dsv41_swa_rope
+
+    launched: list[tuple[int, ...]] = []
+
+    class _FakeKernel:
+        def __getitem__(self, grid):
+            launched.append(grid)
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(dsv41_swa_rope, "swa_aux_vector_core_budget", lambda: 8)
+    monkeypatch.setattr(dsv41_swa_rope, "_store_swa_with_rope_kernel", _FakeKernel())
+
+    for num_tokens, expected_grid in ((6, (6,)), (384, (8,))):
+        kv = torch.empty((num_tokens, 512), dtype=torch.bfloat16)
+        cos = torch.empty((num_tokens, 1, 1, 64), dtype=torch.float32)
+        sin = torch.empty((num_tokens, 1, 1, 64), dtype=torch.float32)
+        cache = torch.empty((16, 128, 1, 512), dtype=torch.bfloat16)
+        slots = torch.zeros((num_tokens, 2), dtype=torch.int32)
+        dsv41_swa_rope.store_swa_with_rope(
+            kv,
+            cos,
+            sin,
+            cache,
+            slots,
+            head_dim=512,
+            nope_head_dim=448,
+        )
+        assert launched[-1] == expected_grid
