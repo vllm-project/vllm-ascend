@@ -1,0 +1,56 @@
+meta:
+  title: Qwen3-0.6B
+  slug: qwen3-0.6b
+  provider: Qwen
+  description: Run the 0.6B dense Qwen3 text model on Ascend NPUs.
+  date_added: '2026-11-19'
+  date_updated: '2026-11-26'
+  tasks:
+    - text
+  hardware:
+    ascend_910b: supported
+    ascend_910c: verified
+model:
+  model_id: Qwen/Qwen3-0.6B
+  architecture: dense
+  parameter_count: 0.6B
+  context_length: 40960
+variants:
+  default:
+    precision: bf16
+    label: BF16 (Ascend)
+    vram_minimum_gb: 2
+    description: Original Qwen BF16 weights on Ascend.
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+    tp: 1
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main
+        docker_serve_command: vllm serve
+        extra_args: [--dtype, bfloat16]
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main-a3
+        docker_serve_command: vllm serve
+        extra_args: [--dtype, bfloat16]
+        install:
+          pip: false
+compatible_strategies:
+  - single_node_tp
+features:
+  tool_calling:
+    description: Enable automatic tool choice with the Hermes parser
+    args: [--enable-auto-tool-choice, --tool-call-parser, hermes]
+  reasoning:
+    description: Enable Qwen3 thinking mode with the Qwen3 reasoning parser
+    args: [--reasoning-parser, qwen3]
+guide: |
+  ## Ascend deployment
+
+  This configuration serves the original BF16 weights with one Ascend chip.
+  Use the listed vLLM Ascend nightly image for your hardware. The A3 configuration was smoke-tested with vLLM 0.33.0 and vLLM Ascend build `405617bae227` from the A3 nightly image, using the CANNLab CANN 9.3.0 runtime.
+  The recorded A3 test covers single-node BF16 TP1 serving (health, model listing, and chat responses). A2 and optional tool-calling, reasoning, long-context, KV-offload, and frontend configurations were not separately hardware-tested. The verified hardware badge does not extend this evidence to every selectable feature or topology.
+  See the [Qwen3 Dense tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-Dense.html) for the functional check, AIME 2025 accuracy example, and serving benchmarks.
