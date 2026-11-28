@@ -59,6 +59,7 @@ from .topk_buffer import share_topk_buffer
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
     from vllm.models.qwen4_exp.common.qsa_indexer import (
         QSAIndexerBackend,
         QSAIndexerMetadataBuilder,
@@ -501,7 +502,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         *,
         token_to_req: torch.Tensor,
@@ -531,7 +532,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
