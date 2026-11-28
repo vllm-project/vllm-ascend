@@ -20,6 +20,11 @@ import vllm_ascend.patch.platform.patch_dp_supervisor  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
+
+# Import before patch_balance_schedule: that module replaces the module-level
+# ``Scheduler`` symbol with ``BalanceScheduler``, and this patch must wrap the
+# upstream base class so every scheduler subclass inherits the fix.
+import vllm_ascend.patch.platform.patch_encoder_cache_free  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile

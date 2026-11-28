@@ -1,0 +1,9 @@
+pr: 23412
+entries:
+  - category: bugfix
+    text: >-
+      Multimodal requests no longer wait an extra scheduler step when the
+      encoder cache is full under async scheduling. Previously such requests
+      could be deferred or preempted even though the encoder inputs they needed
+      had already been consumed, adding a step of latency for image-heavy
+      workloads.

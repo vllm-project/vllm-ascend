@@ -141,6 +141,26 @@
 #       engine-core plugin interfaces, or equivalent dynamic intra-decoder DP
 #       load balancing that vllm-ascend can use without monkey-patching.
 #
+# ** 4a. File: platform/patch_encoder_cache_free.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
+#    Why:
+#       Upstream vLLM PR #68799 frees consumed encoder inputs when the
+#       scheduler advances after a scheduling step. vLLM main contains it, but
+#       the v0.34.0 release tag paired with this branch still frees them only
+#       in `update_from_output`. Under async scheduling that keeps the encoder
+#       cache occupied for an extra step and can delay or preempt multimodal
+#       requests when the cache is full.
+#    How:
+#       Wrap `_update_after_schedule` on the upstream base `Scheduler` so every
+#       scheduler subclass inherits the fix, and free each scheduled request's
+#       consumed encoder inputs after its scheduled tokens are accounted for.
+#       Skip the patch when vLLM main already contains the upstream change.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/68799
+#    Future Plan:
+#       Remove this patch when the supported vLLM release tag includes #68799.
+#
 # ** 5a. File: platform/patch_engine_core.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`

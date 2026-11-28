@@ -25,6 +25,12 @@ from vllm_ascend.core.recompute_scheduler import (
     _normalize_encoder_schedule_result,
 )
 from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+from vllm_ascend.utils import vllm_version_is
+
+# The encoder-free patch is installed only on vLLM v0.34.0. On the main lane
+# the scheduler still frees consumed encoder inputs in update_from_output, so
+# the intermediate cache-reference assertions differ by version.
+_SCHEDULE_FREE_ACTIVE = vllm_version_is("0.34.0")
 
 
 @pytest.fixture(autouse=True)
@@ -426,7 +432,10 @@ def test_waiting_multimodal_duplicate_cache_tracking():
 
     assert output.scheduled_encoder_inputs[request.request_id] == [0]
     manager = scheduler.encoder_cache_manager
-    assert manager.request_cached_ids[request.request_id] == {0, 1}
+    # v0.34.0 with the schedule-time free patch releases both occurrences
+    # immediately; without it the references stay until update_from_output.
+    expected_cached = set() if _SCHEDULE_FREE_ACTIVE else {0, 1}
+    assert manager.request_cached_ids.get(request.request_id, set()) == expected_cached
     assert manager.cpu_num_free_slots == 6
     # Diagnostic manager payload, not a field transported by native MRv2.
     output.ec_manager_metadata = manager.get_manager_metadata()
@@ -459,7 +468,13 @@ def test_running_multimodal_duplicate_cache_tracking():
     assert output.scheduled_encoder_inputs[request.request_id] == [1]
     allocate.assert_called_once_with(request, [1], [2])
     manager = scheduler.encoder_cache_manager
-    assert {1, 2} <= manager.request_cached_ids[request.request_id]
+    cached_input_ids = manager.request_cached_ids.get(request.request_id, set())
+    if _SCHEDULE_FREE_ACTIVE:
+        # Both placeholder ranges were consumed by this step, so the patched
+        # scheduler releases them before the step is dispatched.
+        assert cached_input_ids == set()
+    else:
+        assert {1, 2} <= cached_input_ids
     manager._check_invariant()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in manager.request_cached_ids
@@ -518,7 +533,13 @@ def test_release_encoder_contract_in_both_schedule_paths(monkeypatch, running):
         output = scheduler.schedule()
     assert output.scheduled_encoder_inputs[request.request_id] == ([1] if running else [0, 1])
     manager = scheduler.encoder_cache_manager
-    assert 1 in manager.request_cached_ids[request.request_id]
+    cached_input_ids = manager.request_cached_ids.get(request.request_id, set())
+    if _SCHEDULE_FREE_ACTIVE:
+        # The schedule-time free releases the consumed references before the
+        # step runs; the main lane keeps them until update_from_output.
+        assert cached_input_ids == set()
+    else:
+        assert 1 in cached_input_ids
     manager._check_invariant()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in manager.request_cached_ids
