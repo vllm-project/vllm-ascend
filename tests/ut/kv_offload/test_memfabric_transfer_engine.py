@@ -20,6 +20,7 @@ class _FakeTransDataOpType(Enum):
     SDMA = 1
     DEVICE_RDMA = 2
     DEVICE_URMA = 3
+    HOST_RDMA = 4
 
 
 def _fake_memfabric(raw_engine: MagicMock) -> ModuleType:
@@ -194,3 +195,86 @@ def test_memfabric_transfer_protocol_rejects_unknown_value():
 
     with pytest.raises(ValueError, match="Invalid MemFabric transfer_protocol"):
         manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="rocev2")
+
+
+def test_host_rdma_initialization_uses_local_roce_nic():
+    raw_engine = MagicMock()
+    raw_engine.initialize.return_value = 0
+    raw_engine.get_rpc_port.return_value = 23456
+    manager = GlobalMemfabricTE()
+    settings = dict(
+        role=MEMFABRIC_ROLE_DECODE,
+        device_id=3,
+        transfer_protocol=" HOST_RDMA ",
+        host_rdma_ip="192.0.2.10",
+        host_rdma_port_base=41000,
+    )
+    manager.configure(**settings)
+    manager.configure(**settings)
+    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
+        manager.get_transfer_engine("198.51.100.10")
+
+    assert manager.unique_id == "198.51.100.10:23456"
+    raw_engine.initialize.assert_called_once_with(
+        "tcp://198.51.100.10",
+        "198.51.100.10",
+        MEMFABRIC_ROLE_DECODE,
+        3,
+        store_server_role=MEMFABRIC_ROLE_PREFILL,
+        data_op_type=_FakeTransDataOpType.HOST_RDMA,
+        nic="tcp://192.0.2.10:41048",
+    )
+    with pytest.raises(RuntimeError, match="already configured"):
+        manager.configure(**(settings | {"host_rdma_port_base": 42000}))
+
+
+@pytest.mark.parametrize(
+    "ip,port,match",
+    [
+        (None, 41000, "explicit local IPv4"),
+        ("192.0.2.10", True, "integer HCOM base port"),
+        ("127.0.0.1", 41000, "Unusable host_rdma"),
+        ("192.0.2.10", 1023, "Unusable host_rdma"),
+        ("192.0.2.10", 64500, "Unusable host_rdma"),
+    ],
+)
+def test_host_rdma_rejects_invalid_local_endpoint(ip, port, match):
+    with pytest.raises(ValueError, match=match):
+        GlobalMemfabricTE().configure(
+            role=MEMFABRIC_ROLE_DECODE,
+            device_id=3,
+            transfer_protocol="host_rdma",
+            host_rdma_ip=ip,
+            host_rdma_port_base=port,
+        )
+
+
+def test_device_transport_rejects_host_rdma_endpoint():
+    with pytest.raises(ValueError, match="require explicit host_rdma"):
+        GlobalMemfabricTE().configure(
+            role=MEMFABRIC_ROLE_PREFILL,
+            device_id=0,
+            transfer_protocol="device_urma",
+            host_rdma_ip="192.0.2.10",
+            host_rdma_port_base=41000,
+        )
+
+
+def test_host_rdma_reports_sdk_without_protocol():
+    manager = GlobalMemfabricTE()
+    manager.configure(
+        role=MEMFABRIC_ROLE_DECODE,
+        device_id=0,
+        transfer_protocol="host_rdma",
+        host_rdma_ip="192.0.2.10",
+        host_rdma_port_base=41000,
+    )
+    raw_engine = MagicMock()
+    module = _fake_memfabric(raw_engine)
+    module.TransDataOpType = Enum("LegacyTransDataOpType", {"SDMA": 1})
+    with (
+        patch.dict(sys.modules, {"memfabric_hybrid": module}),
+        pytest.raises(ValueError, match="does not support host_rdma"),
+    ):
+        manager.get_transfer_engine("198.51.100.10")
+    raw_engine.initialize.assert_not_called()

@@ -2,3 +2,5 @@
 features:
   - Support pipeline-parallel Prefill and TP1 Prefill context parallelism for
     layerwise Mooncake MemFabric Push into Ascend HiSparse Decode.
+  - Support Mooncake MemFabric `host_rdma` with local RoCE endpoints and private
+    hugepage-backed Host KV for TP1 HiSparse Decode on Ascend 950PR.

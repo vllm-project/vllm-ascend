@@ -223,3 +223,31 @@ sends the ready layer from that slot and its WRITE completion gates slot
 reuse. Decode publishes its Host Source for Main KV and its NPU Indexer.
 With a shared Host pool only TP rank 0 publishes the Host Source. The normal
 Mooncake DONE path reports completion to the Decode scheduler.
+
+### Host RDMA on Ascend 950PR
+
+Use the following options in each Mooncake child's extra configuration to use
+MemFabric over Host RoCE. Keep `use_layerwise=true` for layerwise Push.
+
+```json
+{
+  "transfer_backend": "memfabric",
+  "memfabric_transfer_protocol": "host_rdma",
+  "host_rdma_ip": "192.0.2.10",
+  "host_rdma_port_base": 41000
+}
+```
+
+Replace the example address with the node's local RoCE IPv4 address on each
+endpoint. Choose an available HCOM base port. The connector adds
+`16 * device_id` to the base, and the SDK may add entity-rank and retry offsets.
+Set distinct base ports for colocated DP workers that see the same device
+index. The Mooncake side-channel address and `kv_port` still provide peer
+discovery.
+
+Use a MemFabric SDK with Host RDMA support for the selected transfer path and
+multi-peer HCOM sessions. Bulk Pull additionally needs SDK support for reading
+remote device memory directly into local Host memory. TP1 HiSparse Decode uses
+a private Host Source mapped from 2 MiB huge pages. Reserve enough huge pages
+on the Decode NUMA nodes for the sum of the configured `host_pool_gib` across
+the local replicas.

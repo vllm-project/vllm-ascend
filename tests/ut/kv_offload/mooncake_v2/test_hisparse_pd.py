@@ -20,6 +20,38 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import Moon
 from .helpers import make_full_spec
 
 
+@pytest.mark.parametrize(
+    "worker_cls,layerwise,store_role",
+    [(_HiSparsePDWorker, False, "Prefill"), (_MemFabricPushWorker, True, "Decode")],
+)
+def test_mooncake_memfabric_passes_host_rdma_endpoint(monkeypatch, worker_cls, layerwise, store_role):
+    worker = worker_cls.__new__(worker_cls)
+    worker.side_channel_host = "198.51.100.10"
+    worker.kv_transfer_config = NS(
+        is_kv_consumer=True,
+        kv_connector_extra_config={
+            "memfabric_transfer_protocol": "host_rdma",
+            "host_rdma_ip": "192.0.2.10",
+            "host_rdma_port_base": 41000,
+            "use_layerwise": layerwise,
+        },
+    )
+    engine = MagicMock()
+    monkeypatch.setattr(pull_worker, "global_memfabric_te", engine)
+    monkeypatch.setattr(torch.npu, "current_device", lambda: 2)
+
+    assert worker._get_transfer_engine(None) is engine.get_transfer_engine.return_value
+    engine.configure.assert_called_once_with(
+        role="Decode",
+        device_id=2,
+        transfer_protocol="host_rdma",
+        store_server_role=store_role,
+        host_rdma_ip="192.0.2.10",
+        host_rdma_port_base=41000,
+    )
+    engine.get_transfer_engine.assert_called_once_with("198.51.100.10")
+
+
 @pytest.mark.parametrize("shared,rank,expected", [(True, 0, [0, 1]), (True, 1, [1]), (False, 1, [0, 1])])
 def test_shared_host_is_imported_once_while_each_rank_keeps_indexer(monkeypatch, shared, rank, expected):
     source = torch.zeros((5, 1, 16, 8), dtype=torch.float16)
@@ -258,7 +290,12 @@ def test_memfabric_worker_configures_direct_engine(monkeypatch, extra, protocol,
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.global_memfabric_te") as engine:
         assert worker._get_transfer_engine(None) is engine.get_transfer_engine.return_value
         engine.configure.assert_called_once_with(
-            role=role, device_id=3, transfer_protocol=protocol, store_server_role=server_role
+            role=role,
+            device_id=3,
+            transfer_protocol=protocol,
+            store_server_role=server_role,
+            host_rdma_ip=None,
+            host_rdma_port_base=None,
         )
         engine.get_transfer_engine.assert_called_once_with("192.0.2.1")
 

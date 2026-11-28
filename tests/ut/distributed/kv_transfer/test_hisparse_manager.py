@@ -117,16 +117,17 @@ def test_existing_private_allocator_does_not_replace_core_shared_allocator(monke
 
 
 @pytest.mark.parametrize(
-    "connector, tp_size, shared",
+    "connector, tp_size, shared, protocol",
     [
-        ("HiSparseConnector", 2, True),
-        ("HiSparseConnector", 1, False),
-        ("MultiConnector", 2, True),
-        ("MultiConnector", 1, False),
+        ("HiSparseConnector", 2, True, None),
+        ("HiSparseConnector", 1, False, None),
+        ("MultiConnector", 2, True, None),
+        ("MultiConnector", 1, False, None),
+        ("MultiConnector", 1, False, " HOST_RDMA "),
     ],
 )
 def test_core_pool_plan_selects_memfabric_allocator(
-    monkeypatch, config, core_hisparse_backend, connector, tp_size, shared
+    monkeypatch, config, core_hisparse_backend, connector, tp_size, shared, protocol
 ):
     import vllm.config as core_config
     import vllm.distributed as distributed
@@ -137,6 +138,9 @@ def test_core_pool_plan_selects_memfabric_allocator(
     from vllm_ascend.hisparse.host_pool import AscendHiSparseOffloadManager
 
     config.kv_transfer_config.kv_connector = connector
+    if protocol is not None:
+        child = config.kv_transfer_config.kv_connector_extra_config["connectors"][1]
+        child["kv_connector_extra_config"]["memfabric_transfer_protocol"] = protocol
     config.parallel_config.tensor_parallel_size = config.parallel_config.world_size = tp_size
     config.model_config = NS(max_model_len=128)
     backend = AscendHiSparseBackend()
@@ -157,13 +161,15 @@ def test_core_pool_plan_selects_memfabric_allocator(
     tp_group = NS(rank_in_group=0)
 
     def allocate_shared(sizes, *, group):
+        assert protocol is None
         assert shared or connector == "MultiConnector"
         assert sizes == [64]
         assert group is (tp_group if shared else None)
         return region
 
-    def allocate_private(shape, dtype, *, memfabric):
-        assert connector == "HiSparseConnector"
+    def allocate_private(shape, dtype, *, memfabric=False, private_hugepages=False):
+        assert private_hugepages is (protocol is not None)
+        assert connector == "HiSparseConnector" or private_hugepages
         assert shape == (64,) and dtype == torch.int8 and not memfabric
         return backing
 
@@ -198,6 +204,19 @@ def test_manager_rejects_foreign_host_pool():
 
     with pytest.raises(RuntimeError, match="manager-owned"):
         AscendHiSparseOffloadManager.from_host_pool(NS(registered=torch.empty(1)))
+
+
+@pytest.mark.usefixtures("core_hisparse_backend")
+def test_host_rdma_reports_hugepage_reservation_failure(monkeypatch):
+    from vllm.v1.hisparse import runtime
+
+    def fail(size):
+        raise OSError("insufficient huge pages")
+
+    monkeypatch.setattr(runtime, "check_hisparse_host_memory", lambda size: None)
+    monkeypatch.setattr(host_pool, "_allocate_private_hugepages", fail)
+    with pytest.raises(RuntimeError, match="available 2 MiB huge pages"):
+        host_pool.AscendHiSparseOffloadManager(64, shared=False, private_hugepages=True)
 
 
 @pytest.mark.usefixtures("core_hisparse_backend")

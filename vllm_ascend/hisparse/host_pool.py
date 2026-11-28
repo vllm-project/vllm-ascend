@@ -11,8 +11,10 @@ Remove the allocation adapter when Core exposes a backend Host-allocation hook.
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import math
 import mmap
+import os
 from contextlib import ExitStack
 from functools import wraps
 from threading import Lock
@@ -27,9 +29,10 @@ if TYPE_CHECKING:
 _ACL_HOST_REGISTER_MAPPED = 0
 _ACL_HAC_AIV = 3
 _LEGACY_MEMFABRIC_POOL = Lock()
+_HUGEPAGE_BYTES = 2 << 20
 
 
-# shortcut: TransferEngine has process-lifetime MRs; retain shared owners until worker exit.
+# TransferEngine has process-lifetime MRs. Retain Host owners until worker exit.
 _shared_owners: list[torch.Tensor] = []
 
 
@@ -235,7 +238,25 @@ class MappedHostTensor:
         self.closed = True
 
 
-def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype, *, memfabric: bool = False) -> torch.Tensor:
+def _allocate_private_hugepages(size: int) -> torch.Tensor:
+    """Allocate one private, faulted-in Host source per Decode process."""
+    capacity = triton.cdiv(size, _HUGEPAGE_BYTES) * _HUGEPAGE_BYTES
+    flags = os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | os.MFD_HUGETLB | os.MFD_HUGE_2MB
+    fd = os.memfd_create("vllm-hisparse-private", flags)
+    try:
+        os.ftruncate(fd, capacity)
+        os.posix_fallocate(fd, 0, capacity)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL)
+        backing = mmap.mmap(fd, capacity, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+    finally:
+        os.close(fd)
+    # frombuffer keeps the mmap alive for the lifetime of the registered range.
+    return torch.frombuffer(backing, dtype=torch.uint8, count=capacity)
+
+
+def allocate_mapped_host(
+    shape: tuple[int, ...], dtype: torch.dtype, *, memfabric: bool = False, private_hugepages: bool = False
+) -> torch.Tensor:
     """Allocate page-locked, aligned storage for both DMA and AIV access."""
     count = math.prod(shape)
     nbytes = count * torch.empty((), dtype=dtype).element_size()
@@ -275,6 +296,9 @@ def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype, *, memfabri
                 raise RuntimeError("MemFabric did not provide a HiSparse device address")
             mapping = MappedHostTensor(raw, memfabric_device_ptr=device_ptr)
             mapping._memfabric_cleanup = cleanup.pop_all()
+    elif private_hugepages:
+        raw = _allocate_private_hugepages(allocated_bytes)
+        mapping = MappedHostTensor(raw)
     else:
         # Align a view of PTA's pinned allocation without creating a second pool.
         owner = torch.empty(allocated_bytes + mmap.PAGESIZE - 1, dtype=torch.uint8, pin_memory=True)
@@ -303,30 +327,45 @@ def _uses_memfabric(transfer: KVTransferConfig | None) -> bool:
     )
 
 
-def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
+def _memfabric_pd_config(transfer: KVTransferConfig | None) -> dict | None:
     if transfer is None or transfer.kv_connector != "MultiConnector":
-        return False
+        return None
     for child in (transfer.kv_connector_extra_config or {}).get("connectors", []):
         if child.get("kv_connector") != "MooncakeConnectorV2" or child.get("kv_role") not in ("kv_consumer", "kv_both"):
             continue
         extra = child.get("kv_connector_extra_config") or {}
         if extra.get("transfer_backend") == "memfabric":
-            return True
-    return False
+            return extra
+    return None
+
+
+def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
+    return _memfabric_pd_config(transfer) is not None
 
 
 class AscendHiSparseOffloadManager:
-    def __init__(self, size: int, *, shared: bool) -> None:
+    def __init__(self, size: int, *, shared: bool, private_hugepages: bool = False) -> None:
         from vllm.distributed import get_tp_group
 
         if size <= 0:
             raise ValueError("HiSparse Source must be nonempty")
         group = get_tp_group() if shared else None
-        region = MemFabricSharedHostRegion([size], group=group)
-        self.shared_region = region if group is not None else None
         self.is_host_writer = group is None or group.rank_in_group == 0
-        self.source = region.base_tensor[:size]
-        self.source._hisparse_registration = region.base_tensor._hisparse_registration
+        if private_hugepages:
+            from vllm.v1.hisparse.runtime import check_hisparse_host_memory
+
+            check_hisparse_host_memory(size)
+            self.shared_region = None
+            try:
+                self.source = allocate_mapped_host((size,), torch.int8, private_hugepages=True)
+            except OSError as exc:
+                raise RuntimeError("Host RDMA HiSparse requires available 2 MiB huge pages on Decode") from exc
+            _shared_owners.append(self.source)
+        else:
+            region = MemFabricSharedHostRegion([size], group=group)
+            self.shared_region = region if group is not None else None
+            self.source = region.base_tensor[:size]
+            self.source._hisparse_registration = region.base_tensor._hisparse_registration
         self.source._hisparse_registration.offload_manager = self
 
     @classmethod
@@ -373,13 +412,16 @@ def install() -> None:
     @wraps(original)
     def allocate(pool, size):
         shared = pool.kv_cache_config.hisparse_shared_host_pool
+        pd = _memfabric_pd_config(pool.vllm_config.kv_transfer_config)
         if (
             pool.backing is not None
             or not isinstance(get_hisparse_backend(), AscendHiSparseBackend)
-            or not (shared or uses_memfabric_pd(pool.vllm_config.kv_transfer_config))
+            or not (shared or pd is not None)
         ):
             return original(pool, size)
-        manager = AscendHiSparseOffloadManager(size, shared=shared)
+        protocol = pd.get("memfabric_transfer_protocol") if pd is not None else None
+        private_hugepages = not shared and isinstance(protocol, str) and protocol.strip().lower() == "host_rdma"
+        manager = AscendHiSparseOffloadManager(size, shared=shared, private_hugepages=private_hugepages)
         registration = manager.source._hisparse_registration
         registered = registration.tensor.view(torch.int8)
         registered._hisparse_registration = registration

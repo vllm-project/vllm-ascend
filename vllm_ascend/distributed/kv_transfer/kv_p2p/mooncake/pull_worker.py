@@ -1618,6 +1618,8 @@ class _MemFabricTransport(MooncakeBaseConnectorWorker):
             role=MEMFABRIC_ROLE_DECODE if self.kv_transfer_config.is_kv_consumer else MEMFABRIC_ROLE_PREFILL,
             device_id=torch.npu.current_device(),
             transfer_protocol=protocol,
+            host_rdma_ip=extra.get("host_rdma_ip"),
+            host_rdma_port_base=extra.get("host_rdma_port_base"),
             # The target of the transfer publishes the MemFabric session.
             store_server_role=MEMFABRIC_ROLE_DECODE if extra.get("use_layerwise") else MEMFABRIC_ROLE_PREFILL,
         )
