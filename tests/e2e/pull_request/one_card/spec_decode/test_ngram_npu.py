@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm import SamplingParams
+from vllm.config import SpeculativeConfig
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -58,7 +59,7 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
     history_before = token_ids.clone()
     lengths_before = total_len.clone()
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
+        speculative_config=SpeculativeConfig(
             method="ngram_gpu",
             prompt_lookup_min=2,
             prompt_lookup_max=5,

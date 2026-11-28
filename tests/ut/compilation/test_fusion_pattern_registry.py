@@ -46,7 +46,12 @@ def _base_pattern_module():
     if stubbed:
         sys.modules["npugraph_ex"] = MagicMock()
     try:
-        yield importlib.import_module("vllm_ascend.compilation.passes.base_pattern")
+        base = importlib.import_module("vllm_ascend.compilation.passes.base_pattern")
+        # These tests exercise the real per-matcher registry, not the installed
+        # backend's process-global registry shared by otherwise identical dummies.
+        with MonkeyPatch.context() as patched:
+            patched.setattr(base.nge, "register_replacement", MagicMock())
+            yield base
     finally:
         if stubbed:
             sys.modules.pop("npugraph_ex", None)
