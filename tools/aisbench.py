@@ -393,9 +393,15 @@ class AisbenchRunner:
             raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = self._result_path(
-            re.search(r"Performance Result files located in (.*)", self.result_line).group(1).removesuffix(".")
-        )
+        match = re.search(r"Performance Result files located in (.*)", self.result_line)
+        if match is None:
+            raise RuntimeError(f"Failed to parse performance result path from aisbench output: {self.result_line!r}")
+        result_dir = self._result_path(match.group(1).removesuffix("."))
+        if not result_dir.is_dir():
+            raise RuntimeError(
+                f"Performance result directory not found: {result_dir!r} "
+                f"(parsed from aisbench output: {self.result_line!r})"
+            )
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}.json")
@@ -406,7 +412,14 @@ class AisbenchRunner:
         self.result = [self.result_csv, self.result_json]
 
     def _get_result_accuracy(self):
-        acc_file = self._result_path(re.search(r"write csv to (.*)", self.result_line).group(1))
+        match = re.search(r"write csv to (.*)", self.result_line)
+        if match is None:
+            raise RuntimeError(f"Failed to parse accuracy csv path from aisbench output: {self.result_line!r}")
+        acc_file = self._result_path(match.group(1))
+        if not acc_file.is_file():
+            raise RuntimeError(
+                f"Accuracy csv file not found: {acc_file!r} (parsed from aisbench output: {self.result_line!r})"
+            )
         df = pd.read_csv(acc_file)
         self.result = float(df.iloc[0, -1])
 

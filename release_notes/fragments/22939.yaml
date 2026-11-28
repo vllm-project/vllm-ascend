@@ -1,0 +1,4 @@
+pr: 22939
+entries:
+  - category: bugfix
+    text: Improved error reporting in the aisbench benchmark tool. Unrecognized aisbench output now fails with a descriptive RuntimeError naming the offending output instead of an AttributeError crash.
