@@ -26,6 +26,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa
+    import vllm_ascend.patch.worker.patch_kda_checkpoint  # noqa
 
 
 # Apply before model construction on every device, including 310P.

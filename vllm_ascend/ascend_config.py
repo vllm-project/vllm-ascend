@@ -743,6 +743,9 @@ class AscendConfig:
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
+    # Switches KDA checkpoint-bearing prefill to Triton recurrence; keep opt-in
+    # until cold/cache-hit equivalence and performance are qualified on NPUs.
+    kda_internal_prefill_checkpoints: bool = False
 
     # ---- private derived state (init=False) ----
     _megamoe_supported: bool = dataclasses.field(default=False, init=False, repr=False)

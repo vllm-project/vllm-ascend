@@ -40,7 +40,15 @@ from vllm_ascend.distributed.parallel_state import get_qkv_iproj_tp_group
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTP
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+from vllm_ascend.ops.kda_checkpoint import (
+    build_kda_kv_cache_spec,
+    initialize_kda_checkpoints,
+    kda_prefill_checkpoint_alignment,
+    prepare_kda_checkpoint_prefill_inputs,
+    run_kda_checkpoint_prefill,
+)
 from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
@@ -541,6 +549,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # eager KDA op between captured segments. Other modes can return the
         # op's own output and skip a hidden_size-wide copy per layer.
         self._needs_output_buffer = compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+        initialize_kda_checkpoints(self, vllm_config)
 
     @torch.inference_mode()
     def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
@@ -573,6 +582,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             loaded_weight = loaded_weight.view(1, 1, -1, 1)
         shard_size = param.shape[2]
         default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * shard_size, shard_size))
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        if getattr(self, "_ascend_internal_checkpoint_enabled", False):
+            return kda_prefill_checkpoint_alignment("triton")
+        return None
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return self.get_prefill_checkpoint_alignment()
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+        return build_kda_kv_cache_spec(self, vllm_config, super().get_kv_cache_spec(vllm_config))
 
     def get_attn_backend(self):
         return Glm5NextGDNHostMetadataBackend
@@ -731,6 +751,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache
+        raw_conv_state = conv_state
         # AscendC consumes [cache, state_len, dim]. Preserve the original storage.
         # Layout is process-global and resolved once at init (see __init__).
         if self._conv_state_dim_first:
@@ -792,8 +813,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
         q_ns = k_ns = v_ns = None
+        raw_qkv_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
+            raw_qkv_ns = qkv_ns
             conv_meta = attn_metadata_narrowed.non_spec_prefill_metadata.causal_conv1d
             qkv_ns = causal_conv1d(
                 qkv_ns,
@@ -893,20 +916,64 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 output_buffer=core_attn_out if direct_output else None,
             )
         if metadata.num_prefills > 0:
-            prefill_output = chunk_kda(
-                q_ns[:, decode_tokens:],
-                k_ns[:, decode_tokens:],
-                v_ns[:, decode_tokens:],
-                g1_ns[:, decode_tokens:],
-                beta_ns[:, decode_tokens:],
-                recurrent_state,
-                metadata.prefill_state_indices,
-                metadata.prefill_has_initial_state,
-                metadata.non_spec_prefill_metadata.chunk,
-                self.A_log,
-                self.dt_bias,
-                lower_bound,
-            )
+            checkpoint = getattr(metadata, "checkpoint", None)
+            if checkpoint is not None and getattr(self, "_ascend_internal_checkpoint_enabled", False):
+                state_indices, has_initial_state, cu_seqlens, checkpoint, prebuilt_meta = (
+                    prepare_kda_checkpoint_prefill_inputs(
+                        state_indices=metadata.prefill_state_indices,
+                        has_initial_state=metadata.prefill_has_initial_state,
+                        prefill_query_start_loc=metadata.prefill_query_start_loc,
+                        chunk_meta=metadata.non_spec_prefill_metadata.chunk,
+                        checkpoint=checkpoint,
+                    )
+                )
+                initial_state = (
+                    gather_initial_states(
+                        recurrent_state,
+                        state_indices,
+                        has_initial_state,
+                    )
+                    .float()
+                    .contiguous()
+                )
+                assert raw_qkv_ns is not None
+                prefill_output, final_state = run_kda_checkpoint_prefill(
+                    exporter=self._checkpoint_exporter,
+                    checkpoint_spec=self._triton_checkpoint_spec,
+                    checkpoint=checkpoint,
+                    q=q_ns[:, decode_tokens:],
+                    k=k_ns[:, decode_tokens:],
+                    v=v_ns[:, decode_tokens:],
+                    raw_gate=g1_ns[:, decode_tokens:],
+                    raw_beta=beta_ns[:, decode_tokens:],
+                    a_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    initial_state=initial_state,
+                    cu_seqlens=cu_seqlens,
+                    raw_qkv=raw_qkv_ns[decode_tokens:],
+                    conv_state=raw_conv_state,
+                    conv_state_is_dim_first=self._conv_state_dim_first,
+                    recurrent_state=recurrent_state,
+                    safe_gate=True,
+                    lower_bound=lower_bound,
+                    prebuilt_meta=prebuilt_meta,
+                )
+                scatter_states(recurrent_state, final_state.to(recurrent_state.dtype), state_indices)
+            else:
+                prefill_output = chunk_kda(
+                    q_ns[:, decode_tokens:],
+                    k_ns[:, decode_tokens:],
+                    v_ns[:, decode_tokens:],
+                    g1_ns[:, decode_tokens:],
+                    beta_ns[:, decode_tokens:],
+                    recurrent_state,
+                    metadata.prefill_state_indices,
+                    metadata.prefill_has_initial_state,
+                    metadata.non_spec_prefill_metadata.chunk,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                )
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
         if direct_output:

@@ -14,6 +14,9 @@ from vllm.triton_utils import tl, triton
 
 from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices, prepare_chunk_offsets
 
+_SUPPORTED_INDEX_DTYPES = (torch.int32, torch.int64)
+_SUPPORTED_CHECKPOINT_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
 # KDA-specific h-state backend. It uses [V, K] state layout and vector gate
 # semantics, so it is exposed through a distinct entry point.
 
@@ -24,6 +27,7 @@ from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices, prepare_chunk_offsets
         "USE_GK": lambda args: args["gk"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+        "STORE_CHECKPOINT": lambda args: args["checkpoint_state"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
@@ -45,6 +49,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
     ht,
     cu_seqlens,
     chunk_offsets,
+    checkpoint_state,
+    checkpoint_offsets,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -56,6 +62,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STORE_CHECKPOINT: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -94,10 +101,14 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
     stride_h = H * V * K
     stride_k = Hg * K
     stride_w = H * K
+    i_nh_64 = i_nh.to(tl.int64)
     if USE_INITIAL_STATE:
-        h0 = h0 + i_nh * V * K
+        h0 = h0 + i_nh_64 * V * K
     if STORE_FINAL_STATE:
-        ht = ht + i_nh * V * K
+        ht = ht + i_nh_64 * V * K
+    if STORE_CHECKPOINT:
+        hc = checkpoint_state + i_nh_64 * V * K
+        checkpoint_offset = tl.load(checkpoint_offsets + i_n).to(tl.int64)
 
     # load initial state
     if USE_INITIAL_STATE:
@@ -115,6 +126,30 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
 
     # main recurrence
     for i_t in range(NT):
+        if STORE_CHECKPOINT:
+            if checkpoint_offset > 0 and i_t.to(tl.int64) * BT == checkpoint_offset:
+                # Round through the checkpoint buffer dtype so cold execution
+                # and warm prefix-cache resume share identical state values.
+                p_hc1 = tl.make_block_ptr(hc, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+                b_h1_ckpt = b_h1.to(p_hc1.dtype.element_ty)
+                tl.store(p_hc1, b_h1_ckpt, boundary_check=(0, 1))
+                b_h1 = b_h1_ckpt.to(tl.float32)
+                if K > 64:
+                    p_hc2 = tl.make_block_ptr(hc, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0))
+                    b_h2_ckpt = b_h2.to(p_hc2.dtype.element_ty)
+                    tl.store(p_hc2, b_h2_ckpt, boundary_check=(0, 1))
+                    b_h2 = b_h2_ckpt.to(tl.float32)
+                if K > 128:
+                    p_hc3 = tl.make_block_ptr(hc, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0))
+                    b_h3_ckpt = b_h3.to(p_hc3.dtype.element_ty)
+                    tl.store(p_hc3, b_h3_ckpt, boundary_check=(0, 1))
+                    b_h3 = b_h3_ckpt.to(tl.float32)
+                if K > 192:
+                    p_hc4 = tl.make_block_ptr(hc, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0))
+                    b_h4_ckpt = b_h4.to(p_hc4.dtype.element_ty)
+                    tl.store(p_hc4, b_h4_ckpt, boundary_check=(0, 1))
+                    b_h4 = b_h4_ckpt.to(tl.float32)
+
         p_h1 = tl.make_block_ptr(
             h + i_t.to(tl.int64) * stride_h,
             (V, K),
@@ -280,9 +315,22 @@ def chunk_gated_delta_rule_fwd_h_kda(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
+    if k.device.type != "npu":
+        raise ValueError(f"k must be on an NPU device, got {k.device}.")
+    if w.device != k.device or u.device != k.device:
+        raise ValueError(f"w and u must be on the same device as k ({k.device}), got w={w.device}, u={u.device}.")
+    if cu_seqlens is not None:
+        if cu_seqlens.device != k.device:
+            raise ValueError(f"cu_seqlens must be on {k.device}, got {cu_seqlens.device}.")
+        if cu_seqlens.dtype not in _SUPPORTED_INDEX_DTYPES:
+            raise ValueError(f"cu_seqlens must have int32 or int64 dtype, got {cu_seqlens.dtype}.")
+        cu_seqlens = cu_seqlens.contiguous()
+
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
     BT = chunk_size
@@ -297,6 +345,28 @@ def chunk_gated_delta_rule_fwd_h_kda(
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
+    if (checkpoint_state is None) != (checkpoint_offsets is None):
+        raise ValueError("checkpoint_state and checkpoint_offsets must be provided together.")
+    if checkpoint_state is not None:
+        assert checkpoint_offsets is not None
+        if checkpoint_state.device != k.device:
+            raise ValueError(f"checkpoint_state must be on {k.device}, got {checkpoint_state.device}.")
+        if checkpoint_offsets.device != k.device:
+            raise ValueError(f"checkpoint_offsets must be on {k.device}, got {checkpoint_offsets.device}.")
+        if checkpoint_state.dtype not in _SUPPORTED_CHECKPOINT_DTYPES:
+            raise ValueError(
+                f"checkpoint_state must have float16, bfloat16, or float32 dtype, got {checkpoint_state.dtype}."
+            )
+        if checkpoint_offsets.dtype not in _SUPPORTED_INDEX_DTYPES:
+            raise ValueError(f"checkpoint_offsets must have int32 or int64 dtype, got {checkpoint_offsets.dtype}.")
+        expected_shape = (N, H, V, K)
+        if tuple(checkpoint_state.shape) != expected_shape:
+            raise ValueError(f"checkpoint_state must have shape {expected_shape}, got {tuple(checkpoint_state.shape)}.")
+        if not checkpoint_state.is_contiguous():
+            raise ValueError("checkpoint_state must be contiguous.")
+        checkpoint_offsets = checkpoint_offsets.contiguous()
+        if tuple(checkpoint_offsets.shape) != (N,):
+            raise ValueError(f"checkpoint_offsets must have shape {(N,)}, got {tuple(checkpoint_offsets.shape)}.")
 
     h = k.new_empty(B, NT, H, V, K)
     final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
@@ -318,6 +388,8 @@ def chunk_gated_delta_rule_fwd_h_kda(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
         T=T,
         H=H,
         Hg=Hg,

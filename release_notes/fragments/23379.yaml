@@ -1,0 +1,11 @@
+pr: 23379
+entries:
+  - category: performance
+    text: >-
+      Added opt-in internal prefill checkpoints for KDA linear-attention models on
+      Atlas A2 and Atlas A3 (`--additional-config '{"kda_internal_prefill_checkpoints": true}'`,
+      default `false`, requires `--mamba-cache-mode align` with prefix caching and
+      excludes KV transfer and RecoverSSM). When enabled, long-prompt prefills
+      snapshot intermediate recurrent states so subsequent prefix-cache hits skip
+      redundant prefill recomputation.
+    hardware: [A2, A3]

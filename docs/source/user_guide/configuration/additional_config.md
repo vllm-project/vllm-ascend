@@ -75,6 +75,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+| `kda_internal_prefill_checkpoints`  | bool | `False` | Experimental opt-in for KDA internal prefill checkpoints during `mamba_cache_mode="align"`. Switches checkpoint-bearing KDA prefills from AscendC to the Triton recurrence (`STORE_CHECKPOINT=True`). |
 
 The details of each configuration option are as follows:
 
@@ -386,6 +387,16 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
     }
 }
 ```
+
+## KDA internal prefill checkpoints
+
+Enable with `--additional-config '{"kda_internal_prefill_checkpoints": true}'` (default `False`).
+Requires `--mamba-cache-mode align`, `prefill_context_parallel_size=1`, `use_ubatching=False`,
+`head_dim <= 256`, `conv_size >= 2`, `local_num_heads > 0`, and `MambaSpec` checkpoint support;
+KV transfer, RecoverSSM (`use_replayssm`/`use_kda_recoverssm`), and legacy EAGLE block dropping without lookahead hashes stay on existing scheduling.
+When opted in, checkpoint-bearing prefills run `chunk_kda_with_fused_gate` (`STORE_CHECKPOINT=True`),
+round exported checkpoints to `state_dtypes[1]`, and reserve a `[max_num_seqs, local_num_heads, head_dim, head_dim]`
+workspace per layer.
 
 ## GDN internal prefill checkpoints
 

@@ -1532,3 +1532,22 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** File: worker/patch_kda_checkpoint.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk_kda_with_fused_gate`
+#      `vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn.KimiGatedDeltaNetAttention`
+#    Why:
+#       Legacy upstream vLLM revisions lack Triton KDA checkpoint export support on
+#       KimiGatedDeltaNetAttention and chunk_kda_with_fused_gate, and must clear
+#       non-zero MambaSpec checkpoint fields when checkpointing is opted out or disabled.
+#    How:
+#       Under `HAS_TRITON` in `vllm_ascend/patch/worker/__init__.py`, install a
+#       ContextVar-scoped wrapper on `chunk_kda_with_fused_gate` and wrap
+#       `KimiGatedDeltaNetAttention` (`__init__`, `get_kv_cache_spec`, alignment getters,
+#       and `_forward` inside `@eager_break_during_capture`) via `ops/kda_checkpoint.py`.
+#    Related PR (if no, explain why):
+#       No upstream PR cited; adapts Ascend Triton KDA prefill checkpointing for legacy vLLM pins.
+#    Future Plan:
+#       Remove once all supported vLLM pins natively include Triton KDA checkpoint export.
+#

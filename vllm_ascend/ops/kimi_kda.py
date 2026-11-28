@@ -17,6 +17,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
@@ -50,6 +51,13 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_checkpoint import (
+    build_kda_kv_cache_spec,
+    initialize_kda_checkpoints,
+    kda_prefill_checkpoint_alignment,
+    prepare_kda_checkpoint_prefill_inputs,
+    run_kda_checkpoint_prefill,
+)
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -392,6 +400,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return result
 
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
+        initialize_kda_checkpoints(self, vllm_config)
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        if getattr(self, "_ascend_internal_checkpoint_enabled", False):
+            return kda_prefill_checkpoint_alignment("triton")
+        return None
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config) -> int | None:
+        return self.get_prefill_checkpoint_alignment()
+
+    def get_kv_cache_spec(self, vllm_config):
+        return build_kda_kv_cache_spec(self, vllm_config, super().get_kv_cache_spec(vllm_config))
 
     def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
         """Bind every KDA head parameter and cache to the same TP x PCP shard."""
@@ -789,6 +809,59 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             num_accepted_tokens=num_accepted_tokens,
         )
 
+    def _run_prefill_with_checkpoint(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        raw_gate: torch.Tensor,
+        beta: torch.Tensor,
+        raw_qkv: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        prefill_query_start_loc: torch.Tensor | None,
+        prebuilt_metadata,
+        checkpoint,
+    ) -> torch.Tensor:
+        if has_initial_state is None:
+            raise ValueError("KDA prefill requires has_initial_state metadata")
+        state_indices, has_initial_state, cu_seqlens, checkpoint, prebuilt_meta = prepare_kda_checkpoint_prefill_inputs(
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
+            prefill_query_start_loc=prefill_query_start_loc,
+            chunk_meta=prebuilt_metadata,
+            checkpoint=checkpoint,
+        )
+        state_copy = getattr(self, "_ascend_kda_state_copy", None)
+        if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
+            raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+        initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
+        output, final_state = run_kda_checkpoint_prefill(
+            exporter=self._checkpoint_exporter,
+            checkpoint_spec=self._triton_checkpoint_spec,
+            checkpoint=checkpoint,
+            q=q,
+            k=k,
+            v=v,
+            raw_gate=raw_gate,
+            beta=beta,
+            a_log=self.A_log,
+            dt_bias=self.dt_bias,
+            initial_state=initial_state_vk,
+            cu_seqlens=cu_seqlens,
+            raw_qkv=raw_qkv,
+            conv_state=conv_state,
+            conv_state_is_dim_first=is_conv_state_dim_first(),
+            recurrent_state=recurrent_state,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound,
+            prebuilt_meta=prebuilt_meta,
+        )
+        state_copy.scatter(recurrent_state, final_state, state_indices)
+        return output
+
     def _run_prefill(
         self,
         q: torch.Tensor,
@@ -895,6 +968,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
 
         conv_state, recurrent_state = self.kv_cache
+        raw_conv_state = conv_state
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
@@ -986,6 +1060,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
+            raw_mixed_non_spec = mixed_non_spec
             if attn_metadata.num_prefills > 0:
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
                 assert prefill_meta is not None
@@ -1052,17 +1127,36 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 assert attn_metadata.prefill_has_initial_state is not None
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
                 assert prefill_meta is not None
-                core_prefill = self._run_prefill(
-                    q_non_spec,
-                    k_non_spec,
-                    v_non_spec,
-                    raw_gate_non_spec,
-                    beta_non_spec,
-                    recurrent_state,
-                    attn_metadata.prefill_state_indices,
-                    attn_metadata.prefill_has_initial_state,
-                    prefill_meta.chunk,
-                )
+                checkpoint = getattr(attn_metadata, "checkpoint", None)
+                if checkpoint is not None and getattr(self, "_ascend_internal_checkpoint_enabled", False):
+                    raw_qkv_prefill = raw_mixed_non_spec[num_decode_tokens:] if split_non_spec else raw_mixed_non_spec
+                    core_prefill = self._run_prefill_with_checkpoint(
+                        q_non_spec,
+                        k_non_spec,
+                        v_non_spec,
+                        raw_gate_non_spec,
+                        beta_non_spec,
+                        raw_qkv_prefill,
+                        raw_conv_state,
+                        recurrent_state,
+                        attn_metadata.prefill_state_indices,
+                        attn_metadata.prefill_has_initial_state,
+                        attn_metadata.prefill_query_start_loc,
+                        prefill_meta.chunk,
+                        checkpoint,
+                    )
+                else:
+                    core_prefill = self._run_prefill(
+                        q_non_spec,
+                        k_non_spec,
+                        v_non_spec,
+                        raw_gate_non_spec,
+                        beta_non_spec,
+                        recurrent_state,
+                        attn_metadata.prefill_state_indices,
+                        attn_metadata.prefill_has_initial_state,
+                        prefill_meta.chunk,
+                    )
                 core_non_spec = (
                     torch.cat((core_decode, core_prefill), dim=1) if core_decode is not None else core_prefill
                 )
