@@ -21,12 +21,14 @@ graph-mode specifics that the integration review called out:
 import pytest
 import torch
 
+from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.dspark_swa_indices import (
     build_dspark_swa_slot_indices_triton,
     dspark_swa_indices_supported,
 )
+from vllm_ascend.ops.triton.spec_decode.dspark_swa_indices import build_dspark_swa_indices_triton
 
 DEVICE = "npu"
 
@@ -754,3 +756,241 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
 )
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_rejects_unsupported_output_views():
+    """Same-shape strided views must be rejected before launch.
+
+    The kernel stores indices with a fixed row stride of index_width and
+    lengths with unit stride, so a strided view passed as either output
+    would be written with the wrong layout; the wrapper must fail loudly
+    instead, including when reached through the shared builder that the
+    V4.1 draft metadata builder calls.
+    """
+    num_speculative_tokens = 4
+    window_size = 944
+    num_query_per_req = num_speculative_tokens + 1
+    num_reqs = 2
+    num_tokens = num_reqs * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    qsl = torch.tensor([0, 5, 10], dtype=torch.int64, device=DEVICE)
+    seq_lens = torch.tensor([600, 800], dtype=torch.int64, device=DEVICE)
+
+    strided_indices = torch.empty(
+        (num_tokens, 1, index_width * 2), dtype=torch.int32, device=DEVICE
+    )[:, :, :index_width]
+    assert strided_indices.shape == (num_tokens, 1, index_width)
+    assert not strided_indices.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices_triton(
+            qsl, seq_lens, num_tokens, index_width, window_size, indices_output=strided_indices
+        )
+
+    # A (1, T).t() view is is_contiguous() == True (size-1 dims are stride
+    # indifferent), so slice a row pair instead to get a genuinely strided
+    # (T, 1) view the kernel's unit-stride stores would corrupt.
+    strided_lengths = torch.empty((num_tokens, 1, 2), dtype=torch.int32, device=DEVICE)[:, :, 0]
+    assert strided_lengths.shape == (num_tokens, 1)
+    assert not strided_lengths.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices_triton(
+            qsl, seq_lens, num_tokens, index_width, window_size, lengths_output=strided_lengths
+        )
+
+    with pytest.raises(ValueError, match="int32"):
+        build_dspark_swa_indices_triton(
+            qsl,
+            seq_lens,
+            num_tokens,
+            index_width,
+            window_size,
+            lengths_output=torch.empty((num_tokens, 1), dtype=torch.int64, device=DEVICE),
+        )
+
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices(
+            torch.tensor([[1, 2]], dtype=torch.int32, device=DEVICE),
+            num_speculative_tokens,
+            window_size,
+            128,
+            qsl,
+            seq_lens,
+            num_tokens,
+            index_width=index_width,
+            indices_output=strided_indices,
+            use_logical_indices=True,
+        )
+
+
+def _logical_ref(qsl, seq_lens, num_tokens, index_width, window_size):
+    """Eager logical reference at full capacity, padded rows included.
+
+    Rows beyond the active tokens (dead requests in the padded query_start_loc)
+    must come out as -1 slots / 0 lengths, mirroring the kernel's pad-row
+    cleanup that a captured graph relies on.
+    """
+    query_lens = qsl[1:] - qsl[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - window_size).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+    cols = torch.arange(index_width, device=qsl.device)
+    pos = (start_pos[:, None] + cols[None, :]).to(torch.int32)
+    slots = torch.where(cols[None, :] < visible_lens[:, None], pos, torch.full_like(pos, -1))
+    slots = slots.repeat_interleave(query_lens, dim=0).unsqueeze(1)
+    lens = visible_lens.repeat_interleave(query_lens, dim=0).to(torch.int32).unsqueeze(1)
+    pad = num_tokens - slots.shape[0]
+    if pad > 0:
+        slots = torch.cat([slots, torch.full((pad, 1, index_width), -1, dtype=torch.int32, device=qsl.device)])
+        lens = torch.cat([lens, torch.zeros((pad, 1), dtype=torch.int32, device=qsl.device)])
+    return slots, lens
+
+
+def _set_layout(qsl_buf, seq_buf, num_active, seq_values, query_len_per_req):
+    """Rewrite device metadata in place for a new step layout.
+
+    ``query_start_loc`` is padded with repeated end offsets and dead
+    ``seq_lens`` entries carry garbage, like the production buffers whose
+    stale tails the kernel must never leak into the outputs.
+    """
+    ends = [query_len_per_req * i for i in range(1, num_active + 1)]
+    qsl_buf[0] = 0
+    qsl_buf[1 : num_active + 1] = torch.tensor(ends, dtype=qsl_buf.dtype, device=qsl_buf.device)
+    qsl_buf[num_active + 1 :] = ends[-1]
+    seq_buf[:num_active] = torch.tensor(seq_values, dtype=seq_buf.dtype, device=seq_buf.device)
+    seq_buf[num_active:] = 777
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_writes_persistent_outputs():
+    """The spec-decode logical variant writes caller-provided buffers in place.
+
+    The V4.1 draft metadata builder hands persistent views as
+    indices_output/lengths_output so ACL graph capture retains stable
+    addresses across per-step rebuilds; the kernel must overwrite the
+    sentinel-filled rows and return the same tensor objects instead of
+    freshly allocated temporaries.
+    """
+
+    num_reqs, num_speculative_tokens = 4, 4
+    window_size = 944
+    query_start_loc, seq_lens, _ = _make_inputs(num_reqs, num_speculative_tokens, window_size, 128, 2000, 32)
+    query_start_loc = query_start_loc.to(DEVICE)
+    seq_lens = seq_lens.to(DEVICE)
+
+    num_query_per_req = num_speculative_tokens + 1
+    T_active = num_reqs * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+
+    slots_buf = torch.full((T_active, 1, index_width), -7, dtype=torch.int32, device=DEVICE)
+    lens_buf = torch.full((T_active, 1), -7, dtype=torch.int32, device=DEVICE)
+
+    out_slots, out_lens = build_dspark_swa_indices_triton(
+        query_start_loc,
+        seq_lens,
+        T_active,
+        index_width,
+        window_size,
+        indices_output=slots_buf,
+        lengths_output=lens_buf,
+    )
+    assert out_slots is slots_buf
+    assert out_lens is lens_buf
+
+    # Eager logical reference: request-local positions, -1 padding.
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - window_size).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+    cols = torch.arange(index_width, device=DEVICE)
+    pos = (start_pos[:, None, None] + cols[None, None, :]).to(torch.int32)
+    ref_slots = torch.where(
+        cols[None, None, :] < visible_lens[:, None, None],
+        pos,
+        torch.full_like(pos, -1),
+    ).repeat_interleave(query_lens, dim=0)
+    ref_lens = visible_lens.repeat_interleave(query_lens, dim=0).to(torch.int32).unsqueeze(1)
+    torch.testing.assert_close(out_slots, ref_slots)
+    torch.testing.assert_close(out_lens, ref_lens)
+    assert not torch.equal(slots_buf, torch.full_like(slots_buf, -7)), "sentinel rows survived the rebuild"
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_graph_replay_rebuilds_new_layouts():
+    """Capture once, then replay with different layouts into the same buffers.
+
+    The FULL draft graph reuses the persistent buffers captured at max
+    capacity: every replay must rewrite indices AND lengths for the new
+    request lengths and the new number of active rows, and must clear the
+    rows beyond the active region (-1 slots / 0 lengths) instead of leaving
+    stale values from a previous step.
+    """
+
+    num_speculative_tokens = 4
+    window_size = 944
+    num_query_per_req = num_speculative_tokens + 1
+    num_reqs_cap = 4
+    T_cap = num_reqs_cap * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+
+    qsl_buf = torch.zeros(num_reqs_cap + 1, dtype=torch.int64, device=DEVICE)
+    seq_buf = torch.zeros(num_reqs_cap, dtype=torch.int64, device=DEVICE)
+    slots_buf = torch.full((T_cap, 1, index_width), -7, dtype=torch.int32, device=DEVICE)
+    lens_buf = torch.full((T_cap, 1), -7, dtype=torch.int32, device=DEVICE)
+
+    def launch():
+        return build_dspark_swa_indices_triton(
+            qsl_buf,
+            seq_buf,
+            T_cap,
+            index_width,
+            window_size,
+            indices_output=slots_buf,
+            lengths_output=lens_buf,
+        )
+
+    _set_layout(qsl_buf, seq_buf, num_reqs_cap, [1200, 1500, 800, 944], num_query_per_req)
+    for _ in range(3):
+        launch()  # warmup compiles the kernel outside capture
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        out_slots, out_lens = launch()
+    assert out_slots is slots_buf
+    assert out_lens is lens_buf
+
+    layouts = [
+        # (num_active_reqs, seq_lens contents) — capture layout first, then
+        # shrinks and re-grows with different request lengths, like a draft
+        # batch whose request count and lengths change per step.
+        (num_reqs_cap, [1200, 1500, 800, 944]),
+        (2, [1000, 1300]),
+        (3, [1100, 900, 1400]),
+    ]
+    for num_active, seq_values in layouts:
+        # Poison with sentinels so any row the replay fails to rewrite for
+        # the new layout is detected as stale, not silently matched.
+        slots_buf.fill_(-7)
+        lens_buf.fill_(-7)
+        torch.npu.synchronize()
+        _set_layout(qsl_buf, seq_buf, num_active, seq_values, num_query_per_req)
+        graph.replay()
+        torch.npu.synchronize()
+
+        ref_slots, ref_lens = _logical_ref(qsl_buf, seq_buf, T_cap, index_width, window_size)
+        torch.testing.assert_close(slots_buf, ref_slots)
+        torch.testing.assert_close(lens_buf, ref_lens)
+        pad_rows = T_cap - num_active * num_query_per_req
+        if pad_rows > 0:
+            assert (lens_buf[-pad_rows:] == 0).all(), "padded rows must carry zero lengths"
+            assert (slots_buf[-pad_rows:] == -1).all(), "padded rows must carry -1 slots"
