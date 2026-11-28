@@ -1,0 +1,10 @@
+pr: 23570
+entries:
+  - category: feature
+    text: >-
+      --kv-cache-dtype int8 now resolves to static or dynamic mode from the checkpoint
+      itself: checkpoints carrying recipe-calibrated C8 scales keep the existing static
+      path unchanged; plain bf16/fp16 checkpoints resolve to dynamic mode and raise a
+      NotImplementedError pointing at the RFC instead of the previous misleading
+      "quantized weights are required" error. The runtime quantization path is not
+      enabled in this build yet.

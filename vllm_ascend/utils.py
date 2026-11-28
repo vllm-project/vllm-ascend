@@ -1549,6 +1549,29 @@ def is_hif8_c8_kv_quant(vllm_config: VllmConfig) -> bool:
     return cache_config is not None and cache_config.cache_dtype == HIF8_C8_KV_CACHE_DTYPE
 
 
+def resolve_kv_cache_int8_mode(vllm_config) -> str | None:
+    """Resolve how ``--kv-cache-dtype int8`` should be honored on Ascend.
+
+    Per RFC https://github.com/vllm-project/vllm-ascend/issues/21732 the same
+    flag covers two implementations, selected by what the checkpoint carries:
+
+    * ``"static"``  -- recipe-calibrated C8 scales shipped in the checkpoint;
+      the existing static C8 attention path is kept byte-for-byte.
+    * ``"dynamic"`` -- plain checkpoint without C8 scales; K/V are quantized
+      at runtime with per-token scales, no weight regeneration required.
+
+    Returns ``None`` when the cache dtype is not int8, or the config object is
+    only partially constructed (e.g. SimpleNamespace in unit tests).
+    """
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if cache_config is None or getattr(cache_config, "cache_dtype", "auto") != "int8":
+        return None
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is not None and getattr(quant_config, "enable_c8_quant", False):
+        return "static"
+    return "dynamic"
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.

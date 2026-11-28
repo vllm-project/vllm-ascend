@@ -24,6 +24,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -68,6 +69,8 @@ SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+
+logger = init_logger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -586,20 +589,47 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        # RFC #21732: how ``--kv-cache-dtype int8`` is honored for this checkpoint.
+        # "static"  -> the checkpoint carries recipe-calibrated C8 scales; the
+        #              existing AscendC8AttentionBackendImpl path is unchanged.
+        # "dynamic" -> plain checkpoint; K/V are quantized at runtime with
+        #              per-token scales and no checkpoint regeneration.
+        # None      -> the cache dtype is not int8 (or fp16/bf16/fp32 passthrough).
+        self.kv_int8_mode: str | None = None
+        self.kv_cache_dtype_skip_layers = {
+            str(layer)
+            for layer in (getattr(self.vllm_config.cache_config, "kv_cache_dtype_skip_layers", None) or [])
+        }
         # Note: Some embedding model weights are in float32 format.
         if self.kv_cache_dtype in [torch.float16, torch.bfloat16, torch.float32]:
             self.enable_c8_quant = False
         else:
-            from vllm_ascend.utils import is_c8_mxfp_kv_quant
+            from vllm_ascend.utils import is_c8_mxfp_kv_quant, resolve_kv_cache_int8_mode
 
             # MXFP8 is switched on by --kv-cache-dtype itself, so it must
             # not be gated by the recipe-derived C8 flag.
             if not self.enable_c8_quant and not is_c8_mxfp_kv_quant(self.vllm_config):
+                self.kv_int8_mode = resolve_kv_cache_int8_mode(self.vllm_config)
+                if self.kv_int8_mode == "dynamic":
+                    logger.info_once(
+                        "KV cache dtype int8 with no recipe C8 scales: resolved to dynamic mode "
+                        "(runtime K/V quantization, no checkpoint regeneration). Effective skip "
+                        "layers: %s.",
+                        sorted(self.kv_cache_dtype_skip_layers) or "none",
+                    )
+                    raise NotImplementedError(
+                        "Dynamic INT8 KV cache enablement is landing under RFC "
+                        "https://github.com/vllm-project/vllm-ascend/issues/21732. Mode "
+                        "resolution and skip-layer plumbing are in place; the runtime "
+                        "quantization path is not enabled in this build yet."
+                    )
                 raise ValueError(
                     "The current GQA‑related models adopt static quantization. "
                     "KV quantization is configured via `--kv‑cache‑dtype` upon service startup, "
                     "and the corresponding quantized weights are required."
                 )
+            if kv_cache_dtype == "int8":
+                self.kv_int8_mode = "static"
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
