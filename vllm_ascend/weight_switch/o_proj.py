@@ -117,8 +117,13 @@ class ParallelOProjection:
             self._prepare_exchange_buffers(vllm_config)
         self.enabled = True
 
-    def enable(self) -> None:
-        if not self.enabled or self._weight_switch_enabled:
+    def enable(self, *, refresh_gather_inputs: bool = False) -> None:
+        if not self.enabled:
+            return
+        if self._weight_switch_enabled:
+            if refresh_gather_inputs:
+                for layer, method, state in self._require_weight_switches():
+                    method.refresh_weight_switch_gather_inputs(layer, state)
             return
         self._weight_switch_states = tuple(
             (

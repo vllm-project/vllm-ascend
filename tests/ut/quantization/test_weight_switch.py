@@ -664,3 +664,71 @@ def test_parallel_projection_can_enable_cloned_legacy_weights_without_load_shard
     assert base.o_proj.weight.data_ptr() == state.gather_parts["weight"].local_tensor.data_ptr()
     projection.enable()
     assert projection._weight_switch_states[0][2] is state
+
+
+def test_communication_copies_are_prepared_once_and_reused() -> None:
+    layer = _input_sharded_layer()
+    method = _TestLinearMethod()
+    config = _weight_switch_config()
+    with patch.object(method, "_prepare_weight_switch_gather_input", side_effect=lambda t, dim: t.clone()) as prepare:
+        state = method.enable_weight_switch(layer, config)
+        assert prepare.call_count == 2
+        cached = state.gather_parts["weight"].gather_input
+        assert cached.data_ptr() != layer.weight.data_ptr()
+        with patch("vllm_ascend.distributed.utils.all_gather_async", return_value=(None, None)) as gather:
+            for _ in range(3):
+                method.all_gather_weight(state, config)
+        assert prepare.call_count == 2
+        assert gather.call_args_list[0].args[0] is cached
+        assert gather.call_args_list[2].args[0] is cached
+        assert gather.call_args_list[4].args[0] is cached
+
+
+def test_refresh_updates_cached_values_without_changing_cache_addresses() -> None:
+    layer = _input_sharded_layer()
+    method = _TestLinearMethod()
+    with patch.object(method, "_prepare_weight_switch_gather_input", side_effect=lambda t, dim: t.clone()):
+        state = method.enable_weight_switch(layer, _weight_switch_config())
+        pointer = state.gather_parts["weight"].gather_input.data_ptr()
+        layer.weight = layer.weight + 100
+        layer.weight_scale = layer.weight_scale + 7
+        method.refresh_weight_switch_gather_inputs(layer, state)
+    part = state.gather_parts["weight"]
+    assert part.gather_input.data_ptr() == pointer
+    assert part.local_tensor.data_ptr() == layer.weight.data_ptr()
+    torch.testing.assert_close(part.gather_input, layer.weight)
+    torch.testing.assert_close(state.gather_parts["weight_scale"].gather_input, layer.weight_scale)
+
+
+def test_refresh_rejects_pending_collectives_and_changed_shapes() -> None:
+    layer = _input_sharded_layer()
+    method = _TestLinearMethod()
+    state = method.enable_weight_switch(layer, _weight_switch_config())
+    state.handles.append(MagicMock())
+    with pytest.raises(RuntimeError, match="pending"):
+        method.refresh_weight_switch_gather_inputs(layer, state)
+    state.handles.clear()
+    layer.weight = torch.empty(5, 3)
+    with pytest.raises(RuntimeError, match="changed layout"):
+        method.refresh_weight_switch_gather_inputs(layer, state)
+
+
+def test_projection_refreshes_communication_cache_only_after_weight_loading() -> None:
+    with patch.object(WeightSwitchMixin, "_prepare_weight_switch_gather_input", side_effect=lambda t, dim: t.clone()):
+        projection = _parallel_projection()
+        layer, method, state = projection._weight_switch_states[0]
+        cache = state.gather_parts["weight"].gather_input
+        old_values = cache.clone()
+        with torch.no_grad():
+            layer.weight.add_(10)
+        with patch.object(
+            method, "refresh_weight_switch_gather_inputs", wraps=method.refresh_weight_switch_gather_inputs
+        ) as refresh:
+            with projection.batch(needs_global_metadata=True, has_prefill=True):
+                pass
+            refresh.assert_not_called()
+            assert torch.equal(cache, old_values)
+            projection.enable(refresh_gather_inputs=True)
+            refresh.assert_called_once_with(layer, state)
+        assert state.gather_parts["weight"].gather_input is cache
+        torch.testing.assert_close(cache, layer.weight)

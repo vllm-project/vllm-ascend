@@ -1136,7 +1136,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.indexer.process_weights_after_loading()
 
         if self._parallel_o_proj is not None:
-            self._parallel_o_proj.enable()
+            self._parallel_o_proj.enable(refresh_gather_inputs=True)
 
         self._load_hif8_quant_scales()
 
