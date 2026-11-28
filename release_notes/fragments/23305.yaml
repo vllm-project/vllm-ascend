@@ -1,0 +1,10 @@
+pr: "<PR_NUMBER>"
+entries:
+  - category: bugfix
+    text: >
+      The UVA availability check read PYTORCH_NPU_ALLOC_CONF with a dict default
+      (``os.environ.get(..., {})``), which only worked because ``"..." in {}``
+      is always False, and matched ``pinned_mem_register:True`` with a
+      case-sensitive substring. Fixed to a string default with case-insensitive
+      matching, so a user writing ``pinned_mem_register:true`` (lowercase) is no
+      longer silently treated as UVA-unavailable.

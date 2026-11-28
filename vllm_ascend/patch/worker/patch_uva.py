@@ -51,7 +51,7 @@ def is_uva_available() -> bool:
     # Thus UVA is disabled for affected versions.
     # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
     return (
-        "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
+        "pinned_mem_register:true" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", "").lower()
         and check_triton_ascend_version_valid()
     )
 
