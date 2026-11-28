@@ -1,0 +1,4 @@
+pr: 23689
+entries:
+  - category: performance
+    text: GLM-5.3-Flash on Ascend A5 replays eligible single-request HiSparse MTP5 cold-page decode in FULL ACLGraph, reducing time per output token.
