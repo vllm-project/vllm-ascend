@@ -289,7 +289,7 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
         "ExpertOffloadMoEMethod",
         {"apply"},
         Parent,
-        {"_EXTRA_CTX": context},
+        {"_EXTRA_CTX": context, "DecodeSplitPlan": type("DecodeSplitPlan", (), {})},
     )
     binding = Mock()
     binding.prepare.return_value = view, physical, slot_comm

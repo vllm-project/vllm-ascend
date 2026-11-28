@@ -15,13 +15,16 @@ from transformers import Qwen3MoeConfig
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig, set_current_vllm_config
 
+from vllm_ascend.distributed.expert_transfer.conditional_expert_graph import ConditionalExpertGraph
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import (
     ExpertOffloadManager,
     HostExpertStore,
     LayerOffloadBinding,
     MXFPExpertAdapter,
 )
+from vllm_ascend.distributed.expert_transfer.expert_offload_method import ExpertOffloadMoEMethod
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import ExpertMapBuffer, get_manager
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDSDynamicFusedMoEMethod,
     maybe_normalize_mxfp_scale_layout,
@@ -85,7 +88,7 @@ def _gemm(x, weight, scale, counts):
         per_token_scale_dtype=torch_npu.float8_e8m0fnu,
         split_item=2,
         group_type=0,
-        group_list=torch.tensor(counts, dtype=torch.int64, device=x.device),
+        group_list=torch.as_tensor(counts, dtype=torch.int64, device=x.device),
         group_list_type=0,
         x_dtype=torch.float8_e4m3fn,
         weight_dtype=torch_npu.float4_e2m1fn_x2,
@@ -130,24 +133,6 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
     with torch.npu.stream(capture_stream):
         manager.capture_stream(None)
 
-    def forward(weights, scale, hidden, counts):
-        quantized, token_scale = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn)
-        return torch_npu.npu_grouped_matmul(
-            x=[quantized],
-            weight=[weights],
-            scale=None,
-            antiquant_scale=[scale],
-            per_token_scale=[maybe_normalize_mxfp_scale_layout(token_scale)],
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-            split_item=2,
-            group_type=0,
-            group_list=counts,
-            group_list_type=0,
-            x_dtype=torch.float8_e4m3fn,
-            weight_dtype=torch_npu.float4_e2m1fn_x2,
-            output_dtype=torch.bfloat16,
-        )[0]
-
     try:
         # Initialize kernel/workspace paths before capture.
         _gemm(x, resident["w13_weight"], resident["w13_weight_scale"], [1, 1])
@@ -156,9 +141,9 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
         with torch.npu.graph(graph, stream=capture_stream):
             physical = binding.prepare_graph(ids)
             counts = (torch.arange(2, device=device) >= physical.reshape(-1)[0]).to(torch.int64)
-            gate, up = forward(resident["w13_weight"], resident["w13_weight_scale"], x, counts).chunk(2, -1)
+            gate, up = _gemm(x, resident["w13_weight"], resident["w13_weight_scale"], counts).chunk(2, -1)
             hidden = torch.nn.functional.silu(gate) * up
-            output = forward(resident["w2_weight"], resident["w2_weight_scale"], hidden, counts)
+            output = _gemm(hidden, resident["w2_weight"], resident["w2_weight_scale"], counts)
         for expert_id in (5, 3, 1, 4, 5):
             ids.fill_(expert_id)
             graph.replay()  # Replay on the default stream, not capture_stream.
@@ -172,6 +157,88 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
             assert {name: tensor.data_ptr() for name, tensor in resident.items()} == pointers
     finally:
         manager.unsubscribe_graph_streams()
+
+
+@torch.inference_mode()
+def test_conditional_acl_graph_replay_selects_and_resets_branch(expert_bundle, monkeypatch):
+    adapter, store = expert_bundle
+    device = torch.device("npu:0")
+    torch.npu.set_device(device)
+    manager = ExpertOffloadManager()
+    manager.device = device
+    manager.graph_load_stream = torch.npu.Stream(device=device)
+    conditional = ConditionalExpertGraph.create_if_supported(device)
+    assert conditional is not None, "The conditional replay test requires CANN conditional graph support"
+    manager.conditional_graph = conditional
+
+    resident = adapter.load_experts(store, [0], device)
+    full = SimpleNamespace(**adapter.load_experts(store, range(NUM_EXPERTS), device))
+    store.convert_to_native_layout(adapter, device)
+    binding = object.__new__(LayerOffloadBinding)
+    binding.__dict__.update(
+        manager=manager,
+        adapter=adapter,
+        host_store=store,
+        resident=resident,
+        slot_to_expert=(0,),
+        num_experts=NUM_EXPERTS,
+        num_slots=1,
+        top_k=1,
+        device=device,
+        topk_ids_cpu=torch.empty(2, dtype=torch.int32, device="cpu", pin_memory=True),
+        mapping=ExpertMapBuffer(NUM_EXPERTS, device),
+        _pending_graph_experts=None,
+    )
+
+    second_group_calls = 0
+    update_second_group = binding.update_second_graph_group
+
+    def count_second_group(arg):
+        nonlocal second_group_calls
+        second_group_calls += 1
+        update_second_group(arg)
+
+    monkeypatch.setattr(binding, "update_second_graph_group", count_second_group)
+
+    def apply_mxfp(layer, x, topk_weights, topk_ids, **_kwargs):
+        # Each token has one route, in expert order for both the full reference
+        # and the single-slot resident groups.
+        experts = torch.arange(layer.w13_weight.shape[0], device=x.device).unsqueeze(1)
+        counts = (experts >= topk_ids.reshape(1, -1)).sum(dim=1)
+        gate, up = _gemm(x, layer.w13_weight, layer.w13_weight_scale, counts).chunk(2, -1)
+        hidden = torch.nn.functional.silu(gate) * up
+        output = _gemm(hidden, layer.w2_weight, layer.w2_weight_scale, counts)
+        return FusedExpertsResult(routed_out=output * topk_weights)
+
+    method = object.__new__(ExpertOffloadMoEMethod)
+    method.quant_method = SimpleNamespace(apply=apply_mxfp)
+    layer = SimpleNamespace(ascend_pertoken_scale=None, ascend_mc2_mask=None)
+    x = torch.randn(2, HIDDEN_SIZE, generator=torch.Generator().manual_seed(7)).to(device, dtype=torch.bfloat16)
+    weights = torch.ones(2, 1, device=device, dtype=x.dtype)
+    ids = torch.zeros(2, 1, device=device, dtype=torch.int32)
+    capture_stream = torch.npu.Stream(device=device)
+    graph = torch.npu.NPUGraph()
+    try:
+        manager.subscribe_graph_stream(capture_stream)
+        manager.subscribe_graph_stream(conditional.capture_stream)
+        resident_view = SimpleNamespace(**resident)
+        apply_mxfp(resident_view, x, weights, ids)
+        apply_mxfp(resident_view, x[:1], weights[:1], ids[:1])
+        torch.npu.synchronize()
+        with torch.npu.graph(graph, stream=capture_stream):
+            output = method._apply_decode_graph(binding, layer, x, weights, ids).routed_out
+
+        for routes, expected_calls in (((2, 2), 0), ((1, 3), 1), ((4, 4), 0)):
+            ids.copy_(torch.tensor(routes, device=device, dtype=ids.dtype).view_as(ids))
+            second_group_calls = 0
+            graph.replay()
+            torch.npu.current_stream().synchronize()
+            assert second_group_calls == expected_calls
+            expected = apply_mxfp(full, x, weights, ids).routed_out
+            torch.testing.assert_close(output, expected, rtol=1e-3, atol=1e-3)
+    finally:
+        manager.unsubscribe_graph_streams()
+        graph.reset()
 
 
 class _ExpertOffloadAudit(TypedDict):
@@ -324,8 +391,8 @@ def _generate_batches(llm, batches):
 
 def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_checkpoint):
     """A different model name must pass the same loader/layout contract end to end."""
-    prompts = [[2 + (offset + index) % 200 for index in range(40)] for offset in range(3)]
-    batches = [[prompts[0]], prompts[:2], prompts, [prompts[1]]]
+    prompts = [[2 + (offset + index) % 200 for index in range(40)] for offset in range(5)]
+    batches = [[prompts[0]], prompts[:2], prompts[:3], prompts, [prompts[1]]]
     common = dict(
         model=tiny_checkpoint,
         skip_tokenizer_init=True,
@@ -334,8 +401,8 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
         quantization="ascend",
         async_scheduling=False,
         max_model_len=128,
-        max_num_seqs=4,
-        max_num_batched_tokens=128,
+        max_num_seqs=5,
+        max_num_batched_tokens=256,
         kv_cache_memory_bytes=32 * 1024 * 1024,
         enable_prefix_caching=False,
         seed=17,
@@ -343,19 +410,20 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
     llm = LLM(
         **common,
         additional_config={"expert_offload_config": {"enabled": True, "num_device_experts": 4}},
-        compilation_config={"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]},
+        compilation_config={"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 5]},
     )
     try:
         before = llm.collective_rpc("expert_offload_test_audit", args=("install",))[0]
         actual = _generate_batches(llm, batches)
         after = llm.collective_rpc("expert_offload_test_audit", args=("snapshot",))[0]
         assert before["loaded"] and len(before["layer_names"]) == 2
-        assert set(before["capture_sizes"]) == {1, 2}
+        assert set(before["capture_sizes"]) == {1, 2, 4}
         assert after["addresses"] == before["addresses"]
         assert after["replays"] > 0
         assert any(step["prefill"] for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "FULL" for step in after["steps"])
-        assert any(not step["prefill"] and step["mode"] == "NONE" and step["tokens"] > 2 for step in after["steps"])
+        assert any(not step["prefill"] and step["mode"] == "FULL" and step["tokens"] > 2 for step in after["steps"])
+        assert any(not step["prefill"] and step["mode"] == "NONE" and step["tokens"] == 5 for step in after["steps"])
         closed = llm.collective_rpc("expert_offload_test_audit", args=("close",))[0]
         assert closed["released"]
     finally:
