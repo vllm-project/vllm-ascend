@@ -1,0 +1,4 @@
+pr: 19290
+entries:
+  - category: bugfix
+    text: Fixed dynamic EPLB on Model Runner V1 moving expert weights for every planned placement, including plans the EPLB policy had marked as unchanged; placements the policy reports as not worth applying are now skipped.
