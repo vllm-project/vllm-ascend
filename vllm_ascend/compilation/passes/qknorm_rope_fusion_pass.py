@@ -33,7 +33,24 @@ if HAS_TRITON:
     from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_vnorm import qkv_rmsnorm_rope_vnorm_fits_ub
 
 
-class QKNormRopeFusionPattern(BasePattern):
+class _QKVLayoutPattern(BasePattern):
+    def pattern_key(self) -> str:
+        return (
+            f"{super().pattern_key()}_{self.dtype}_hd{self.head_dim}"
+            f"_nh{self.num_heads}_nkv{self.num_kv_heads}_rd{self.rope_dim}"
+        )
+
+    def _split_qkv(self, qkv: torch.Tensor):
+        # Match upstream's trace-miss contract when the process-global backend
+        # offers a different model's layout: it handles RuntimeError, not the
+        # ValueError raised by FakeTensor's split-size check.
+        try:
+            return qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        except ValueError as error:
+            raise RuntimeError("QKV fusion pattern has an incompatible input width") from error
+
+
+class QKNormRopeFusionPattern(_QKVLayoutPattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
@@ -62,7 +79,7 @@ class QKNormRopeFusionPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = self._split_qkv(qkv)
 
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
             q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
@@ -107,7 +124,7 @@ class QKNormRopeFusionPattern(BasePattern):
         return replacement
 
 
-class QKNormRopeFusionPatternWithBias(BasePattern):
+class QKNormRopeFusionPatternWithBias(_QKVLayoutPattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
@@ -141,7 +158,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = self._split_qkv(qkv)
 
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
             q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
@@ -189,7 +206,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
         return replacement
 
 
-class QKVNormRopeFusionPattern(BasePattern):
+class QKVNormRopeFusionPattern(_QKVLayoutPattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
@@ -202,11 +219,6 @@ class QKVNormRopeFusionPattern(BasePattern):
         # passes `rotary_dim=head_size` to the base class, so the cos/sin cache
         # is full width and the model-level `get_rope_dim` is not needed here.
         self.rope_dim = head_dim
-
-    def pattern_key(self) -> str:
-        # Registered once per attention shape, so the shape has to be part of
-        # the identity or the second registration is silently skipped.
-        return f"{super().pattern_key()}_hd{self.head_dim}_nh{self.num_heads}_nkv{self.num_kv_heads}_rd{self.rope_dim}"
 
     def get_inputs(self):
         T = 5
@@ -228,17 +240,7 @@ class QKVNormRopeFusionPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            # The structural match treats the split sizes as a wildcard, so a
-            # pattern registered for one attention shape is offered graphs of
-            # every other shape too. The matcher rejects those by re-tracing
-            # this function against the matched tensors, but only a
-            # RuntimeError counts as a mismatch there, while split raises
-            # ValueError when the sizes do not add up. vLLM's own
-            # qk_norm_rope_fusion pass converts it the same way.
-            try:
-                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            except ValueError as e:
-                raise RuntimeError from e
+            q, k, v = self._split_qkv(qkv)
 
             # Mirrors the unflatten/flatten idiom in gemma4.py and gemma3n.py,
             # not the view idiom qwen3.py uses for the base patterns.

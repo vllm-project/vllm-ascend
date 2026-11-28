@@ -1,0 +1,16 @@
+pr: 19306
+entries:
+  - category: bugfix
+    text: >-
+      Custom speculative decoders registered with vLLM now retain their own
+      implementation on Ascend instead of being replaced by a built-in decoder
+      or rejected solely because their method name is unknown.
+  - category: bugfix
+    text: >-
+      Fixed graph-mode initialization for standalone draft-model speculative
+      decoding on Ascend. Draft graphs now use the required NPU input buffers
+      and refresh attention parameters between decoding steps. Independent
+      draft models keep their own compilation layer registry so fusion patterns
+      do not use the target model's attention dimensions. Process-global QK/ROPE
+      fusion patterns now distinguish attention layouts and safely reject
+      incompatible candidate shapes during compilation.

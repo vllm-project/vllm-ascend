@@ -17,12 +17,15 @@
 
 import importlib
 import importlib.util
+import inspect
 import sys
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -40,6 +43,7 @@ GEMMA4_TP2_FULL = (512, 16, 2)
 QWEN3_8B_TP1 = (128, 32, 8)
 
 EPSILONS = (1e-6, 1e-5)
+QKV_PATTERNS = ("QKNormRopeFusionPattern", "QKNormRopeFusionPatternWithBias", "QKVNormRopeFusionPattern")
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +112,73 @@ def test_pattern_key_is_distinct_per_shape(pass_module):
         for head_dim, num_heads, num_kv_heads in (GEMMA4_TP4_SLIDING, GEMMA4_TP4_FULL)
     }
     assert len(keys) == 2, f"expected one key per shape, got {keys}"
+
+
+@pytest.mark.parametrize("pattern_name", QKV_PATTERNS)
+def test_target_and_draft_layouts_have_distinct_global_pattern_keys(pass_module, pattern_name):
+    cls = getattr(pass_module, pattern_name)
+    config = make_vllm_config()
+    with patch.object(pass_module, "get_rope_dim", return_value=128):
+        keys = {cls(config, 128, heads, kv_heads).pattern_key() for heads, kv_heads in [(32, 8), (16, 8), (16, 16)]}
+        config.model_config.dtype = torch.float16
+        keys.add(cls(config, 128, 32, 8).pattern_key())
+    assert len(keys) == 4
+
+
+@pytest.mark.parametrize("pattern_name", QKV_PATTERNS)
+def test_backend_registers_both_target_and_draft_patterns(pass_module, monkeypatch, pattern_name):
+    base = importlib.import_module("vllm_ascend.compilation.passes.base_pattern")
+    monkeypatch.setattr(base, "_registered_patterns", set())
+    monkeypatch.setattr(base, "_registered_by_matcher", weakref.WeakKeyDictionary())
+    native_register, backend_register = MagicMock(), MagicMock()
+    monkeypatch.setattr(base.pm, "register_replacement", native_register)
+    monkeypatch.setattr(base.nge, "register_replacement", backend_register)
+    matcher = pass_module.PatternMatcherPass()
+    cls = getattr(pass_module, pattern_name)
+    with patch.object(pass_module, "get_rope_dim", return_value=128):
+        for heads in (32, 16, 32):
+            pattern = cls(make_vllm_config(), 128, heads, 8)
+            monkeypatch.setattr(pattern, "get_inputs", lambda: [])
+            pattern.register(matcher)
+    assert native_register.call_count == 2
+    assert backend_register.call_count == 2
+
+
+@pytest.mark.parametrize("pattern_name", QKV_PATTERNS)
+def test_foreign_qkv_width_is_a_trace_specialization_miss(pass_module, pattern_name):
+    cls = getattr(pass_module, pattern_name)
+    with patch.object(pass_module, "get_rope_dim", return_value=128):
+        pattern = cls(make_vllm_config(), 128, 32, 8).get_pattern()
+    with FakeTensorMode():
+        draft_qkv = torch.empty(2, 4096, dtype=torch.bfloat16)
+        unused_inputs = [None] * (len(inspect.signature(pattern).parameters) - 1)
+        with pytest.raises(RuntimeError):
+            pattern(draft_qkv, *unused_inputs)
+
+
+@pytest.mark.parametrize("pattern_name", QKV_PATTERNS)
+def test_npu_split_value_error_becomes_a_trace_miss(pass_module, pattern_name):
+    cls = getattr(pass_module, pattern_name)
+    with patch.object(pass_module, "get_rope_dim", return_value=128):
+        pattern = cls(make_vllm_config(), 128, 32, 8).get_pattern()
+    qkv = torch.empty(2, 4096, dtype=torch.bfloat16)
+    unused_inputs = [None] * (len(inspect.signature(pattern).parameters) - 1)
+    error = ValueError("NPU split sizes do not match the tensor width")
+    with patch.object(torch.Tensor, "split", side_effect=error), pytest.raises(RuntimeError) as caught:
+        pattern(qkv, *unused_inputs)
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.parametrize("pattern_name", QKV_PATTERNS)
+@pytest.mark.parametrize("heads", [16, 32])
+def test_matching_qkv_layout_keeps_its_split(pass_module, pattern_name, heads):
+    cls = getattr(pass_module, pattern_name)
+    with patch.object(pass_module, "get_rope_dim", return_value=128):
+        pattern = cls(make_vllm_config(), 128, heads, 8)
+    with FakeTensorMode():
+        q, k, v = pattern._split_qkv(torch.empty(2, (heads + 16) * 128, dtype=torch.bfloat16))
+        assert q.shape == (2, heads * 128)
+        assert k.shape == v.shape == (2, 1024)
 
 
 def test_registers_one_pattern_per_attention_shape(pass_module):
