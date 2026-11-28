@@ -1047,7 +1047,7 @@ class NPUWorker(GPUWorker):
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
-        if self.worker_sentinel is not None and self.use_v2_model_runner:
+        if self.worker_sentinel is not None:
             self.worker_sentinel.init_num_local_experts()
 
         if self.vllm_config.weight_transfer_config is not None:
