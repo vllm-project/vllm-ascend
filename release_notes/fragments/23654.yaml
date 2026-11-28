@@ -1,0 +1,6 @@
+pr: 23654
+entries:
+  - category: documentation
+    text: >-
+      Added Qwen3.8-27B tutorial presets to Recipes for A2, A3, and 950PR, including the
+      colocated A3 prefill/decode deployment.
