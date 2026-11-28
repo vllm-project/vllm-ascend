@@ -36,6 +36,17 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
+# TODO: keep this helper beside the swap it serves, not in a utils
+# module: the swap below changes global Triton state at import time,
+# and the helper has no other caller. Not every supported
+# Triton-Ascend release ships a next_power_of_2 that kernel bodies
+# can call with tl.constexpr arguments (older ones ship a plain
+# function), so this shim must stay until they all do. The shim is
+# all this file holds, so its removal removes the file. Removal
+# checklist: delete this file, drop its import and the naming comment
+# in patch/worker/__init__.py, close its manifest entry in
+# patch/__init__.py, and re-check the 310P placeholder injection in
+# _310p/worker/v2/sample/dispatch.py.
 def _next_power_of_2(n):
     # vLLM #58651's packed_qk_rope kernel evaluates
     # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
