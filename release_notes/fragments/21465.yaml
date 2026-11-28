@@ -1,0 +1,4 @@
+pr: 21465
+entries:
+  - category: performance
+    text: Avoided a separate expert-count cumulative sum for local MXFP8 MoE routing by requesting cumulative boundaries directly from the routing operator.

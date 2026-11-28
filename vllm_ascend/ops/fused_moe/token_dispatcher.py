@@ -430,20 +430,31 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
+        # MXFP8 GMM1 consumes cumulative boundaries. Request them directly
+        # from routing instead of launching a separate cumsum before GMM1.
+        # Keep count semantics for mapped/distributed experts and LoRA paths.
+        group_list_type = EXPERT_TOKEN_NUMS_TYPE_COUNT
+        if (
+            quant_type == QuantType.W8A8MXFP
+            and expert_map is None
+            and global_redundant_expert_num == 0
+            and not has_lora(self.lora_context)
+            and self.ep_size == 1
+        ):
+            group_list_type = EXPERT_TOKEN_NUMS_TYPE_CUMSUM
         sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
             scale=dynamic_scale,
             active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
-            expert_tokens_num_type=1,
+            expert_tokens_num_type=group_list_type,
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
             quant_mode=quant_mode,
             act_quant_type=act_quant_type,
         )
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 1  # `count` mode
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
