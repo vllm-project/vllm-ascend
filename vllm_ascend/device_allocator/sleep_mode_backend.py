@@ -19,10 +19,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
+from typing import Literal
 
 from vllm.device_allocator.sleep_mode_backend import CuMemBackend, SleepModeBackendFactory
 
 from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+SleepModeState = Literal["RUNNING", "SUSPENDED", "RESUMING"]
 
 
 class CaMemBackend(CuMemBackend):
@@ -34,7 +37,12 @@ class CaMemBackend(CuMemBackend):
 
     def __init__(self, allocator: Callable[[], CaMemAllocator] | None = None) -> None:
         super().__init__()
+        self._state: SleepModeState = "RUNNING"
         self._allocator = allocator or CaMemAllocator.get_instance
+
+    def state(self) -> SleepModeState:
+        """Return the lifecycle state tracked by the Ascend allocator backend."""
+        return self._state
 
     def suspend(self, discardable: Collection[int] = ()) -> None:
         self._state = "SUSPENDED"
