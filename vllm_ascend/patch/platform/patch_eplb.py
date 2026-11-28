@@ -19,6 +19,7 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.distributed.eplb import rebalance_execute as _rebalance_execute
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -897,6 +898,38 @@ def _wrap_move_to_workspace(original_move):
     return _move_to_workspace
 
 
+def _copy_rows_for_tensor_lists(original_copy_rows: Any) -> Any:
+    """Keep row installation working for per-expert tensor lists.
+
+    Ascend holds one tensor per parameter for every expert, so
+    ``expert_weights[layer]`` is a list of lists. The upstream batched row copy
+    reads ``dst[0].is_cuda`` and the row length from ``d.shape[0]``, which
+    assumes every entry is a single tensor; the row-indexed copy it replaced
+    accepted both layouts.
+    """
+
+    @wraps(original_copy_rows)
+    def _copy_rows(dst: Any, dst_rows: Any, src: Any, src_rows: Any) -> None:
+        if dst and isinstance(dst[0], (list, tuple)):
+            for d, s in zip(dst, src):
+                for i, j in zip(dst_rows, src_rows):
+                    d[i].copy_(s[j], non_blocking=True)
+            return
+        original_copy_rows(dst, dst_rows, src, src_rows)
+
+    setattr(_copy_rows, _PATCH_MARKER, True)
+    return _copy_rows
+
+
+def _patch_row_copies() -> None:
+    original_copy_rows = getattr(_rebalance_execute, "copy_rows", None)
+    # Releases before the batched helper index destination rows directly and
+    # already accept tensor lists.
+    if original_copy_rows is None or getattr(original_copy_rows, _PATCH_MARKER, False):
+        return
+    setattr(_rebalance_execute, "copy_rows", _copy_rows_for_tensor_lists(original_copy_rows))  # noqa: B010
+
+
 def _patch_async_move_to_workspace() -> None:
     original_move = _eplb_state._move_to_workspace
     if not getattr(original_move, _PATCH_MARKER, False):
@@ -911,3 +944,4 @@ _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_changed_layer_transfer()
 _patch_async_move_to_workspace()
+_patch_row_copies()

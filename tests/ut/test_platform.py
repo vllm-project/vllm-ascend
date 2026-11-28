@@ -21,6 +21,7 @@ from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.eplb.config import resolve_placement_scope, validate_eplb_config
 from vllm_ascend.platform import (
     NPUPlatform,
     _install_device_id_narrowing,
@@ -30,7 +31,6 @@ from vllm_ascend.platform import (
     _validate_deepseek_v4_tp_config,
     _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
-    _validate_eplb_config,
     _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
     _validate_target_dcp_config,
@@ -634,6 +634,48 @@ class TestNPUPlatform(TestBase):
             mock_warning.call_args.args[0],
         )
 
+    def test_validate_eplb_static_config(self):
+        config = self.mock_vllm_config()
+        config.parallel_config.enable_eplb = True
+        config.parallel_config.pipeline_parallel_size = 1
+        config.additional_config = {"eplb_config": {"mode": "static", "expert_placement_path": "deployment.json"}}
+        validate_eplb_config(config)
+        self.assertEqual(config.additional_config["eplb_config"]["expert_placement_path"], "deployment.json")
+
+    def test_validate_eplb_static_rejects_incomplete_or_unsupported_config(self):
+        for failure in ("disabled", "missing_path", "pp", "phase", "dynamic_path"):
+            with self.subTest(failure=failure):
+                config = self.mock_vllm_config()
+                config.parallel_config.enable_eplb = True
+                config.parallel_config.pipeline_parallel_size = 1
+                fields = {"mode": "static", "expert_placement_path": "deployment.json"}
+                config.additional_config = {"eplb_config": fields}
+                if failure == "disabled":
+                    config.parallel_config.enable_eplb = False
+                elif failure == "missing_path":
+                    fields.pop("expert_placement_path")
+                elif failure == "pp":
+                    config.parallel_config.pipeline_parallel_size = 2
+                elif failure == "phase":
+                    fields["load_collection_phase"] = "decode"
+                elif failure == "dynamic_path":
+                    fields["mode"] = "dynamic"
+                with self.assertRaises(ValueError):
+                    validate_eplb_config(config)
+
+    def test_validate_eplb_static_accepts_speculative_config(self):
+        config = self.mock_vllm_config()
+        config.parallel_config.enable_eplb = True
+        config.parallel_config.pipeline_parallel_size = 1
+        config.speculative_config = SimpleNamespace()
+        config.additional_config = {
+            "eplb_config": {
+                "mode": "static",
+                "expert_placement_path": "deployment.json",
+            }
+        }
+        validate_eplb_config(config)
+
     def test_validate_eplb_config_rejects_weight_offload(self):
         for cpu_gb, group_size in ((1, 0), (0, 2)):
             with self.subTest(cpu_gb=cpu_gb, group_size=group_size):
@@ -642,7 +684,7 @@ class TestNPUPlatform(TestBase):
                 config.offload_config.uva.cpu_offload_gb = cpu_gb
                 config.offload_config.prefetch.offload_group_size = group_size
                 with self.assertRaisesRegex(ValueError, "incompatible with weight offload/prefetch"):
-                    _validate_eplb_config(config)
+                    validate_eplb_config(config)
 
     def test_weight_offload_allowed_without_eplb(self):
         config = self.mock_vllm_config()
@@ -650,7 +692,7 @@ class TestNPUPlatform(TestBase):
         config.offload_config.uva.cpu_offload_gb = 1
         config.offload_config.prefetch.offload_group_size = 2
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(config)
+            validate_eplb_config(config)
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
@@ -658,7 +700,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "prefill"}}
 
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         self.assertIsNone(vllm_config.parallel_config.eplb_config.communicator)
 
@@ -668,7 +710,23 @@ class TestNPUPlatform(TestBase):
         vllm_config.additional_config = {"eplb_config": {"stair_config": {"rank_transfer_limit": 2}}}
 
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
+
+    def test_resolve_placement_scope_follows_the_kv_role(self):
+        for kv_role, expected in (
+            ("kv_producer", "prefill"),
+            ("kv_consumer", "decode"),
+            ("kv_both", "mixed"),
+            (None, "mixed"),
+        ):
+            with self.subTest(kv_role=kv_role):
+                self.assertEqual(resolve_placement_scope(kv_role, "all"), expected)
+
+    def test_resolve_placement_scope_falls_back_to_the_collection_phase(self):
+        self.assertEqual(resolve_placement_scope(None, "prefill"), "prefill")
+        self.assertEqual(resolve_placement_scope(None, "decode"), "decode")
+        with self.assertRaisesRegex(ValueError, "no EPLB placement scope"):
+            resolve_placement_scope(None, "prompt")
 
     def test_validate_eplb_config_expert_placement_path(self):
         vllm_config = self.mock_vllm_config()
@@ -698,7 +756,7 @@ class TestNPUPlatform(TestBase):
         )
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
@@ -714,7 +772,7 @@ class TestNPUPlatform(TestBase):
         )
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "hixl")
@@ -732,7 +790,7 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "torch_gloo"),
         ):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_keeps_gloo_auto_select(self):
         vllm_config = self.mock_vllm_config()
@@ -744,7 +802,7 @@ class TestNPUPlatform(TestBase):
         )
 
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         self.assertIsNone(
             vllm_config.parallel_config.eplb_config.communicator,
@@ -760,7 +818,7 @@ class TestNPUPlatform(TestBase):
         )
 
         with patch.dict("os.environ", {}, clear=True), self.assertRaisesRegex(ValueError, "elastic EP"):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_rejects_nccl_communicator(self):
         vllm_config = self.mock_vllm_config()
@@ -775,7 +833,7 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "torch_gloo"),
         ):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_rejects_nixl_communicator(self):
         vllm_config = self.mock_vllm_config()
@@ -790,7 +848,7 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "got 'nixl'"),
         ):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_async_allows_hixl_communicator(self):
         vllm_config = self.mock_vllm_config()
@@ -802,9 +860,9 @@ class TestNPUPlatform(TestBase):
         )
 
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
+    def test_validate_eplb_config_allows_v2_load_collection_phase_with_dbo_and_spec_decode(
         self,
     ):
         vllm_config = self.mock_vllm_config()
@@ -814,7 +872,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
 
         with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_warns_and_ignores_unsupported_v2_fields(self):
         vllm_config = self.mock_vllm_config()
@@ -834,7 +892,7 @@ class TestNPUPlatform(TestBase):
         }
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         self.assertEqual(
             vllm_config.additional_config,
@@ -864,7 +922,7 @@ class TestNPUPlatform(TestBase):
         }
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
-            _validate_eplb_config(vllm_config)
+            validate_eplb_config(vllm_config)
 
         filtered_config = vllm_config.additional_config["eplb_config"]
         self.assertEqual(filtered_config, {"stair_config": {"rank_transfer_limit": 2}})

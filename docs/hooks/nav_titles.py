@@ -47,6 +47,10 @@ TITLES = {
         "en": "Model Runner V2 EPLB Architecture",
         "zh": "Model Runner V2 EPLB 架构",
     },
+    "developer_guide/Design_Documents/eplb_placement.md": {
+        "en": "EPLB Deployment Import and Static Initialization",
+        "zh": "EPLB 部署导入与静态初始化",
+    },
     "developer_guide/Design_Documents/npugraph_ex.md": {"en": "NPUGraph Ex", "zh": "NPUGraph 扩展"},
     "developer_guide/Design_Documents/patch.md": {"en": "Patch", "zh": "补丁"},
     "developer_guide/Design_Documents/quantization.md": {"en": "Quantization", "zh": "量化"},

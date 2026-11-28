@@ -1,177 +1,197 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import copy
 import json
-import socket
+import tempfile
+import unittest
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
+from types import SimpleNamespace
 
 from vllm_ascend.distributed.eplb.placement import (
-    PlacementExporter,
-    validate_placement_snapshot,
-    write_placement_snapshot,
+    EplbPlacement,
+    build_placement_metadata,
+    load_placement,
+    plan_placement_sources,
 )
 
 
-def _snapshot(with_draft: bool = False) -> dict:
-    data: dict = {
-        "version": 1,
+def write_placement(path, placement):
+    Path(path).write_text(json.dumps(placement.to_dict()), encoding="utf-8")
+
+
+def make_metadata():
+    return {
+        "model": "test-model",
+        "revision": "test-revision",
+        "architecture": "TestMoE",
+        "hf_config_sha256": "test-config-hash",
+        "quantization": "ascend",
+        "dtype": "torch.bfloat16",
         "ep_size": 2,
-        "target": {
-            "num_logical_experts": 4,
-            "num_redundant_experts": 2,
-            "physical_to_logical_map": [[0, 1, 2, 0, 1, 3]],
-        },
+        "tp_size": 2,
+        "dp_size": 1,
+        "pp_size": 1,
+        "num_logical_experts": 4,
+        "num_redundant_experts": 2,
+        "layer_names": ["layers.0.moe"],
+        "placement_scope": "mixed",
     }
-    if with_draft:
-        data["draft"] = {
-            "num_logical_experts": 2,
-            "num_redundant_experts": 0,
-            "physical_to_logical_map": [[1, 0]],
-        }
-    return data
 
 
-def test_snapshot_write_target_and_optional_draft(tmp_path: Path):
-    for with_draft in (False, True):
-        path = tmp_path / f"placement_{int(with_draft)}.json"
-        expected = _snapshot(with_draft=with_draft)
-        write_placement_snapshot(path, expected)
-        assert json.loads(path.read_text(encoding="utf-8")) == expected
+class TestPlacement(unittest.TestCase):
+    def setUp(self):
+        self.placement = EplbPlacement(make_metadata(), ((0, 1, 2, 0, 1, 3),), {"workload": "unit-test"})
 
+    def test_round_trip_and_relative_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deployment.json"
+            write_placement(path, self.placement)
+            loaded = load_placement(path)
+            self.assertEqual(loaded, self.placement)
+            self.assertEqual(loaded.digest(), self.placement.digest())
 
-@pytest.mark.parametrize(
-    ("mutator", "pattern"),
-    [
-        (lambda s: s.update(version=2), "version"),
-        (lambda s: s.update(version=True), "version"),
-        (lambda s: s.update(extra=1), "must contain"),
-        (lambda s: s["target"].update(model="unexpected"), "must contain exactly"),
-        (lambda s: s["target"].update(physical_to_logical_map=[[0, 1, 2, 0, 1, 2]]), "cover every"),
-        (lambda s: s["target"].update(physical_to_logical_map=[[0, 0, 1, 2, 3, 1]]), "duplicate logical experts"),
-        (lambda s: s["target"].update(physical_to_logical_map=[[False, 1, 2, 0, 1, 3]]), "invalid logical expert"),
-        (lambda s: s["target"].update(physical_to_logical_map=[[0, 1, 2, 3]]), "slot count"),
-    ],
-)
-def test_validate_placement_snapshot_rejects_invalid_data(mutator, pattern: str):
-    data = _snapshot()
-    mutator(data)
-    with pytest.raises(ValueError, match=pattern):
-        validate_placement_snapshot(data)
+    def test_draft_placement_round_trip(self):
+        draft_metadata = make_metadata()
+        draft_metadata.update(
+            model="draft-model",
+            num_logical_experts=2,
+            num_redundant_experts=0,
+            layer_names=["layers.0.draft.moe"],
+        )
+        draft = EplbPlacement(draft_metadata, ((0, 1),), {"workload": "draft"})
+        placement = EplbPlacement(
+            self.placement.metadata,
+            self.placement.physical_to_logical,
+            self.placement.provenance,
+            draft=draft,
+        )
 
+        data = placement.to_dict()
+        self.assertEqual(data["schema_version"], 3)
+        loaded = EplbPlacement.from_dict(data)
+        self.assertEqual(loaded, placement)
+        self.assertEqual(loaded.digest(), placement.digest())
+        self.assertIsNotNone(loaded.draft)
+        self.assertEqual(loaded.draft.metadata["model"], "draft-model")
 
-def test_atomic_write_preserves_previous_snapshot_on_failure(tmp_path: Path):
-    path = tmp_path / "placement.json"
-    previous = _snapshot(with_draft=False)
-    write_placement_snapshot(path, previous)
-    with (
-        patch("vllm_ascend.distributed.eplb.placement.os.replace", side_effect=OSError("replace failed")),
-        pytest.raises(OSError, match="replace failed"),
-    ):
-        write_placement_snapshot(path, _snapshot(with_draft=True))
-    assert json.loads(path.read_text(encoding="utf-8")) == previous
-    assert list(tmp_path.iterdir()) == [path]
+        target_only = self.placement.to_dict()
+        self.assertEqual(target_only["schema_version"], 3)
+        self.assertNotIn("draft", target_only)
+        self.assertEqual(EplbPlacement.from_dict(target_only), self.placement)
 
+        legacy_v2 = dict(target_only, schema_version=2)
+        self.assertEqual(EplbPlacement.from_dict(legacy_v2), self.placement)
 
-def test_pp_listener_survives_probes_write_errors_and_ipv6(tmp_path: Path):
-    hosts = ["127.0.0.1"]
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
-            probe.bind(("::1", 0))
-        hosts.append("::1")
-    except OSError:
-        pass
+    def test_draft_metadata_mismatch_is_reported(self):
+        draft_metadata = make_metadata()
+        draft_metadata.update(model="draft-model", layer_names=["layers.0.draft.moe"])
+        placement = EplbPlacement(
+            self.placement.metadata,
+            self.placement.physical_to_logical,
+            self.placement.provenance,
+            draft=EplbPlacement(draft_metadata, ((0, 1),), {}),
+        )
+        expected = dict(draft_metadata)
+        expected["model"] = "other-draft"
+        with self.assertRaisesRegex(ValueError, "model mismatch"):
+            placement.validate(expected_metadata=self.placement.metadata, expected_draft_metadata=expected)
 
-    for idx, host in enumerate(hosts):
-        out = tmp_path / f"pp_{idx}.json"
-        writer = PlacementExporter(ep_size=1, pp_rank=0, pp_size=2, is_stage_leader=True, path=str(out))
-        sender = PlacementExporter(ep_size=1, pp_rank=1, pp_size=2, is_stage_leader=True, path=str(out))
-        entry = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[0, 1]]}
-        updated = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[1, 0]]}
-        try:
-            endpoint = writer.start_pp_listener(host)
-            gathered: list[dict] = [
-                {"pp_rank": 0, "target": None, "draft": None, "endpoint": endpoint},
-                {"pp_rank": 1, "target": entry, "draft": None, "endpoint": None},
-            ]
-            writer.configure_pp_stages(gathered, same_node_as_writer=True)
-            sender.configure_pp_stages(gathered, same_node_as_writer=True)
+    def test_missing_draft_is_reported_when_expected(self):
+        with self.assertRaisesRegex(ValueError, "missing the expected draft"):
+            self.placement.validate(expected_metadata=self.placement.metadata, expected_draft_metadata=make_metadata())
 
-            # Empty probe + invalid auth payload must not kill the accept loop.
-            with socket.create_connection((host, endpoint[1]), timeout=2.0):
-                pass
-            with socket.create_connection((host, endpoint[1]), timeout=2.0) as bad:
-                bad.sendall(b"\x00\x00\x00\x02" + b"x" * 32 + b"{}")
-                assert bad.recv(1) == b"\x00"
+    def test_invalid_placements(self):
+        cases = [
+            ("missing logical expert", ((0, 1, 2, 0, 1, 2),), "cover every"),
+            ("invalid ID", ((0, 1, 2, 0, 1, 4),), "invalid logical"),
+            ("boolean ID", ((False, 1, 2, 0, 1, 3),), "invalid logical"),
+            ("wrong slot count", ((0, 1, 2, 3),), "slot count"),
+            ("missing layer", (), "layer count"),
+        ]
+        for label, mapping, error in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, error):
+                EplbPlacement(make_metadata(), mapping, {}).validate()
 
-            assert sender.publish_evaluation(
-                target_stats=(1.6, 1), target_entry=entry, draft_stats=None, draft_entry=None
-            )
-            assert not out.exists()
+    def test_rejects_schema_and_unknown_fields(self):
+        for version in (True, 0, 1, "3"):
+            data = self.placement.to_dict()
+            data["schema_version"] = version
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "schema_version"):
+                EplbPlacement.from_dict(data)
+        data = self.placement.to_dict()
+        data["logical_to_physical"] = []
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            EplbPlacement.from_dict(data)
 
-            sender.mark_committed("target")
-            with patch("vllm_ascend.distributed.eplb.placement.write_placement_snapshot", side_effect=OSError("disk")):
-                assert not sender.publish_evaluation(
-                    target_stats=(1.1, 1), target_entry=updated, draft_stats=None, draft_entry=None
-                )
-            assert sender.has_unexported_commit
-            assert writer.min_peak_to_mean_ratio == pytest.approx(1.6)
+    def test_metadata_mismatch(self):
+        for name, value in (
+            ("model", "other"),
+            ("revision", "other"),
+            ("quantization", None),
+            ("hf_config_sha256", "other"),
+            ("placement_scope", "prefill"),
+            ("ep_size", 3),
+            ("tp_size", 1),
+            ("layer_names", ["layers.1.moe"]),
+        ):
+            expected = make_metadata()
+            expected[name] = value
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, f"{name} mismatch"):
+                self.placement.validate(expected)
 
-            assert sender.publish_evaluation(
-                target_stats=(1.2, 1), target_entry=updated, draft_stats=None, draft_entry=None
-            )
-            assert not sender.has_unexported_commit
-            assert json.loads(out.read_text(encoding="utf-8"))["target"]["physical_to_logical_map"] == [[1, 0]]
-        finally:
-            sender.close()
-            writer.close()
+    def test_rejects_invalid_parallel_metadata(self):
+        for name, value in (("ep_size", True), ("ep_size", 4), ("pp_size", 2), ("layer_names", [""])):
+            metadata = make_metadata()
+            metadata[name] = value
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                EplbPlacement(metadata, self.placement.physical_to_logical, {}).validate()
 
+    def test_source_plan_handles_local_swaps_and_replication(self):
+        old = (0, 1, 2, 3, 0, 1)
+        target = (1, 0, 3, 2, 0, 1)
+        ranks, slots = plan_placement_sources(old, target, 2)
+        self.assertEqual((ranks[0][0], slots[0][0]), (0, 1))
+        self.assertEqual((ranks[0][1], slots[0][1]), (0, 0))
+        self.assertEqual((ranks[0][2], slots[0][2]), (1, 0))
+        for rank in range(2):
+            for slot in range(3):
+                self.assertEqual(old[ranks[rank][slot] * 3 + slots[rank][slot]], target[rank * 3 + slot])
 
-def test_asymmetric_role_stats_preserve_pending_commits(tmp_path: Path):
-    target_init = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[0, 1]]}
-    target_next = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[1, 0]]}
-    draft_init = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[0, 1]]}
-    draft_next = {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[1, 0]]}
+    def test_source_plan_rejects_missing_sources(self):
+        with self.assertRaisesRegex(ValueError, "No source"):
+            plan_placement_sources((0, 1), (0, 2), 2)
 
-    # 1. Draft commit reported during a prefill-only window (draft_stats=None) is retained for the next decode window.
-    out_draft = tmp_path / "draft_retained.json"
-    exporter = PlacementExporter(ep_size=1, pp_rank=0, pp_size=1, is_stage_leader=True, path=str(out_draft))
-    assert exporter.publish_evaluation(
-        target_stats=(1.8, 1), target_entry=target_init, draft_stats=(1.6, 1), draft_entry=draft_init
-    )
-    exporter.mark_committed("target")
-    exporter.mark_committed("draft")
-    assert exporter.publish_evaluation(
-        target_stats=(1.2, 1), target_entry=target_next, draft_stats=None, draft_entry=draft_next
-    )
-    saved = json.loads(out_draft.read_text(encoding="utf-8"))
-    assert saved["target"]["physical_to_logical_map"] == [[1, 0]]
-    assert saved["draft"]["physical_to_logical_map"] == [[0, 1]]
+    def test_metadata_fingerprint_ignores_local_hf_path(self):
+        layer = object()
+        model = SimpleNamespace(
+            named_modules=lambda: [("layers.0.moe", layer)],
+            moe_layers=[layer],
+            num_logical_experts=4,
+            num_redundant_experts=2,
+        )
+        hf = {"_name_or_path": "/old", "transformers_version": "old", "hidden_size": 64}
+        config = SimpleNamespace(
+            model="test-model",
+            revision="rev",
+            architecture="TestMoE",
+            quantization="ascend",
+            dtype="bfloat16",
+            hf_config=SimpleNamespace(to_dict=lambda: copy.deepcopy(hf)),
+        )
+        parallel = SimpleNamespace(tensor_parallel_size=2, data_parallel_size=1, pipeline_parallel_size=1)
+        first = build_placement_metadata(model, config, parallel, 2, "mixed")
+        hf.update(_name_or_path="/new", transformers_version="new")
+        self.assertEqual(first, build_placement_metadata(model, config, parallel, 2, "mixed"))
+        hf["hidden_size"] = 128
+        self.assertNotEqual(
+            first["hf_config_sha256"],
+            build_placement_metadata(model, config, parallel, 2, "mixed")["hf_config_sha256"],
+        )
 
-    assert exporter.publish_evaluation(
-        target_stats=(1.3, 1), target_entry=target_next, draft_stats=(1.1, 1), draft_entry=draft_next
-    )
-    saved = json.loads(out_draft.read_text(encoding="utf-8"))
-    assert saved["draft"]["physical_to_logical_map"] == [[1, 0]]
-
-    # 2. Target commit reported when target_stats=None is retained until target_stats is observed.
-    out_target = tmp_path / "target_retained.json"
-    exporter2 = PlacementExporter(ep_size=1, pp_rank=0, pp_size=1, is_stage_leader=True, path=str(out_target))
-    assert exporter2.publish_evaluation(
-        target_stats=(1.8, 1), target_entry=target_init, draft_stats=(1.6, 1), draft_entry=draft_init
-    )
-    exporter2.mark_committed("target")
-    exporter2.mark_committed("draft")
-    assert exporter2.publish_evaluation(
-        target_stats=None, target_entry=target_next, draft_stats=(1.1, 1), draft_entry=draft_next
-    )
-    assert not out_target.exists()
-
-    assert exporter2.publish_evaluation(
-        target_stats=(1.2, 1), target_entry=target_next, draft_stats=(1.2, 1), draft_entry=draft_next
-    )
-    saved2 = json.loads(out_target.read_text(encoding="utf-8"))
-    assert saved2["target"]["physical_to_logical_map"] == [[1, 0]]
-    assert saved2["draft"]["physical_to_logical_map"] == [[1, 0]]
+    def test_invalid_json_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deployment.json"
+            path.write_text("{", encoding="utf-8")
+            with self.assertRaises(json.JSONDecodeError):
+                load_placement(path)

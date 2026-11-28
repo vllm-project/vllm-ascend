@@ -123,13 +123,46 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-Keep upstream fields in `--eplb-config`; Ascend EPLB fields under
-`additional_config.eplb_config` are `load_collection_phase`,
-`expert_placement_path`, and `stair_config`.
+They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
+fields under `additional_config.eplb_config` are `load_collection_phase`,
+`stair_config`, `mode`, and `expert_placement_path`; any other field is
+rejected at startup.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
 omit it or set it to `stair` to run STAIR.
+
+### Static Deployment Import
+
+`eplb_config.mode=static` installs a pre-generated deployment document once,
+before memory profiling and graph capture, and then keeps the fixed
+expert-replica routing without runtime load collection, placement planning, or
+weight migration. `--enable-eplb` is still required because it controls the
+router and the expert allocation.
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --eplb-config '{"num_redundant_experts":16}' \
+  --additional-config '{"eplb_config":{"mode":"static","expert_placement_path":"/data/eplb/deployment.json"}}'
+```
+
+Constraints:
+
+- The deployment document is an input. This change implements the consumer
+  side; the file must be produced by a compatible external calibration tool;
+  this change only consumes it.
+- `pipeline_parallel_size` must be `1`, `load_collection_phase` must stay
+  `all`, and `expert_placement_path` is required.
+- The document metadata must match the model, revision, architecture,
+  quantization, dtype, EP/TP/DP/PP sizes, expert counts, and layer order.
+- EP rank 0 reads the file; the document is broadcast to every rank and every
+  rank validates it against its own runtime metadata before weight movement.
+- A registered MoE draft that enables EPLB is installed from the same document.
+- `eplb_config.log_balancedness=true` enables a rank-local load sample. It is
+  for observation only and never triggers rearrangement.
 
 #### MRv2 Communicator Selection
 

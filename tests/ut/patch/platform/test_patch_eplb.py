@@ -977,3 +977,54 @@ def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch
 
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
     consumed_event.record.assert_not_called()
+
+
+def test_row_copies_keep_tensor_list_support():
+    """Upstream batches rows through `dst[0]`, which is a list on Ascend."""
+    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
+    batched_calls = []
+
+    def upstream_copy_rows(dst, dst_rows, src, src_rows):
+        # Mirrors the batched helper: every entry is read as one tensor.
+        batched_calls.append((list(dst_rows), list(src_rows)))
+        for d, s in zip(dst, src):
+            for i, j in zip(dst_rows, src_rows):
+                d[i].copy_(s[j], non_blocking=True)
+
+    with patch.object(rebalance_execute, "copy_rows", upstream_copy_rows, create=True):
+        patch_eplb._patch_row_copies()
+        copy_rows = rebalance_execute.copy_rows
+
+        source = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        buffers = [list(torch.zeros(4, 2).unbind()) for _ in range(2)]
+        weights = [list(source.unbind()) for _ in range(2)]
+        copy_rows(buffers, [0, 2], weights, [1, 3])
+
+        torch.testing.assert_close(
+            torch.stack([buffers[0][0], buffers[0][2]]),
+            torch.stack([weights[0][1], weights[0][3]]),
+        )
+        assert batched_calls == []
+
+        plain_dst = [torch.zeros(4, 2)]
+        plain_src = [source.clone()]
+        copy_rows(plain_dst, [1], plain_src, [2])
+
+        assert batched_calls == [([1], [2])]
+        torch.testing.assert_close(plain_dst[0][1], plain_src[0][2])
+
+
+def test_row_copy_patch_is_idempotent():
+    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
+    with patch.object(rebalance_execute, "copy_rows", lambda *args: None, create=True):
+        patch_eplb._patch_row_copies()
+        patched = rebalance_execute.copy_rows
+        patch_eplb._patch_row_copies()
+        assert rebalance_execute.copy_rows is patched
+
+
+def test_row_copy_patch_skips_releases_without_the_batched_helper():
+    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
+    with patch.object(rebalance_execute, "copy_rows", None, create=True):
+        patch_eplb._patch_row_copies()
+        assert rebalance_execute.copy_rows is None

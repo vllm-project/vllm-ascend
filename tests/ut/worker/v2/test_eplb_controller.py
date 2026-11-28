@@ -105,7 +105,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace(model="draft")
+                draft_config = SimpleNamespace(
+                    model="draft",
+                    compute_hash=MagicMock(return_value="draft"),
+                )
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
                     added = controller.maybe_register_speculator(
                         speculator, SimpleNamespace(draft_model_config=draft_config), False
@@ -123,7 +126,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     speculator.set_eplb_state.assert_not_called()
 
                     target = nn.Linear(2, 2)
-                    model_config = SimpleNamespace(model="target")
+                    model_config = SimpleNamespace(
+                        model="target",
+                        compute_hash=MagicMock(return_value="target"),
+                    )
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
                         added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)
@@ -131,19 +137,37 @@ class TestAscendEPLBController(unittest.TestCase):
                     controller.maybe_start_async_loop(added)
                     controller.state.start_async_loop.assert_called_once()
 
-    def test_placement_export_enables_state_and_pp_setup(self):
+    def test_dynamic_mtp_draft_is_not_pinned_to_a_static_placement(self):
         controller = self._make_controller()
-        controller.expert_placement_path = "/tmp/placement.json"
-        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState") as state_cls:
-            state = MagicMock()
-            state.is_async = True
-            state_cls.return_value = state
-            controller.prepare_load()
-            state.enable_placement_export.assert_called_once_with("/tmp/placement.json")
+        controller.mode = "dynamic"
+        controller._kv_role = None
+        controller.parallel_config.enable_elastic_ep = False
+        controller._has_registered_models = False
+        controller.state = MagicMock()
+        speculator = SimpleNamespace(
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True)),
+            model=nn.Linear(2, 2),
+            set_eplb_state=MagicMock(),
+        )
+        draft_config = SimpleNamespace(model="draft", compute_hash=lambda: "draft")
 
-            controller.maybe_start_async_loop(eplb_models_added=False, load_dummy_weights=False)
-            state.setup_pp_placement_export.assert_called_once_with()
-            state.start_async_loop.assert_not_called()
+        with patch(
+            "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+            return_value=speculator.model,
+        ):
+            added = controller.maybe_register_speculator(
+                speculator,
+                SimpleNamespace(draft_model_config=draft_config, method="mtp"),
+                False,
+            )
+
+        self.assertTrue(added)
+        # A dynamic deployment leaves the draft on the async worker: nothing
+        # switches static recording on and nothing pins the draft state.
+        self.assertIs(controller._draft_placement_model_config, draft_config)
+        controller.state.disable_static_recording.assert_not_called()
+        # Nothing looks the draft state up to pin it to a static placement.
+        controller.state.model_states.get.assert_not_called()
 
     def test_step_early_return_conditions(self):
         for condition in (

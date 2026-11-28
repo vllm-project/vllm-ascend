@@ -331,6 +331,15 @@ class TestAscendConfig(TestBase):
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
 
+    def test_eplb_static_configuration(self):
+        self.assertEqual(EplbConfig().mode, "dynamic")
+        self.assertEqual(EplbConfig(mode="static", expert_placement_path="deployment.json").mode, "static")
+        with self.assertRaisesRegex(ValueError, "requires mode='static'"):
+            EplbConfig(expert_placement_path="deployment.json")
+        for kwargs in ({"mode": "static"}, {"mode": "auto"}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                EplbConfig(**kwargs)
+
     def test_eplb_load_collection_phase_validation(self):
         self.assertEqual(
             EplbConfig(load_collection_phase="prefill").load_collection_phase,

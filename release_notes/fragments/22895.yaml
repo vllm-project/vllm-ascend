@@ -1,0 +1,10 @@
+pr: 22895
+entries:
+  - category: feature
+    text: >-
+      Added static EPLB through `eplb_config.mode=static`: a pre-generated
+      deployment document is installed once, before memory profiling and graph
+      capture, and the engine keeps expert-replica routing without runtime load
+      recording, placement planning or weight migration. A registered MoE draft
+      follows the target and is installed from the same document. Initial
+      support requires PP=1 and `--enable-eplb`.
