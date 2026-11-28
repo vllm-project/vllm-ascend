@@ -2839,7 +2839,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
     Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, then start Node 1. Only Node 0 exposes the API endpoint. Each server contributes one TP8 rank to the global DP2 topology.
 
-### 5.6 Service Verification
+### 5.6 Service Verification {: #56-service-verification }
 
 Set `SERVICE_URL` to the host and port configured when starting the service.
 For colocated deployment, use the vLLM API endpoint with `HEALTH_PATH=health`;
