@@ -1,0 +1,7 @@
+pr: 22990
+entries:
+  - category: bugfix
+    text: >-
+      Fixed unnecessarily reduced DSpark batch capacity with the recompute scheduler
+      when using older vLLM versions. Target batches now use the configured token
+      budget without reserving extra slots for DSpark's separate drafting pass.

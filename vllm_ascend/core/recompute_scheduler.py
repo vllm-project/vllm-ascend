@@ -237,7 +237,11 @@ class RecomputeScheduler(Scheduler):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
-        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        # DSpark drafts in a separate forward pass. Older vLLM versions still
+        # reserve K - 1 query slots here, unnecessarily limiting the target batch.
+        draft_slots = 0
+        if spec is not None and spec.method != "dspark":
+            draft_slots = spec.max_num_new_slots_for_drafting
         input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
