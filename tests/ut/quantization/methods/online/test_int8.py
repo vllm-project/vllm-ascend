@@ -77,6 +77,25 @@ class TestQuantizeLastDimToInt8(TestBase):
         self.assertEqual(scale[0].item(), 0.0)
         self.assertGreater(scale[1].item(), 0.0)
 
+    def test_tiny_nonzero_fp16_row_is_flushed_to_zero(self):
+        # 2**-20 / 127 rounds to zero in fp16, so a plain division would use a
+        # zero scale; the channel must be flushed instead.
+        weight = torch.tensor([[2.0**-20, -(2.0**-21)]], dtype=torch.float16)
+
+        qweight, scale = quantize_last_dim_to_int8(weight, scale_dtype=torch.float16)
+
+        self.assertEqual(scale[0].item(), 0.0)
+        self.assertTrue(torch.all(qweight == 0))
+
+    def test_tiny_nonzero_bf16_row_keeps_its_scale(self):
+        # bf16 has enough exponent range for the same row, so it is not flushed.
+        weight = torch.tensor([[2.0**-20, -(2.0**-21)]], dtype=torch.bfloat16)
+
+        qweight, scale = quantize_last_dim_to_int8(weight, scale_dtype=torch.bfloat16)
+
+        self.assertGreater(scale[0].item(), 0.0)
+        self.assertTrue(torch.any(qweight[0] != 0))
+
     def test_scale_dtype_follows_request(self):
         weight = torch.randn(4, 8, dtype=torch.bfloat16)
 
@@ -205,6 +224,12 @@ class TestInt8PerChannelOnlineMoEMethod(TestBase):
 
     def test_reuses_the_offline_w8a8_dynamic_scheme(self):
         self.assertIs(AscendInt8PerChannelOnlineMoEMethod.scheme_cls, AscendW8A8DynamicFusedMoEMethod)
+
+    def test_biased_moe_is_rejected_before_loading(self):
+        with self.assertRaises(NotImplementedError) as raised:
+            AscendInt8PerChannelOnlineMoEMethod(moe=SimpleNamespace(has_bias=True))
+
+        self.assertIn("bias", str(raised.exception))
 
     def test_process_weights_quantizes_both_projections_and_delegates_the_layout(self):
         method = self._method()

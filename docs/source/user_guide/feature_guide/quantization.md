@@ -187,6 +187,9 @@ Notes:
 - Online re-quantization of a checkpoint-quantized layer is not supported yet;
   such a combination is rejected while the layer is built.
 - Reloading weights into an online-quantized model is not supported yet.
+- MoE layers with expert bias (for example GPT-OSS) are rejected: the Ascend
+  W8A8 expert path does not consume `w13_bias`/`w2_bias`, so online
+  quantization would otherwise drop them silently.
 - The quantized result is numerically equivalent to re-quantizing the same
   checkpoint with ModelSlim `W8A8_DYNAMIC` and serving it with
   `--quantization ascend`; online quantization just removes the offline step.

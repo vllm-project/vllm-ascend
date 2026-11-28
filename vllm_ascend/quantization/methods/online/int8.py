@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import torch
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.utils import replace_parameter
@@ -115,6 +116,13 @@ def quantize_last_dim_to_int8(
     Returns:
         ``(qweight, scale)`` where ``qweight`` is ``int8`` with the same shape
         as ``weight`` and ``scale`` is ``weight.shape[:-1] + (1,)``.
+
+    Notes:
+        A channel whose ``amax`` is positive but whose scale rounds to zero in
+        ``scale_dtype`` (possible in FP16) is *flushed*: the stored scale is
+        zero and every quantized value is zero, so the channel reconstructs as
+        zero. This matches the all-zeros case and avoids dividing by a zero
+        scale.
     """
     if weight.dtype == torch.int8:
         raise NotImplementedError(
@@ -146,18 +154,37 @@ def quantize_last_dim_to_int8(
     safe_amax = torch.where(nonzero, amax, torch.ones_like(amax))
     scale = (safe_amax / _int8_max(amax.device)).to(scale_dtype)
 
+    # A tiny positive amax can still round to a zero scale when cast to the
+    # activation dtype: FP16 cannot represent ``amax / 127`` below about
+    # 2**-25. Flush those channels instead of dividing by zero -- with a zero
+    # scale the kernel already reconstructs the channel as zero, and the
+    # division would rely on the undefined inf/nan -> int8 conversion.
+    usable = nonzero & (scale > 0)
+    flushed = nonzero & (scale == 0)
+    if flushed.any():
+        logger.warning_once(
+            "Online int8: %d weight channel(s) are below the %s scale resolution and are stored as zero. "
+            "This only affects channels whose weights are vanishingly small.",
+            int(flushed.sum()),
+            scale_dtype,
+        )
+    scale = torch.where(usable, scale, torch.zeros_like(scale))
+
     # Quantize with the *stored* scale so ``q * scale`` is the best
-    # reconstruction the round-tripped scale allows.
-    scale_fp32 = scale.float()
+    # reconstruction the round-tripped scale allows. Flushed and all-zero rows
+    # use a neutral divisor and are zeroed below, so they reconstruct as zero.
+    divisor = torch.where(usable, scale.float(), torch.ones_like(scale.float()))
     row_step = max(1, _QUANT_CHUNK_ELEMS // contraction_dim)
     qweight = torch.empty(flat.shape, dtype=torch.int8, device=flat.device)
     for start in range(0, rows, row_step):
         end = min(start + row_step, rows)
         # The divide allocates the only float32 temporary; round/clamp on it.
-        codes = flat[start:end].float() / scale_fp32[start:end]
+        codes = flat[start:end].float() / divisor[start:end]
         qweight[start:end] = codes.round_().clamp_(-_INT8_MAX, _INT8_MAX).to(torch.int8)
 
-    scale = torch.where(nonzero, scale, torch.zeros_like(scale))
+    invalid_rows = ~usable.squeeze(-1)
+    if invalid_rows.any():
+        qweight[invalid_rows] = 0
     return qweight.view(original_shape), scale.view(reduction_shape)
 
 
@@ -326,6 +353,19 @@ class AscendInt8PerChannelOnlineMoEMethod(AscendOnlineFusedMoEMethod):
     """
 
     scheme_cls = AscendW8A8DynamicFusedMoEMethod
+
+    def __init__(self, moe: FusedMoEConfig) -> None:
+        # The runtime delegates to AscendW8A8DynamicFusedMoEMethod, whose
+        # grouped matmuls pass bias=None; a biased expert layer would silently
+        # drop w13_bias/w2_bias, so reject it before any weight is loaded.
+        if getattr(moe, "has_bias", False):
+            raise NotImplementedError(
+                "Online int8 quantization does not support MoE layers with expert bias "
+                "(e.g. GPT-OSS): the Ascend W8A8_DYNAMIC expert path does not apply "
+                "w13_bias/w2_bias. Serve this model without online quantization, or use "
+                "an unbiased MoE checkpoint."
+            )
+        super().__init__(moe)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, _PROCESSED_FLAG, False):

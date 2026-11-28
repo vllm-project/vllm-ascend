@@ -1,0 +1,10 @@
+pr: 22970
+entries:
+  - category: feature
+    text: >-
+      Added experimental online INT8 quantization on Ascend: a BF16/FP16
+      checkpoint can be quantized while its weights are loaded with
+      `--quantization int8_per_channel` (per-output-channel INT8 weights and
+      dynamically per-token INT8 activations, for dense linear layers and
+      routed experts), so no calibration dataset or pre-quantized checkpoint
+      is required.
