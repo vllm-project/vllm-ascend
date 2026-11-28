@@ -19,7 +19,7 @@
 # Differs from the UBX variant only in the CANN base image and the memcache
 # pins; FrameworkPTAdapter (torch-npu) is the same as the UBX variant.
 
-ARG CANN_BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261120181100-950-openeuler24.03-py3.12"
+ARG CANN_BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261128092700-950-openeuler24.03-py3.12"
 FROM ${CANN_BASE_IMAGE}
 
 WORKDIR /workspace
