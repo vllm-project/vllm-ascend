@@ -77,6 +77,7 @@ import codeowner_gate as owners_gate
 
 API_ROOT = "https://api.github.com"
 WORKFLOW_NAME = "E2E"
+IGNORED_RUN_PREFIX = "E2E (ignored label): "
 IN_FLIGHT_STATUSES = ("queued", "requested", "waiting", "in_progress")
 
 
@@ -115,10 +116,14 @@ def is_gate_job(name: str) -> bool:
 
 
 def latest_pull_request_run(repo: str, token: str, sha: str) -> dict | None:
-    """The newest E2E ``pull_request``-event run on ``sha``, if any."""
+    """The newest CI-eligible E2E ``pull_request`` run on ``sha``, if any."""
     data = _get_json(f"{API_ROOT}/repos/{repo}/actions/runs?head_sha={sha}&per_page=100", token)
     runs = [
-        r for r in data.get("workflow_runs", []) if r.get("name") == WORKFLOW_NAME and r.get("event") == "pull_request"
+        r
+        for r in data.get("workflow_runs", [])
+        if r.get("name") == WORKFLOW_NAME
+        and r.get("event") == "pull_request"
+        and not r.get("display_title", "").startswith(IGNORED_RUN_PREFIX)
     ]
     runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return runs[0] if runs else None

@@ -71,12 +71,6 @@ defaults:
   run:
     shell: bash -el {0}
 
-# only cancel in-progress runs of the same workflow
-# and ignore the lint / 1 card / 4 cards test type
-concurrency:
-  group: upstream-${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm }}
-  cancel-in-progress: true
-
 env:
   UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match

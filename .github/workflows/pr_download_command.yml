@@ -49,20 +49,28 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  # One wait per PR: a newer /download supersedes the previous one. The request
-  # already handed to sync-tools keeps running; it is idempotent. A manual run
-  # gets its own group, so it never cancels another manual download.
-  group: ascend-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.event.client_payload.pull_request.number || github.run_id }}
+  # Label, push and /download requests for one PR share a waiter. Unrelated
+  # labels and manual downloads cannot cancel that waiter, even while pending.
+  group: >-
+    model-downloader-${{
+      (github.event_name == 'pull_request' &&
+        (github.event.label.name == 'model-dataset-download' ||
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'model-dataset-download'))) &&
+        format('pr-{0}', github.event.pull_request.number)) ||
+      (github.event_name == 'repository_dispatch' &&
+        format('pr-{0}', github.event.client_payload.pull_request.number)) ||
+      format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
   download:
     name: Download models and datasets
-    # The label only gates pull_request events; a dispatch (comment or manual)
-    # is always allowed because a maintainer started it.
-    if: |
+    if: >-
       github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'model-dataset-download')
+      github.event.label.name == 'model-dataset-download' ||
+      (github.event.action == 'synchronize' &&
+       contains(github.event.pull_request.labels.*.name, 'model-dataset-download'))
     runs-on: linux-amd64-cpu-1-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04

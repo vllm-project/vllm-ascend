@@ -165,6 +165,23 @@ def assert_refused(rerun_env, exit_code, substring):
 
 
 class TestApprovedReview:
+    def test_newer_ignored_label_run_does_not_hide_failed_gate(self, rerun_env, monkeypatch):
+        ignored = run(conclusion="success", run_id=101)
+        ignored.update(display_title="E2E (ignored label): ai-review-passed", created_at="2026-11-18T00:00:00Z")
+        fake = _FakeGitHub(runs=[run(), ignored], jobs_by_run={100: owner_blocked_jobs()})
+        fake.install(monkeypatch)
+        assert rerun.main() == 0
+        assert fake.posts == [("failed-jobs", "https://api.github.com/repos/o/r/actions/runs/100/rerun-failed-jobs")]
+
+    def test_only_ignored_label_run_does_not_count_as_ci(self, rerun_env, monkeypatch):
+        ignored = run(conclusion="success")
+        ignored["display_title"] = "E2E (ignored label): model-dataset-download"
+        fake = _FakeGitHub(runs=[ignored])
+        fake.install(monkeypatch)
+        assert rerun.main() == 0
+        assert fake.posts == []
+        assert "no E2E run for" in (rerun_env / "ci_gate_failure_reason.txt").read_text(encoding="utf-8")
+
     def test_mixed_case_review_state_is_normalized(self, rerun_env, monkeypatch):
         # Real payloads are lowercase ("approved"); the script must normalize
         # before comparing against the uppercase REST API states.
@@ -348,6 +365,14 @@ class TestNoopsAndErrors:
 
 
 class TestHelpers:
+    @pytest.mark.parametrize("status", ["queued", "in_progress", "completed", "action_required"])
+    def test_latest_pull_request_run_ignores_unrelated_labels(self, monkeypatch, status):
+        eligible = run()
+        ignored = run(run_id=101, status=status)
+        ignored.update(display_title="E2E (ignored label): ai-review-passed", created_at="2026-11-18T00:00:00Z")
+        _FakeGitHub(runs=[eligible, ignored]).install(monkeypatch)
+        assert rerun.latest_pull_request_run("o/r", "t0ken", "abc123") == eligible
+
     @pytest.mark.parametrize(
         "name,expected",
         [

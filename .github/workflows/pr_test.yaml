@@ -16,13 +16,21 @@
 #
 
 name: E2E
+# Keep the ignored-label prefix in sync with run selectors and workflow_run
+# followers, which must distinguish these skipped runs from actual CI.
+run-name: >-
+  ${{ (github.event.action != 'labeled' ||
+      contains(fromJSON('["ci-run","ready-precise","main2main","ready-a5"]'), github.event.label.name))
+      && format('E2E: {0}', github.event.pull_request.title)
+      || format('E2E (ignored label): {0}', github.event.label.name) }}
 
 on:
   pull_request:
     # `synchronize` is deliberately absent: pushing a new commit does not start
     # E2E, so intermediate commits no longer occupy the NPU runner pool. A
-    # commit is tested on opened/reopened, when a label is added, or when a
-    # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
+    # commit is tested on opened/reopened, when a CI label is added, or when
+    # a `/run` comment re-emits `ci-run` (see pr_run_command.yml). Other labels
+    # create only skipped jobs, under a distinct gate check name and run title.
     # `ci-gate` is a required check, so a commit that was never tested stays
     # blocked rather than being merged untested.
     types:
@@ -48,17 +56,20 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  # This workflow only sees pull_request events, so one group per PR is
-  # enough: a new run (opened / synchronize / labeled) cancels the stale one.
-  # The review-event retrigger lives in pr_refresh_ci_gate.yaml, which keeps
-  # its own concurrency group so it never cancels the in-flight CI run here
-  # (the review retrigger waits for that run to finish before re-running its
-  # gate jobs).
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only opening/reopening the PR or requesting CI may replace its current run.
+  group: >-
+    ${{ github.workflow }}-${{ (github.event.action != 'labeled' ||
+        contains(fromJSON('["ci-run","ready-precise","main2main","ready-a5"]'), github.event.label.name))
+        && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
   pre-commit:
+    # Every test entry point requires this job to succeed. Filter by the label
+    # added in this event, rather than the labels the PR already carries.
+    if: >-
+      github.event.action != 'labeled' ||
+      contains(fromJSON('["ci-run","ready-precise","main2main","ready-a5"]'), github.event.label.name)
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -865,14 +876,18 @@ jobs:
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
-  ci-gate:
+  gate:
+    # A skipped required check counts as satisfied. Unrelated labels must use
+    # a different check name so they cannot replace the actual gate verdict.
+    # Keep the job ID distinct too: skipped job names may remain unexpanded.
+    name: ${{ needs.pre-commit.result == 'skipped' && 'ci-ignored' || 'ci-gate' }}
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     # The only producer of the required `ci-gate` check. Review events
     # re-evaluate the gate by re-running this job inside the original
     # pull_request run (see pr_refresh_ci_gate.yaml), so the required check
-    # flips in place - and no second check-run under this name is ever
-    # created: a skipped same-name check would shadow the real verdict and
-    # let the PR merge before the gate rewrites it. `!cancelled()` is what
+    # flips in place. An unrelated event must never create a same-name check:
+    # a skipped check would shadow the real verdict and let the PR merge
+    # before the gate rewrites it. `!cancelled()` is what
     # makes the gate run even when a needed job failed - without it, the
     # default success() would skip ci-gate, and a skipped required check
     # counts as satisfied on GitHub.
@@ -882,7 +897,7 @@ jobs:
     # check, and running it at the end of the workflow means reviews
     # submitted while the tests run are already visible when it judges - so
     # a mid-CI approval turns the gate green without any re-run.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.pre-commit.result != 'skipped' }}
     runs-on: linux-amd64-cpu-2-hk
     timeout-minutes: 360
     permissions:
