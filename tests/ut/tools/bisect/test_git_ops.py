@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect import git_ops
+from tools.bisect.deployment import git_ops
 
 
 def test_candidate_list_parses_first_parent_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

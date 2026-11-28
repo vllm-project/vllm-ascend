@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from tools.bisect.config import BisectInput, Candidate, TrialResult
-from tools.bisect.report import write_report_json
+from tools.bisect.orchestration.config import BisectInput, Candidate, TrialResult
+from tools.bisect.orchestration.report import write_report_json
 
 
 def test_write_report_json_serializes_candidates_and_trials(tmp_path: Path):

@@ -1,8 +1,7 @@
 # Bisect dependency recipe
 
 The bisect environment is prepared from the target commit's build chain.
-`BuildManager` uses the build analyzer and planner to prepare each trial;
-legacy version-adapter installation commands are not a second switching path.
+`deployment/manager.py` uses the build analyzer and planner to prepare each trial.
 
 ## Build inputs and analysis
 

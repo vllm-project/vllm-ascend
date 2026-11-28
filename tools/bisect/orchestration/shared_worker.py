@@ -25,50 +25,16 @@ multi-node, non-master node (``LWS_WORKER_INDEX != 0``).
 """
 
 import logging
-import os
-import subprocess
 import time
 from pathlib import Path
 
-from tools.bisect import git_ops, runner
-from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
-from tools.bisect.config import BisectInput, BisectOptions
-from tools.bisect.coordinator import Coordinator
+from tools.bisect.deployment import git_ops
+from tools.bisect.deployment.manager import DEPLOY_ERRORS, BuildManager
+from tools.bisect.execution.shared_directory import Coordinator
+from tools.bisect.orchestration.config import BisectInput, BisectOptions
+from tools.bisect.testing.nightly import kill_stray_servers, run_worker_test
 
 logger = logging.getLogger("bisect.worker")
-
-
-def _launch_pytest(
-    inp: BisectInput, opt: BisectOptions, log_path: Path, test_environment: dict[str, str] | None = None
-) -> int:
-    """Run the non-master multi-node pytest (same env recipe as the master)."""
-    env = dict(test_environment or os.environ)
-    env["CONFIG_YAML_PATH"] = inp.config_yaml
-    if inp.config_base_path:
-        env["CONFIG_BASE_PATH"] = inp.config_base_path
-    env["BENCHMARK_JOB_NAME"] = runner._safe_name(inp.config_yaml)
-    env.setdefault("BENCHMARK_HOME", str(opt.repo_dir / "benchmark"))
-    env["LWS_WORKER_INDEX"] = str(opt.node_index)
-
-    test_path = runner._multi_node_test_path(opt.repo_dir, inp)
-    sources = " ; ".join(f"source {f} 2>/dev/null || true" for f in runner._ENV_SOURCE_FILES)
-    bash_cmd = f"set -e ; {sources} ; exec python -m pytest -sv --show-capture=no {test_path}"
-    with open(log_path, "a", encoding="utf-8") as out:
-        out.write(f"\n$ {bash_cmd}\n")
-        out.flush()
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", bash_cmd],
-                cwd=str(opt.repo_dir),
-                env=env,
-                stdout=out,
-                stderr=subprocess.STDOUT,
-                timeout=opt.trial_timeout_s,
-            )
-            return proc.returncode
-        except subprocess.TimeoutExpired:
-            logger.error("[worker] pytest timed out after %ss", opt.trial_timeout_s)
-            return 124
 
 
 def _await_start(coord: Coordinator, rnd: int, opt: BisectOptions) -> bool:
@@ -136,12 +102,20 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
             _await_start(coord, rnd, opt)
             continue
 
-        coord.signal_ready(rnd, git_ops.current_commit(opt.repo_dir))
+        coord.signal_ready(
+            rnd,
+            git_ops.current_commit(opt.repo_dir),
+            inp.test_entry.identity if inp.test_entry else None,
+        )
         if not _await_start(coord, rnd, opt):
             logger.info("[worker] round %d aborted before test execution", rnd)
             continue
         # Launch the worker test; it returns when the master's trial completes.
-        rc = _launch_pytest(inp, opt, log_path, builder.test_environment)
+        rc = run_worker_test(inp, opt, log_path, builder.test_environment)
         logger.info("[worker] round %d pytest finished rc=%d", rnd, rc)
-        runner.kill_stray_servers()
-        coord.signal_finished(rnd)
+        if inp.test_entry is None:
+            kill_stray_servers()
+        verdict = None
+        if inp.test_entry is not None:
+            verdict = "SKIP" if rc == 125 else ("PASS" if rc == 0 else "FAIL")
+        coord.signal_finished(rnd, verdict)

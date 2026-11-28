@@ -3,15 +3,19 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect.auto_bisect import Bisector, _parse_args, _resolve_num_nodes
-from tools.bisect.config import SCENE_MULTI, BisectInput, BisectOptions
+from tools.bisect.algorithm.search import BisectSearch
+from tools.bisect.execution.participants import resolve_node_count
+from tools.bisect.orchestration.cli import _parse_args
+from tools.bisect.orchestration.config import SCENE_MULTI, BisectInput, BisectOptions
+from tools.bisect.orchestration.coordinator import BisectCoordinator
+from tools.bisect.testing.nightly import resolve_nightly_node_count
 
 
 def test_pick_mid_prefers_midpoint_then_nearest_unskipped_index():
-    assert Bisector._pick_mid(0, 8, skipped=set()) == 4
-    assert Bisector._pick_mid(0, 8, skipped={4}) == 5
-    assert Bisector._pick_mid(0, 8, skipped={4, 5}) == 3
-    assert Bisector._pick_mid(0, 3, skipped={0, 1, 2}) is None
+    assert BisectSearch(0, 8).next_index() == 4
+    assert BisectSearch(0, 8, {4}).next_index() == 5
+    assert BisectSearch(0, 8, {4, 5}).next_index() == 3
+    assert BisectSearch(0, 3, {0, 1, 2}).next_index() is None
 
 
 def test_parse_args_maps_no_assume_built_head_flag():
@@ -71,8 +75,8 @@ def _bisector_with_good_table(
     name: str | None = None,
     soc: str | None = None,
     good_commit: str | None = None,
-) -> Bisector:
-    bisector = Bisector.__new__(Bisector)
+) -> BisectCoordinator:
+    bisector = BisectCoordinator.__new__(BisectCoordinator)
     bisector.inp = BisectInput(
         scene="single_node",
         config_yaml="model.yaml",
@@ -135,7 +139,7 @@ def test_resolve_num_nodes_prefers_explicit_value(tmp_path: Path):
         config_yaml="missing.yaml",
     )
 
-    assert _resolve_num_nodes(args, tmp_path) == 4
+    assert resolve_node_count(args.scene, args.num_nodes) == 4
 
 
 def test_resolve_num_nodes_reads_multi_node_yaml(tmp_path: Path):
@@ -149,7 +153,7 @@ def test_resolve_num_nodes_reads_multi_node_yaml(tmp_path: Path):
         config_yaml="case.yaml",
     )
 
-    assert _resolve_num_nodes(args, tmp_path) == 2
+    assert resolve_nightly_node_count(tmp_path, args.config_yaml, args.config_base_path) == 2
 
 
 def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path: Path):
@@ -163,5 +167,5 @@ def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path
         config_yaml="case.yaml",
     )
 
-    with pytest.raises(SystemExit, match="Could not determine --num-nodes"):
-        _resolve_num_nodes(args, tmp_path)
+    with pytest.raises(ValueError, match="Could not determine --num-nodes"):
+        resolve_nightly_node_count(tmp_path, args.config_yaml, args.config_base_path)

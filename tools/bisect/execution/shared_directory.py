@@ -52,6 +52,10 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+class CoordinationError(RuntimeError):
+    """A participant barrier failed for the current trial."""
+
+
 class Coordinator:
     def __init__(self, coord_dir: str, num_nodes: int, node_index: int):
         self.root = Path(coord_dir)
@@ -122,15 +126,15 @@ class Coordinator:
         return self._done_flag.exists()
 
     # ------------------------------------------------------- worker writes
-    def signal_ready(self, rnd: int, head: str) -> None:
+    def signal_ready(self, rnd: int, head: str, test_identity: str | None = None) -> None:
         path = self._round_dir(rnd) / f"ready_{self.node_index}.json"
-        _atomic_write(path, json.dumps({"node": self.node_index, "head": head}))
+        _atomic_write(path, json.dumps({"node": self.node_index, "head": head, "test_identity": test_identity}))
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
 
-    def signal_finished(self, rnd: int) -> None:
+    def signal_finished(self, rnd: int, verdict: str | None = None) -> None:
         """Report that this node's test and stray processes have exited."""
         path = self._round_dir(rnd) / f"finished_{self.node_index}.json"
-        _atomic_write(path, json.dumps({"node": self.node_index}))
+        _atomic_write(path, json.dumps({"node": self.node_index, "verdict": verdict}))
 
     def wait_all_finished(self, rnd: int, timeout_s: float) -> None:
         """Do not permit a new round while another node still uses old CANN."""
@@ -142,6 +146,23 @@ class Coordinator:
             time.sleep(_POLL_INTERVAL_S)
         finished = sorted(path.name for path in directory.glob("finished_*.json"))
         raise TimeoutError(f"Round {rnd} finish barrier timed out: {finished}")
+
+    def verify_test_entry(self, rnd: int, identity: str) -> None:
+        for index in range(self.num_nodes):
+            path = self._round_dir(rnd) / f"ready_{index}.json"
+            data = json.loads(path.read_text())
+            if data.get("node") != index or data.get("test_identity") != identity:
+                raise RuntimeError(f"Node {index} joined with a different or missing test definition")
+
+    def trial_verdicts(self, rnd: int) -> list[str]:
+        verdicts = []
+        for index in range(self.num_nodes):
+            data = json.loads((self._round_dir(rnd) / f"finished_{index}.json").read_text())
+            verdict = data.get("verdict")
+            if verdict not in {"PASS", "FAIL", "SKIP"}:
+                raise RuntimeError(f"Node {index} did not publish a test-entry verdict")
+            verdicts.append(verdict)
+        return verdicts
 
     @staticmethod
     def _fresh(path: Path, since_ts: float | None) -> bool:
