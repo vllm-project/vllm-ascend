@@ -79,8 +79,11 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-uv-install -->
     ```bash
-    # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
-    pip install "vllm=={{ release_vllm_version }}"
+    # Install vllm-project/vllm. The installed version is {{ release_vllm_version }}.
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
