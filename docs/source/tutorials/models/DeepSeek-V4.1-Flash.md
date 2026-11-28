@@ -1677,15 +1677,16 @@ Select the tab for the target hardware.
     #### 5.3.1 Memcache KV Cache Pool
 
     This example adds a DRAM KV Cache Pool to the two-server DP8 Prefill / DP8
-    Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
+    Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout and ports are
     the same as ordinary PD deployment.
 
     `MultiConnector` combines `MooncakeConnectorV2` for P-to-D transfer with
     `AscendStoreConnector` for Memcache access. Prefill looks up, loads, and
     stores reusable prefixes; Decode receives KV from Prefill. Set
     `use_layerwise: true` in the Prefill `AscendStoreConnector` child and
-    `use_layerwise: false` in the Decode child. The MooncakeConnectorV2 children
-    continue to use their default non-layerwise pull mode.
+    `use_layerwise: false` in the Decode child. Set `use_layerwise: true` in
+    both `MooncakeConnectorV2` children to use layerwise push transfer with the
+    proxy shown in [Section 5.3.1.4](#5314-start-the-proxy-and-verify-pooling).
 
     Both roles retain the MegaMoE, fastokens, and renderer settings from ordinary
     PD deployment. Prefill uses the same EPLB settings. Keep
@@ -2005,8 +2006,24 @@ Select the tab for the target hardware.
 
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
-    the proxy from [Deploy the 950DT PD Proxy](#deploy-the-950dt-pd-proxy) with the same
-    endpoints. Verify the service using [Section 5.6](#56-service-verification).
+    the layerwise proxy in a separate terminal inside the Prefill node's 950DT
+    container. Set `P_IP` and `D_IP` to the corresponding server IPs. Decode must
+    be able to reach the proxy at `$P_IP:1999`.
+
+    ```shell
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
+        --host "$P_IP" \
+        --port 1999 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports 7100 7101 7102 7103 7104 7105 7106 7107 \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports 7100 7101 7102 7103 7104 7105 7106 7107
+    ```
+
+    Verify the service using [Section 5.6](#56-service-verification).
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Local prefix caching is enabled in this recipe, so an
     HBM cache hit alone does not demonstrate Memcache reuse. For an external-pool
