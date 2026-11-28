@@ -236,8 +236,7 @@ presets:
         encoder_parallel: false
         long_context: false
     runbook: >-
-      Use the Docker setup in tutorial section 4.1 to set an unlimited memlock limit.
-      Add the tutorial's memlock option when using the generated Docker command.
+      Add `--ulimit memlock=-1` to the generated Docker command as in tutorial section 4.1.
     args:
       - '--host'
       - '0.0.0.0'
@@ -300,8 +299,9 @@ presets:
         tool_calling: false
         reasoning: false
     runbook: >-
-      Follow the container setup in tutorial section 4.1, including the unlimited memlock
-      limit. Run the proxy after both workers are ready (section 5.6.3).
+      Add `--ulimit memlock=-1` to the generated Docker command as in tutorial section 4.1.
+      Run the proxy after both workers are ready. To reproduce section 5.6.3, bind the
+      proxy to the Prefill node IP on port 8000.
     args:
       - '--no-disable-hybrid-kv-cache-manager'
     roles:

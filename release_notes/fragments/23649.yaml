@@ -1,0 +1,8 @@
+pr: 23649
+entries:
+  - category: documentation
+    text: >-
+      Added tutorial presets to Recipes for Qwen3.8-27B on A2, A3, and 950PR,
+      Qwen3.6-27B on A2 and A3, and Qwen3.5-397B-A17B on 950DT. The A3
+      Qwen3.8-27B preset includes colocated prefill/decode, and the A2
+      Qwen3.5-397B-A17B disaggregation preset uses the tutorial's worker ports.
