@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, KVTransferConfig, VllmConfig, set_current_vllm_config
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
@@ -42,29 +42,92 @@ from vllm_ascend.utils import (
 )
 
 
-@pytest.mark.parametrize("block_size,interleave", [(768, 128), (768, 384), (768, 768), (1536, 768), (1536, 1536)])
-def test_kimi_hybrid_pd_keeps_kernel_interleave_after_manager_block_growth(block_size, interleave):
+@pytest.mark.parametrize(
+    "connector,dcp_size,allow_auto_resolve,interleave,legacy_interleave,expected_interleave",
+    [
+        ("AscendStoreConnector", 8, True, 1, 1, 384),
+        ("MooncakeConnectorStoreV1", 8, True, 1, 1, 384),
+        ("MultiConnector", 8, True, 1, 1, 384),
+        ("AscendStoreConnector", 1, True, 1, 1, 1),
+        ("AscendStoreConnector", 8, False, 1, 1, None),
+        ("AscendStoreConnector", 8, True, 128, 1, None),
+        ("AscendStoreConnector", 8, True, 1, 128, None),
+        ("MooncakeConnectorV2", 8, True, 1, 1, 384),
+        ("MooncakeConnectorV2", 8, False, 1, 1, None),
+        ("MooncakeConnectorV2", 8, False, 384, 1, 384),
+    ],
+)
+def test_dcp_kv_transfer_interleave_defaults(
+    connector, dcp_size, allow_auto_resolve, interleave, legacy_interleave, expected_interleave
+):
+    extra_config = {}
+    if connector == "MultiConnector":
+        extra_config["connectors"] = [
+            {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"},
+            {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer"},
+        ]
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(block_size=384, cache_dtype="auto"),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=interleave,
+            dcp_kv_cache_interleave_size=legacy_interleave,
+            _allow_auto_resolve_cp_interleave_size=allow_auto_resolve,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=connector, kv_role="kv_consumer", kv_connector_extra_config=extra_config
+        ),
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        if expected_interleave is None:
+            with pytest.raises(AssertionError, match=rf"cp_kv_cache_interleave_size\({interleave}\) and block_size"):
+                _validate_sfa_dcp_kv_sp(config)
+        else:
+            _validate_sfa_dcp_kv_sp(config)
+            assert config.parallel_config.cp_kv_cache_interleave_size == expected_interleave
+
+
+@pytest.mark.parametrize(
+    "block_size,interleave", [(768, None), (768, 128), (768, 384), (768, 768), (1536, 768), (1536, 1536)]
+)
+def test_kimi_hybrid_pd_resolves_default_and_preserves_kernel_interleave(block_size, interleave):
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
         cache_config=SimpleNamespace(block_size=block_size, cache_dtype="fp8"),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=interleave),
-        kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=8,
+            cp_kv_cache_interleave_size=1 if interleave is None else interleave,
+            dcp_kv_cache_interleave_size=1,
+            _allow_auto_resolve_cp_interleave_size=interleave is None,
+        ),
+        kv_transfer_config=KVTransferConfig(kv_connector="MooncakeConnectorV2", kv_role="kv_consumer"),
     )
     with (
         patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
         patch("vllm_ascend.platform.enable_sp", return_value=False),
     ):
         _validate_sfa_dcp_kv_sp(config)
-    assert config.parallel_config.cp_kv_cache_interleave_size == interleave
+    expected_interleave = block_size if interleave is None else interleave
+    assert config.parallel_config.cp_kv_cache_interleave_size == expected_interleave
 
 
-@pytest.mark.parametrize("connector,interleave", [("MooncakeConnectorV2", 64), ("MooncakePullConnector", 192)])
+@pytest.mark.parametrize(
+    "connector,interleave", [("MooncakeConnectorV2", 64), ("MooncakePullConnector", 192), ("MooncakePullConnector", 1)]
+)
 def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
         cache_config=SimpleNamespace(block_size=768, cache_dtype="fp8"),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=interleave),
-        kv_transfer_config=SimpleNamespace(kv_connector=connector),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=interleave,
+            _allow_auto_resolve_cp_interleave_size=False,
+        ),
+        kv_transfer_config=KVTransferConfig(kv_connector=connector, kv_role="kv_consumer"),
     )
     with (
         patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),

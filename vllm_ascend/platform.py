@@ -1829,21 +1829,40 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
+    kv_transfer_config = vllm_config.kv_transfer_config
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
+    # Consecutive KV tokens assigned to one DCP rank before switching ranks.
+    cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+    if (
+        use_dcp
+        and cp_kv_cache_interleave_size == 1
+        and cp_kv_cache_interleave_size != cache_config.block_size
+        and kv_transfer_config is not None
+        and kv_transfer_config.is_kv_transfer_instance
+        and parallel_config._allow_auto_resolve_cp_interleave_size
+        and parallel_config.dcp_kv_cache_interleave_size == 1
+    ):
+        logger.info_once(
+            "KV transfer with DCP adjusts cp_kv_cache_interleave_size from %d to block_size %d.",
+            cp_kv_cache_interleave_size,
+            cache_config.block_size,
+        )
+        cp_kv_cache_interleave_size = cache_config.block_size
+        parallel_config.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+
     # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
     # Mooncake pull path transfers kernel blocks and retains the DCP token
     # interleave; changing that interleave after worker initialization would
     # reinterpret the already allocated block tables.
-    interleave = parallel_config.cp_kv_cache_interleave_size
     hybrid_kernel_interleave = (
         getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
         and cache_config.cache_dtype == "fp8"
-        and vllm_config.kv_transfer_config is not None
-        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
-        and interleave > 0
-        and cache_config.block_size % interleave == 0
+        and kv_transfer_config is not None
+        and kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and cp_kv_cache_interleave_size > 0
+        and cache_config.block_size % cp_kv_cache_interleave_size == 0
     )
     if use_dcp and hybrid_kernel_interleave:
         from vllm.v1.worker.utils import select_common_block_size
@@ -1851,21 +1870,22 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 
         kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
-        if interleave % kernel_block_size:
+        if cp_kv_cache_interleave_size % kernel_block_size:
             raise ValueError(
                 "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
-                f"interleave={interleave}, kernel_block_size={kernel_block_size}"
+                f"interleave={cp_kv_cache_interleave_size}, kernel_block_size={kernel_block_size}. "
+                f"For example, use --cp-kv-cache-interleave-size {cache_config.block_size}."
             )
     if (
-        vllm_config.kv_transfer_config is not None
-        and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
+        kv_transfer_config is not None
+        and cache_config.block_size != cp_kv_cache_interleave_size
         and use_dcp
         and not hybrid_kernel_interleave
     ):
         raise AssertionError(
-            f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
-            f"and block_size({cache_config.block_size}) "
-            "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
+            f"cp_kv_cache_interleave_size({cp_kv_cache_interleave_size}) and block_size({cache_config.block_size}) "
+            "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario. "
+            f"Use --cp-kv-cache-interleave-size {cache_config.block_size}."
         )
 
     if (
