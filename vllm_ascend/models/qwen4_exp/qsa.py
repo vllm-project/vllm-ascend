@@ -678,6 +678,8 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             num_write_tokens = batch.num_tokens_after_padding if full_pcp_graph else batch.num_tokens
             metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
         metadata.qsa_request_plan = None
+        if pcp_context is None and (for_capture or full_graph_mode):
+            metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
         if for_capture or full_pcp_graph:
             return metadata
         phases = common_attn_metadata.is_prefilling

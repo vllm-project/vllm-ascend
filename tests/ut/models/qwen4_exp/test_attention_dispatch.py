@@ -227,7 +227,9 @@ def load_builder():
 def test_metadata_builder_keeps_decode_capture_on_gbsa():
     builder, plans = load_builder()
     assert builder._cudagraph_support == "uniform"
-    common = SimpleNamespace(is_prefilling=torch.tensor([False]), graph_pad_size=4)
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False]), graph_pad_size=4, query_start_loc=torch.tensor([0, 4])
+    )
     assert builder.build(0, common).qsa_request_plan is None
     # Capture dummy inputs can look like prefills; the decode capture contract
     # must not freeze the prefill request plan into the graph.

@@ -145,6 +145,7 @@ class Qwen4ExpPreparedInputAdapter:
             module for module in model.modules() if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
         )
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
+        self._graph_query_offsets: dict[tuple[torch.device, int], torch.Tensor] = {}
         self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
         for layer in self._layers:
             rotary = layer.rotary_emb
@@ -337,14 +338,24 @@ class Qwen4ExpPreparedInputAdapter:
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
-        if full_graph:
-            # Replay uses the row layout recorded during capture.
+        graph_offsets = getattr(main, "qsa_graph_query_offsets", None)
+        if graph_offsets is not None:
+            # Capture and replay use the same int64 buffer. The runner supplies
+            # padded request boundaries on device, including synthetic requests.
+            key = (graph_offsets.device, requests)
+            cu_q = self._graph_query_offsets.get(key)
+            if cu_q is None:
+                cu_q = torch.empty(requests + 1, dtype=torch.int64, device=graph_offsets.device)
+                self._graph_query_offsets[key] = cu_q
+            main.qsa_request_cu_q = cu_q
+        elif full_graph:
             main.qsa_request_cu_q = None
         cu_q = getattr(main, "qsa_request_cu_q", None)
-        max_query_len = main.max_query_len if cu_q is not None else 1
+        request_layout = cu_q is not None
+        max_query_len = main.max_query_len if request_layout else 1
         signature = (
             "gbsa",
-            max_query_len,
+            max_query_len if graph_offsets is None else None,
             _tensor_storage_signature(cu_q) if cu_q is not None else None,
             int(layer.num_heads),
             num_kv_heads,
@@ -361,6 +372,8 @@ class Qwen4ExpPreparedInputAdapter:
         if prepared is not None:
             main.qsa_gbsa_metadata = prepared
             return
+        if graph_offsets is not None:
+            cu_q.copy_(graph_offsets)
         sparse_count = counts.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
         # Metadata generation consumes the GBSA geometry and counts.  Selected
         # indices are produced later by LI and passed to the attention operator.
@@ -397,9 +410,7 @@ class Qwen4ExpPreparedInputAdapter:
             **common,
         )
         main.qsa_gbsa_metadata = (
-            generated
-            if getattr(main, "qsa_request_cu_q", None) is not None
-            else self._persistent_metadata(signature, generated)
+            generated if request_layout and graph_offsets is None else self._persistent_metadata(signature, generated)
         )
         prepared_this_step[signature] = main.qsa_gbsa_metadata
 

@@ -491,6 +491,8 @@ def test_qsa_decode_maps_only_live_rows(cpu_token_to_req, full_graph, live_reqs)
         expected_rows - live_tokens
     )
     assert metadata["other"].num_actual_tokens == live_tokens
+    if full_graph:
+        assert metadata["main"].qsa_graph_query_offsets is starts
     if live_reqs == 14 and not full_graph:
         torch.testing.assert_close(metadata["main"].qsa_request_cu_q, starts.long())
     else:
