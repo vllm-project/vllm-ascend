@@ -704,6 +704,12 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::CalcParams(uint32_t loop, uint3
         }
     }
 
+    if constexpr (!HEAD_RATIO_ONE && IsSameType<KV_T, bfloat16_t>::value &&
+                  LAYOUT_T == SMLA_LAYOUT::TND && KV_LAYOUT_T == SMLA_LAYOUT::PA_BBND) {
+        constexpr uint32_t fullTile = 2 * ConstInfo::KV_GATHER_HALF_ROWS;
+        info.splitKvGather = !info.isOriOnly && (constInfo.gSize == 8 || constInfo.gSize == 64) &&
+                             constInfo.sparseBlockCount == fullTile && info.actualSingleProcessSInnerSize == fullTile;
+    }
     info.actualSingleProcessSInnerSizeAlign =
         SMLAAlign(info.actualSingleProcessSInnerSize, SMLAVectorBlock<SMLAT>::BYTE_BLOCK);
     if (info.isOriOnly) {
@@ -937,7 +943,8 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::PreloadPipeline(uint32_t loop, 
                 }
                 vectorBlock.ProcessVec0L(extraInfo0);
                 if (!extraInfo0.isOriOnly) {
-                    CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
+                    uint32_t flag = extraInfo0.splitKvGather ? ConstInfo::SYNC_KV_SECOND_HALF : constInfo.syncV0C1;
+                    CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(flag);
                 }
             }
         }

@@ -69,6 +69,8 @@ public:
     // ================================Vector0==========================================
     template <bool USE_PHYSICAL_CACHE>
     __aicore__ inline void ProcessVec0LImpl(const RunInfo &runInfo, int64_t s2GmStartOffset, int64_t s2GmLimit);
+    template <bool USE_PHYSICAL_CACHE>
+    __aicore__ inline void GatherKvRows(const RunInfo &runInfo, int64_t start, int64_t limit, int64_t cacheStart);
     __aicore__ inline bool PrepareVec0AddressCache(int64_t topkGmBaseOffset, const RunInfo &runInfo);
     __aicore__ inline void CopyInKvFromPhysicalCache(int64_t &mte2Size, int64_t mte3Size,
                                                   int64_t mergeMte3Idx, int64_t cacheIdx0, int64_t cacheIdx1);
@@ -576,11 +578,13 @@ __aicore__ inline bool SMLAVectorBlock<SMLAT>::PrepareVec0AddressCache(int64_t t
     DataCopyPad(blockTableUb, cmpBlockTableGm_[runInfo.bIdx * constInfo.cmpMaxBlockNumPerBatch], copyParams,
                 padParams);
     LocalTensor<int32_t> sparseIdxUb = blockTableUb[V0_CACHE_MAX_BLOCK_NUM];
-    copyParams.blockCount = V0_CACHE_MAX_TOPK_NUM / constInfo.s2BaseSize;
-    copyParams.blockLen = constInfo.s2BaseSize / 2U * sizeof(int32_t);
-    copyParams.srcStride = constInfo.s2BaseSize / 2U * sizeof(int32_t);
-    DataCopyPad(sparseIdxUb,
-                topkGm_[topkGmBaseOffset + GetSubBlockIdx() * (constInfo.s2BaseSize / 2U)], copyParams, padParams);
+    // Each AIV owns one stripe per gather. Store its two stripes consecutively for split QK.
+    const uint32_t gatherRows = runInfo.splitKvGather ? ConstInfo::KV_GATHER_HALF_ROWS : constInfo.s2BaseSize;
+    const uint32_t rowsPerAiv = gatherRows / 2U;
+    copyParams.blockCount = V0_CACHE_MAX_TOPK_NUM / gatherRows;
+    copyParams.blockLen = rowsPerAiv * sizeof(int32_t);
+    copyParams.srcStride = copyParams.blockLen;
+    DataCopyPad(sparseIdxUb, topkGm_[topkGmBaseOffset + GetSubBlockIdx() * rowsPerAiv], copyParams, padParams);
     SetFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_V0BUF_FLAG);
     WaitFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_V0BUF_FLAG);
 
@@ -786,7 +790,7 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyOutMrgeResult(int64_t mte2Siz
 template <typename SMLAT>
 __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0L(const RunInfo &runInfo)
 {
-    int64_t s2ProcessSize = runInfo.v0S2DealSize;
+    int64_t s2ProcessSize = runInfo.splitKvGather ? ConstInfo::KV_GATHER_HALF_ROWS : runInfo.v0S2DealSize;
     int64_t s2Pair = CeilDiv(s2ProcessSize, 2 * constInfo.sparseBlockSize);
     int64_t s2SplitPoint = SMLAAlign(s2Pair, 2) * constInfo.sparseBlockSize;
     int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : s2SplitPoint;
@@ -815,6 +819,21 @@ template <bool USE_PHYSICAL_CACHE>
 __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0LImpl(
     const RunInfo &runInfo, int64_t s2GmStartOffset, int64_t s2GmLimit)
 {
+    int64_t cacheStart = runInfo.v0S2Start / constInfo.s2BaseSize * (constInfo.s2BaseSize / 2U);
+    GatherKvRows<USE_PHYSICAL_CACHE>(runInfo, s2GmStartOffset, s2GmLimit, cacheStart);
+    if (runInfo.splitKvGather) {
+        // Release the first 256 rows before submitting the second gather.
+        CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
+        constexpr uint32_t halfRows = ConstInfo::KV_GATHER_HALF_ROWS;
+        GatherKvRows<USE_PHYSICAL_CACHE>(runInfo, halfRows + s2GmStartOffset, halfRows + s2GmLimit, halfRows / 2U);
+    }
+}
+
+template <typename SMLAT>
+template <bool USE_PHYSICAL_CACHE>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::GatherKvRows(
+    const RunInfo &runInfo, int64_t s2GmStartOffset, int64_t s2GmLimit, int64_t cacheStart)
+{
     int64_t topkGmBaseOffset = runInfo.topKBaseOffset + runInfo.v0S2Start;
     int64_t mte2Size = 0;
     int64_t mte3Size = 0;
@@ -829,8 +848,7 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0LImpl(
             needWaitMte3ToMte2 = false;
         }
         if constexpr (USE_PHYSICAL_CACHE) {
-            int64_t cacheIdx0 = runInfo.v0S2Start / constInfo.s2BaseSize * (constInfo.s2BaseSize / 2U) +
-                                s2GmOffsetArray - s2GmStartOffset;
+            int64_t cacheIdx0 = cacheStart + s2GmOffsetArray - s2GmStartOffset;
             CopyInKvFromPhysicalCache(mte2Size, mte3Size, mergeMte3Idx, cacheIdx0, cacheIdx0 + 1);
         } else {
             GetRealS2Idx(s2GmOffsetArray, s2IdxArray0, topkGmBaseOffset, runInfo);
