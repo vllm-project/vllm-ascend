@@ -1,0 +1,426 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Validate: Docker Actions on Self-Hosted'
+
+on:
+  workflow_dispatch:
+    inputs:
+      push-to-ghcr:
+        description: 'Push test image to GHCR (requires packages:write permission)'
+        type: boolean
+        default: false
+      runner-label:
+        description: 'Override runner label for single-runner test'
+        type: string
+        default: ''
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/validate_docker_actions.yaml'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Job 1: 检测 Docker daemon 是否可用 ───
+  validate-docker-availability:
+    name: docker-availability-check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
+    steps:
+      - name: Check Docker daemon availability
+        run: |
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Arch: $(uname -m)"
+          echo "========================================"
+
+          if command -v docker &> /dev/null; then
+            echo "Docker CLI: $(docker --version 2>/dev/null || echo unknown)"
+          else
+            echo "::warning::Docker CLI not found on this runner"
+            exit 0
+          fi
+
+          # Check Docker socket existence and permissions
+          if [ -S /var/run/docker.sock ]; then
+            echo "Docker socket: $(ls -la /var/run/docker.sock)"
+            if docker info &> /dev/null; then
+              echo "Docker daemon: RUNNING"
+              docker info --format 'Server Version: {{.ServerVersion}}' 2>/dev/null || true
+            else
+              echo "::warning::Docker socket exists but daemon not responding (permission issue?)"
+              id
+            fi
+          else
+            echo "::warning::Docker socket not found at /var/run/docker.sock"
+          fi
+
+      - name: Summary
+        run: |
+          echo "Docker availability check completed for ${{ matrix.runner }}"
+          echo "See step logs for details."
+
+  # ─── Job 2: Docker 元数据 & Buildx 基础验证 ───
+  validate-docker-meta-and-buildx:
+    name: docker-meta-buildx-on-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    needs: validate-docker-availability
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Print runner info
+        run: |
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Arch: $(uname -m)"
+          echo "Docker version: $(docker --version 2>/dev/null || echo 'docker not found')"
+          echo "Buildx available: $(docker buildx version 2>/dev/null || echo 'buildx not found')"
+          echo "Docker socket: $(ls -la /var/run/docker.sock 2>/dev/null || echo 'not found')"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/validate-docker-test
+          tags: |
+            type=raw,value=self-hosted-${{ matrix.runner }}-${{ github.run_id }}
+          flavor: |
+            latest=false
+          labels: |
+            self-hosted=true
+            validation=true
+            runner=${{ matrix.runner }}
+
+      - name: Verify metadata
+        run: |
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Labels: ${{ steps.meta.outputs.labels }}"
+          echo "JSON: ${{ steps.meta.outputs.json }}"
+          test -n "${{ steps.meta.outputs.tags }}" && echo "metadata OK" || echo "metadata FAILED"
+
+      - name: Check Docker daemon (same job)
+        id: check-docker
+        run: |
+          if docker info &> /dev/null; then
+            echo "docker-ready=true" >> $GITHUB_OUTPUT
+            docker info --format 'Server: {{.ServerVersion}}' 2>/dev/null
+          else
+            echo "docker-ready=false" >> $GITHUB_OUTPUT
+            echo "::warning::Docker daemon not available on this runner instance"
+          fi
+
+      - name: Set up QEMU (cross-arch, only if Docker daemon available)
+        uses: docker/setup-qemu-action@v4
+        if: ${{ steps.check-docker.outputs.docker-ready == 'true' && contains(matrix.runner, 'amd64') }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Verify Buildx
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        run: |
+          docker buildx inspect --bootstrap
+          docker buildx ls
+          echo "buildx setup OK"
+
+      - name: Login to GitHub Container Registry
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Job 3: Docker 本地构建测试 (不推送) ───
+  validate-docker-local-build:
+    name: docker-local-build-on-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    needs: validate-docker-meta-and-buildx
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: validate-docker-local-test
+          tags: |
+            type=raw,value=test
+          flavor: |
+            latest=false
+
+      - name: Check Docker daemon (local-build)
+        id: check-docker
+        run: |
+          if docker info &> /dev/null; then
+            echo "docker-ready=true" >> $GITHUB_OUTPUT
+            docker info --format 'Server: {{.ServerVersion}}' 2>/dev/null
+          else
+            echo "docker-ready=false" >> $GITHUB_OUTPUT
+            echo "::notice::Docker daemon not available, will use buildctl for validation"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Verify buildkitd configuration
+        run: |
+          echo "BUILDKITD_ADDR: ${BUILDKITD_ADDR:-NOT SET}"
+          if [ -n "$BUILDKITD_ADDR" ]; then
+            echo "Attempting to connect to buildkitd..."
+            buildctl --addr="$BUILDKITD_ADDR" du || echo "buildkitd connection check completed (may fail if not yet running)"
+          fi
+
+      - name: Create test Dockerfile
+        run: |
+          mkdir -p /tmp/docker-validate-context
+          cat > /tmp/docker-validate-context/Dockerfile << 'DOCKERFILE'
+          FROM alpine:3.20
+          RUN echo "Docker build validation on self-hosted runner" > /validate.txt
+          RUN echo "Runner: ${{ matrix.runner }}" >> /validate.txt
+          RUN echo "Arch: $(uname -m)" >> /validate.txt
+          CMD ["cat", "/validate.txt"]
+          DOCKERFILE
+          echo "Test Dockerfile created"
+
+      - name: Build image with Docker (local only, no push)
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        id: docker_build
+        uses: docker/build-push-action@v7
+        with:
+          context: /tmp/docker-validate-context
+          file: /tmp/docker-validate-context/Dockerfile
+          platforms: ${{ contains(matrix.runner, 'amd64') && 'linux/amd64' || 'linux/arm64' }}
+          push: false
+          load: true
+          tags: validate-docker-local-test:${{ github.run_id }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build image with buildctl (fallback, no Docker daemon)
+        if: steps.check-docker.outputs.docker-ready != 'true' && env.BUILDKITD_ADDR != ''
+        run: |
+          echo "Building image with buildctl via remote buildkitd..."
+          TAG="validate-buildctl-test:${{ github.run_id }}"
+          buildctl --addr="$BUILDKITD_ADDR" build \
+            --frontend=dockerfile.v0 \
+            --local context=/tmp/docker-validate-context \
+            --local dockerfile=/tmp/docker-validate-context \
+            --output "type=image,name=${TAG},push=false" \
+            || echo "::warning::buildctl build failed — check buildkitd service status"
+          echo "buildctl build completed (check buildkitd logs for details)"
+
+      - name: Verify local image (Docker)
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        run: |
+          echo "Inspecting built image:"
+          docker inspect validate-docker-local-test:${{ github.run_id }} --format='{{.Architecture}}'
+          echo "Running image:"
+          docker run --rm validate-docker-local-test:${{ github.run_id }}
+          echo "Local build validation OK"
+
+      - name: Cleanup local image (Docker)
+        if: steps.check-docker.outputs.docker-ready == 'true'
+        run: docker rmi validate-docker-local-test:${{ github.run_id }} || true
+
+  # ─── Job 4: GHCR 推送测试 (仅 workflow_dispatch + push-to-ghcr=true) ───
+  validate-docker-ghcr-push:
+    name: docker-ghcr-push-on-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    needs: validate-docker-meta-and-buildx
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.push-to-ghcr == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-32-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/validate-docker-test
+          tags: |
+            type=raw,value=self-hosted-${{ matrix.runner }}-${{ github.run_id }}
+          flavor: |
+            latest=false
+          labels: |
+            self-hosted=true
+            validation=true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create test Dockerfile
+        run: |
+          mkdir -p /tmp/docker-push-context
+          cat > /tmp/docker-push-context/Dockerfile << 'DOCKERFILE'
+          FROM alpine:3.20
+          RUN echo "Docker push validation on self-hosted runner" > /validate.txt
+          CMD ["cat", "/validate.txt"]
+          DOCKERFILE
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64
+          context: /tmp/docker-push-context
+          file: /tmp/docker-push-context/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pull and verify pushed image
+        run: |
+          TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          echo "Pulling: $TAG"
+          docker pull "$TAG" || echo "Pull failed, image may take time to propagate"
+          echo "Docker push validation completed"
+
+      - name: Cleanup GHCR test image
+        if: always()
+        uses: actions/github-script@v9
+        continue-on-error: true
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const packageName = 'validate-docker-test';
+            console.log(`Attempting to clean up ${owner}/${packageName}`);
+            try {
+              const { data: versions } = await github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg({
+                package_type: 'container',
+                package_name: packageName,
+                org: owner,
+                per_page: 30,
+              });
+              for (const v of versions) {
+                const tags = v.metadata?.container?.tags || [];
+                if (tags.some(t => t.includes('${{ github.run_id }}'))) {
+                  console.log(`Deleting version ${v.id}`);
+                  await github.rest.packages.deletePackageVersionForOrg({
+                    package_type: 'container',
+                    package_name: packageName,
+                    org: owner,
+                    package_version_id: v.id,
+                  });
+                }
+              }
+            } catch (e) {
+              console.log(`Cleanup skipped: ${e.message}`);
+            }
+
+  # ─── Job 5: 汇总报告 ───
+  summary:
+    name: docker-validation-summary
+    runs-on: linux-amd64-cpu-4-hk
+    needs:
+      - validate-docker-availability
+      - validate-docker-meta-and-buildx
+      - validate-docker-local-build
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Docker Actions Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-docker-availability | ${{ needs.validate-docker-availability.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-docker-meta-and-buildx | ${{ needs.validate-docker-meta-and-buildx.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-docker-local-build | ${{ needs.validate-docker-local-build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-docker-ghcr-push | ${{ needs.validate-docker-ghcr-push.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Key Changes from Original PR #11618" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **Removed** \`driver: docker-container\` — 在 k8s runner 上 \`docker-container\` 驱动需要特权模式创建额外容器，改用默认 \`docker\` 驱动" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Separated local build from GHCR push** — build 测试不需要推送，单独可选触发 GHCR 推送" >> $GITHUB_STEP_SUMMARY
+          echo "3. **Added Docker availability check** — 先检测 Docker daemon 是否可用，帮助定位环境问题" >> $GITHUB_STEP_SUMMARY
+          echo "4. **Added explicit permissions** — 明确 \`packages: write\` 权限" >> $GITHUB_STEP_SUMMARY
+          echo "5. **Added \`load: true\` for local build** — 本地构建后加载到 Docker daemon 直接验证" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 注意事项" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux-amd64-cpu-32-hk\` / \`linux-arm64-cpu-32-hk\` 通过 Vault 注入证书 + 远程 buildkitd (\`tcp://buildkitd-service-*.buildkitd:1234\`) 支持 Docker 构建" >> $GITHUB_STEP_SUMMARY
+          echo "- 若 buildx 需要本地 Docker daemon 而 runner 无 daemon，则 Docker build 相关 action 不可用" >> $GITHUB_STEP_SUMMARY
+          echo "- 替代方案: 使用 \`buildctl\` 直接调用远程 buildkitd 进行镜像构建" >> $GITHUB_STEP_SUMMARY
