@@ -897,13 +897,13 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers and supports joint TP × PCP head sharding. The KDA head count
-must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
-are not supported.
-Stochastic rounding must be disabled.
+GLM RecoverSSM requires speculative decoding, PP=1 and DCP=1. Disable
+stochastic rounding. For colocated PCP, follow the
+[GLM-5.3-Flash single-node deployment example](../../tutorials/models/GLM5.3-Flash.md#glm53-flash-colocated-pcp-recoverssm).
 
-For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
+In a disaggregated deployment, Prefill producers support joint TP × PCP head
+sharding. The KDA head count must be divisible by TP × PCP. Decode consumers
+use PCP=1. For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, speculative window,
 cache dtypes, convolution layout and RecoverSSM settings on both sides.
 PCP producers may use a different KDA head-shard count from Decode consumers:

@@ -339,6 +339,31 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input where specified. A3 ordinary PD uses `'{"image":1}'` to limit image input only.
 - `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens. GLM-5.3-Flash supports MTP draft graph execution.
 
+#### Colocated PCP with RecoverSSM on A3 {: #glm53-flash-colocated-pcp-recoverssm }
+
+The following GLM-5.3-Flash W8A8 example serves text requests on eight A3 NPUs.
+Prefill and Decode share one engine with TP1/PCP8/EP8, PP=1 and DCP=1. Omit
+`--kv-transfer-config` and keep stochastic rounding disabled. The KDA head
+count must be divisible by the PCP size. During MTP verification, all PCP
+ranks process the same requests. Each rank commits the accepted tokens to
+its local shard of the KDA recurrent state.
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_SSM_CONV_STATE_LAYOUT=SD
+
+vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
+  --language-model-only --trust-remote-code --quantization ascend \
+  --tensor-parallel-size 1 --prefill-context-parallel-size 8 --enable-expert-parallel \
+  --distributed-executor-backend mp \
+  --max-model-len 139264 --max-num-seqs 8 --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.90 --kv-cache-dtype int8 --mamba-ssm-cache-dtype bfloat16 \
+  --enable-prefix-caching --enable-chunked-prefill --use-replayssm \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5,"enforce_eager":false}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,6,12,24,48]}' \
+  --additional-config '{"enable_cpu_binding":false,"enable_flashcomm1":false,"enable_fused_mc2":0}'
+```
+
 ### 5.2 Multi-Node Colocated Deployment
 
 === "A2 series"
