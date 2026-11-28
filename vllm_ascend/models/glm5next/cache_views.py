@@ -7,10 +7,9 @@ from collections.abc import Callable
 import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
 )
@@ -25,10 +24,10 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
 
 def view_kpool_tail_cache(
     layer_name: str,
-    kv_cache_spec: AscendIndexerKPoolTailSpec,
+    kv_cache_spec: CircularBufferSpec,
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     if not isinstance(raw_cache, torch.Tensor):
         raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
     typed_slot = raw_cache.view(kv_cache_spec.dtype)
@@ -40,13 +39,11 @@ def view_kpool_tail_cache(
             f"KPool tail cache for {layer_name} does not fit one small page: "
             f"tail={tail_block_el} elements, page={page_el} elements."
         )
-    return [
-        torch.as_strided(
-            typed_slot,
-            size=(num_blocks, kv_cache_spec.ring_capacity, 2 * kv_cache_spec.head_size),
-            stride=(page_el, 2 * kv_cache_spec.head_size, 1),
-        )
-    ]
+    return torch.as_strided(
+        typed_slot,
+        size=(num_blocks, kv_cache_spec.block_size, kv_cache_spec.head_size),
+        stride=(page_el, kv_cache_spec.head_size, 1),
+    )
 
 
 def view_compressed_indexer_cache(
@@ -147,14 +144,17 @@ def view_glm5_next_cache(
     kernel_block_size: int,
     num_blocks: int,
     get_kv_cache_dims: Callable[[str, AttentionSpec], tuple[int, int]],
-) -> list[torch.Tensor] | tuple[torch.Tensor, ...] | None:
+) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None:
     """Build the pooled-cache views for one GLM-Next layer.
 
     Returns the view container the runner registers for the layer, or None
     when the spec is not owned by the GLM-Next pooled layout, so the caller
     falls through to its generic reshape paths.
     """
-    if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+    if (
+        isinstance(kv_cache_spec, CircularBufferSpec)
+        and getattr(attn_backend, "get_name", lambda: None)() == "ASCEND_INDEXER_KPOOL_TAIL"
+    ):
         return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False

@@ -4,10 +4,9 @@
 
 from types import MappingProxyType
 
-from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, MambaSpec, MLAAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
@@ -19,7 +18,7 @@ GLM5_NEXT_SPEC_REUSE_RULES: SpecReuseRules = MappingProxyType(
         AscendMLAAttentionSpec: _is_glm5_next_main_spec,
         MLAAttentionSpec: _is_glm5_next_main_spec,
         MambaSpec: True,
-        AscendIndexerKPoolTailSpec: False,
+        CircularBufferSpec: False,
     }
 )
 

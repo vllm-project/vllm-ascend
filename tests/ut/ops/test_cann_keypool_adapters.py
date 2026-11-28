@@ -9,6 +9,28 @@ import torch
 from vllm_ascend.ops.triton import glm5_next_cann_keypool as adapters
 
 
+@pytest.mark.parametrize("capacity", [4, 8, 32])
+def test_tail_mapping_uses_request_ring_with_generic_mapping_disabled(capacity):
+    positions = torch.tensor([5999, 6000, 6001, 129, 130, 7, 8, 0, 1])
+    common = SimpleNamespace(
+        positions=positions,
+        query_start_loc=torch.tensor([0, 3, 5, 7], dtype=torch.int32),
+        block_table_tensor=torch.tensor([[5, 99], [2, 99], [0, 99]], dtype=torch.int32),
+        slot_mapping=torch.full_like(positions, -1),
+        num_actual_tokens=7,
+        num_reqs=3,
+    )
+    output = torch.full((16,), 42, dtype=torch.int64)
+    mapped = adapters.build_tail_slot_mapping(common, capacity, output)
+    expected = [5 * capacity + pos % capacity for pos in positions[:3].tolist()]
+    expected += [2 * capacity + pos % capacity for pos in positions[3:5].tolist()]
+    expected += [-1] * 4
+    assert mapped.tolist() == expected
+    assert mapped.data_ptr() == output.data_ptr()
+    assert torch.all(common.slot_mapping == -1)
+    assert torch.all(output[positions.numel() :] == 42)
+
+
 @pytest.fixture(autouse=True)
 def mock_triton_launch_config(monkeypatch):
     triton = MagicMock()

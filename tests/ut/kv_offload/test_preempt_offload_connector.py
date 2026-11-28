@@ -35,7 +35,6 @@ for _module_name in list(sys.modules):
 for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload import (  # noqa: E402
     manager as preempt_manager,
@@ -1156,15 +1155,7 @@ def test_worker_keeps_mamba_views_separate_from_attention(reverse, attention_sca
 @pytest.mark.parametrize("load_start", [0, 48])
 def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_start):
     if glm_tail:
-        spec = AscendIndexerKPoolTailSpec(
-            block_size=4,
-            ring_capacity=16,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.float32,
-            sliding_window=4,
-            compress_ratio=4,
-        )
+        spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0)
     else:
         spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
     if uniform:

@@ -5,6 +5,7 @@ import torch
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 
+from vllm_ascend.models.glm5next.kv_cache import Glm5NextTailCache
 from vllm_ascend.patch.worker import patch_bind_kv_cache
 
 
@@ -30,6 +31,24 @@ class _TensorOnlyAttentionLayer:
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         self.bind_called = True
         self.kv_cache = kv_cache.squeeze(1)
+
+
+def test_glm_tail_binding_keeps_registered_tensor_and_wraps_model_cache():
+    layer_name = "model.layers.1.indexer.tail_cache"
+    tensor = torch.ones(4, 7, 8)
+    registered = {layer_name: tensor}
+    for binding in (patch_bind_kv_cache.bind_kv_cache, patch_bind_kv_cache.bind_kv_cache_to_layers):
+        layer = Glm5NextTailCache.__new__(Glm5NextTailCache)
+        torch.nn.Module.__init__(layer)
+        if binding is patch_bind_kv_cache.bind_kv_cache:
+            runner_caches: list[object] = []
+            binding(registered, {layer_name: layer}, runner_caches)
+            assert runner_caches[0] is tensor
+        else:
+            binding(registered, {layer_name: layer})
+        assert registered[layer_name] is tensor
+        assert isinstance(layer.kv_cache, list)
+        assert layer.kv_cache[0] is tensor
 
 
 def test_bind_kv_cache_preserves_materialized_attention_tuple() -> None:
