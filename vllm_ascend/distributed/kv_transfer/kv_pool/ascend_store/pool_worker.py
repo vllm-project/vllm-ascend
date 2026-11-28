@@ -1596,6 +1596,20 @@ class KVPoolWorker:
             self._masked_runs_cache[key] = runs
         return runs
 
+    def _save_window_base_block(self, request: ReqMeta, group_id: int, block_size: int) -> int:
+        """Absolute block number of this group's window head (0 = legacy).
+
+        Returns 0 unless the scheduler proved a WINDOW base for this group, so
+        the legacy (ZERO / feature-off) path is byte-for-byte unchanged.
+        """
+        states = getattr(request, "save_window_base_state", None)
+        if not states or group_id >= len(states) or states[group_id] != "WINDOW":
+            return 0
+        bases = getattr(request, "save_window_base_by_group", None)
+        if not bases or group_id >= len(bases) or bases[group_id] is None or not block_size:
+            return 0
+        return int(bases[group_id]) // block_size
+
     def _process_save_for_layer_batch(
         self,
         requests: list[ReqMeta],
@@ -1638,6 +1652,18 @@ class KVPoolWorker:
                 )
                 hit_full_blocks = pool_hit_tokens // block_size
                 save_start_block = max(save_start_block, hit_full_blocks)
+            # Clamp each WINDOW group to its own table, including a window
+            # whose token base rounds down to block zero.
+            _base_blk = self._save_window_base_block(request, group_id, block_size)
+            states = request.save_window_base_state
+            if states and group_id < len(states) and states[group_id] == "WINDOW":
+                _ids_g = request.block_ids_by_group[group_id] if group_id < len(request.block_ids_by_group) else []
+                _win_last = _base_blk + len(_ids_g)
+                save_start_block = max(save_start_block, _base_blk)
+                save_end_block = min(save_end_block, _win_last)
+                if save_end_block <= save_start_block and partial_block_index is None:
+                    # Empty window range for this group: skip this group only.
+                    continue
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
             num_allocated_blocks = (
@@ -2009,6 +2035,8 @@ class KVPoolWorker:
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
+            all_group_save_gvas: list[np.ndarray] = []
+            all_group_save_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
@@ -2019,9 +2047,21 @@ class KVPoolWorker:
                 )
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
+                # Absolute-indexed (padded) views of this group's arrays.
+                # Index == absolute block number; for the legacy base-0 case this
+                # is identical to the unpadded table, so nothing changes unless
+                # the scheduler proved a window base for this group.
+                _bs_g = self.grouped_block_size[group_id]
+                _base_blk = self._save_window_base_block(request, group_id, _bs_g)
+                _win_last = _base_blk + len(block_ids_by_group)
+                _padded_ids = np.zeros(_win_last, dtype=np.int64)
+                if len(block_ids_by_group):
+                    _padded_ids[_base_blk:] = np.asarray(block_ids_by_group, dtype=np.int64)
                 if group_id not in self.cacheable_group_ids or not self._is_layerwise_save_owner(group_id):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+                    all_group_save_gvas.append(np.zeros(_win_last, dtype=np.int64))
+                    all_group_save_ids.append(_padded_ids)
                     continue
                 effective_block_size = self.grouped_block_size[group_id]
                 alloc_size = self._global_group_alloc_size(group_id)
@@ -2051,7 +2091,10 @@ class KVPoolWorker:
                     if request.store_masks is not None and group_id < len(request.store_masks)
                     else None
                 )
-                end_limit = min(save_end_block, len(block_ids_by_group))
+                # Keep the candidate range inside this group's own window.
+                if _base_blk:
+                    save_start_block = max(save_start_block, _base_blk)
+                end_limit = min(save_end_block, _win_last)
                 if not (
                     self.layerwise_offload
                     and self.num_kv_cache_groups == 1
@@ -2164,14 +2207,44 @@ class KVPoolWorker:
                     alloc_size,
                 )
 
-                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
+                # Legacy layout: unchanged on purpose. Load and other consumers
+                # keep seeing the historic (table-indexed) arrays, so a ZERO /
+                # feature-off request stays byte-for-byte identical.
                 full_gvas = [0] * len(block_ids_by_group)
                 for blk_idx, gva in zip(transfer_blocks, block_gvas):
                     if blk_idx < len(full_gvas):
                         full_gvas[blk_idx] = gva
-
                 all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+
+                # Aligned layout: padded up to the window base so the array
+                # index is the absolute block number.
+                _padded_gvas = np.zeros(_win_last, dtype=np.int64)
+                for blk_idx, gva in zip(transfer_blocks, block_gvas):
+                    if _base_blk <= blk_idx < _win_last:
+                        _padded_gvas[blk_idx] = gva
+                all_group_save_gvas.append(_padded_gvas)
+                all_group_save_ids.append(_padded_ids)
+
+            _ng = self.num_kv_cache_groups
+            if not (
+                len(all_group_gvas)
+                == len(all_group_block_ids)
+                == len(all_group_save_gvas)
+                == len(all_group_save_ids)
+                == _ng
+            ):
+                logger.error(
+                    "alloc_gvas: group count mismatch req=%s old_gvas=%d old_ids=%d save_gvas=%d save_ids=%d groups=%d",
+                    request.req_id,
+                    len(all_group_gvas),
+                    len(all_group_block_ids),
+                    len(all_group_save_gvas),
+                    len(all_group_save_ids),
+                    _ng,
+                )
+                request.can_save = False
+                return None
 
             if all_group_gvas:
                 request.save_keys = all_group_save_keys
@@ -2179,6 +2252,9 @@ class KVPoolWorker:
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]
                 request.gva_block_offset = 0
+                # Consumed by the save path only when the group state is WINDOW.
+                request.save_block_gvas_by_group_np = all_group_save_gvas
+                request.save_block_ids_by_group_np = all_group_save_ids
         return None
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
