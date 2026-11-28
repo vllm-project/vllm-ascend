@@ -169,6 +169,35 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
             )
 
 
+def _register_engram_replayed_slots_warmup(worker: NPUWorker) -> bool:
+    """Late-register ``_pad_v2_replayed_slots_kernel`` for Engram V2 runners.
+
+    The kernel only executes when an APC hit triggers bounded prefix replay, so
+    startup dummy runs never compile it. Replay window, cacheable group count,
+    and slot-mapping stride are final once KV caches and input buffers exist.
+    """
+    runner = worker.model_runner
+    if not hasattr(runner, "jit_warmup_registry"):
+        return False
+    model_state = getattr(runner, "model_state", None)
+    register = getattr(model_state, "register_replayed_slots_warmup", None)
+    if not callable(register):
+        return False
+    block_tables = getattr(runner, "block_tables", None)
+    slot_mappings = getattr(block_tables, "slot_mappings", None)
+    input_buffers = getattr(runner, "input_buffers", None)
+    positions = getattr(input_buffers, "positions", None)
+    kv_cache_config = getattr(runner, "kv_cache_config", None)
+    with runner.jit_warmup_registry.activate():
+        return bool(
+            register(
+                kv_cache_config,
+                slot_mappings=slot_mappings,
+                positions=positions,
+            )
+        )
+
+
 def _prune_unlaunchable_registrations(registry) -> int:
     """Drop registrations whose kernels cannot compile on NPU.
 
@@ -212,11 +241,14 @@ def kernel_warmup(worker: NPUWorker) -> None:
 
     _register_dcp_warmup(worker)
     dspark_registered = _register_dspark_swa_indices_warmup(worker)
+    replayed_slots_registered = _register_engram_replayed_slots_warmup(worker)
     pruned = _prune_unlaunchable_registrations(registry)
-    if dspark_registered or pruned:
+    if dspark_registered or replayed_slots_registered or pruned:
         logger.info(
-            "JIT warmup registrations adjusted: %d dspark group(s) added, %d non-Ascend registration(s) pruned.",
+            "JIT warmup registrations adjusted: %d dspark group(s) added, "
+            "%d replayed-slots kernel(s) added, %d non-Ascend registration(s) pruned.",
             dspark_registered,
+            int(replayed_slots_registered),
             pruned,
         )
 

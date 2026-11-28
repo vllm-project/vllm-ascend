@@ -36,6 +36,7 @@ examples and links together.
 | Module | Runner ownership | Documentation |
 | --- | --- | --- |
 | [engram_lookback.py](engram_lookback.py) | `models/deepseek_v41/engram/model_state.py` | [engram.md](docs/engram.md) |
+| [engram_replayed_slots.py](engram_replayed_slots.py) | `models/deepseek_v41/engram/model_state.py` | [engram.md](docs/engram.md) |
 | [apply_grammar_bitmask.py](apply_grammar_bitmask.py) | `patch/worker/patch_triton.py` | [apply_grammar_bitmask.md](docs/apply_grammar_bitmask.md) |
 | [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [compute_slot_mappings.md](docs/compute_slot_mappings.md) |
 | [mamba/precopy.py](mamba/precopy.py) | `patch/worker/patch_triton.py` | [mamba_precopy.md](docs/mamba_precopy.md) |

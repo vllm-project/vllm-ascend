@@ -22,48 +22,22 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
+from vllm_ascend.ops.triton.engram_replayed_slots import (
+    _PAD_V2_REPLAYED_SLOTS_BLOCK,
+    _PAD_V2_REPLAYED_SLOTS_KERNEL,
+    _pad_v2_replayed_slots_kernel,
+    register_pad_v2_replayed_slots_warmup,
+)
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
-
-
-@triton.jit
-def _pad_v2_replayed_slots_kernel(
-    slot_mappings_ptr,
-    group_stride,
-    cacheable_groups_ptr,
-    query_start_loc_ptr,
-    positions_ptr,
-    replay_start_ptr,
-    replay_window,
-    pad_slot_id,
-    NUM_GROUPS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    req = tl.program_id(0)
-    start = tl.load(replay_start_ptr + req)
-    if start <= 0:
-        return
-    begin = tl.load(query_start_loc_ptr + req)
-    end = tl.load(query_start_loc_ptr + req + 1)
-    for tok in range(begin, end, BLOCK):
-        offsets = tok + tl.arange(0, BLOCK)
-        pos = tl.load(positions_ptr + offsets, mask=offsets < end, other=0)
-        replayed = (offsets < end) & (pos >= start) & (pos < start + replay_window)
-        for i in tl.static_range(NUM_GROUPS):
-            group = tl.load(cacheable_groups_ptr + i)
-            tl.store(
-                slot_mappings_ptr + group * group_stride + offsets,
-                pad_slot_id,
-                mask=replayed,
-            )
 
 
 class EngramModelState(AscendModelState):
@@ -134,6 +108,64 @@ class EngramModelState(AscendModelState):
         finally:
             super().finish_execution(failed=failed)
 
+    @staticmethod
+    def _compute_replay_group_layout(kv_cache_config: KVCacheConfig) -> tuple[int, list[int]]:
+        from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+
+        specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
+        windows = [int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs]
+        cacheable_indices = [i for i, spec in enumerate(specs) if is_prefix_cacheable(spec)]
+        return max(windows, default=0), cacheable_indices
+
+    def register_replayed_slots_warmup(
+        self,
+        kv_cache_config: KVCacheConfig | None,
+        *,
+        slot_mappings: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> bool:
+        """Register ``_pad_v2_replayed_slots_kernel`` for startup JIT warmup.
+
+        Covers both local ``slot_mappings`` and PCP ``_global_batch_slot_mappings``
+        when present without allocating any device tensors.
+        """
+        if self._replay_groups is not None:
+            replay_window, cacheable_groups = self._replay_groups
+            num_groups = cacheable_groups.numel()
+        elif kv_cache_config is not None:
+            replay_window, cacheable_indices = self._compute_replay_group_layout(kv_cache_config)
+            num_groups = len(cacheable_indices)
+        else:
+            return False
+
+        if replay_window <= 0 or num_groups <= 0:
+            return False
+
+        layouts: list[tuple[torch.dtype, int]] = []
+        for candidate in (
+            slot_mappings,
+            getattr(self.pcp_manager, "_global_batch_slot_mappings", None) if self.pcp_manager is not None else None,
+        ):
+            if candidate is not None and candidate.ndim >= 2:
+                layout = (candidate.dtype, int(candidate.stride(0)))
+                if layout not in layouts:
+                    layouts.append(layout)
+
+        if not layouts:
+            return False
+
+        positions_dtype = positions.dtype if positions is not None else torch.int64
+        registered = False
+        for slot_mappings_dtype, group_stride in layouts:
+            registered |= register_pad_v2_replayed_slots_warmup(
+                slot_mappings_dtype=slot_mappings_dtype,
+                group_stride=group_stride,
+                positions_dtype=positions_dtype,
+                replay_window=replay_window,
+                num_groups=num_groups,
+            )
+        return registered
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -150,14 +182,11 @@ class EngramModelState(AscendModelState):
         # this step is only known here; engram overlap dispatch keys off it.
         self._cg_mode = cudagraph_mode
         if self._replay_groups is None:
-            from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-
-            specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
-            windows = [int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs]
+            replay_window, cacheable_group_indices = self._compute_replay_group_layout(kv_cache_config)
             self._replay_groups = (
-                max(windows, default=0),
+                replay_window,
                 torch.tensor(
-                    [i for i, spec in enumerate(specs) if is_prefix_cacheable(spec)],
+                    cacheable_group_indices,
                     dtype=torch.int32,
                     device=self.device,
                 ),
@@ -192,31 +221,33 @@ class EngramModelState(AscendModelState):
             self._global_replay_start.np[:global_reqs] = global_replay_np
             self._global_replay_start.copy_to_gpu(global_reqs)
             if replay_window > 0 and global_replay_np.any() and cacheable_groups.numel() > 0:
-                _pad_v2_replayed_slots_kernel[(global_reqs,)](
+                _PAD_V2_REPLAYED_SLOTS_KERNEL(
                     pcp_context.global_slot_mappings,
-                    pcp_context.global_slot_mappings.stride(0),
                     cacheable_groups,
                     global_batch.query_start_loc,
                     global_batch.positions,
                     self._global_replay_start.gpu,
-                    replay_window,
-                    PAD_SLOT_ID,
+                    replay_window=replay_window,
+                    pad_slot_id=PAD_SLOT_ID,
                     NUM_GROUPS=cacheable_groups.numel(),
-                    BLOCK=1024,
+                    BLOCK=_PAD_V2_REPLAYED_SLOTS_BLOCK,
+                    num_reqs=global_reqs,
+                    kernel=_pad_v2_replayed_slots_kernel,
                 )
                 self.pcp_manager.refresh_gathered_slot_mappings(slot_mappings)
         elif replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
-            _pad_v2_replayed_slots_kernel[(num_reqs,)](
+            _PAD_V2_REPLAYED_SLOTS_KERNEL(
                 slot_mappings,
-                slot_mappings.stride(0),
                 cacheable_groups,
                 input_batch.query_start_loc,
                 input_batch.positions,
                 replay_start,
-                replay_window,
-                PAD_SLOT_ID,
+                replay_window=replay_window,
+                pad_slot_id=PAD_SLOT_ID,
                 NUM_GROUPS=cacheable_groups.numel(),
-                BLOCK=1024,
+                BLOCK=_PAD_V2_REPLAYED_SLOTS_BLOCK,
+                num_reqs=num_reqs,
+                kernel=_pad_v2_replayed_slots_kernel,
             )
         # No prefix-cache replay is active for the ordinary request path. Do
         # not opt every FULL graph step into the bounded-replay band metadata:
