@@ -77,7 +77,13 @@ class MappingProbeServers(RemotePDServer):
                 ],
                 # Capture HIXL's inner endpoint-generation error in CI artifacts.
                 # Logging only: keep device, protocol and loader settings intact.
-                env_dict={"ASCEND_GLOBAL_LOG_LEVEL": "1", "ASCEND_SLOG_PRINT_TO_STDOUT": "1"} if transport else None,
+                env_dict={
+                    "ASCEND_GLOBAL_LOG_LEVEL": "1",
+                    "ASCEND_SLOG_PRINT_TO_STDOUT": "1",
+                    "ASCEND_GLOBAL_EVENT_ENABLE": "1",
+                }
+                if transport
+                else None,
             )
         finally:
             # Only children created by this instance; also covers partial startup.

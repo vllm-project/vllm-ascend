@@ -4,12 +4,15 @@
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 DEVICE_TIMEOUT_SECONDS = 60
 TRANSPORT_TIMEOUT_SECONDS = 120
+QUERY_TIMEOUT_SECONDS = 10
 ENV_KEYS = (
     "ASCEND_VISIBLE_DEVICES",
     "ASCEND_RT_VISIBLE_DEVICES",
@@ -25,6 +28,7 @@ ENV_KEYS = (
     "TP_SOCKET_IFNAME",
     "ASCEND_GLOBAL_LOG_LEVEL",
     "ASCEND_SLOG_PRINT_TO_STDOUT",
+    "ASCEND_GLOBAL_EVENT_ENABLE",
 )
 REQUIRED_APIS = {
     "aclInit",
@@ -126,6 +130,43 @@ def validate_transport_reports(reports):
     return errors
 
 
+def query_observed_bond(stdout, pid, events):
+    """Repeat only HIXL's read-only query, using IDs observed in this child.
+
+    Run after the transport child exits so diagnostics cannot affect its result.
+    Never guess a slot from the allocation string or query an unobserved device.
+    """
+    slots = set(re.findall(rf"\b{pid} GetDevSlotId:.*success, device_id=(\d+), slot_id=(\d+)", stdout))
+    logical_ids = {str(e["logical"]) for e in events if e.get("event") == "mapping"}
+    if len(slots) != 1 or len(logical_ids) != 1:
+        return {"unavailable": "Expected one observed HIXL slot and SDK logical ID"}
+    logical, slot = slots.pop()
+    if logical not in logical_ids:
+        return {"unavailable": "HIXL device and SDK logical ID disagree"}
+    default = Path("/usr/local/Ascend/driver/tools/hccn_tool")
+    tool = str(default) if os.access(default, os.X_OK) else shutil.which("hccn_tool")
+    if tool is None:
+        return {"unavailable": "hccn_tool is not executable"}
+    command = [tool, "-g", "-ip", "-i", logical, "-d", f"bond{slot}"]
+    result = {"command": command, "logical": logical, "slot": slot}
+    try:
+        query = subprocess.run(command, capture_output=True, timeout=QUERY_TIMEOUT_SECONDS)
+        result.update(
+            returncode=query.returncode,
+            stdout=query.stdout.decode("utf-8", errors="replace"),
+            stderr=query.stderr.decode("utf-8", errors="replace"),
+        )
+    except subprocess.TimeoutExpired as exc:
+        result.update(
+            timeout=True,
+            stdout=(exc.stdout or b"").decode("utf-8", errors="replace"),
+            stderr=(exc.stderr or b"").decode("utf-8", errors="replace"),
+        )
+    except OSError as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
@@ -171,6 +212,8 @@ def main():
                 continue
             if isinstance(event, dict) and "event" in event:
                 events.append(event)
+        if args.transport_library:
+            probe["bond_query"] = query_observed_bond(stdout_text, probe["pid"], events)
         report["probes"].append(probe)
         output.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print("A5_DEVICE_MAPPING " + json.dumps({**report, "probes": [probe]}), flush=True)
