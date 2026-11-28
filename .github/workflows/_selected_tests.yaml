@@ -364,6 +364,44 @@ jobs:
           PY
           printf 'TRITON_CACHE_DIR=%s\n' "$(mktemp -d "$RUNNER_TEMP/triton-torch214.XXXXXX")" >> "$GITHUB_ENV"
 
+      - name: Build the pinned XLite wheel for the PR Torch runtime
+        if: ${{ steps.torch-214.outcome == 'success' && contains(matrix.group.tests, '/test_xlite.py') }}
+        run: |
+          set -eo pipefail
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set -u
+
+          build_dir=$(mktemp -d "$RUNNER_TEMP/xlite-torch214.XXXXXX")
+          git clone --depth 1 --branch 0.2.0rc5 https://gitcode.com/openeuler/GVirt.git "$build_dir/source"
+          test "$(git -C "$build_dir/source" rev-parse HEAD)" = 4cbf60df29fa6bdcdbca171f5ece2443b6ddefdd
+          uv pip install build 'cmake>=3.22.0' 'pybind11>=3.0.0' 'setuptools>=64.0.0,<82.0.0' 'setuptools-scm>=8.0.0'
+
+          python3 - "$build_dir/source/xlite" <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          edits = (
+              ('pyproject.toml', 'torch>=2.5.1,<=2.10.0', 'torch==2.14.0+cpu', 1),
+              ('CMakeLists.txt', '-std=c++17', '-std=c++20', 2),
+              ('setup.py', 'str(build_temp), "-j"]', 'str(build_temp), "-j", "8"]', 1),
+          )
+          for name, old, new, expected in edits:
+              path = root / name
+              source = path.read_text(encoding='utf-8')
+              if source.count(old) != expected:
+                  raise SystemExit(f'Unexpected XLite build input in {name}')
+              path.write_text(source.replace(old, new), encoding='utf-8')
+          PY
+
+          SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0rc5 python3 -m build --wheel --no-isolation \
+            --outdir "$build_dir/dist" "$build_dir/source/xlite"
+          wheels=("$build_dir"/dist/xlite-0.2.0rc5-*.whl)
+          test "${#wheels[@]}" -eq 1
+          test -f "${wheels[0]}"
+          uv pip install --no-deps --reinstall "${wheels[0]}"
+          python3 -c 'import torch; import torch_npu; from xlite._C import Model; print(torch.__version__, Model)'
+
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
         env:
