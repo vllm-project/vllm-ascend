@@ -22,17 +22,55 @@
 # limitations under the License.
 
 
+from dataclasses import dataclass
+
 import torch
 import torch_npu
-from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEAllGatherCombineMetadata, MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput, TokenDispatcherWithAllGather
+
+# Cache row indices only for small decode shapes to avoid holding large dynamic
+# prefill buffers across variable sequence lengths.
+_MAX_CACHED_ROW_INDICES = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class MoEAllGatherCombineMetadata310(MoEAllGatherCombineMetadata):
+    local_row_count: torch.Tensor | None = None
+
+
+def _is_stream_capturing() -> bool:
+    checker = getattr(torch.npu, "is_current_stream_capturing", None)
+    return bool(checker()) if checker is not None else False
 
 
 class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._encoded_expert_maps: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._row_indices_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+    def _get_encoded_expert_map(self, expert_map: torch.Tensor) -> torch.Tensor:
+        key = id(expert_map)
+        cached = self._encoded_expert_maps.get(key)
+        if cached is not None and cached[0] is expert_map:
+            return cached[1]
+        encoded = expert_map.masked_fill(expert_map < 0, self.num_experts_local)
+        if not _is_stream_capturing():
+            self._encoded_expert_maps[key] = (expert_map, encoded)
+        return encoded
+
+    def _get_row_indices(self, num_rows: int, device: torch.device) -> torch.Tensor:
+        if num_rows >= _MAX_CACHED_ROW_INDICES:
+            return torch.arange(num_rows, device=device, dtype=torch.int32)
+        key = (num_rows, device)
+        rows = self._row_indices_cache.get(key)
+        if rows is None:
+            rows = torch.arange(num_rows, device=device, dtype=torch.int32)
+            if not _is_stream_capturing():
+                self._row_indices_cache[key] = rows
+        return rows
 
     def token_dispatch(
         self,
@@ -51,14 +89,14 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+        expert_num = self.num_experts_local
         if expert_map is not None:
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
-            first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
-            last_expert_idx = first_expert_idx + self.num_experts_local
-        else:
-            first_expert_idx = 0
-            last_expert_idx = self.num_experts_local
+            # 310P only accepts the full routing range. Pre-encode remote routes
+            # (-1) into a final slot once and omit that slot from grouped matmul's
+            # cumulative counts.
+            encoded_map = self._get_encoded_expert_map(expert_map)
+            topk_ids = encoded_map.index_select(0, topk_ids.flatten()).view_as(topk_ids)
+            expert_num += 1
 
         assert hidden_states.shape[-1] % 16 == 0, (
             f"The last dim of hidden_states {hidden_states.shape[-1]} should be aligned with 16."
@@ -67,22 +105,37 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             hidden_states,
             topk_ids,
             active_num=num_tokens * self.top_k,
-            expert_num=self.num_experts_local,
+            expert_num=expert_num,
             drop_pad_mode=0,
-            active_expert_range=[first_expert_idx, last_expert_idx],
+            active_expert_range=[0, expert_num],
             quant_mode=-1,
             row_idx_type=0,
         )
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 0  # `cumsum` mode
+        local_row_count = None
+        if expert_map is not None:
+            expert_tokens = expert_tokens[:-1]
+            local_row_count = expert_tokens[-1]
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
             group_list=expert_tokens,
-            group_list_type=group_list_type,
-            combine_metadata=MoEAllGatherCombineMetadata(
+            group_list_type=0,  # cumulative counts
+            combine_metadata=MoEAllGatherCombineMetadata310(
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                local_row_count=local_row_count,
             ),
         )
+
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        if combine_metadata.local_row_count is not None:
+            # The grouped matmuls leave rows beyond the final group unwritten.
+            # Keep the original unique permutation for npu_moe_token_unpermute
+            # and zero out the unwritten remote rows in place.
+            local_rows = combine_metadata.local_row_count
+            num_rows = hidden_states.shape[0]
+            rows = self._get_row_indices(num_rows, hidden_states.device)
+            hidden_states.masked_fill_((rows >= local_rows).unsqueeze(1), 0)
+        return super().token_combine(hidden_states, combine_metadata, bias)
