@@ -81,12 +81,11 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     packaged_configs = {Path(path).name for path in provider.config_paths}
-    assert {
-        "base_metrics.yaml",
-        "eplb_metrics.yaml",
-        "runtime_guard_metrics.yaml",
-        "schedule_execute_metrics.yaml",
-    } <= packaged_configs
+    # Derive the expectation from the source tree instead of a hardcoded list:
+    # every packaged config exists in the config directory and vice versa, so
+    # provider branches never edit this shared assertion.
+    expected_configs = {path.name for path in (_PACKAGE_ROOT / "config").glob("*.yaml")}
+    assert packaged_configs == expected_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
     # Assert per-file and namespace invariants instead of exact totals: every
@@ -158,17 +157,16 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = [str(_REPOSITORY_ROOT / "vllm_ascend")]
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
-    for module_name in (
+    # Purge the package and every feature submodule (derived from the tree, so
+    # new handler files need no edit here) before importing the package fresh.
+    module_names = [
         "vllm_ascend.observability",
         "vllm_ascend.observability.ms_metrics",
         "vllm_ascend.observability.ms_metrics.provider",
-        "vllm_ascend.observability.ms_metrics.handlers",
-        "vllm_ascend.observability.ms_metrics.handlers.common",
-        "vllm_ascend.observability.ms_metrics.handlers.eplb",
-        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
-        "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
-        "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
-    ):
+        _HANDLER_PACKAGE,
+    ]
+    module_names.extend(f"{_HANDLER_PACKAGE}.{path.stem}" for path in sorted((_PACKAGE_ROOT / "handlers").glob("*.py")))
+    for module_name in module_names:
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(_HANDLER_PACKAGE, fromlist=["__unused__"])
@@ -305,6 +303,155 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
     assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
     assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_kv_pool_put_failure_handler_counts_failed_keys(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_put_failure_keys", "kvpool")
+    backend = type("MooncakeBackend", (), {})()
+
+    result = handlers.kv_pool_put_failure_handler(
+        lambda store, keys, mats: [True, False, False],
+        backend,
+        ["a", "b", "c"],
+        [object()],
+    )
+
+    assert result == [True, False, False]
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:put_failure_keys_total",
+        value=2.0,
+        labels={"backend": "mooncake"},
+    )
+
+
+def test_kv_pool_put_failure_handler_expands_batch_failure(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_put_batch_failure", "kvpool")
+    backend = type("MemcacheBackend", (), {})()
+
+    handlers.kv_pool_put_failure_handler(lambda store, keys: False, backend, ["a", "b"])
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:put_failure_keys_total",
+        value=2.0,
+        labels={"backend": "memcache"},
+    )
+
+    metrics.reset_mock()
+    handlers.kv_pool_put_failure_handler(lambda store, keys: True, backend, ["a", "b"])
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_pool_put_failure_handler_labels_yuanrong_backend(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_yuanrong_backend", "kvpool")
+    backend = type("YuanrongBackend", (), {})()
+
+    handlers.kv_pool_put_failure_handler(lambda store, keys: False, backend, ["a", "b"])
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:put_failure_keys_total",
+        value=2.0,
+        labels={"backend": "yuanrong"},
+    )
+
+
+def test_kv_pool_load_error_handler_counts_blocks(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_load_errors", "kvpool")
+    worker = type("KVPoolWorker", (), {})()
+    layerwise_worker = type("LayerwiseKVPoolWorker", (), {})()
+
+    result = handlers.kv_pool_load_error_handler(lambda current_worker: {1, 2, 3}, worker)
+
+    assert result == {1, 2, 3}
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:load_error_blocks_total",
+        value=3.0,
+        labels={"mode": "standard"},
+    )
+
+    metrics.reset_mock()
+    handlers.kv_pool_load_error_handler(lambda current_worker: {4}, layerwise_worker)
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:load_error_blocks_total",
+        value=1.0,
+        labels={"mode": "layerwise"},
+    )
+
+    metrics.reset_mock()
+    handlers.kv_pool_load_error_handler(lambda current_worker: set(), worker)
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_pool_layerwise_handlers_record_one_sample_per_load_path(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_layerwise_modes", "kvpool")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+    thread = object()
+
+    def original(obj, *args, **kwargs):
+        return obj, args, kwargs
+
+    assert handlers.kv_pool_layerwise_gva_load_handler(original, thread, "layer") == (thread, ("layer",), {})
+    assert handlers.kv_pool_layerwise_key_load_handler(original, thread) == (thread, (), {})
+
+    metrics.get_or_create_metric.assert_any_call(
+        metric_name="kvpool:layerwise_load_get_duration_ms",
+        metric_type="histogram",
+        label_names=["mode"],
+    )
+    recorded = [call.kwargs["labels"] for call in metrics.record_metric.call_args_list]
+    assert recorded == [{"mode": "gva"}, {"mode": "key"}]
+    assert all(call.args[0] == "kvpool:layerwise_load_get_duration_ms" for call in metrics.record_metric.call_args_list)
+    assert all(call.kwargs["value"] >= 0.0 for call in metrics.record_metric.call_args_list)
+
+
+def test_kv_pool_layerwise_handlers_stay_dark_at_basic_level(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_layerwise_basic", "kvpool")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+
+    assert handlers.kv_pool_layerwise_gva_load_handler(lambda thread: "loaded", object()) == "loaded"
+    assert handlers.kv_pool_layerwise_key_load_handler(lambda thread: "loaded", object()) == "loaded"
+
+    metrics.get_or_create_metric.assert_not_called()
+    metrics.record_metric.assert_not_called()
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
