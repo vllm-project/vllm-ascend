@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
+    create_kv_pool_scheduler,
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
@@ -192,6 +193,7 @@ def make_worker(
         config.model_config.compile_factors.side_effect = lambda: {"identity": config.model_config.compute_hash()}
         config.cache_config.compile_factors.side_effect = lambda: {"identity": config.cache_config.compute_hash()}
         config.cache_config.cache_dtype = "auto"
+        config.attention_config.indexer_kv_dtype = "auto"
         config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
@@ -848,6 +850,92 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    @patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"})
+    def test_memcache_layerwise_prefix_hits_after_every_kvpp_owner_publishes(self):
+        published: set[str] = set()
+        block_hash = b"prefix"
+
+        def publish(keys, statuses):
+            published.update(keys)
+            return statuses
+
+        # Save PP0/PCP1 last so the scheduler can observe exactly one missing shard.
+        stages = ((1, 42, 36), (0, 0, 42))
+        for stage, start, num_layers in stages:
+            names = [f"model.layers.{layer}.attn" for layer in range(start, start + num_layers)]
+            spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+            caches = {name: torch.zeros((4, 16, 8)) for name in names}
+            for rank in (0, 2, 3, 4, 5, 6, 7, 1):
+                with self.subTest(stage=stage, rank=rank):
+                    cache_config = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(names, spec)], num_blocks=4)
+                    worker = make_worker(
+                        self,
+                        use_mla=True,
+                        use_kvpp=True,
+                        pcp_rank=rank,
+                        pcp_size=8,
+                        pp_rank=stage,
+                        pp_size=2,
+                        pp_partition=[42, 36],
+                        num_layers=num_layers,
+                        kv_cache_config=cache_config,
+                        use_layerwise=True,
+                        extra_config={"backend": "memcache"},
+                    )
+                    self.addCleanup(worker.shutdown)
+                    store = worker.m_store
+                    store.batch_is_exist.side_effect = lambda keys: [int(key in published) for key in keys]
+                    store.batch_alloc.return_value = [1 << 20]
+                    store.store.batch_copy.return_value = 0
+                    store.batch_write_finish.side_effect = publish
+                    worker.register_kv_caches(caches)
+                    request = ReqMeta(
+                        req_id="req",
+                        token_len_chunk=17,
+                        save_end_token=16,
+                        block_ids_by_group=[[1]],
+                        block_ids_by_group_np=[np.asarray([1])],
+                        block_hashes=[block_hash],
+                        can_save=True,
+                    )
+                    metadata = AscendConnectorMetadata(preempted_req_ids=set())
+                    metadata.add_request(request)
+                    worker.prepare_layerwise_step(metadata)
+                    if (stage, rank) == (0, 0):
+                        self.assertFalse(worker.layer_save_tasks[6])  # PCP0 registers only layers 0 through 5.
+
+                    if (stage, rank) == (0, 1):
+                        with patch.object(worker.layerwise_backend, "create_scheduler_client", return_value=store):
+                            scheduler = create_kv_pool_scheduler(worker.vllm_config, True, worker.kv_cache_config)
+                        store.batch_is_readable.side_effect = lambda keys: [key in published for key in keys]
+                        hit_request = SimpleNamespace(
+                            request_id="hit", prompt_token_ids=[1] * 17, num_tokens=17, block_hashes=[block_hash]
+                        )
+                        self.assertEqual(len(published), 15)
+
+                        # PCP1 owns layers 6 through 11 in PP0. Block publication until layer 11 is saved.
+                        for _ in range(11):
+                            worker.save_kv_layer(metadata)
+                        events = worker.layer_save_finished_events
+                        self.assertTrue(events[10].wait(timeout=5))
+                        self.assertFalse(events[11].is_set())
+                        store.batch_write_finish.assert_not_called()
+                        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+
+                        worker.save_kv_layer(metadata)
+                        self.assertTrue(events[11].wait(timeout=5))
+                        self.assertFalse(events[41].is_set())
+                        self.assertEqual(store.store.batch_copy.call_count, 6)
+                        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (16, False))
+                        self.assertCountEqual(store.batch_is_readable.call_args.args[0], published)
+
+                    while worker.current_layer < num_layers:
+                        worker.save_kv_layer(metadata)
+                    worker.wait_for_previous_save()
+                    owner_key = f"llama-7b@pp{stage}@{block_hash.hex()}@{rank}"
+                    store.batch_write_finish.assert_called_once_with([owner_key], [0])
+                    self.doCleanups()
+
     def test_load_completion_is_shared_and_reset_at_step_binding(self):
         worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
         worker._global_to_local_layer = {9: 0, 10: 1}

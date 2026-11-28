@@ -709,6 +709,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
+        if getattr(self, "use_kvpp", False):
+            # TP and PCP ranks own different layers in this layout.
+            return True
+
         # Each rank must save its own Mamba state shard.
         if group_id in self.sharded_mamba_group_ids:
             return True
@@ -732,9 +736,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return self.physical_layer_to_group_layers.get(
-            local_layer, [] if getattr(self, "has_shared_kv", False) else [(0, local_layer)]
-        )
+        skip_unregistered = getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False)
+        return self.physical_layer_to_group_layers.get(local_layer, [] if skip_unregistered else [(0, local_layer)])
 
     def _masked_block_runs_cached(
         self,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -223,6 +224,45 @@ def test_no_reuse_preserves_native_descriptors(num_buffers, model_type):
     original_tensors = tuple(config.kv_cache_tensors)
     assert plan_layerwise_cache_reuse(config, _runtime(6, num_buffers, model_type)) is None
     assert tuple(config.kv_cache_tensors) == original_tensors
+
+
+@pytest.mark.parametrize("role_name", ["WORKER", "SCHEDULER"])
+@pytest.mark.parametrize(
+    ("num_buffers", "independent_layers", "partition", "num_groups", "error"),
+    [
+        (1, "all", "4,4", 1, None),
+        (4, [0], "4,4", 1, None),
+        (1, [0], "4,4", 1, "cross-layer buffer reuse"),
+        (4, [0], "4,4", 2, "one KV cache group"),
+        (8, [0], "7,1", 1, "at least one target layer"),
+    ],
+)
+def test_memcache_kvpp_layout(monkeypatch, role_name, num_buffers, independent_layers, partition, num_groups, error):
+    from vllm_ascend.core.kv_cache_config_builder import _attach_transfer_and_speculation_metadata
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
+
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
+    runtime = _runtime(8, num_buffers, layerwise_independent_layers=independent_layers)
+    runtime.additional_config = {"enable_kvpp": True}
+    runtime.parallel_config = SimpleNamespace(
+        tensor_parallel_size=1, prefill_context_parallel_size=2, pipeline_parallel_size=2
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, model_version="glm5_next"
+    )
+    names = [f"model.layers.{i}.self_attn.attn" for i in range(int(partition.split(",")[0]))]
+    cache = _native_config([KVCacheGroupSpec(names[i::num_groups], spec) for i in range(num_groups)])
+    role = connector.KVConnectorRole[role_name]
+    if role == connector.KVConnectorRole.SCHEDULER:
+        cache = _attach_transfer_and_speculation_metadata(runtime, cache)
+    else:
+        layout = plan_layerwise_cache_reuse(cache, runtime)
+        if layout is not None:
+            cache = apply_layerwise_kv_cache_plan(cache, runtime.kv_transfer_config, layout)
+
+    monkeypatch.setattr(connector, f"create_kv_pool_{role_name.lower()}", lambda *_: object())
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        connector.AscendStoreConnector(runtime, role, cache)
 
 
 @pytest.mark.parametrize("num_blocks", [1, 3])
