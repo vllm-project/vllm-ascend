@@ -753,6 +753,20 @@ def round_up(val: int, align: int) -> int:
     return -(val // -align) * align
 
 
+SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC = 9
+SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV = 8
+SPARSE_FLASH_MLA_PLAN_ALIGNMENT = 1024
+
+
+def get_sparse_flash_mla_plan_buffer_size(device: torch.device) -> int:
+    properties = torch.npu.get_device_properties(device)
+    entries = (
+        SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIC * properties.cube_core_num
+        + SPARSE_FLASH_MLA_PLAN_ENTRIES_PER_AIV * properties.vector_core_num
+    )
+    return round_up(entries, SPARSE_FLASH_MLA_PLAN_ALIGNMENT)
+
+
 def trans_rope_weight(weight, rope_dim):
     if rope_dim == 0:
         return weight.contiguous()
