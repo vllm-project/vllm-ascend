@@ -44,7 +44,7 @@ def test_moe_routing_replay(model, comm_case):
     if comm_case == "default":
         # With graph sizes up to 8, the long prefill exceeds MC2 capacity.
         prompts.append("Hello, please introduce yourself. " * 8)
-    additional_config = {"enable_fused_mc2": 1} if comm_case == "fused_mc2" else None
+    additional_config = {"enable_fused_mc2": 1} if comm_case == "fused_mc2" else {}
     with VllmRunner(
         model,
         tensor_parallel_size=2,
