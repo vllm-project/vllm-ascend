@@ -2416,7 +2416,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Complete [MemCache backend setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) first, including the metadata service, dependencies and per-node configuration. Export `MMC_LOCAL_CONFIG_PATH` to the actual configuration file on every node and make the installed MemCache libraries available to the vLLM Python runtime.
 
-    This source uses **W4A4C8 MXFP4**, a 1,048,576-token limit, and layerwise pooling (`use_layerwise=true`) through MultiConnector, MooncakeConnectorV2 and AscendStoreConnector. It is not the A3 198k non-layerwise configuration. Both roles enable prefix caching. The source does not explicitly set `use_ascend_direct` for pooling; verify the selected build's default and backend transport rather than assuming the non-pooled setting. Decode needs four nodes with four TP2 ranks per node. Do not infer 1M capacity from the earlier single-node short-request W4A4C8 test.
+    This source uses **W4A4C8 MXFP4**, a 135,000-token limit, and layerwise pooling (`use_layerwise=true`) through MultiConnector, MooncakeConnectorV2 and AscendStoreConnector. It is not the A3 198k non-layerwise configuration. Both roles enable prefix caching. The source does not explicitly set `use_ascend_direct` for pooling; verify the selected build's default and backend transport rather than assuming the non-pooled setting. Decode needs four nodes with four TP2 ranks per node.
 
     ###### Prepare the Scripts
 
@@ -2492,7 +2492,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 0 \
-              --max-model-len 1048576 \
+              --max-model-len 135000 \
               --max-num-batched-tokens 4096 \
               --served-model-name glm \
               --gpu-memory-utilization 0.95 \
@@ -2614,7 +2614,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 1 \
-              --max-model-len 1048576 \
+              --max-model-len 135000 \
               --max-num-batched-tokens 4096 \
               --served-model-name glm \
               --gpu-memory-utilization 0.95 \
@@ -2729,7 +2729,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
-              --max-model-len 1048576 \
+              --max-model-len 135000 \
               --max-num-batched-tokens 60 \
               --served-model-name glm \
               --gpu-memory-utilization 0.95 \
@@ -2863,7 +2863,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     - The Decode launcher uses `--dp-size 16`, `--tp-size 2`, and
       `--dp-size-local 4` across four nodes. Each node exposes API ports
       `8000-8003`; register all 16 endpoints with the proxy.
-    - Both roles use `--max-model-len 1048576`. Prefill sets
+    - Both roles use `--max-model-len 135000`. Prefill sets
       `--max-num-seqs 8` and `--max-num-batched-tokens 4096`;
       Decode sets `10` and `60`, respectively, per engine.
     - Both roles enable prefix caching and FP8 attention and indexer KV
@@ -4797,8 +4797,8 @@ scheduler limits; do not apply the multi-node rows to those examples.
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
 | Ordinary PD | 950DT | Prefill (2 instances) | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
 | Ordinary PD | 950DT | Decode | 1 | 16 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
-| Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 8 | 4096 | 1048576 | 1 |
-| Pooled PD | 950DT | Decode | 2 | 16 | 4 | 1 | 1 | 10 | 60 | 1048576 | 5 |
+| Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 8 | 4096 | 135000 | 1 |
+| Pooled PD | 950DT | Decode | 2 | 16 | 4 | 1 | 1 | 10 | 60 | 135000 | 5 |
 | 1M PD | 950DT | Prefill | 8 | 2 | 1 | 1 | 1 | 64 | 32768 | 1046576 | 1 |
 | 1M PD | 950DT | Decode | 8 | 2 | 1 | 1 | 8 | 32 | 192 | 1048576 | 5 |
 | Colocated | A3 | Shared | 4 | 8 | 4 | 1 | 1 | 6 | 4096 | 202752 | 3 |
