@@ -973,30 +973,10 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
-
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
-
-        num_valid_tokens = num_scheduled_tokens_np
-        if scheduler_output.scheduled_spec_decode_tokens:
-            num_valid_tokens = np.array(
-                [
-                    num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                ],
-                dtype=np.int32,
-            )
-        attn_state = build_attn_state(
-            self.vllm_config,
-            self.input_buffers.seq_lens_np,
-            num_reqs,
-            num_scheduled_tokens_np,
-            num_valid_tokens,
-            kv_cache_config=self.kv_cache_config,
-        )
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -1136,12 +1116,6 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
-        if adaptive_verification_active and self.use_fia:
-            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
-
-        # Pad for full CUDA graph mode.
-        self.input_buffers.seq_lens_np[num_reqs:] = 0
-
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212).
@@ -1160,6 +1134,24 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
         )
+
+        # Device input preparation above uses rejection-corrected NPU counters.
+        # Submit it before waiting for the host snapshot needed by attention metadata.
+        self._update_seq_lens_cpu(scheduler_output, req_ids)
+        num_valid_tokens = num_scheduled_tokens_upper_bound
+        if num_draft_tokens_per_req is not None:
+            num_valid_tokens = num_scheduled_tokens_upper_bound - num_draft_tokens_per_req
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
+            num_reqs,
+            num_scheduled_tokens_upper_bound,
+            num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
+        )
+        if adaptive_verification_active and self.use_fia:
+            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
+        self.input_buffers.seq_lens_np[num_reqs:] = 0
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
@@ -1586,22 +1578,26 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        # These arrays share their CPU tensors' storage. Avoid dispatching torch
+        # scalar operations for every request on the model runner thread.
+        computed = self.req_states.num_computed_tokens_cpu.numpy()
+        req_to_index = self.req_states.req_id_to_index
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
         if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
+            snapshot = self.num_computed_tokens_cpu.numpy()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+                req_index = req_to_index[req_id]
+                computed[req_index] = snapshot[req_index]
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        seq_lens = self.input_buffers.seq_lens_cpu.numpy()
+        for i, req_id in enumerate(req_ids):
+            seq_lens[i] = computed[req_to_index[req_id]] + num_scheduled_tokens[req_id]
 
     def _pad_query_start_loc_for_fia(
         self,

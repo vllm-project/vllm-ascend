@@ -1965,15 +1965,20 @@ def _run_prepare_inputs(
     *,
     prefill_inputs=None,
     combine_tokens=None,
+    classify=None,
 ):
-    batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
+    batch = SimpleNamespace()
+
+    def capture_batch(**fields):
+        vars(batch).update(fields)
+        return batch
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
         return input_batch
 
     with (
         patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
-        patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
+        patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn", side_effect=classify),
         patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs", side_effect=prefill_inputs),
         patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens", create=True),
@@ -1986,7 +1991,7 @@ def _run_prepare_inputs(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
-        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch) as make_batch,
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", side_effect=capture_batch),
         patch.object(
             vllm_model_runner,
             "pcp",
@@ -1995,10 +2000,9 @@ def _run_prepare_inputs(
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
-        batch.is_padding = make_batch.call_args.kwargs["is_padding"]
-        assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
-        assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
-        assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
+        assert batch.decode_graph_eligible == batch_req_state.decode_graph_eligible
+        assert batch.prefill_runs_as_decode_np is batch_req_state.prefill_runs_as_decode_np
+        assert batch.max_seq_len_np is batch_req_state.max_seq_len_np
         return prepared, batch
 
 
@@ -2120,6 +2124,56 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
+
+
+@pytest.mark.parametrize("skip_sync", [False, True])
+def test_prepare_inputs_submits_mtp_inputs_before_host_length_sync(skip_sync):
+    runner, output, state, desc = _prepare_inputs_runner(draft=True, full_cg=True, speculator=True)
+    output.scheduled_spec_decode_tokens = {"r0": [9]}
+    runner.model_state.can_skip_spec_cpu_length_sync = lambda: skip_sync
+    runner.req_states.num_computed_tokens_cpu[:2] = torch.tensor([10, 7])
+    runner.req_states.num_computed_tokens_np = runner.req_states.num_computed_tokens_cpu.numpy()
+    # Only the cached row has a snapshot from the previous step.
+    runner.num_computed_tokens_cpu[:2] = torch.tensor([7, 3])
+    wait = runner.num_computed_tokens_event.synchronize
+
+    def combine_tokens(*_args):
+        wait.assert_not_called()
+        return torch.tensor([0, 1], dtype=torch.int32)
+
+    _run_prepare_inputs(runner, output, state, desc, combine_tokens=combine_tokens)
+    assert wait.call_count == int(not skip_sync)
+    assert runner.input_buffers.seq_lens_cpu[:2].tolist() == [12 if skip_sync else 9, 9]
+
+
+def test_capacity_limited_adaptive_fia_classifies_scheduled_counts_and_returns_exact_lengths():
+    runner, output, state, desc = _prepare_inputs_runner(draft=True)
+    runner.use_fia = True
+    output.scheduled_spec_decode_tokens = {"r0": [9], "r1": [8]}
+    # With one draft slot for two requests, the host assigns it to r0, but
+    # the device admits r1's draft. The device's query lengths are [1, 2].
+    device_offsets = torch.tensor([0, 1, 3], dtype=torch.int32)
+    runner.adaptive_verification = Mock()
+    runner.adaptive_verification.compact_batch.return_value = (
+        np.array([2, 1], dtype=np.int32),
+        np.array([0, 2, 4], dtype=np.int32),
+    )
+    runner.adaptive_verification.reallocate_drafts.return_value = (device_offsets, device_offsets, 1, None)
+    runner._log_adaptive_verification_costs = Mock()
+    # _run_prepare_inputs stubs the device position kernel. Supply the lengths
+    # it would write for the fixture's computed counts [1, 2].
+    runner.input_buffers.seq_lens[:2] = torch.tensor([2, 4])
+
+    def classify(_config, lengths, num_reqs, scheduled, valid, **_kwargs):
+        np.testing.assert_array_equal(lengths[:num_reqs], [3, 4])
+        np.testing.assert_array_equal(scheduled, [2, 2])
+        np.testing.assert_array_equal(valid, [1, 1])
+        return "classified"
+
+    batch, _ = _run_prepare_inputs(runner, output, state, desc, classify=classify)
+    assert batch.attn_state == "classified"
+    np.testing.assert_array_equal(batch.query_start_loc_np, [0, 1, 3])
+    np.testing.assert_array_equal(batch.seq_lens_np[:2], [2, 4])
 
 
 def test_postprocess_sampled_copies_only_with_speculator():
