@@ -20,9 +20,6 @@ from vllm.utils.network_utils import get_ip, get_open_port
 from tests.e2e.common.rlhf.common import post_control, register_engines_once, server_visible_devices
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
-    assert_quantized_storage_unchanged,
-    assert_quantized_updates,
-    capture_quantized_pointers,
     capture_update_result,
     hccl_weight_transfer_servers,
 )
@@ -48,8 +45,9 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
     source_a = make_weight_source(case, device, seed=0)
-    source_b = make_weight_source(case, device, seed=1, weight_multiplier=-8.0 if case.weight_quantization else 1.0)
+    source_b = make_weight_source(case, device, seed=1)
     updates = (("A", source_a), ("B", source_b), ("A", source_a))
+    audit = case.weight_update_audit_factory() if case.weight_update_audit_factory is not None else None
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
@@ -63,11 +61,12 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         device_index=INFERENCE_DEVICE_INDEX,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
+        audit=audit,
     ) as (server, references, dummy_signature):
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
-        initial_pointers = capture_quantized_pointers(server) if case.weight_quantization else None
-        updated_pointers = []
+        initial_state = audit.capture_state(server) if audit is not None else None
+        updated_states = []
         register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             HCCLTrainerInitInfo(
@@ -97,9 +96,9 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                 # if a transfer fails.
                 engine.send_weights()
                 post_control(server, "resume")
-                if case.weight_quantization:
-                    updated_pointers.append(capture_quantized_pointers(server))
-                observation = capture_update_result(server, case)
+                if audit is not None:
+                    updated_states.append(audit.capture_state(server))
+                observation = capture_update_result(server, case, audit=audit)
                 assert observation == references[reference_name], (
                     f"{case.id}: {reference_name} update {update_round} differs from fresh-load"
                 )
@@ -109,6 +108,11 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
 
     assert signatures[0] != signatures[1], f"{case.id}: A/B updates have identical observations"
     assert signatures[2] == signatures[0], f"{case.id}: final A did not restore the first A"
-    if case.weight_quantization:
-        assert_quantized_storage_unchanged(initial_pointers, updated_pointers, case)
-        assert_quantized_updates([references["A"], references["B"]], signatures, case)
+    if audit is not None:
+        audit.check_updates(
+            initial_state=initial_state,
+            updated_states=updated_states,
+            references=[references["A"], references["B"]],
+            updates=signatures,
+            case=case,
+        )

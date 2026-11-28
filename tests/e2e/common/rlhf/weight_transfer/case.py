@@ -9,7 +9,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm import envs
 
@@ -26,6 +26,28 @@ if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import WeightSource
 
 
+class WeightSourceFactory(Protocol):
+    def __call__(self, case: WeightUpdateModelCase, device: torch.device, *, seed: int) -> WeightSource: ...
+
+
+class WeightUpdateAudit(Protocol):
+    """Case-specific observations and checks for a live weight update."""
+
+    def capture_result(self, server: Any, case: WeightUpdateModelCase) -> Any: ...
+
+    def capture_state(self, server: Any) -> Any: ...
+
+    def check_updates(
+        self,
+        *,
+        initial_state: Any,
+        updated_states: list[Any],
+        references: list[Any],
+        updates: list[Any],
+        case: WeightUpdateModelCase,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
     """A layer-reduced model whose complete parameter set is reloaded."""
@@ -34,10 +56,9 @@ class WeightUpdateModelCase:
     model: str
     hf_overrides: dict[str, Any]
     # Build this case's payload source instead of ``FixedRandomWeightSource``.
-    # DeepSeek-V4.1 overrides it: Transformers has no ``deepseek_v41``, so its
-    # layout comes from the published checkpoint's safetensors headers
-    # (``DeepseekV41WeightSource`` in ``weight_source``).
-    weight_source_factory: Callable[[Any, torch.device], WeightSource] | None = None
+    # Factories receive the seed so A/B sources remain independently reproducible.
+    weight_source_factory: WeightSourceFactory | None = None
+    weight_update_audit_factory: Callable[[], WeightUpdateAudit] | None = None
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
@@ -55,7 +76,6 @@ class WeightUpdateModelCase:
     image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
-    weight_quantization: str | None = None
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -109,11 +129,30 @@ QWEN35_CASE = WeightUpdateModelCase(
 QWEN_CASES = (QWEN35_CASE,)
 
 
+def _mxfp8_weight_source(case: WeightUpdateModelCase, device: torch.device, *, seed: int) -> WeightSource:
+    # Lazy imports avoid a cycle: weight_source imports the case descriptions.
+    from tests.e2e.common.rlhf.weight_transfer.weight_source import MXFP8WeightSource
+
+    # The HCCL B source uses seed=1. Magnify and flip its quantized weights so
+    # both FP8 values and E8M0 scales change relative to A.
+    alternate_weight_multiplier = -8.0
+    return MXFP8WeightSource(
+        case, device, seed=seed, weight_multiplier=alternate_weight_multiplier if seed == 1 else 1.0
+    )
+
+
+def _mxfp8_weight_update_audit() -> WeightUpdateAudit:
+    from tests.e2e.common.rlhf.weight_transfer.reference_check import MXFP8WeightUpdateAudit
+
+    return MXFP8WeightUpdateAudit()
+
+
 QWEN35_W8A8_MXFP_CASE = WeightUpdateModelCase(
     id="qwen35-quant-mxfp8",
     model="Qwen/Qwen3.5-35B-A3B",
     full_transfer_matrix=True,
-    weight_quantization="mxfp8",
+    weight_source_factory=_mxfp8_weight_source,
+    weight_update_audit_factory=_mxfp8_weight_update_audit,
     hf_overrides={
         "architectures": ["Qwen3_5MoeForCausalLM"],
         "text_config": {
@@ -176,13 +215,13 @@ def _dsv41_engram_args() -> tuple[str, ...]:
     return ("--engram-config", f'{{"cpu_offload": {offload}}}')
 
 
-def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device, *, seed: int) -> WeightSource:
     """Payload source for DeepSeek-V4.1, which has no Transformers meta model."""
     # Imported lazily: ``weight_source`` imports this module, and the header
     # reader it needs is not part of every lane's import path.
     from tests.e2e.common.rlhf.weight_transfer.weight_source import DeepseekV41WeightSource
 
-    return DeepseekV41WeightSource(case, device)
+    return DeepseekV41WeightSource(case, device, seed=seed)
 
 
 # Engram host-offload coverage. The published V4.1 checkpoint ships two Engram

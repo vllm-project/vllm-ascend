@@ -578,10 +578,11 @@ class DeepseekV41WeightSource(WeightSource):
     because nothing is synthesised through an HF model first.
     """
 
-    def __init__(self, case: Any, device: torch.device) -> None:
+    def __init__(self, case: Any, device: torch.device, *, seed: int = FIXED_WEIGHT_SEED) -> None:
         text = _dsv41_text_config(case)
         self._case = case
         self._device = device
+        self._seed = seed
         self._num_layers = int(text.get("num_hidden_layers", 40))
         self._num_experts = int(text.get("n_routed_experts", 384))
         self._num_nextn = int(text.get("num_nextn_predict_layers", 0))
@@ -697,6 +698,7 @@ class DeepseekV41WeightSource(WeightSource):
             sample_on_cpu=True,
             norm_suffixes=("norm.weight", "attn_sink"),
             integer_topk_names=("tid2eid", "eid2tid"),
+            seed=self._seed,
         )
 
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
@@ -808,24 +810,16 @@ def make_weight_source(
     device: torch.device,
     *,
     seed: int = FIXED_WEIGHT_SEED,
-    weight_multiplier: float = 1.0,
 ) -> WeightSource:
     """Build the payload source a case declares, or the default random one.
 
-    Cases whose architecture Transformers can enumerate use
-    ``FixedRandomWeightSource``. DeepSeek-V4.1 cannot - ``AutoConfig`` raises
-    ``KeyError: 'deepseek_v41'`` - so it names the header-driven source that
-    lives in this module too. ``packed_buffer_size_for`` works on either, because
-    both answer ``metadata()`` with the same ``ParamMeta``.
+    A case factory owns format conversion or architecture-specific enumeration
+    and receives the seed for independent A/B payloads. Cases without a factory
+    use BF16 ``FixedRandomWeightSource``. Every implementation supplies the same
+    ``WeightSource`` metadata/iterator contract to the transport.
     """
-    if case.weight_quantization == "mxfp8":
-        return MXFP8WeightSource(case, device, seed=seed, weight_multiplier=weight_multiplier)
-    if case.weight_quantization is not None:
-        raise ValueError(f"Unsupported sender quantization: {case.weight_quantization}")
     if case.weight_source_factory is not None:
-        if seed != FIXED_WEIGHT_SEED:
-            raise ValueError(f"{case.id}: custom weight sources do not support independent seeded updates")
-        return case.weight_source_factory(case, device)
+        return case.weight_source_factory(case, device, seed=seed)
     return FixedRandomWeightSource(case, device, seed=seed)
 
 

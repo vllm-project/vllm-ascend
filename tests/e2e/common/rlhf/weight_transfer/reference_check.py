@@ -14,7 +14,7 @@ from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
-from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateAudit, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
     fixed_startup_checkpoint,
@@ -23,9 +23,9 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
-def capture_update_result(server, case):
-    if case.weight_quantization:
-        return capture_quantized_result(server, case)
+def capture_update_result(server, case, *, audit: WeightUpdateAudit | None = None):
+    if audit is not None:
+        return audit.capture_result(server, case)
     return generation_signature(
         server.get_client(),
         case.model,
@@ -318,6 +318,7 @@ def hccl_weight_transfer_servers(
     device_index,
     gpu_memory_utilization,
     env_dict,
+    audit: WeightUpdateAudit | None = None,
 ):
     """Build independent references for explicit HCCL update sources.
 
@@ -347,7 +348,7 @@ def hccl_weight_transfer_servers(
                 server_port=port,
                 env_dict=env_dict,
             ) as server:
-                references[name] = capture_update_result(server, case)
+                references[name] = capture_update_result(server, case, audit=audit)
         for rank in range(tensor_parallel_size):
             wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
         port = get_open_port()
@@ -370,7 +371,7 @@ def hccl_weight_transfer_servers(
             server_port=port,
             env_dict=env_dict,
         ) as server:
-            dummy = None if case.weight_quantization else capture_update_result(server, case)
+            dummy = None if audit is not None else capture_update_result(server, case)
             yield server, references, dummy
 
 
@@ -486,3 +487,20 @@ def assert_quantized_updates(references, updates, case):
         assert rank_a.keys() == rank_b.keys()
         for name in rank_a:
             assert rank_a[name]["sha256"] != rank_b[name]["sha256"], f"{name}: A/B value unchanged"
+
+
+class MXFP8WeightUpdateAudit:
+    """Keep MXFP8-specific RPCs and assertions outside the transport runner."""
+
+    @staticmethod
+    def capture_result(server, case):
+        return capture_quantized_result(server, case)
+
+    @staticmethod
+    def capture_state(server):
+        return capture_quantized_pointers(server)
+
+    @staticmethod
+    def check_updates(*, initial_state, updated_states, references, updates, case):
+        assert_quantized_storage_unchanged(initial_state, updated_states, case)
+        assert_quantized_updates(references, updates, case)
