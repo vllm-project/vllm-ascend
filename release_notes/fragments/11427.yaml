@@ -1,0 +1,9 @@
+pr: 11427
+entries:
+  - category: feature
+    text: >-
+      Added Atlas 300I Duo (310P) support for serving LLM-Compressor
+      `compressed-tensors` W8A8 checkpoints (such as
+      `ramblingpolymath/Qwen3-32B-W8A8`) with `--dtype float16` without
+      requiring `--quantization ascend`.
+    hardware: [310P]
