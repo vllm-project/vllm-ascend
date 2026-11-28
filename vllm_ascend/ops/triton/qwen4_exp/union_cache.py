@@ -6,9 +6,20 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _mark_pages(indices, positions, lengths, requests, table, used,
-                index_stride, table_stride, column_stride, num_requests,
-                GROUPS: tl.constexpr, TILE: tl.constexpr):
+def _mark_pages(
+    indices,
+    positions,
+    lengths,
+    requests,
+    table,
+    used,
+    index_stride,
+    table_stride,
+    column_stride,
+    num_requests,
+    GROUPS: tl.constexpr,
+    TILE: tl.constexpr,
+):
     row = tl.program_id(0)
     group_col = tl.arange(0, TILE)
     req = tl.load(requests + row)
@@ -26,8 +37,7 @@ def _mark_pages(indices, positions, lengths, requests, table, used,
 
 
 @triton.jit
-def _mark_request_pages(table, lengths, used, row_stride, col_stride, cols,
-                        TILE: tl.constexpr):
+def _mark_request_pages(table, lengths, used, row_stride, col_stride, cols, TILE: tl.constexpr):
     req = tl.program_id(0)
     col = tl.program_id(1) * TILE + tl.arange(0, TILE)
     length = tl.load(lengths + req)
@@ -55,9 +65,25 @@ def _scale(byte):
 
 
 @triton.jit
-def _materialize(pages, current_rows, k, v, ks, vs, current_k, current_v, out_k, out_v,
-                 k_row_stride, v_row_stride, k_col_stride, v_col_stride,
-                 DIM: tl.constexpr, WIDTH: tl.constexpr, ROWS: tl.constexpr):
+def _materialize(
+    pages,
+    current_rows,
+    k,
+    v,
+    ks,
+    vs,
+    current_k,
+    current_v,
+    out_k,
+    out_v,
+    k_row_stride,
+    v_row_stride,
+    k_col_stride,
+    v_col_stride,
+    DIM: tl.constexpr,
+    WIDTH: tl.constexpr,
+    ROWS: tl.constexpr,
+):
     shard = tl.program_id(0)
     dest_page = shard // (128 // ROWS)
     src_page = tl.load(pages + dest_page)
@@ -92,13 +118,28 @@ def prepare_union_pages(num_pages, slots, indices, positions, lengths, requests,
     if request_page_limit:
         cols = min(request_page_limit, table.shape[1])
         _mark_request_pages[(table.shape[0], triton.cdiv(cols, 64))](
-            table, lengths.contiguous(), used, table.stride(0), table.stride(1), cols, TILE=64,
+            table,
+            lengths.contiguous(),
+            used,
+            table.stride(0),
+            table.stride(1),
+            cols,
+            TILE=64,
         )
     else:
         _mark_pages[(indices.shape[0],)](
-            indices, positions.contiguous(), lengths.contiguous(), requests.contiguous(), table, used,
-            indices.stride(0), table.stride(0), table.stride(1), table.shape[0],
-            GROUPS=groups, TILE=triton.next_power_of_2(groups),
+            indices,
+            positions.contiguous(),
+            lengths.contiguous(),
+            requests.contiguous(),
+            table,
+            used,
+            indices.stride(0),
+            table.stride(0),
+            table.stride(1),
+            table.shape[0],
+            GROUPS=groups,
+            TILE=triton.next_power_of_2(groups),
         )
     pages = torch.nonzero(used).flatten()
     page_map = torch.where(used.bool(), used.cumsum(0, dtype=torch.int32) - 1, -1)
@@ -106,8 +147,9 @@ def prepare_union_pages(num_pages, slots, indices, positions, lengths, requests,
     # The extra row receives writes for unused and padded slots.
     current = torch.full((n * 128 + 1,), -1, dtype=torch.int32, device=table.device)
     slot = slots.reshape(-1).long()
-    dest = page_map[(slot // 128).clamp_min(0)].long() * 128 + slot.remainder(128)
-    dest = torch.where((slot >= 0) & (dest >= 0), dest, n * 128)
+    valid_slot = (slot >= 0) & (slot < num_pages * 128)
+    page = page_map[(slot // 128).clamp(0, num_pages - 1)].long()
+    dest = torch.where(valid_slot & (page >= 0), page * 128 + slot.remainder(128), n * 128)
     current.scatter_(0, dest, torch.arange(slot.numel(), device=table.device, dtype=torch.int32))
     return pages, current, page_map
 
@@ -121,9 +163,22 @@ def materialize_prepared_pages(cache, current_kv, pages, current):
     out_v = current_v.new_empty(shape)
     if n:
         _materialize[(n * 16,)](
-            pages, current, k.view(torch.uint8), v.view(torch.uint8), ks, vs,
-            current_k, current_v, out_k, out_v,
-            current_k.stride(0), current_v.stride(0), current_k.stride(-1), current_v.stride(-1),
-            DIM=k.shape[-1], WIDTH=triton.next_power_of_2(k.shape[-1]), ROWS=8,
+            pages,
+            current,
+            k.view(torch.uint8),
+            v.view(torch.uint8),
+            ks,
+            vs,
+            current_k,
+            current_v,
+            out_k,
+            out_v,
+            current_k.stride(0),
+            current_v.stride(0),
+            current_k.stride(-1),
+            current_v.stride(-1),
+            DIM=k.shape[-1],
+            WIDTH=triton.next_power_of_2(k.shape[-1]),
+            ROWS=8,
         )
     return out_k, out_v

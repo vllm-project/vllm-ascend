@@ -201,6 +201,7 @@ def load_builder():
 
     class Base:
         kv_cache_spec = None
+
         def build(self, _, common, *args, **kwargs):
             return SimpleNamespace(
                 block_table=getattr(common, "block_table_tensor", "kept"),

@@ -82,13 +82,20 @@ def test_prefill_union_uses_only_connector_cache_pages(monkeypatch):
     groups = _groups()
     main = groups[0].kv_cache_spec
     args = {field.name: getattr(main, field.name) for field in fields(main)}
-    args.update(dtype=torch.float8_e4m3fn, head_size=256, head_size_v=256,
-                num_head_slots=2, state_content_bytes=264, use_prefill_union=True)
+    args.update(
+        dtype=torch.float8_e4m3fn,
+        head_size=256,
+        head_size_v=256,
+        num_head_slots=2,
+        state_content_bytes=264,
+        use_prefill_union=True,
+    )
     groups[0].kv_cache_spec = QSAMXFP8Spec(**args)
     groups[2].kv_cache_spec = replace(groups[2].kv_cache_spec, dtype=torch.uint8, head_size=36)
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
-        groups, 10**9,
+        groups,
+        10**9,
     )
     modules = {}
     _, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch, forward_context=modules)
@@ -114,8 +121,11 @@ def test_missing_static_v_scale_is_rejected(monkeypatch):
     with pytest.raises(ValueError, match="static E8M0"):
         owner.process_weights_after_loading()
     owner.attn.v_cache_scale.data.fill_(127)
+    owner.attn.v_cache_scale.data[:2] = torch.tensor([0, 126], dtype=torch.uint8)
     owner.process_weights_after_loading()
-    assert torch.all(owner.v_cache_scale_reciprocal == 1)
+    expected = torch.ones(256, dtype=torch.bfloat16)
+    expected[1] = 2
+    torch.testing.assert_close(owner.v_cache_scale_reciprocal, expected)
     owner.num_kv_heads, owner.head_dim = 1, 256
     caches = (
         torch.empty(2, 128, 1, 256),
@@ -124,7 +134,9 @@ def test_missing_static_v_scale_is_rejected(monkeypatch):
         torch.empty(2, 2, 1, 512, dtype=torch.uint8),
     )
     owner.bind_kv_cache(caches)
-    assert torch.all(caches[3] == 127)
+    scale_bytes = torch.full((256,), 127, dtype=torch.uint8)
+    scale_bytes[1] = 126
+    torch.testing.assert_close(caches[3], scale_bytes.repeat_interleave(2).expand_as(caches[3]))
 
 
 @pytest.mark.parametrize("dim", [192, 256])
@@ -242,3 +254,22 @@ def test_fp8_cache_write_copies_encoded_bytes(monkeypatch):
     assert seen[0][0].dtype == seen[0][1].dtype == torch.uint8
     assert seen[0][0].data_ptr() == cache.data_ptr()
     assert torch.equal(seen[0][1], rows.view(torch.uint8))
+
+
+@pytest.mark.parametrize(
+    ("requests", "tokens", "history", "fits"),
+    [
+        (1, 32, 0, False),
+        (3, 1024, 4096, True),
+        (3, 1024, 4097, False),
+        (2, 8191, 139264, False),
+        (2, 8192, 139264, True),
+        (2, 8192, 139265, False),
+        (3, 8192, 139264, False),
+        (2, 40000, 160000, True),
+    ],
+)
+def test_dense_union_page_budget(requests, tokens, history, fits):
+    from vllm_ascend.models.qwen4_exp.union_layout import fits_dense_page_budget
+
+    assert fits_dense_page_budget(requests, tokens, history) is fits

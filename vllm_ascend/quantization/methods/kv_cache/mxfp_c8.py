@@ -48,6 +48,11 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight.view_as(param))
 
 
+def normalize_mxfp_v_scale(raw: torch.Tensor) -> None:
+    """Map zero-absmax calibration bytes to E8M0 scale one for both cache and reciprocal."""
+    raw.masked_fill_(raw == 0, 127)
+
+
 class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     """MXFP8 KV cache storage for dense-attention models.
 
@@ -89,11 +94,7 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
         vllm_config = get_current_vllm_config()
         target_dtype = vllm_config.model_config.dtype
         raw = layer.v_cache_scale.data
-        # A minmax calibrator emits 0 for a channel whose absmax was 0;
-        # sanitize to the neutral 127 so both consumers (the reciprocal below
-        # and the raw bytes broadcast into the V-scale cache) stay neutral.
-        if bool((raw == 0).any()):
-            raw[raw == 0] = 127
+        normalize_mxfp_v_scale(raw)
         exponent = raw.to(torch.float32) - 127
         # Only the reciprocal is consumed (npu_quantize needs 1/scale); the
         # raw E8M0 bytes are broadcast into the V-scale cache as-is.

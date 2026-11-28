@@ -14,10 +14,10 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
-from copy import copy
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
@@ -54,7 +54,8 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
-from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader
+from vllm_ascend.ops.triton.qwen4_exp.union_cache import materialize_prepared_pages
+from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader, normalize_mxfp_v_scale
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .cache_config import QSAMXFP8Spec
@@ -66,11 +67,12 @@ from .lightning_indexer import (
     quantize_indexer_rows,
 )
 from .topk_buffer import share_topk_buffer
+from .union_layout import fits_dense_page_budget, prepare_union_layout
 
 if TYPE_CHECKING:
-    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
     from vllm.models.qwen4_exp.common.qsa_indexer import (
         QSAIndexerBackend,
         QSAIndexerMetadataBuilder,
@@ -568,7 +570,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         seq_lens: torch.Tensor,
         current_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Use ordinary GBSA for MXFP8 and preserve request dispatch for unquantized caches."""
+        """Dispatch prefill with a request plan and decode through ordinary GBSA."""
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
         if num_tokens == 0:
@@ -583,38 +585,23 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         if request_plan is not None:
             table = attn_metadata.block_table
             if self.kv_cache_dtype == "mxfp8":
-                from vllm_ascend.ops.triton.qwen4_exp.union_cache import materialize_prepared_pages, prepare_union_pages
-
                 if current_kv is None:
                     raise ValueError("C8 Union prefill requires current K/V")
-                limit = getattr(attn_metadata, "qsa_request_page_limit", 0)
-                # Layers in an attention group share this step's metadata object.
-                # Sparse selections depend on the layer's indexer output.
-                layout = None
-                if limit:
-                    layouts = attn_metadata.qsa_dense_page_layouts
-                    signature = (kv_cache[0].shape[0], seq_lens.data_ptr(), seq_lens.stride())
-                    layout = layouts.get(signature)
-                if layout is None:
-                    pages, current, page_map = prepare_union_pages(
-                        kv_cache[0].shape[0], attn_metadata.slot_mapping, compact_indices,
-                        logical_positions[:num_tokens], seq_lens, token_to_req[:num_tokens],
-                        table, limit,
-                    )
-
-                    def remap(source: torch.Tensor) -> torch.Tensor:
-                        return page_map[source.long().clamp(0, page_map.numel() - 1)].clamp_min(0)
-
-                    request_plan = replace(request_plan, prepared_union_batches=tuple(
-                        replace(batch, block_table=remap(batch.block_table))
-                        for batch in request_plan.prepared_union_batches
-                    ))
-                    table = remap(table)
-                    if limit:
-                        layouts[signature] = pages, current, table, request_plan
-                else:
-                    pages, current, table, request_plan = layout
-                key_cache, value_cache = materialize_prepared_pages(kv_cache, current_kv, pages, current)
+                layout = prepare_union_layout(
+                    kv_cache[0].shape[0],
+                    attn_metadata.slot_mapping,
+                    compact_indices,
+                    logical_positions[:num_tokens],
+                    seq_lens,
+                    token_to_req[:num_tokens],
+                    table,
+                    request_plan,
+                    getattr(attn_metadata, "qsa_dense_page_layouts", None),
+                )
+                table, request_plan = layout.block_table, layout.request_plan
+                key_cache, value_cache = materialize_prepared_pages(
+                    kv_cache, current_kv, layout.pages, layout.current_rows
+                )
                 logger.info_once("QSA Union prefill uses step-local BF16 pages from the C8 cache.")
             return dispatch_qsa_attention(
                 query[:num_tokens],
@@ -786,7 +773,9 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         phases = common_attn_metadata.is_prefilling
         if phases is None or phases.device.type != "cpu":
             raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
-        if any(phases.tolist()) and (not isinstance(self.kv_cache_spec, QSAMXFP8Spec) or self.kv_cache_spec.use_prefill_union):
+        if any(phases.tolist()) and (
+            not isinstance(self.kv_cache_spec, QSAMXFP8Spec) or self.kv_cache_spec.use_prefill_union
+        ):
             metadata.qsa_request_plan = build_qsa_request_plan(
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.num_actual_tokens,
@@ -798,17 +787,15 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             # pages. The indexer and the Union mask still select the exact groups.
             n = common_attn_metadata.num_reqs
             lengths_bound = common_attn_metadata.seq_lens_cpu_upper_bound
-            page_token_budget = 4 * metadata.num_actual_tokens
-            if n <= 2 and metadata.num_actual_tokens >= 8192:
-                # A full 128K prompt can share its boundary step with the next
-                # request. Bound the combined history by 128K plus one chunk.
-                page_token_budget = max(page_token_budget, 131072 + 8192)
-            if (pcp_context is None and n == metadata.block_table.shape[0]
-                    and len(metadata.qsa_request_plan.requests) == n
-                    and not metadata.qsa_request_plan.decode_spans
-                    and lengths_bound is not None and lengths_bound.device.type == "cpu"
-                    and 0 < int(lengths_bound[:n].sum()) <= page_token_budget):
-                metadata.qsa_request_page_limit = metadata.block_table.shape[1]
+            if (
+                pcp_context is None
+                and n == metadata.block_table.shape[0]
+                and len(metadata.qsa_request_plan.requests) == n
+                and not metadata.qsa_request_plan.decode_spans
+                and lengths_bound is not None
+                and lengths_bound.device.type == "cpu"
+                and fits_dense_page_budget(n, metadata.num_actual_tokens, int(lengths_bound[:n].sum()))
+            ):
                 metadata.qsa_dense_page_layouts = {}
         # A packed query segment is the causal suffix of its request. Graph
         # padding and PCP sharding can break that relationship.
@@ -1035,10 +1022,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         super().process_weights_after_loading()
         if self.kv_cache_dtype == "mxfp8":
             scale = self.attn.v_cache_scale
-            if bool(((scale == 255) | (scale == 0)).any()):
-                raise ValueError(
-                    "QSA MXFP8 requires loaded finite, nonzero static E8M0 fa_v.scale for every KV channel"
-                )
+            if bool((scale == 255).any()):
+                raise ValueError("QSA MXFP8 requires loaded finite static E8M0 fa_v.scale for every KV channel")
+            normalize_mxfp_v_scale(scale)
             self.register_buffer(
                 "v_cache_scale_reciprocal", torch.exp2(127 - scale.float()).to(self._qsa_model_dtype), persistent=False
             )
