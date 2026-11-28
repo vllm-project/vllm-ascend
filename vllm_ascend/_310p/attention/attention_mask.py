@@ -18,11 +18,10 @@
 import torch
 import torch_npu
 
-from vllm_ascend.attention.attention_v1 import AscendMetadata
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d
 
 COMPRESSED_MASK_SEQ_LEN = 2048
-PAGED_ATTENTION_COMPRESSED_MASK_VALUE = -10000.0
+SPLITFUSE_MASK_TILE_SIZE = 16
 
 
 def is_compressed_mask_supported() -> bool:
@@ -30,10 +29,6 @@ def is_compressed_mask_supported() -> bool:
 
 
 class AttentionMaskBuilder310:
-    chunked_prefill_attn_mask = None
-    compressed_chunked_prefill_attn_mask = None
-    max_seqlen = 16384
-
     def __init__(self, device: torch.device, max_seqlen: int):
         """
         Initializes the AttentionMaskBuilder for the 310P device.
@@ -42,7 +37,7 @@ class AttentionMaskBuilder310:
             device (torch.device): The device on which tensors will be allocated.
             max_seqlen (int): Maximum length of a sequence (including prompt and generated text).
         """
-        AttentionMaskBuilder310.max_seqlen = max_seqlen
+        self.max_seqlen = max_seqlen
         self.causal_attn_mask_cache = None
         self.non_causal_attn_mask_cache = None
         self.support_compressed_mask = is_compressed_mask_supported()
@@ -69,55 +64,37 @@ class AttentionMaskBuilder310:
         mask.masked_fill_(upper, float("-inf"))
         return mask
 
-    @classmethod
-    def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
-        """
-        Generates and formats the attention mask for SplitFuse (chunked prefill) decoding.
+    @staticmethod
+    def get_splitfuse_mask(
+        query_start_loc: torch.Tensor,
+        context_lens: torch.Tensor,
+        num_tokens: int,
+        max_context_len: int,
+        *,
+        capturing: bool,
+    ) -> torch.Tensor:
+        """Build the per-query causal mask in the legacy SplitFuse blocked layout."""
+        tile = SPLITFUSE_MASK_TILE_SIZE
+        padded_tokens = (num_tokens + tile - 1) // tile * tile
+        padded_context = (max_context_len + tile - 1) // tile * tile
+        device = context_lens.device
 
-        It calculates the specific indices required based on query start locations
-        and context lengths, selects the relevant parts from the global chunked
-        mask, and converts the result to the NPU-specific fractal format.
+        # Use the live device lengths so replay rebuilds the correct mask.
+        query_ends = query_start_loc[1 : context_lens.numel() + 1].to(device)
+        rows = torch.arange(padded_tokens, dtype=query_ends.dtype, device=device)
+        requests = torch.searchsorted(query_ends, rows, out_int32=True, right=True)
+        requests.clamp_max_(context_lens.numel() - 1)
+        cutoffs = (context_lens - query_ends).index_select(0, requests) + rows
+        cutoffs.masked_fill_(rows >= num_tokens, padded_context - 1)
 
-        Args:
-            attn_metadata (AscendMetadata): Metadata containing query start locations and sequence lengths.
-            device (torch.device): The device to perform operations on.
-
-        Returns:
-            torch.Tensor: The splitfuse attention mask cast to ACL_FORMAT_FRACTAL_NZ.
-        """
-        if cls.chunked_prefill_attn_mask is None:
-            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
-        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
-        qlens = qsl[1:] - qsl[:-1]
-        q_list = qlens.tolist()
-        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
-        c_list = context_lens.tolist()
-        pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
-        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
-        splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
-        splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
-        return splitfuse_mask_nz
-
-    @classmethod
-    def get_compressed_splitfuse_mask(cls, device: torch.device):
-        """
-        Generates the fixed ND attention mask for compressed SplitFuse PA.
-
-        Returns:
-            torch.Tensor: A [2048, 2048] float16 ND mask on the target device.
-        """
-        if (
-            cls.compressed_chunked_prefill_attn_mask is None
-            or cls.compressed_chunked_prefill_attn_mask.device != device
-        ):
-            mask = torch.ones(
-                size=(COMPRESSED_MASK_SEQ_LEN, COMPRESSED_MASK_SEQ_LEN),
-                dtype=torch.float16,
-                device=device,
-            )
-            mask = torch.triu(mask, diagonal=1)
-            cls.compressed_chunked_prefill_attn_mask = mask.mul_(PAGED_ATTENTION_COMPRESSED_MASK_VALUE)
-        return cls.compressed_chunked_prefill_attn_mask
+        columns = torch.arange(padded_context, dtype=rows.dtype, device=device).view(1, -1, 1, tile)
+        mask = torch.zeros((1, padded_context // tile, padded_tokens, tile), dtype=torch.float16, device=device)
+        mask.masked_fill_(columns > cutoffs.view(1, 1, -1, 1), float("-inf"))
+        if capturing:
+            # The legacy op consumes the blocked layout directly. FormatCast
+            # uses an aclop on 310P that cannot run during ACLGraph capture.
+            return mask
+        return torch_npu.npu_format_cast(mask, ACL_FORMAT_FRACTAL_NZ)
 
     def get_attention_mask(self, causal: bool, model_config) -> torch.Tensor:
         """

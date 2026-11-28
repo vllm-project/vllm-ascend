@@ -15,17 +15,15 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend._310p.attention.attention_mask import (
-    AttentionMaskBuilder310,
-    is_compressed_mask_supported,
-)
+from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
@@ -48,6 +46,12 @@ def get_query_lens_cpu(attn_metadata: AscendMetadata) -> torch.Tensor | None:
     return value
 
 
+@dataclass
+class AscendMetadata310(AscendMetadata):
+    splitfuse_mask: torch.Tensor | None = None
+    splitfuse_max_context_len: int | None = None
+
+
 class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     """
     Metadata builder specialized for the Huawei Ascend 310P NPU.
@@ -57,6 +61,8 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     generated in the correct format (FRACTAL_NZ) and logic required by
     the 310P hardware.
     """
+
+    metadata_cls = AscendMetadata310
 
     def __init__(
         self,
@@ -111,12 +117,13 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         is_drafting: bool = False,
-    ) -> AscendMetadata:
-        attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+    ) -> AscendMetadata310:
+        attn_metadata = cast(AscendMetadata310, super().build(common_prefix_len, common_attn_metadata, fast_build))
 
         num_reqs = common_attn_metadata.num_reqs
 
         splitfuse_states = (
+            AscendAttentionState.PrefillCacheHit,
             AscendAttentionState.SpecDecoding,
             AscendAttentionState.ChunkedPrefill,
         )
@@ -142,8 +149,9 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu, is_drafting),
         )
 
-        if is_compressed_mask_supported():
-            attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
+        context_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+        if context_upper_bound is not None:
+            attn_metadata.splitfuse_max_context_len = max(context_upper_bound[:num_reqs].tolist(), default=0)
 
         return attn_metadata
 

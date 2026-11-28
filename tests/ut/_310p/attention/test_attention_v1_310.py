@@ -27,6 +27,7 @@ from vllm_ascend._310p.attention.attention_v1 import (
 from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310 as AscendMetadataBuilder310Direct,
 )
+from vllm_ascend._310p.attention.metadata_builder import AscendMetadata310
 
 
 class TestAscendAttentionBackend310(TestBase):
@@ -60,8 +61,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.attention_type = MagicMock()
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
-        self.attn_metadata = MagicMock()
-        self.attn_metadata.return_value = "1"
+        self.attn_metadata = AscendMetadata310()
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
@@ -105,7 +105,6 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillNoCache
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
         metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
@@ -133,7 +132,8 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.assertIs(kwargs["out"], output)
         self.assertIs(result, output)
 
-    @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
+    @patch("torch_npu.npu_format_cast", side_effect=lambda mask, _: mask)
+    @patch("torch_npu._npu_paged_attention_splitfuse_v2", create=True)
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -142,6 +142,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         mock_get_forward_context,
         mock_npu_paged_attention_splitfuse,
         mock_npu_reshape_and_cache,
+        mock_npu_paged_attention_splitfuse_v2,
         mock_format_cast,
     ):
         """Test forward pass in ChunkedPrefill state"""
@@ -151,23 +152,27 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.ChunkedPrefill
         metadata.attn_mask = torch.randn(1, 128, 16, 16)
-        metadata.query_lens = torch.tensor([5])
-        metadata.seq_lens = torch.tensor([1, 4])
+        metadata.seq_lens = torch.tensor([2049, 4])
         metadata.query_start_loc = torch.tensor([0, 1, 5])
-        metadata.actual_seq_lengths_q = [5]
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
+        metadata.splitfuse_max_context_len = 2049
+        metadata.actual_seq_lengths_q = [1, 5]
+        metadata.block_tables = torch.zeros(2, 33, dtype=torch.int32)
+        metadata.num_actual_tokens = 5
         metadata.num_decode_tokens = 0
         metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.num_prefills = 2
+        metadata.slot_mapping = torch.zeros(5, dtype=torch.long)
 
-        self.impl.support_compressed_mask = False
+        self.impl.support_compressed_mask = True
         mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
         mock_npu_paged_attention_splitfuse.assert_called_once()
+        mock_npu_paged_attention_splitfuse_v2.assert_not_called()
+        mask = mock_npu_paged_attention_splitfuse.call_args.kwargs["mask"]
+        self.assertIs(mask, metadata.splitfuse_mask)
+        self.assertEqual(mask.shape, (1, 129, 16, 16))
 
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
@@ -187,9 +192,9 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 128, 16, 16)
-        metadata.query_lens = torch.tensor([5])
         metadata.seq_lens = torch.tensor([1, 4])
         metadata.query_start_loc = torch.tensor([0, 1, 5])
+        metadata.splitfuse_max_context_len = 4
         metadata.actual_seq_lengths_q = [5]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10

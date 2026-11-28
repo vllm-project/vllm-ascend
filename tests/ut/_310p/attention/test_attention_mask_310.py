@@ -35,11 +35,17 @@ class TestAttentionMaskBuilder310(TestBase):
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 
-    @patch("torch_npu.npu_format_cast")
-    def test_get_splitfuse_attn_mask_310(self, mock_format_cast):
-        mock_format_cast.side_effect = lambda x, y: x
-        attn_metadata = MagicMock()
-        attn_metadata.query_start_loc = torch.tensor([0, 1, 5])
-        attn_metadata.seq_lens = torch.tensor([7, 4])
-        attn_mask = self.attention_mask_builder.get_splitfuse_mask(attn_metadata, torch.device("cpu"))
-        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))
+    def test_get_splitfuse_attn_mask_310(self):
+        mask = self.attention_mask_builder.get_splitfuse_mask(
+            torch.tensor([0, 2, 5], dtype=torch.int32),
+            torch.tensor([2049, 4], dtype=torch.int32),
+            num_tokens=5,
+            max_context_len=2049,
+            capturing=True,
+        )
+        self.assertEqual(mask.shape, (1, 129, 16, 16))
+        dense = mask.permute(0, 2, 1, 3).reshape(16, 2064)
+        expected = torch.zeros_like(dense)
+        for row, cutoff in enumerate((2047, 2048, 1, 2, 3)):
+            expected[row, cutoff + 1 :] = -torch.inf
+        torch.testing.assert_close(dense, expected)
