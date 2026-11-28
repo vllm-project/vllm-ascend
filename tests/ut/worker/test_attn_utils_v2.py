@@ -3351,6 +3351,8 @@ def _step5_ring_spec() -> CircularBufferSpec:
 
 
 def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers() -> None:
+    from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
+
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.1.self_attn": _step5_sw_spec(),
@@ -3362,7 +3364,7 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
     }
     summary_before = specs[STEP5_SUMMARY]
 
-    attn_utils._align_hybrid_attention_page_sizes(specs)
+    _align_hybrid_attention_page_sizes(specs)
 
     # Dense layers still align: the sliding-window page doubles its block
     # to reach the main page.
@@ -3378,6 +3380,8 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
 def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page() -> None:
     """Without the aux-name exclusion the same geometry must fail, pinning
     that the suffix filter (not the geometry) spares the summary layers."""
+    from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
+
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.3.self_attn": FullAttentionSpec(
@@ -3385,7 +3389,7 @@ def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page(
         ),
     }
     with pytest.raises(ValueError, match="Cannot align"):
-        attn_utils._align_hybrid_attention_page_sizes(specs)
+        _align_hybrid_attention_page_sizes(specs)
 
 
 def _step5_tensors_and_groups():

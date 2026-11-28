@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -798,7 +799,7 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
 
     config = object()
     groups = get_qwen4_exp_kv_cache_groups(config, specs, upstream)
-    assert calls == [(config, specs)]
+    assert calls == [(config, align_hybrid_kv_cache_specs(specs, descriptor_native=True))]
     assert groups is not None
     assert len(groups) == 6
     assert sorted(name for group in groups for name in group.layer_names) == sorted(specs)
@@ -811,9 +812,30 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     )
 
 
+def test_qwen4_page_alignment_is_owned_by_planning() -> None:
+    specs = _ungrouped_qwen_specs()
+    original = specs.copy()
+    state_page = max(spec.page_size_bytes for spec in specs.values() if isinstance(spec, MambaSpec))
+    captured: dict[str, KVCacheSpec] = {}
+
+    def upstream(_config, planned):
+        captured.update(planned)
+        return [KVCacheGroupSpec([name], spec) for name, spec in planned.items()]
+
+    groups = get_qwen4_exp_kv_cache_groups(object(), specs, upstream)
+    assert groups is not None
+    for name, spec in specs.items():
+        if isinstance(spec, MambaSpec):
+            assert captured[name] is spec
+        else:
+            assert captured[name].page_size_bytes == max(spec.page_size_bytes, state_page)
+            assert captured[name].block_size == spec.block_size
+    assert specs == original
+    assert all(spec.page_size_padded is None for spec in specs.values())
+
+
 def test_platform_builder_uses_qwen_pool_accounting() -> None:
     pytest.importorskip("vllm.v1.core.kv_cache_planning")
-    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)

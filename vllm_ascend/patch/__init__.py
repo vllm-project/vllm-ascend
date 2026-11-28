@@ -1218,16 +1218,15 @@
 #       the upstream kernel, or after an equivalent fix lands upstream.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
+#   1. `vllm.v1.worker.gpu.model_runner.get_kv_cache_spec`
 #    Why:
-#       The current v2 worker still goes through the shared upstream v1 helper
-#       to build KV cache specs. For Ascend MLA layers that helper returns the
-#       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
-#       logic expects `AscendMLAAttentionSpec`.
+#       Ascend Model Runner V2 requires Mamba groups to remain ordered after
+#       attention groups for graph parameter updates, plus C8-MXFP and HiSparse
+#       spec customization before cross-worker planning.
 #    How：
-#       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
-#       upstream behavior while MLA layers are rewritten to
-#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
+#       Collect pure per-layer owner specs on each worker while keeping Mamba
+#       specs ordered after attention specs; cross-layer hybrid page alignment
+#       now runs in `AscendKVCacheConfigBuilder` after Core merges worker specs.
 #    Related PR (if no, explain why):
 #       No. This is a plugin-side compatibility patch for the current upstream
 #       helper path.

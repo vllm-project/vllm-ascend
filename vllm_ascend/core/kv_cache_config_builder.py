@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -102,6 +103,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
+            kv_cache_spec = dict(kv_cache_spec)
             unify_hybrid_kv_cache_specs(kv_cache_spec)
 
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
@@ -110,6 +112,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         qwen4_exp_groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if qwen4_exp_groups is not None:
             return qwen4_exp_groups
+
+        kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec)
 
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))
