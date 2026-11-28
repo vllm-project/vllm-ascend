@@ -10,7 +10,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from tools.kv_pool.analyze_recv_trace import summarize
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import (
     RecvTimeline,
     RecvTraceSession,
@@ -176,7 +176,7 @@ class TestRecvTimeline(unittest.TestCase):
     def test_invalid_capacity(self):
         for value in (0, -1, True, 1.5, "100000"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                RecvTimeline(value)
+                RecvTimeline(cast(Any, value))
 
     def test_unpublished_task_cannot_be_hol_evidence(self):
         trace = RecvTimeline()
@@ -239,7 +239,9 @@ class TestRecvTraceSession(unittest.TestCase):
             block_ranges=[],
             use_key_major_ranges=True,
         )
-        task = SimpleNamespace(wait_for_save_layer=None, attention_start_gate=None, layer_id=0, transfer_tasks=[item])
+        task = SimpleNamespace(
+            wait_for_save_layers=(), load_gate=None, compute_boundary=None, layer_id=0, transfer_tasks=[item]
+        )
         with tempfile.TemporaryDirectory() as directory:
             session = RecvTraceSession(worker, str(Path(directory) / "trace.json"), 100, 1000)
             try:
@@ -270,7 +272,9 @@ class TestRecvTraceSession(unittest.TestCase):
             load_disabled=threading.Event(),
             name="gva",
         )
-        task = SimpleNamespace(wait_for_save_layer=0, attention_start_gate=None, layer_id=1, transfer_tasks=[])
+        task = SimpleNamespace(
+            wait_for_save_layers=(0,), load_gate=None, compute_boundary=None, layer_id=1, transfer_tasks=[]
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "trace.json")
             session = RecvTraceSession(worker, path, 100, 1000)
@@ -281,18 +285,65 @@ class TestRecvTraceSession(unittest.TestCase):
                 session.timeline.sample()
                 self.assertEqual(calls, [])
                 event.set()
-                session.mark("save_cpu_wait_end")
-                session.mark("save_npu_wait_end")
+                session.mark("save_cpu_wait_end", 0)
+                session.mark("save_npu_wait_end", 0)
                 event.clear()
                 session.timeline.sample()
                 sample = session.timeline.snapshot()["events"][-1]
-                self.assertTrue(sample["head_recheck"]["save_cpu"])
-                self.assertTrue(sample["head_recheck"]["save_npu"])
+                self.assertTrue(sample["head_recheck"]["save_cpu:0"])
+                self.assertTrue(sample["head_recheck"]["save_npu:0"])
                 session.finish()
             finally:
                 session.close()
             self.assertTrue(Path(path).exists())
             self.assertFalse(session._observer.is_alive())
+
+    def test_multiple_save_dependencies_and_compute_boundary_are_independent(self):
+        cpu_events = [threading.Event(), threading.Event()]
+        npu_ready = [False, False]
+        boundary_ready = False
+        gate = AttentionLoadGate()
+        worker = SimpleNamespace(
+            m_store=SimpleNamespace(set_device=lambda: None),
+            layer_save_finished_events=cpu_events,
+            sync_save_events=[SimpleNamespace(query=lambda i=i: npu_ready[i]) for i in range(2)],
+            load_disabled=threading.Event(),
+            name="range",
+        )
+        task = SimpleNamespace(
+            wait_for_save_layers=(0, 1),
+            load_gate=gate,
+            compute_boundary=SimpleNamespace(query=lambda: boundary_ready),
+            layer_id=2,
+            transfer_tasks=[],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = RecvTraceSession(worker, str(Path(directory) / "trace.json"), 100, 1000)
+            try:
+                session.enqueue(task)
+                session.publish(task)
+                session.dequeue(task)
+                cpu_events[0].set()
+                session.mark("save_cpu_wait_end", 0)
+                session.mark("save_npu_wait_end", 0)
+                session.timeline.sample()
+                deps = session.timeline.snapshot()["events"][-1]["head_recheck"]
+                self.assertTrue(deps["save_npu:0"])
+                self.assertFalse(deps["save_cpu:1"])
+                self.assertFalse(deps["save_npu:1"])
+                self.assertFalse(deps["compute_boundary"])
+                self.assertFalse(deps["gate_record"])
+                cpu_events[1].set()
+                npu_ready[1] = True
+                boundary_ready = True
+                gate._event = cast(Any, SimpleNamespace(query=lambda: True))
+                session.timeline.sample()
+                deps = session.timeline.snapshot()["events"][-1]["head_recheck"]
+                self.assertTrue(all(value for key, value in deps.items() if key != "has_payload"))
+                self.assertEqual(session.timeline.snapshot()["events"][0]["save_owners"], [0, 1])
+                session.finish()
+            finally:
+                session.close()
 
     def test_external_waiter_is_never_executed_by_probe(self):
         def forbidden(_):
@@ -304,7 +355,9 @@ class TestRecvTraceSession(unittest.TestCase):
             load_disabled=threading.Event(),
             name="gva",
         )
-        task = SimpleNamespace(wait_for_save_layer=None, attention_start_gate=None, layer_id=0, transfer_tasks=[])
+        task = SimpleNamespace(
+            wait_for_save_layers=(), load_gate=None, compute_boundary=None, layer_id=0, transfer_tasks=[]
+        )
         with tempfile.TemporaryDirectory() as directory:
             session = RecvTraceSession(worker, str(Path(directory) / "trace.json"), 100, 1000)
             try:
@@ -364,7 +417,7 @@ class TestRecvTraceSession(unittest.TestCase):
 class TestAttentionGateTrace(unittest.TestCase):
     def test_split_wait_does_not_add_synchronization(self):
         calls: list[str] = []
-        gate = AttentionComputeStartGate()
+        gate = AttentionLoadGate()
 
         def query():
             calls.append("query")
@@ -381,7 +434,7 @@ class TestAttentionGateTrace(unittest.TestCase):
         self.assertEqual(calls, ["sync", "query"])
 
     def test_unrecorded_gate_query_does_not_create_an_event(self):
-        gate = AttentionComputeStartGate()
+        gate = AttentionLoadGate()
         self.assertEqual(gate.readiness(), (False, False))
         marks: list[str] = []
         self.assertFalse(gate.wait(timeout=0, observer=marks.append))

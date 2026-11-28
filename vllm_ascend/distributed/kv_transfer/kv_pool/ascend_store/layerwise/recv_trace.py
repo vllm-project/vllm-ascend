@@ -85,11 +85,11 @@ class RecvTimeline:
         with self._lock:
             self._record(task_id, event, **fields)
 
-    def boundary(self, task_id: int | None, event: str) -> None:
+    def boundary(self, task_id: int | None, event: str, **fields: Any) -> None:
         with self._lock:
             self._epoch += 1
             if task_id is not None:
-                self._record(task_id, event)
+                self._record(task_id, event, **fields)
 
     def dequeue(self, task_id: int | None) -> None:
         with self._lock:
@@ -213,14 +213,16 @@ class RecvTraceSession:
 
         def probe() -> Readiness:
             result: dict[str, bool | None] = {}
-            owner = task.wait_for_save_layer
-            if owner is not None:
-                cpu_ready = "save_cpu" in dependencies or self.worker.layer_save_finished_events[owner].is_set()
-                result["save_cpu"] = cpu_ready
+            for owner in task.wait_for_save_layers:
+                cpu_key, npu_key = f"save_cpu:{owner}", f"save_npu:{owner}"
+                cpu_ready = cpu_key in dependencies or self.worker.layer_save_finished_events[owner].is_set()
+                result[cpu_key] = cpu_ready
                 events = getattr(self.worker, "sync_save_events", None)
                 if events is not None:
-                    result["save_npu"] = "save_npu" in dependencies or (cpu_ready and bool(events[owner].query()))
-            gate = task.attention_start_gate
+                    result[npu_key] = npu_key in dependencies or (cpu_ready and bool(events[owner].query()))
+            if task.compute_boundary is not None:
+                result["compute_boundary"] = "compute_boundary" in dependencies or bool(task.compute_boundary.query())
+            gate = task.load_gate
             if gate is not None:
                 recorded, complete = gate.readiness()
                 result.update(gate_record=recorded, gate_npu=complete)
@@ -241,7 +243,7 @@ class RecvTraceSession:
             layer=task.layer_id,
             groups=sorted({item.group_id for item in task.transfer_tasks}),
             requests=sorted({br.request.req_id for item in task.transfer_tasks for br in item.block_ranges}),
-            save_owner=task.wait_for_save_layer,
+            save_owners=list(task.wait_for_save_layers),
             path="block_key" if any(t.use_key_major_ranges for t in task.transfer_tasks) else self.worker.name,
         )
         task.recv_trace_id = task_id
@@ -256,21 +258,25 @@ class RecvTraceSession:
         self._waiting = False
         self.timeline.dequeue(self._active_id)
 
-    def mark(self, event: str) -> None:
+    def mark(self, event: str, source: int | None = None) -> None:
         self._waiting = event in {
+            "compute_boundary_wait_begin",
             "save_cpu_wait_begin",
             "save_npu_wait_begin",
             "gate_record_wait_begin",
             "gate_npu_wait_begin",
             "external_slot_wait_begin",
         }
-        self.timeline.boundary(self._active_id, event)
+        self.timeline.boundary(self._active_id, event, source=source)
         dependency = {
+            "compute_boundary_wait_end": "compute_boundary",
             "save_cpu_wait_end": "save_cpu",
             "save_npu_wait_end": "save_npu",
             "external_slot_wait_end": "external_slot",
         }.get(event)
         if dependency is not None and self._active_id is not None and self._active_id in self._satisfied:
+            if source is not None:
+                dependency = f"{dependency}:{source}"
             self._satisfied[self._active_id].add(dependency)
 
     def finish(self, outcome: str = "complete") -> None:

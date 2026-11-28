@@ -36,6 +36,10 @@ with separately collected NPU traces.
 - `enqueue` / `dequeue`: host queue residence.
 - `save_cpu_wait_begin/end`: save-finished host event wait.
 - `save_npu_wait_begin/end`: existing save-event device synchronization.
+- `compute_boundary_wait_begin/end`: existing shared-KV compute-boundary synchronization.
+- Save and external-slot wait events include `source` for each reuse owner;
+  readiness records `save_cpu:<layer>` and `save_npu:<layer>` independently.
+  Enqueue metadata lists all dependencies in `save_owners`.
 - `gate_record_wait_begin/end/timeout`: attention gate condition wait.
 - `gate_npu_wait_begin/end`: existing attention-event device synchronization.
 - `external_slot_wait_begin/end`: external buffer release callback.

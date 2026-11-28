@@ -983,21 +983,29 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
     def _wait_for_reuse_saves(self, data: LayerLoadTask) -> bool:
         for source in data.wait_for_save_layers:
+            self._trace_mark("save_cpu_wait_begin", source)
             if not self._wait_for_event(self.layer_save_finished_events[source], self.save_failure_checker):
                 return False
+            self._trace_mark("save_cpu_wait_end", source)
             if self.save_failure_checker is not None:
                 self.save_failure_checker()
             # CPU completion on a non-writing rank only records the NPU event.
+            self._trace_mark("save_npu_wait_begin", source)
             self.sync_save_events[source].synchronize()
+            self._trace_mark("save_npu_wait_end", source)
             if self.external_slot_release_waiter is not None:
+                self._trace_mark("external_slot_wait_begin", source)
                 self.external_slot_release_waiter(source)
+                self._trace_mark("external_slot_wait_end", source)
         return True
 
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
             if data.compute_boundary is not None:
+                self._trace_mark("compute_boundary_wait_begin")
                 data.compute_boundary.synchronize()
+                self._trace_mark("compute_boundary_wait_end")
             if not self._wait_for_reuse_saves(data):
                 return
 

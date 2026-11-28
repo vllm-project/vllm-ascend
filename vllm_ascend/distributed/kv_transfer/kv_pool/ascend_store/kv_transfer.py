@@ -154,9 +154,9 @@ class KVTransferThread(threading.Thread):
             if self.recv_trace is not None:
                 self.recv_trace.publish(request)
 
-    def _trace_mark(self, event: str) -> None:
+    def _trace_mark(self, event: str, source: int | None = None) -> None:
         if self.recv_trace is not None:
-            self.recv_trace.mark(event)
+            self.recv_trace.mark(event, source)
 
     def stop(self) -> None:
         with self._request_submit_lock:
@@ -172,7 +172,7 @@ class KVTransferThread(threading.Thread):
     ) -> bool:
         while not self._stopping.is_set():
             trace = self.recv_trace
-            if trace is not None and isinstance(event, AttentionComputeStartGate):
+            if trace is not None and isinstance(event, AttentionLoadGate):
                 ready = event.wait(timeout=_TRANSFER_SHUTDOWN_POLL_S, observer=trace.mark)
             else:
                 ready = event.wait(timeout=_TRANSFER_SHUTDOWN_POLL_S)
