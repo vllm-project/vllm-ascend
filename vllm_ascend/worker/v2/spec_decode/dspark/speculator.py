@@ -37,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -114,6 +115,69 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_wrap_draft_logits(model)
 
         return model
+
+    def _init_draft_logits(self, target_model: torch.nn.Module) -> None:
+        super()._init_draft_logits(target_model)
+        self._compact_draft_logits: torch.Tensor | None = None
+        cache = self.draft_logits
+        mapping = self._d2t_scatter_index
+        if (
+            cache is None
+            or mapping is None
+            or cache.row_mapping is not None
+            or self.draft_watermarker is not None
+            or callable(getattr(self.model, "sample_sequential", None))
+        ):
+            return
+        mapping = mapping.to(device=self.device, dtype=torch.int64).contiguous()
+        self._d2t_scatter_index = mapping
+        if not bool(((mapping >= 0) & (mapping < cache.values.shape[-1])).all()):
+            raise ValueError("DSpark vocab mapping must contain valid target ids")
+        # Check at initialization: ordered ids preserve the dense argmax's
+        # tie-break without mapped vector reductions in the sampling kernel.
+        if mapping.numel() > 0 and bool((mapping[1:] > mapping[:-1]).all()):
+            cache.values.fill_(float("-inf"))
+            self._compact_draft_logits = torch.full(
+                (*cache.values.shape[:2], mapping.numel()),
+                float("-inf"),
+                dtype=cache.values.dtype,
+                device=self.device,
+            )
+
+    def _sample_logits(
+        self,
+        logits: torch.Tensor,
+        idx_map: torch.Tensor,
+        sample_pos: torch.Tensor,
+        step: int,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if getattr(self, "_compact_draft_logits", None) is None or self.draft_watermarker is not None:
+            return super()._sample_logits(logits, idx_map, sample_pos, step, bias=bias)
+        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
+        # Preserve the dense path's cache-dtype rounding before sampling.
+        return categorical_sample(
+            logits.to(self.draft_logits.values.dtype),
+            idx_map,
+            self.temperature,
+            self.seeds,
+            sample_pos - 1,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=self._compact_draft_logits,
+            logits_cache_col=self._step_cols[step],
+            use_fp64=self.use_fp64_gumbel,
+            bias=bias,
+            vocab_mapping=self._d2t_scatter_index,
+        )
+
+    def _export_compact_logits(self) -> None:
+        if getattr(self, "_compact_draft_logits", None) is not None and self.draft_watermarker is None:
+            # Keep the verifier's target-space cache; export all Markov steps
+            # once after draft graph replay, using persistent request slots.
+            self.draft_logits.values.flatten(0, 1).index_copy_(
+                1, self._d2t_scatter_index, self._compact_draft_logits.flatten(0, 1)
+            )
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
         """Pad/trim the DSpark draft LM head around its collectives.
@@ -479,4 +543,5 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+        self._export_compact_logits()
         return draft_tokens

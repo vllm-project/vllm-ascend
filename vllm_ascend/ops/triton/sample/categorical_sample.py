@@ -158,6 +158,7 @@ def _categorical_sample_kernel(
     fine_mass_stride_1,
     logits_ptr,
     logits_stride,
+    vocab_mapping_ptr,
     expanded_idx_mapping_ptr,
     seeds_ptr,
     draft_step_ptr,
@@ -173,6 +174,7 @@ def _categorical_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    HAS_VOCAB_MAPPING: tl.constexpr,
 ):
     worker_id = tl.program_id(0).to(tl.int64)
     num_workers = tl.num_programs(0).to(tl.int64)
@@ -303,6 +305,11 @@ def _categorical_sample_kernel(
         categorical_token = fine_base + selected_offset
         categorical_token = tl.where(has_total_mass, categorical_token, 0)
         sampled_token = tl.where(is_random, categorical_token, greedy_token)
+        if HAS_VOCAB_MAPPING:
+            # A strictly increasing map preserves the compact argmax tie-break.
+            # Keep the dense sampler's target-id-zero fallback for all -inf.
+            has_mass = tl.where(is_random, has_total_mass, tl.max(block_max, axis=0) > float("-inf"))
+            sampled_token = tl.load(vocab_mapping_ptr + sampled_token, mask=has_mass, other=0)
         tl.store(sampled_ptr + token_idx, sampled_token)
 
 
@@ -318,12 +325,17 @@ def _categorical_sample(
     use_fp64: bool = False,
     *,
     is_drafting: bool = False,
+    vocab_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample token ids from logits with categorical sampling.
 
     This internal entry keeps the v0.28 positional argument order. On newer
     vLLM versions the public wrapper exposes `is_drafting` immediately after
     `apply_temperature`, matching the upstream gumbel_sample contract.
+
+    A strictly increasing ``vocab_mapping`` maps only the selected token id;
+    sampling and raw-logit caching remain in compact vocabulary space. The
+    caller validates mapped ids/order before capture, not on the hot path.
     """
     if use_fp64:
         raise NotImplementedError("FP64 categorical sampling is not supported on NPU.")
@@ -334,6 +346,10 @@ def _categorical_sample(
         logits_cache_col = logits_cache_col.contiguous()
 
     num_tokens, vocab_size = logits.shape
+    if vocab_mapping is not None:
+        assert vocab_mapping.ndim == 1 and vocab_mapping.numel() == vocab_size
+        assert vocab_mapping.dtype == torch.int64 and vocab_mapping.device == logits.device
+        assert vocab_mapping.is_contiguous()
     if logits_cache is not None:
         assert logits_cache.size(-1) >= vocab_size, (
             f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
@@ -397,6 +413,7 @@ def _categorical_sample(
         fine_mass.stride(1),
         logits,
         logits.stride(0),
+        vocab_mapping,
         expanded_idx_mapping,
         seed,
         logits_cache_col if logits_cache is not None else None,
@@ -412,6 +429,7 @@ def _categorical_sample(
         APPLY_TEMPERATURE=apply_temperature,
         IS_DRAFTING=is_drafting,
         PER_TOKEN_COL=per_token_col,
+        HAS_VOCAB_MAPPING=vocab_mapping is not None,
     )
     return sampled
 
@@ -433,6 +451,7 @@ def _categorical_sample_main(
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
+    vocab_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Upstream may shard the logits cache across TP ranks and expose the
     # per-row mapping. The NPU kernels index the cache by request state and
@@ -457,6 +476,7 @@ def _categorical_sample_main(
         logits_cache_col,
         use_fp64,
         is_drafting=is_drafting,
+        vocab_mapping=vocab_mapping,
     )
 
 

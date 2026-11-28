@@ -20,25 +20,26 @@
 ## Parameters
 
 > [!NOTE]
-> All parameters are required.
+> Parameters marked optional below can be omitted.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `logits` | Input | Logits with shape `[num_tokens, vocab_size]`; vocabulary dimension must be contiguous | fp32 / bf16 | ND |
+| `logits` | Input | Logits with shape `[num_tokens, vocab_size]`; vocabulary dimension must be contiguous | fp32 / fp16 / bf16 | ND |
 | `expanded_idx_mapping` | Input | Maps each token row to a request-state index, shape `[num_tokens]` | int32 | ND |
 | `temperature` | Input | Per-request temperature, shape `[max_num_reqs]`; `0` selects greedy mode | fp32 | ND |
 | `seed` | Input | Per-request stateless RNG seed, shape `[max_num_reqs]` | int64 | ND |
 | `pos` | Input | Per-token RNG position, shape `[num_tokens]`; converted to int32 inside the Triton sampling kernel | int32 / int64 | ND |
 | `apply_temperature` | Attribute | If `True`, non-zero-temperature rows use `logits / temperature`; if `False`, logits are sampled as provided | bool | scalar |
 | `is_drafting` | Attribute | If `True`, adds a fixed RNG-position salt to keep the optional drafting stream separate | bool | scalar |
-| `logits_cache` | Input/Output | Optional cache buffer `[max_num_reqs, num_cols, cache_vocab_size]`; stores raw logits before temperature scaling | fp32 / bf16 | ND |
+| `logits_cache` | Input/Output | Optional cache buffer `[max_num_reqs, num_cols, cache_vocab_size]`; stores raw logits before temperature scaling | fp32 / fp16 / bf16 | ND |
 | `logits_cache_col` | Input | Optional cache-column selector; either a scalar or shape `[num_tokens]` | int32 | scalar / ND |
 | `use_fp64` | Attribute | Compatibility argument; must be `False` on this NPU implementation | bool | scalar |
+| `vocab_mapping` | Input | Optional strictly increasing draft-to-target ids, shape `[vocab_size]`; maps the selected id only | int64 | contiguous ND |
 | `sampled_token_ids` | Output | Sampled token ID for each input row, shape `[num_tokens]` | int64 | ND |
 
 ## Constraints
 
-- `logits` must be rank 2 with shape `[num_tokens, vocab_size]`, `vocab_size > 0`, and `logits.stride(-1) == 1`. The current single-operator tests cover fp32 and bf16.
+- `logits` must be rank 2 with shape `[num_tokens, vocab_size]`, `vocab_size > 0`, and `logits.stride(-1) == 1`. The current single-operator tests cover fp32, fp16 and bf16.
 - `expanded_idx_mapping.shape == [num_tokens]`; valid rows index `temperature` and `seed` by request state. A negative mapping is treated as an invalid/padded request by the kernel and must not be used to write `logits_cache`.
 - `temperature.shape[0]` and `seed.shape[0]` must cover every non-negative request index referenced by `expanded_idx_mapping`. Temperature values are expected to be non-negative.
 - `temperature == 0` is greedy mode. For non-zero temperature, random sampling is categorical. `apply_temperature=False` means the caller has already applied any required temperature scaling.
@@ -46,6 +47,8 @@
 - The vocabulary size does not need to be divisible by 8192 or 1024. Tail elements are masked. The long-vocabulary inference shape `vocab_size=151936` therefore exercises both coarse and fine tail handling.
 - `logits_cache`, when provided, must satisfy `logits_cache.size(-1) >= vocab_size`. Cache values are written before temperature scaling.
 - `logits_cache_col`, when provided, must be either a 0-D scalar tensor or a tensor with one column index per token. If multiple tokens map to the same `(request, cache_col)` location, their cache writes alias; callers requiring deterministic cache contents must avoid that mapping.
+- `vocab_mapping`, when present, must have one valid target id per input vocabulary column and be strictly increasing, on the logits device. The DSpark caller validates values/order once during cache initialization. The wrapper checks shape, dtype, device and contiguity from metadata. Greedy ties therefore preserve the smallest target id. All-masked inputs retain target id zero, even when it is not in the mapping.
+- Mapping does not alter cache contents: raw logits are stored in compact vocabulary space. DSpark exports all Markov steps to its existing replicated target-space verifier cache after graph replay. Unsorted maps, sharded caches, watermarking and model-owned sequential samplers retain the upstream path.
 - `use_fp64=True` is not supported and raises `NotImplementedError`.
 - Finite logits and `-inf` masking are supported. NaN and `+inf` inputs do not have an additional operator-specific normalization contract.
 - The Python wrapper obtains `num_tokens` and `vocab_size` from tensor shape metadata; it does not perform a device-to-host `.item()` synchronization. Runtime task counts are passed to Triton as scalar kernel arguments.
@@ -68,3 +71,26 @@ The single-operator tests use the long-vocabulary inference shape `vocab_size=15
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py
 ```
+
+## Reduced vocabulary sampling integration
+
+MRV2 DSpark uses the public `categorical_sample` wrapper with `vocab_mapping`
+when the checkpoint mapping is strictly increasing. The prepare kernel and its
+8K/1K geometry are unchanged. Only the selected scalar id is remapped in the
+sample kernel; Markov inputs and the verifier still use target ids.
+
+The map creates one additional optional-pointer/constexpr specialization of the
+sample kernel. Mapping contents, request slots and scalar dimensions do not
+become new compile-time constants. Prepare specialization controls are unchanged.
+Draft graph capture exercises the mapped variant; previously unseen eager
+shapes or dtype/signature combinations can still compile lazily. This change
+adds no separate warmup registry or serving-time device-to-host checks. Graph
+replay and mixed-temperature cases must be checked on actual NPU hardware.
+
+Operator tests include the Qwen3.6 shape (draft vocabulary 32000, target
+vocabulary 248320), FP32/FP16/BF16, optional Markov bias, persistent-slot
+permutations, cross-block greedy ties, empty input, singleton vocabulary,
+all-masked fallback and categorical distributions. Cache values and greedy ids
+are compared exactly with a dense target-vocabulary reference. Stochastic
+sequences can differ due to floating-point regrouping; tests check empirical
+probability masses rather than requiring identical seeded draws.

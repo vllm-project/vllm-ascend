@@ -24,6 +24,121 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 _HIDDEN = 8
 
 
+@pytest.mark.parametrize("mapping", [[1, 3, 5, 7], [7], [], [5, 1, 7, 3], [5, 5, 7, 3], [-1, 1, 7, 3], [8, 1, 7, 3]])
+def test_compact_cache_initializes_after_parent_cache(monkeypatch, mapping):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.device = torch.device("cpu")
+    spec.model = SimpleNamespace()
+    spec.draft_watermarker = None
+    spec._d2t_scatter_index = torch.tensor(mapping, dtype=torch.int32)
+    cache = SimpleNamespace(values=torch.zeros(3, 2, 8), row_mapping=None)
+    parent = MagicMock(side_effect=lambda *args: setattr(spec, "draft_logits", cache))
+    monkeypatch.setattr(DSparkSpeculator, "_init_draft_logits", parent)
+    if any(token < 0 or token >= 8 for token in mapping):
+        with pytest.raises(ValueError, match="valid target ids"):
+            spec._init_draft_logits(object())
+        return
+    target = object()
+    spec._init_draft_logits(target)
+    parent.assert_called_once_with(target)
+    assert spec._d2t_scatter_index.dtype == torch.int64
+    if not mapping or any(a >= b for a, b in zip(mapping, mapping[1:])):
+        assert spec._compact_draft_logits is None
+        assert (cache.values == 0).all()
+    else:
+        assert spec._compact_draft_logits.shape == (3, 2, len(mapping))
+        assert torch.isneginf(cache.values).all()
+        assert torch.isneginf(spec._compact_draft_logits).all()
+
+
+@pytest.mark.parametrize("fallback", ["no_cache", "no_mapping", "sharded", "watermark", "custom_sampler"])
+def test_compact_initialization_preserves_other_paths(monkeypatch, fallback):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.model = SimpleNamespace(sample_sequential=lambda *args: True) if fallback == "custom_sampler" else object()
+    spec.draft_watermarker = object() if fallback == "watermark" else None
+    spec._d2t_scatter_index = None if fallback == "no_mapping" else torch.tensor([1, 3])
+    spec.draft_logits = (
+        None
+        if fallback == "no_cache"
+        else SimpleNamespace(
+            values=torch.zeros(1, 2, 8), row_mapping=torch.tensor([0]) if fallback == "sharded" else None
+        )
+    )
+    monkeypatch.setattr(DSparkSpeculator, "_init_draft_logits", lambda *args: None)
+    spec._init_draft_logits(object())
+    assert spec._compact_draft_logits is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_compact_sampling_uses_public_wrapper_and_cache_precision(monkeypatch, dtype, with_bias):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.draft_logits = SimpleNamespace(values=torch.full((3, 2, 8), -torch.inf, dtype=dtype))
+    spec._compact_draft_logits = torch.full((3, 2, 4), -torch.inf, dtype=dtype)
+    spec._d2t_scatter_index = torch.tensor([1, 3, 5, 7])
+    spec.draft_watermarker = None
+    spec.temperature, spec.seeds = torch.tensor([0.0, 0.7, 1.0]), torch.arange(3)
+    spec._step_cols = torch.arange(2, dtype=torch.int32)
+    spec.use_fp64_gumbel = False
+    spec._maybe_predict_acceptance = MagicMock()
+    sampler = MagicMock(return_value=torch.tensor([1, 5]))
+    monkeypatch.setattr(dspark_module, "categorical_sample", sampler)
+    logits, idx, pos = torch.randn(2, 4), torch.tensor([2, 0]), torch.tensor([11, 21])
+    bias = torch.ones_like(logits) if with_bias else None
+    assert spec._sample_logits(logits, idx, pos, 1, bias=bias) is sampler.return_value
+    args, kwargs = sampler.call_args
+    torch.testing.assert_close(args[0], logits.to(dtype), rtol=0, atol=0)
+    torch.testing.assert_close(args[4], pos - 1)
+    assert kwargs["logits_cache"] is spec._compact_draft_logits
+    assert kwargs["vocab_mapping"] is spec._d2t_scatter_index
+    assert kwargs["bias"] is bias
+    spec._maybe_predict_acceptance.assert_called_once_with(logits, idx, spec._step_cols[1])
+
+
+@pytest.mark.parametrize("watermark", [False, True])
+def test_compact_sampler_fallback_forwards_bias(monkeypatch, watermark):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec._compact_draft_logits = torch.empty(1, 2, 4) if watermark else None
+    spec.draft_watermarker = object() if watermark else None
+    parent = MagicMock(return_value=torch.tensor([3]))
+    monkeypatch.setattr(DSparkSpeculator, "_sample_logits", parent)
+    logits, idx, pos, bias = torch.zeros(1, 4), torch.tensor([0]), torch.tensor([10]), torch.ones(1, 4)
+    assert spec._sample_logits(logits, idx, pos, 0, bias=bias) is parent.return_value
+    parent.assert_called_once_with(logits, idx, pos, 0, bias=bias)
+
+
+def test_compact_export_preserves_target_columns_and_slots():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.draft_logits = SimpleNamespace(values=torch.full((3, 2, 8), -torch.inf))
+    spec._compact_draft_logits = torch.arange(24.0).reshape(3, 2, 4)
+    spec._d2t_scatter_index = torch.tensor([1, 3, 5, 7])
+    spec.draft_watermarker = None
+    spec._export_compact_logits()
+    expected = torch.full_like(spec.draft_logits.values, -torch.inf)
+    expected[:, :, spec._d2t_scatter_index] = spec._compact_draft_logits
+    torch.testing.assert_close(spec.draft_logits.values, expected, rtol=0, atol=0)
+
+
+def test_compact_export_follows_parent_propose(monkeypatch):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.pcp_manager = None
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(1))
+    spec.max_num_tokens = 1
+    monkeypatch.setattr(
+        AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: SimpleNamespace(parallel_config=object()))
+    )
+    events, expected = [], torch.tensor([[1, 3]])
+    monkeypatch.setattr(DSparkSpeculator, "propose", lambda *args, **kwargs: events.append("propose") or expected)
+    spec._export_compact_logits = lambda: events.append("export")
+    spec._proposal_metadata = lambda *args: nullcontext()
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", lambda: nullcontext())
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    batch = SimpleNamespace(is_prefilling_np=torch.zeros(1, dtype=torch.bool).numpy(), num_reqs=1)
+    token = torch.tensor([0])
+    assert spec.propose(batch, {}, {}, token, None, token, token, token, token, token, token) is expected
+    assert events == ["propose", "export"]
+
+
 def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.vllm_config = vllm_config
