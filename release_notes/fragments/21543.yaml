@@ -1,0 +1,9 @@
+pr: 21543
+entries:
+  - category: performance
+    text: >-
+      Fused the bare chunk->silu->mul SwiGLU pattern in vision MLP layers into a
+      single torch_npu.npu_swiglu call via a new FX graph fusion pass, reducing
+      operator count on Ascend for models that write SwiGLU with raw aten ops.
+    model: deepseek-v4
+    hardware: [A2, A3]
