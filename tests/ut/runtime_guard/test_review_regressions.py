@@ -564,6 +564,29 @@ def test_v12b3_logits_finite_misaligned_with_indices_maps_correct_req():
     assert alerts[0].detail.get("logits_row") == 1
 
 
+@pytest.mark.parametrize("item_sync", [False, True])
+def test_logits_finite_uses_admitted_query_boundaries(item_sync):
+    section = {"enabled": True, "item_sync": item_sync}
+    config = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    # The host splits two draft slots evenly. The device admitted both for A.
+    batch = SimpleNamespace(
+        req_ids=["A", "B"],
+        query_start_loc_np=np.array([0, 2, 4]),
+        query_start_loc=torch.tensor([0, 3, 4]),
+    )
+    runner = SimpleNamespace(input_batch=batch, adaptive_verification=object(), use_fia=False)
+    detector = LogitsFiniteDetector(runtime_config=config, runner=runner)
+    logits = torch.zeros(4, 2)
+    logits[2, 0] = float("nan")
+    detector.check_all(logits=logits, logits_indices=torch.arange(4), input_batch=batch)
+    # The next wave may reuse the device buffer before the deferred check.
+    batch.query_start_loc.copy_(torch.tensor([0, 1, 4]))
+    assert [alert.req_id for alert in detector.check_deferred()] == ["A"]
+
+
 def test_v12c_logits_finite_alerts_same_step_no_window():
     """Dirty logits alert on the same step's check_deferred (no multi-step OR)."""
     section = {"enabled": True}

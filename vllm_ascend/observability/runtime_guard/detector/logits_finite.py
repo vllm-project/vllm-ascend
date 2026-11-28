@@ -34,15 +34,20 @@ from vllm_ascend.observability.runtime_guard.state import ILL_TYPE_NAN, Incident
 logger = init_logger_ascend(__name__)
 
 
-def query_start_loc_np(
+def _snapshot_query_start_loc(
     runner: Any,
     num_reqs: int,
     input_batch: Any = None,
-) -> np.ndarray | None:
-    """Best-effort host ``query_start_loc`` of length ``num_reqs + 1``."""
+) -> np.ndarray | torch.Tensor | None:
+    """Capture request boundaries for the wave that produced the logits."""
     if input_batch is None:
         input_batch = getattr(runner, "input_batch", None)
     if input_batch is not None:
+        if getattr(runner, "adaptive_verification", None) is not None and not getattr(runner, "use_fia", False):
+            # Non-FIA keeps the host's even budget split after the device
+            # redistributes drafts. The next wave can overwrite the device view.
+            actual = getattr(input_batch, "query_start_loc", None)
+            return actual[: num_reqs + 1].detach().clone() if isinstance(actual, torch.Tensor) else None
         # V2 AscendInputBatch / community InputBatch often expose numpy directly.
         qsl_np = getattr(input_batch, "query_start_loc_np", None)
         if qsl_np is not None:
@@ -86,7 +91,7 @@ class _PendingAsyncGate:
     logits: torch.Tensor | None
     req_ids: list[str]
     num_reqs: int
-    qsl: np.ndarray | None
+    qsl: np.ndarray | torch.Tensor | None
     # Optional CPU copy of logits_indices (non-blocking); None when 1:1 decode.
     logits_indices_host: torch.Tensor | None
     skip_req_ids: set[str]
@@ -194,9 +199,15 @@ class LogitsFiniteDetector(ConfigBackedDetector):
             return []
 
         num_reqs = len(req_ids)
-        qsl = query_start_loc_np(runner, num_reqs, input_batch) if num_reqs > 0 else None
         if logits_indices is None:
             logits_indices = getattr(runner, "logits_indices", None)
+        nrows = int(row_finite.shape[0]) if row_finite.dim() > 0 else 1
+        mapping_indices = logits_indices if num_reqs > 0 and nrows != num_reqs else None
+        qsl = (
+            _snapshot_query_start_loc(runner, num_reqs, input_batch)
+            if isinstance(mapping_indices, torch.Tensor)
+            else None
+        )
 
         if self._item_sync:
             return self._sync_gate_and_enqueue(
@@ -229,13 +240,12 @@ class LogitsFiniteDetector(ConfigBackedDetector):
                 skip_req_ids=skip,
             )
 
-        nrows = int(row_finite.shape[0]) if row_finite.dim() > 0 else 1
         idx_host: torch.Tensor | None = None
         # Spec / misaligned rows need indices at resolve time; snapshot now so a
         # later in-place rewrite (or buffer reuse) cannot poison attribution.
-        if not (num_reqs > 0 and nrows == num_reqs) and isinstance(logits_indices, torch.Tensor):
+        if isinstance(mapping_indices, torch.Tensor):
             try:
-                idx_host = logits_indices.detach().to("cpu", non_blocking=True)
+                idx_host = mapping_indices.detach().to("cpu", non_blocking=True)
             except Exception:
                 idx_host = None
 
@@ -264,7 +274,7 @@ class LogitsFiniteDetector(ConfigBackedDetector):
         logits: torch.Tensor | None,
         req_ids: list[str],
         num_reqs: int,
-        qsl: np.ndarray | None,
+        qsl: np.ndarray | torch.Tensor | None,
         logits_indices: torch.Tensor | None,
         skip_req_ids: set[str],
     ) -> list[Incident]:
@@ -348,7 +358,7 @@ class LogitsFiniteDetector(ConfigBackedDetector):
         logits: torch.Tensor | None,
         req_ids: list[str],
         num_reqs: int,
-        qsl: np.ndarray | None,
+        qsl: np.ndarray | torch.Tensor | None,
         logits_indices: torch.Tensor | None,
         skip_req_ids: set[str] | None,
     ) -> list[Incident]:
@@ -363,6 +373,9 @@ class LogitsFiniteDetector(ConfigBackedDetector):
         # need logits_indices (+ qsl); never guess req_id from the row number.
         one_to_one = num_reqs > 0 and nrows == num_reqs
         idx_list: list[int] = [] if one_to_one else _materialize_idx_list(logits_indices)
+        # Transfer the saved device boundaries only when a non-finite row hit.
+        if isinstance(qsl, torch.Tensor):
+            qsl = qsl.cpu().numpy()
 
         alerts: list[Incident] = []
         seen_req: set[str] = set()
