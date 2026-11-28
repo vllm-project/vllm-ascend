@@ -80,6 +80,11 @@ on:
         type: string
         default: ''
         description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). When set, the build checks out this ref ('pre-merge') instead of the branch, but vllm_ascend_branch still decides the published tag. /presmoke passes the triggering PR so the test image contains the code under review. Default '' builds vllm_ascend_branch."
+      tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Extra suffix appended to the base-image reference and the nightly image tag (e.g. '-pr123'). Isolated per-PR builds use it so they cannot collide with the standard nightly tags or with each other."
       cann_swr_url:
         required: false
         type: string
@@ -260,6 +265,9 @@ jobs:
             BASE_BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           fi
           BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
+          # Isolated per-PR builds append '-pr<N>' so their images never collide
+          # with the standard nightly tags or with another PR's build.
+          TAG_SUFFIX="${{ inputs.tag_suffix }}"
 
           # The isolated (/presmoke) build keeps the standard tags; only the
           # repositories differ ('-presmoke').
@@ -275,7 +283,7 @@ jobs:
           fi
           # Nightly tags carry no extra suffix now that dependency versions are
           # pinned in the Dockerfiles.
-          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}${TAG_SUFFIX}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
           # overwritten by each nightly, while a unique tag (CANN version +
           # build date + run number) keeps the history of nightly images.
@@ -317,6 +325,7 @@ jobs:
             --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
             --build-arg BASE_IMAGE="${BASE_IMAGE}"
             --build-arg OS_MARK="${OS_MARK}"
+            --build-arg TAG_SUFFIX="${TAG_SUFFIX}"
           )
 
           if [ "${{ inputs.should_push }}" = "true" ]; then
@@ -362,6 +371,7 @@ jobs:
           TAG_SUFFIX_UBUNTU: ${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}
           TAG_SUFFIX_OPENEULER: ${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}
           ISOLATED_REPO_SUFFIX: ${{ inputs.isolated_build && '-presmoke' || '' }}
+          TAG_SUFFIX: ${{ inputs.tag_suffix }}
         run: |
           set -euo pipefail
           BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
@@ -386,7 +396,7 @@ jobs:
           for OS_NAME in $OS_LIST; do
             if [ "$OS_NAME" = "openeuler" ]; then
               OS_MARK="-openeuler"
-              TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
+              HISTORY_SUFFIX="${TAG_SUFFIX_OPENEULER}"
               if [ -n "$ISOLATED_REPO_SUFFIX" ]; then
                 # Isolated builds never reach atlas_inference; both OS variants
                 # stay in the CI repository.
@@ -398,7 +408,7 @@ jobs:
               fi
             else
               OS_MARK=""
-              TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
+              HISTORY_SUFFIX="${TAG_SUFFIX_UBUNTU}"
               if [ -n "$ISOLATED_REPO_SUFFIX" ]; then
                 DESTS="${CI_REPO}"
               else
@@ -408,9 +418,11 @@ jobs:
                 DESTS="${CI_REPO} ${ATLAS_REPO}"
               fi
             fi
-            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
+            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}${TAG_SUFFIX}"
             # The build step pushed the per-arch images under the unique tag.
-            UNIQUE_TAG="${TAG}${TAG_SUFFIX}"
+            # HISTORY_SUFFIX is the CANN/date/run suffix that preserves history;
+            # TAG_SUFFIX is the optional isolation suffix (e.g. '-pr123').
+            UNIQUE_TAG="${TAG}${HISTORY_SUFFIX}"
             TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}"
 
             # A variant merges only when BOTH arch images exist.
