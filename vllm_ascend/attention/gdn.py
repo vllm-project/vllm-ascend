@@ -110,8 +110,9 @@ def _refresh_recurrent_gate_bias(layer: nn.Module) -> None:
     """Refresh the FP32 gate constant after loading, never during decode."""
     bias = getattr(layer, "_recurrent_dt_bias_fp32", None)
     if bias is not None and not layer.dt_bias.is_meta:
-        if bias.device != layer.dt_bias.device:
-            # Materialize deferred buffers; same-device reloads keep graph addresses.
+        if bias.device != layer.dt_bias.device or bias.shape != layer.dt_bias.shape:
+            # Initial loading may materialize meta weights or replace them with PCP shards.
+            # Same-device, same-shape reloads keep graph-captured buffer addresses.
             bias = torch.empty_like(layer.dt_bias, dtype=torch.float32)
             layer._recurrent_dt_bias_fp32 = bias
         bias.copy_(layer.dt_bias)

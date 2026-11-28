@@ -36,6 +36,36 @@ def test_recurrent_gate_bias_materializes_after_meta_weight_load():
     assert "_recurrent_dt_bias_fp32" not in layer.state_dict()
 
 
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+def test_recurrent_gate_bias_resizes_after_pcp_sharding(pcp_rank):
+    layer = nn.Module()
+    layer.dt_bias = nn.Parameter(torch.arange(24, dtype=torch.bfloat16))
+    layer.register_buffer("_recurrent_dt_bias_fp32", torch.empty(24), persistent=False)
+    pending = layer._recurrent_dt_bias_fp32
+
+    # PCP replaces the TP-local weight after the derived buffer is registered.
+    shard = layer.dt_bias.detach().chunk(2)[pcp_rank].clone()
+    layer.dt_bias = nn.Parameter(shard)
+    assert pending.device == layer.dt_bias.device
+    gdn._refresh_recurrent_gate_bias(layer)
+    cached = layer._recurrent_dt_bias_fp32
+    assert cached is not pending
+    assert cached.shape == (12,)
+    assert cached.device == layer.dt_bias.device
+    assert cached.dtype == torch.float32
+    torch.testing.assert_close(cached, shard.float(), rtol=0, atol=0)
+
+    # Subsequent same-shape reloads must retain the graph-captured address.
+    address = cached.data_ptr()
+    for offset in (1, 2):
+        layer.dt_bias = nn.Parameter(shard + offset)
+        gdn._refresh_recurrent_gate_bias(layer)
+        assert layer._recurrent_dt_bias_fp32 is cached
+        assert cached.data_ptr() == address
+        torch.testing.assert_close(cached, layer.dt_bias.float(), rtol=0, atol=0)
+    assert "_recurrent_dt_bias_fp32" not in layer.state_dict()
+
+
 @pytest.fixture
 def fusion_backend(monkeypatch):
     gdn._supports_fused_recurrent_gdn.cache_clear()
