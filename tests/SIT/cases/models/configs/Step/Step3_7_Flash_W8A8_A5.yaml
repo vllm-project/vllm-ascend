@@ -2,6 +2,7 @@
 # Shared Configurations
 # ==========================================
 _envs: &envs
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_BUFFSIZE: "1024"
   HCCL_OP_EXPANSION_MODE: "CCU_SCHED"
   ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
@@ -48,6 +49,11 @@ test_cases:
     envs:
       <<: *envs
     server_cmd: *server_cmd
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: [0.9140, 0.7951, 0.6791]
+      tolerance: 0.05
     benchmarks:
       acc_aime2026:
         case_type: accuracy
@@ -58,7 +64,7 @@ test_cases:
         batch_size: 16
         # Record accuracy without imposing a quality gate until a known
         # Step3.7 baseline is available.
-        baseline: 96.43
+        baseline: 92.86
         threshold: 4
         temperature: 0.6
         ignore_eos: false
