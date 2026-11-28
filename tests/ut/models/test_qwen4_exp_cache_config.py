@@ -726,6 +726,8 @@ def _plan_qsa_runtime_cache(monkeypatch, text_model_type, outer_model_type, mana
             backend = PleShortConvAttentionBackend if spec.tp_replicated else AscendGDNAttentionBackend
             if spec.tp_replicated:
                 spec = replace(spec, shapes=((3, 5),), page_size_padded=4096)
+            else:
+                spec = replace(spec, page_size_padded=100000)
         elif isinstance(spec, CircularBufferSpec):
             backend = AscendQSAIndexerBackend
             spec = replace(spec, head_size=44, page_size_padded=1024)

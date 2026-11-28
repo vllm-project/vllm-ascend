@@ -697,12 +697,12 @@ def get_qwen4_exp_kv_cache_groups(
     if owners is None:
         return None
     if is_qwen4_exp_model(vllm_config):
-        # Keep QSA kernel pages, raw rings, and private PLE banks compact.
-        # A GDN state can reuse a main slot only if it fits without padding.
+        # Keep QSA kernel pages, raw rings, and Mamba (GDN/PLE) specs compact
+        # so GDN overlays onto QSA main slots whenever its real page fits.
         kv_cache_spec = kv_cache_spec.copy()
         qsa_names = set.union(*owners)
         for name, spec in list(kv_cache_spec.items()):
-            if name not in qsa_names and _classify_spec(name, spec) != PLE:
+            if name not in qsa_names and _classify_spec(name, spec) not in (PLE, GDN):
                 continue
             assert isinstance(spec, (AttentionSpec, MambaSpec))
             if spec.page_size_padded is not None:
