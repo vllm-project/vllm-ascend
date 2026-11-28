@@ -621,24 +621,41 @@ class NPUPlatform(Platform):
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
-        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
-            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
-            from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+        from vllm.v1.attention.backend import AttentionBackend
 
-            # Keep the upstream token/checkpoint block sizes. K3.1's packed
-            # main page includes RoPE and scale bytes that the generic MLA
-            # page calculation above does not account for.
-            # Recurrent states overlay this page; the indexer and draft keep
-            # their independently sized physical regions.
-            cache_config = vllm_config.cache_config
-            text_config = vllm_config.model_config.hf_text_config
-            if cache_config.cache_dtype in ("int8", "fp8"):
-                token_bytes = get_sfa_qsfa_packed_head_dim(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
-            elif cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE:
-                token_bytes = get_tq_fused_slot_bytes(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
-            else:
-                return
-            cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if (
+            not model_config.use_mla
+            or cache_config.mamba_page_size_padded is None
+            or backend_cls.customize_spec.__func__ is AttentionBackend.customize_spec.__func__
+        ):
+            return
+
+        from vllm.config.vllm import get_current_vllm_config_or_none, set_current_vllm_config
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec, get_kv_quant_mode
+
+        kv_cache_dtype = (
+            model_config.dtype
+            if cache_config.cache_dtype == "auto"
+            else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        )
+        probe = MLAAttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=kv_cache_dtype,
+            cache_dtype_str=cache_config.cache_dtype,
+            kv_quant_mode=get_kv_quant_mode(cache_config.cache_dtype),
+        )
+        if get_current_vllm_config_or_none() is None:
+            with set_current_vllm_config(vllm_config):
+                customized = backend_cls.customize_spec(probe)
+        else:
+            customized = backend_cls.customize_spec(probe)
+        if customized.page_size_bytes != probe.page_size_bytes:
+            cache_config.mamba_page_size_padded = cache_config.block_size * customized.page_size_bytes
 
     @classmethod
     def get_mla_prefill_backend_cls(cls, mla_selector_config: MLAPrefillSelectorConfig) -> type[MLAPrefillBackend]:

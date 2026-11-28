@@ -14,6 +14,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -224,11 +225,13 @@ def test_backend_alignment_preserves_kpool_c8_page_geometry(cache_dtype, prefix_
     [(True, "auto", True), (True, "int8", False), (False, "int8", True)],
 )
 def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype, kpool):
+    from vllm.v1.attention.backend import AttentionBackend
+
     config = _config()
     config.cache_config.cache_dtype = cache_dtype
     config.model_config.use_mla = use_mla
     config.model_config.hf_text_config = SimpleNamespace(**({"index_kpool": 4} if kpool else {}))
-    backend = SimpleNamespace()
+    backend = AttentionBackend
 
     with patch.object(Platform, "_align_hybrid_block_size") as upstream:
         NPUPlatform._align_hybrid_block_size(config, backend)
@@ -273,8 +276,10 @@ def test_kimi_k31_platform_alignment_preserves_native_pages(tp_size, mamba_cache
         def get_mamba_state_dtype_from_config(cls, _config):
             return (torch.bfloat16, torch.float32)
 
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
     model_cls = KimiGeometry
-    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128])
+    backend = AscendSFABackend
     if cache_dtype in ("int8", "fp8"):
         expected_block_size, token_bytes = 12288 // tp_size, 656
     elif cache_dtype == "turboquant_4bit_nc":
@@ -285,7 +290,6 @@ def test_kimi_k31_platform_alignment_preserves_native_pages(tp_size, mamba_cache
 
     with (
         patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
-        patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
         patch("vllm.model_executor.layers.mamba.abstract.get_mamba_prefill_checkpoint_alignment", return_value=128),
         patch.object(NPUPlatform, "_find_non_ssm_backends", return_value=[backend]),
     ):
@@ -379,3 +383,176 @@ def test_kv_store_rejects_non_align_explicit_mode():
         pytest.raises(AssertionError, match="only support 'align'"),
     ):
         HybridAttentionMambaModelConfig.verify_and_update_config(config)
+
+
+@pytest.mark.parametrize(
+    "case_name,model_type,use_mla,cache_dtype,backend_name,expected",
+    [
+        ("qwen35_gdn_bf16", "qwen3_next", False, "auto", "dense", (1152, 1179648, 1152)),
+        ("kimi_linear_bf16", "kimi_linear", False, "auto", "dense", (896, 917504, 896)),
+        ("kimi_k31_int8", "kimi_k31", True, "int8", "sfa", (1536, 1536 * 656, 1536)),
+        ("kimi_k31_fp8", "kimi_k31", True, "fp8", "sfa", (1536, 1536 * 656, 1536)),
+        ("kimi_k31_tq4", "kimi_k31", True, "turboquant_4bit_nc", "sfa", (1536, 1536 * 386, 1536)),
+        ("glm5_kpool_int8", "glm_moe_dsa", True, "int8", "sfa", (8704, 8704 * 528, 8704)),
+        ("glm5_kpool_fp8", "glm_moe_dsa", True, "fp8", "sfa", (8704, 8704 * 528, 8704)),
+    ],
+)
+def test_hybrid_platform_alignment_baseline_characterization(
+    case_name, model_type, use_mla, cache_dtype, backend_name, expected
+):
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+    config = _config(prefix_caching=True, mamba_cache_mode="align")
+    config.scheduler_config.enable_chunked_prefill = True
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=8 if model_type == "kimi_k31" else 1)
+    config.cache_config.cache_dtype = cache_dtype
+    config.cache_config.block_size = 128
+    config.cache_config.user_specified_block_size = False
+    config.cache_config.user_specified_mamba_block_size = False
+    config.cache_config.kv_cache_dtype_skip_layers = []
+    config.cache_config.mamba_page_size_padded = None
+    config.cache_config.mamba_block_size = 131072 if model_type == "kimi_k31" else None
+    config.compilation_config = SimpleNamespace(static_forward_context={})
+    config.attention_config = SimpleNamespace(
+        hisparse_config=None,
+        resolve_indexer_kv_dtype=lambda _default: "fp8",
+    )
+
+    if model_type == "qwen3_next":
+        text_cfg = SimpleNamespace(model_type=model_type)
+        mamba_shapes, mamba_dtypes = ((3, 1024), (16, 128, 128)), (torch.bfloat16, torch.float32)
+        num_heads, head_dim = 2, 128
+        max_len = 32768
+        model_cls_base = SimpleNamespace
+    elif model_type == "kimi_linear":
+        text_cfg = SimpleNamespace(model_type=model_type)
+        mamba_shapes, mamba_dtypes = ((3, 1024), (12, 128, 128)), (torch.bfloat16, torch.float32)
+        num_heads, head_dim = 2, 128
+        max_len = 32768
+        model_cls_base = SimpleNamespace
+    elif model_type == "kimi_k31":
+        text_cfg = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            dsa_config=SimpleNamespace(index_head_dim=128),
+            linear_attn_config={"full_attn_layers": [4, 5], "kda_layers": [1, 2, 3]},
+        )
+        local_heads = 12
+        mamba_shapes, mamba_dtypes = ((3, local_heads * 384), (local_heads, 128, 128)), (torch.bfloat16, torch.float32)
+        num_heads, head_dim = 1, 576
+        max_len = 131072
+        model_cls_base = AscendKimiK3ForConditionalGeneration
+    else:
+        text_cfg = SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0)
+        mamba_shapes, mamba_dtypes = ((8, 24576), (64, 128, 128)), (torch.bfloat16, torch.float32)
+        num_heads, head_dim = 1, 512
+        max_len = 133120
+        model_cls_base = SimpleNamespace
+
+    config.model_config = SimpleNamespace(
+        architecture=f"Dummy_{case_name}",
+        is_hybrid=True,
+        use_mla=use_mla,
+        dtype=torch.bfloat16,
+        max_model_len=max_len,
+        hf_config=SimpleNamespace(model_type=model_type),
+        hf_text_config=text_cfg,
+        get_num_kv_heads=lambda _parallel: num_heads,
+        get_head_size=lambda: head_dim,
+    )
+
+    model_cls: Any
+    if model_cls_base is SimpleNamespace:
+        model_cls = SimpleNamespace(
+            get_mamba_state_shape_from_config=lambda _config: mamba_shapes,
+            get_mamba_state_dtype_from_config=lambda _config: mamba_dtypes,
+        )
+    else:
+
+        class KimiCharGeometry(AscendKimiK3ForConditionalGeneration):
+            @classmethod
+            def get_mamba_state_shape_from_config(cls, _config):
+                return mamba_shapes
+
+            @classmethod
+            def get_mamba_state_dtype_from_config(cls, _config):
+                return mamba_dtypes
+
+        model_cls = KimiCharGeometry
+
+    backend = AscendSFABackend if backend_name == "sfa" else AscendAttentionBackend
+    with (
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
+        patch("vllm.model_executor.layers.mamba.abstract.get_mamba_prefill_checkpoint_alignment", return_value=128),
+        patch.object(NPUPlatform, "_find_non_ssm_backends", return_value=[backend]),
+        patch.object(NPUPlatform, "_check_aligned_block_size"),
+    ):
+        if model_type == "glm_moe_dsa":
+            with patch.object(MambaModelConfig, "verify_and_update_config"):
+                HybridAttentionMambaModelConfig.verify_and_update_config(config)
+        NPUPlatform.update_block_size_for_backend(config)
+
+    assert (
+        config.cache_config.block_size,
+        config.cache_config.mamba_page_size_padded,
+        config.cache_config.mamba_block_size,
+    ) == expected
+
+
+def test_non_sfa_mla_backend_leaves_hybrid_page_unoverridden():
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SparseCacheRole
+
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    config = _config(prefix_caching=True, mamba_cache_mode="align")
+    config.scheduler_config.enable_chunked_prefill = True
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=8)
+    config.cache_config.cache_dtype = "int8"
+    config.cache_config.mamba_block_size = 131072
+    config.cache_config.mamba_page_size_padded = None
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.model_config = SimpleNamespace(
+        architecture="DummyHybridMLA",
+        use_mla=True,
+        dtype=torch.bfloat16,
+        hf_config=SimpleNamespace(model_type="kimi_k31"),
+        hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64),
+        get_num_kv_heads=lambda _parallel: 1,
+        get_head_size=lambda: 576,
+    )
+    local_heads = 12
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _cfg: ((3, local_heads * 384), (local_heads, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _cfg: (torch.bfloat16, torch.float32),
+    )
+
+    with (
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
+        patch("vllm.model_executor.layers.mamba.abstract.get_mamba_prefill_checkpoint_alignment", return_value=128),
+        patch.object(NPUPlatform, "_find_non_ssm_backends", return_value=[AscendMLABackend]),
+    ):
+        config.cache_config.block_size = 128
+        NPUPlatform._align_hybrid_block_size(config, AscendMLABackend)
+
+    # Generic AscendMLABackend does not rewrite MLA probes into SFA packed slots.
+    assert config.cache_config.block_size == 1536
+    assert config.cache_config.mamba_page_size_padded == 1536 * 576
+
+    # AscendSFABackend.customize_spec leaves owner specs, indexer specs, and hisparse specs untouched.
+    owner_spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=672, dtype=torch.int8)
+    indexer_probe = MLAAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=576, dtype=torch.int8, cache_role=SparseCacheRole.INDEXER
+    )
+    mla_probe = MLAAttentionSpec(block_size=1, num_kv_heads=1, head_size=576, dtype=torch.int8)
+    from vllm.config import set_current_vllm_config
+
+    with set_current_vllm_config(config):
+        assert AscendSFABackend.customize_spec(owner_spec) is owner_spec
+        assert AscendSFABackend.customize_spec(indexer_probe) is indexer_probe
+        customized = AscendSFABackend.customize_spec(mla_probe)
+        assert customized.head_size == 656
+        config.attention_config.hisparse_config = object()
+        assert AscendSFABackend.customize_spec(mla_probe) is mla_probe
