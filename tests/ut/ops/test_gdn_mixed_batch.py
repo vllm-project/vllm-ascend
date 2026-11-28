@@ -75,11 +75,21 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
     expected_g = -layer.A_log.exp() * torch.nn.functional.softplus(a[:total].float() + layer.dt_bias)
     expected_beta = b[:total].float().sigmoid().to(dtype)
 
-    def gating(A_log, gate_a, gate_b, dt_bias):
-        torch.testing.assert_close(gate_a, a[:total])
-        torch.testing.assert_close(gate_b, b[:total])
+    def gating(
+        A_log,
+        gate_a,
+        gate_b,
+        dt_bias,
+        output_head_major=False,
+        output_raw_beta=False,
+    ):
         assert dt_bias is layer.dt_bias
-        return expected_g.unsqueeze(0), expected_beta.unsqueeze(0)
+        gate_g = -A_log.exp() * torch.nn.functional.softplus(gate_a.float() + dt_bias)
+        gate_beta = gate_b if output_raw_beta else gate_b.float().sigmoid().to(gate_b.dtype)
+        if output_head_major:
+            gate_g = gate_g.transpose(0, 1)
+            gate_beta = gate_beta.transpose(0, 1)
+        return gate_g.unsqueeze(0), gate_beta.unsqueeze(0)
 
     def prefill(**kwargs):
         return kwargs["v"].clone(), kwargs["initial_state"].clone()
@@ -137,9 +147,12 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
     mocks[selected].assert_called_once()
     mocks[unused].assert_not_called()
     call = mocks[selected].call_args.kwargs
-    beta = b[:total] if backend == "a5" else expected_beta
-    torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
-    torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
+    if backend == "a5":
+        torch.testing.assert_close(call["beta"], b[prefill_tokens].transpose(0, 1).unsqueeze(0))
+        torch.testing.assert_close(call["g"], expected_g[prefill_tokens].transpose(0, 1).unsqueeze(0))
+    else:
+        torch.testing.assert_close(call["beta"], expected_beta[prefill_tokens].unsqueeze(0))
+        torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
     if decode_tokens is None:
         mocks["recurrent_gated_delta_rule"].assert_not_called()
     else:

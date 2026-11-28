@@ -205,6 +205,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         raw_key_cache: QSARawKeyCache
         compressed_key_cache: qsa_indexer.QSACompressedKeyCache
 
+    @property
+    def output_width(self) -> int:
+        """Return the compact group-index row width consumed by GBSA."""
+        return self.token_topk // self.compress_ratio + self.compress_ratio - 1
+
     def configure_pcp_cache_backends(self, vllm_config: VllmConfig) -> None:
         # Only the cache owners need new backends. Keep upstream's indexer
         # projection, cache dtype and ring configuration.
@@ -539,15 +544,21 @@ class AscendQSAImpl(AttentionImplBase[Any]):
     ) -> torch.Tensor:
         """Run the GBSA attention path selected for this step."""
         num_tokens = attn_metadata.num_actual_tokens
-        output.zero_()
         if num_tokens == 0:
+            output.zero_()
             return output
+        # The selected attention backend overwrites every live row.  Avoid
+        # clearing those rows first; only graph padding must be reset.
+        if num_tokens < output.shape[0]:
+            output[num_tokens:].zero_()
         selected_indices = layer.topk_indices_buffer[:num_tokens]
         key_cache, value_cache = kv_cache
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
-        compact_indices = selected_indices[:, :packed_width]
+        compact_indices = (
+            selected_indices if selected_indices.shape[1] == packed_width else selected_indices[:, :packed_width]
+        )
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
