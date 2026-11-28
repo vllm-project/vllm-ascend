@@ -2,13 +2,16 @@ pr: 23057
 entries:
   - category: feature
     text: >-
-      Requests waiting on asynchronous KV cache loads are now throttled and
-      scheduled to completion instead of stalling in the waiting queue when
-      `--max-num-inflight-kv-loads` is set with `enable_balance_scheduling`,
-      `dyntra_lb_config`, or `recompute_scheduler_enable`.
+      Users can now set `--max-num-inflight-kv-loads` to cap concurrent async
+      KV-cache loads with the Balance, DyntraLB, and recompute schedulers
+      (`scheduler_config.enable_balance_scheduling`,
+      `scheduler_config.dyntra_lb_config.enabled`,
+      `scheduler_config.recompute_scheduler_enable`). The limit is off by
+      default.
   - category: bugfix
     text: >-
-      Fixed prompts being unexpectedly split by `--long-prefill-token-threshold`
-      or encoder cache pressure when chunked prefill is disabled
-      (`enable_chunked_prefill=False`) with `enable_balance_scheduling`,
-      `dyntra_lb_config`, or `recompute_scheduler_enable` enabled.
+      With `--no-enable-chunked-prefill`, the Balance, DyntraLB, and recompute
+      schedulers no longer split a prompt across steps when
+      `--long-prefill-token-threshold` is set or the encoder cache is
+      temporarily full. Pooling models with CLS or MEAN pooling could fail on
+      such prompts with "partial prefill is not supported".
