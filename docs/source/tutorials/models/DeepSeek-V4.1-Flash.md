@@ -2412,7 +2412,7 @@ Select the tab for the target hardware.
     ##### 5.3.2.4 Startup and Verification
 
     Start the components in this order: Memcache MetaService, standalone Memcache
-    on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
+    on both Prefill and Decode nodes, Prefill engines, Decode engines, and then the
     PD proxy.
 
     Wait until both standalone Memcache processes report successful initialization
@@ -2441,7 +2441,7 @@ Select the tab for the target hardware.
 
     The Decode node must be able to reach `http://<PREFILL_IP>:1999/v1/metaserver`
     for the layerwise transfer callback. The layerwise proxy requires a reachable
-    `--host` address instead of `0.0.0.0` and does not accept `--workers`.
+    `--host` address and does not accept `--workers`.
 
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Check all Prefill ranks for increased
