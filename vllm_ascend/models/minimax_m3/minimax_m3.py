@@ -128,6 +128,9 @@ _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
 # token-count range; other batches stay on the plain MM + ReduceScatter path.
 _MMRS_MIN_TOKENS = 256
 _MMRS_MAX_TOKENS = 16384
+# The INT8 W8A8 variant only pays off on long prefill batches; there is no
+# upper bound (the kernel limit is the GEMM inner dimension).
+_MMRS_INT8_MIN_TOKENS = 10240
 
 
 def _resolve_layer_kv_cache_dtype(
@@ -1042,13 +1045,16 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # to the O-projection: fused MMRS when possible, plain MM +
         # ReduceScatter otherwise; both paths return the SP token shard, so
         # no external ReduceScatter is needed here. Without SP the
-        # O-projection keeps its plain GEMM forward.
+        # O-projection keeps its plain GEMM forward. The INT8 W8A8 variant
+        # fuses only on long prefill batches (>= _MMRS_INT8_MIN_TOKENS).
         if self.use_sequence_parallel:
-            self.self_attn.o_proj.custom_op = SequenceParallelMMReduceScatterOp(
-                self.self_attn.o_proj,
+            o_proj = self.self_attn.o_proj
+            o_proj.custom_op = SequenceParallelMMReduceScatterOp.create(
+                o_proj,
                 attention_layer_name=f"{prefix}.self_attn.attn",
                 min_tokens=_MMRS_MIN_TOKENS,
                 max_tokens=_MMRS_MAX_TOKENS,
+                int8_min_tokens=_MMRS_INT8_MIN_TOKENS,
             )
 
         if self.is_layer_sparse:

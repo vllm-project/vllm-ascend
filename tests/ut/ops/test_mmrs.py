@@ -9,6 +9,8 @@ import torch
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.ops import mmrs
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 ATTENTION_LAYER_NAME = "model.layers.0.self_attn.attn"
@@ -385,3 +387,270 @@ def test_weight_changes_are_picked_up_without_cache(harness):
     h.layer.weight.fill_(3)
     torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
     assert h.weight_format.call_count == 3  # validated on every fused forward
+
+
+# ---------------------------------------------------------------------------
+# INT8 W8A8_DYNAMIC variant (same RS ownership contract as the BF16 op)
+# ---------------------------------------------------------------------------
+
+
+def make_quant_layer(tp_size=2):
+    return SimpleNamespace(
+        custom_op=None,
+        reduce_results=False,
+        input_is_parallel=True,
+        disable_tp=False,
+        bias=None,
+        tp_size=tp_size,
+        tp_rank=0,
+        quant_method=AscendLinearMethod(AscendW8A8DynamicLinearMethod()),
+        # ModelSlim stores the INT8 weight transposed: [K, N].
+        weight=torch.ones(256, 32, dtype=torch.int8),
+        weight_scale_fp32=torch.full((32,), 0.02, dtype=torch.float32),
+        skip_bias_add=False,
+        return_bias=True,
+        input_size_per_partition=256,
+        output_size=32,
+        prefix="model.layers.0.self_attn.o_proj",
+    )
+
+
+def make_quant_op(layer, min_tokens=4096):
+    return mmrs.SequenceParallelQuantMMReduceScatterOp(layer, ATTENTION_LAYER_NAME, min_tokens=min_tokens)
+
+
+def per_token_quantize(x):
+    # Deterministic symmetric per-token quant used by both fake paths.
+    absmax = x.float().abs().amax(dim=1).clamp(min=1e-5) / 127.0
+    quantized = (x.float() / absmax[:, None]).round().clamp(-127, 127).to(torch.int8)
+    return quantized, absmax
+
+
+@pytest.fixture
+def quant_harness():
+    layer = make_quant_layer()
+    group = Mock(world_size=2, rank_in_group=0)
+    group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "original-tp"
+    metadata = SimpleNamespace(num_prefills=1, num_decodes=0)
+    context = SimpleNamespace(attn_metadata={ATTENTION_LAYER_NAME: metadata})
+    profile = Mock()
+    profile.supports.return_value = True
+    with (
+        patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=group),
+        patch.object(mmrs, "is_forward_context_available", return_value=True),
+        patch.object(mmrs, "get_forward_context", return_value=context),
+        patch.object(mmrs, "get_current_vllm_config", return_value=make_config()),
+        patch.object(mmrs, "get_current_hardware_profile", return_value=profile),
+        patch.object(
+            mmrs.torch_npu, "get_npu_format", return_value=mmrs.ACL_FORMAT_FRACTAL_ND, create=True
+        ) as weight_format,
+        patch.object(mmrs.torch_npu, "npu_mm_reduce_scatter_base", create=True),
+        patch.object(mmrs.DeviceOperator, "npu_mm_reduce_scatter_base") as fused,
+        patch.object(mmrs, "sp_reduce_scatter") as reduce_scatter,
+    ):
+        op = make_quant_op(layer)
+
+        def scatter(x):
+            padded = torch.nn.functional.pad(x, (0, 0, 0, (-x.shape[0]) % group.world_size))
+            return (padded * group.world_size).chunk(group.world_size, dim=0)[group.rank_in_group]
+
+        def prepare(owner, x):
+            quantized, scale = per_token_quantize(x)
+            return SimpleNamespace(quantized=quantized, scale=scale)
+
+        def projection(owner, x, bias):
+            # The scale values live in the closure so layout-corruption tests
+            # can replace owner.weight_scale_fp32 without breaking the fake.
+            quantized, scale = per_token_quantize(x)
+            dequant = quantized.float() * scale[:, None]
+            weight = owner.weight.float() * torch.full((32,), 0.02)[None, :]
+            return dequant.matmul(weight).to(x.dtype)
+
+        def fused_projection(x1, x2, hcom, world_size, **kwargs):
+            assert x1.shape[0] % world_size == 0
+            dequant = x1.float() * kwargs["x1_scale"].reshape(-1)[:, None]
+            weight = x2.float() * kwargs["x2_scale"].reshape(-1)[None, :]
+            return scatter(dequant.matmul(weight).to(kwargs["output_dtype"]))
+
+        layer.quant_method.quant_method.prepare_input_for_overlap = Mock(side_effect=prepare)
+        layer.quant_method.apply = Mock(side_effect=projection)
+        fused.side_effect = fused_projection
+        reduce_scatter.side_effect = scatter
+        yield SimpleNamespace(
+            layer=layer,
+            op=op,
+            group=group,
+            metadata=metadata,
+            context=context,
+            profile=profile,
+            fused=fused,
+            reduce_scatter=reduce_scatter,
+            projection=projection,
+            scatter=scatter,
+            weight_format=weight_format,
+        )
+
+
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize("tokens", [4096, 4099])
+def test_quant_fused_matches_fallback_on_every_rank(quant_harness, tp_size, tokens):
+    h = quant_harness
+    h.group.world_size = tp_size
+    x = torch.arange(tokens * 256).remainder(4).reshape(tokens, 256).to(torch.bfloat16)
+    for rank in range(tp_size):
+        h.group.rank_in_group = rank
+        expected = h.scatter(h.projection(h.layer, x, None))
+        actual = h.op.run(x)
+        torch.testing.assert_close(actual, expected)
+        assert actual.shape == ((tokens + tp_size - 1) // tp_size, 32)
+    h.reduce_scatter.assert_not_called()
+    h.layer.quant_method.apply.assert_not_called()
+    args, kwargs = h.fused.call_args
+    # INT8 quantized input and the [K, N] INT8 weight (no transposed view:
+    # ModelSlim already stores the weight transposed).
+    assert args[0].dtype == torch.int8
+    assert args[1] is h.layer.weight
+    assert args[2:4] == ("original-tp", tp_size)
+    assert kwargs["x1_scale"].shape == (args[0].shape[0], 1)
+    assert kwargs["x2_scale"].shape == (1, 32)
+    assert kwargs["output_dtype"] is torch.bfloat16
+    assert kwargs["reduce_op"] == "sum"
+    assert "comm_mode" not in kwargs
+    if tokens % tp_size:
+        # Only real rows are quantized; padded rows are exact zeros.
+        assert torch.count_nonzero(args[0][tokens:]) == 0
+        assert torch.all(kwargs["x1_scale"][tokens:] == 1.0)
+
+
+@pytest.mark.parametrize("tokens,expected", [(4095, False), (4096, True), (40960, True)])
+def test_quant_token_gate_enables_fusion_above_4k(quant_harness, tokens, expected):
+    # The model enables the INT8 variant only on long prefill batches; there
+    # is no upper token bound.
+    h = quant_harness
+    x = torch.ones(tokens, 256, dtype=torch.bfloat16)
+    assert h.op._can_fuse(x) is expected
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    assert h.fused.called is expected
+    assert h.reduce_scatter.called is not expected
+
+
+def test_quant_short_batch_stays_on_fallback(quant_harness):
+    h = quant_harness
+    x = torch.ones(1024, 256, dtype=torch.bfloat16)
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    h.fused.assert_not_called()
+    h.layer.quant_method.apply.assert_called_once_with(h.layer, x, None)
+    h.reduce_scatter.assert_called_once()
+
+
+def test_quant_nz_weight_fuses_without_conversion(quant_harness):
+    # An NZ weight (weight_nz_mode=2) goes to the fused kernel as-is: no
+    # conversion, nothing cached.
+    h = quant_harness
+    h.weight_format.return_value = ACL_FORMAT_FRACTAL_NZ
+    x = torch.ones(4096, 256, dtype=torch.bfloat16)
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    assert h.fused.call_count == 1
+    assert h.fused.call_args.args[1] is h.layer.weight
+    # In-place mutation is visible on the very next fused call.
+    h.layer.weight.fill_(2)
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    assert h.fused.call_count == 2
+    assert h.fused.call_args.args[1] is h.layer.weight
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        ("quant_method", UnquantizedLinearMethod()),
+        ("weight", torch.ones(256, 32, dtype=torch.bfloat16)),
+    ],
+)
+def test_quant_static_rejections_never_fuse(quant_harness, attribute, value):
+    h = quant_harness
+    setattr(h.layer, attribute, value)
+    op = make_quant_op(h.layer)
+    assert op._static_reason is not None
+    # The replacement quant method is not the fixture's; re-mock its apply.
+    h.layer.quant_method.apply = Mock(side_effect=h.projection)
+    x = torch.ones(4096, 256, dtype=torch.bfloat16)
+    torch.testing.assert_close(op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    h.fused.assert_not_called()
+
+
+def test_quant_scheme_subclass_is_rejected(quant_harness):
+    # Subclasses such as FP8/PDMix have different scale ABIs.
+    class DerivedScheme(AscendW8A8DynamicLinearMethod):
+        pass
+
+    h = quant_harness
+    h.layer.quant_method = AscendLinearMethod(DerivedScheme())
+    op = make_quant_op(h.layer)
+    assert op._static_reason is not None
+    assert not op._can_fuse(torch.ones(4096, 256, dtype=torch.bfloat16))
+
+
+@pytest.mark.parametrize("bad_case", ["scale_dtype", "scale_shape", "no_scale", "format"])
+def test_quant_runtime_layout_rejected_before_collective(quant_harness, bad_case):
+    h = quant_harness
+    if bad_case == "scale_dtype":
+        h.layer.weight_scale_fp32 = h.layer.weight_scale_fp32.to(torch.float64)
+    elif bad_case == "scale_shape":
+        h.layer.weight_scale_fp32 = h.layer.weight_scale_fp32.reshape(32, 1)
+    elif bad_case == "no_scale":
+        del h.layer.weight_scale_fp32
+    elif bad_case == "format":
+        h.weight_format.return_value = 3
+    x = torch.ones(4096, 256, dtype=torch.bfloat16)
+    assert not h.op._can_fuse(x)
+    torch.testing.assert_close(h.op.run(x), h.scatter(h.projection(h.layer, x, None)))
+    h.fused.assert_not_called()
+    h.reduce_scatter.assert_called_once()
+
+
+def test_quant_fused_failure_is_not_retried_as_another_collective(quant_harness):
+    h = quant_harness
+    h.fused.side_effect = RuntimeError("collective failed")
+    with pytest.raises(RuntimeError, match="collective failed"):
+        h.op.run(torch.ones(4096, 256, dtype=torch.bfloat16))
+    h.reduce_scatter.assert_not_called()
+
+
+def test_quant_fusion_queries_the_int8_mmrs_capability(quant_harness):
+    profile = Mock()
+    profile.supports.return_value = True
+    with patch.object(mmrs, "get_current_hardware_profile", return_value=profile):
+        make_quant_op(quant_harness.layer)
+    assert profile.supports.call_args.args[0] is mmrs.HardwareCapability.MM_REDUCE_SCATTER_INT8
+
+
+def test_supports_layer_selects_only_w8a8_dynamic():
+    assert mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(make_quant_layer())
+    assert not mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(make_layer())
+    assert not mmrs.SequenceParallelQuantMMReduceScatterOp.supports_layer(SimpleNamespace(quant_method=None))
+
+
+def test_create_selects_the_int8_variant_for_w8a8(quant_harness):
+    op = mmrs.SequenceParallelMMReduceScatterOp.create(
+        quant_harness.layer,
+        ATTENTION_LAYER_NAME,
+        min_tokens=256,
+        max_tokens=16384,
+        int8_min_tokens=10240,
+    )
+    assert type(op) is mmrs.SequenceParallelQuantMMReduceScatterOp
+    assert op.min_tokens == 10240
+    assert op.max_tokens is None
+
+
+def test_create_selects_the_bf16_variant_otherwise(harness):
+    op = mmrs.SequenceParallelMMReduceScatterOp.create(
+        harness.layer,
+        ATTENTION_LAYER_NAME,
+        min_tokens=256,
+        max_tokens=16384,
+        int8_min_tokens=10240,
+    )
+    assert type(op) is mmrs.SequenceParallelMMReduceScatterOp
+    assert op.min_tokens == 256
+    assert op.max_tokens == 16384

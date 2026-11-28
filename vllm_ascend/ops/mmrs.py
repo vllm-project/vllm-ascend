@@ -17,7 +17,9 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.ops.linear_op import CustomRowParallelOp
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
 class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
@@ -44,8 +46,11 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
     # as the Kimi O-projection backend.
     MIN_K = 256
     MAX_K = 65535
+    # Hardware capability the fused path depends on; quantized subclasses
+    # override it together with the quantization contract.
+    REQUIRED_CAPABILITY = HardwareCapability.MM_REDUCE_SCATTER_BF16
 
-    def __init__(self, layer, attention_layer_name: str, *, min_tokens: int, max_tokens: int):
+    def __init__(self, layer, attention_layer_name: str, *, min_tokens: int, max_tokens: int | None):
         super().__init__(layer)
         self.update_attrs()
         self.attention_layer_name = attention_layer_name
@@ -62,6 +67,29 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
         else:
             logger.info_once("Layer MMRS disabled for %s: %s", self.prefix, self._static_reason)
 
+    @classmethod
+    def create(
+        cls,
+        layer,
+        attention_layer_name: str,
+        *,
+        min_tokens: int,
+        max_tokens: int | None,
+        int8_min_tokens: int,
+        int8_max_tokens: int | None = None,
+    ) -> "SequenceParallelMMReduceScatterOp":
+        """Select the op variant from the layer's quantization scheme.
+
+        A W8A8_DYNAMIC layer gets the INT8 variant with its own token
+        window; every other layer gets the unquantized BF16 variant. The
+        caller passes both windows and never branches on the scheme.
+        """
+        if SequenceParallelQuantMMReduceScatterOp.supports_layer(layer):
+            return SequenceParallelQuantMMReduceScatterOp(
+                layer, attention_layer_name, min_tokens=int8_min_tokens, max_tokens=int8_max_tokens
+            )
+        return cls(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=max_tokens)
+
     def _find_static_reason(self) -> str | None:
         """Collect the facts fixed after loading; None leaves fusion possible."""
         layer = self.layer
@@ -75,11 +103,8 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
             return "requires TP size 2, 4 or 8"
         if not callable(getattr(torch_npu, "npu_mm_reduce_scatter_base", None)):
             return "requires the torch_npu fused MM+ReduceScatter interface"
-        if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-            return "requires an unquantized linear method"
-        weight = getattr(layer, "weight", None)
-        if weight is None or weight.ndim != 2 or weight.dtype != torch.bfloat16:
-            return "requires unquantized BF16 projection weights"
+        if reason := self._quant_weight_reason():
+            return reason
         config = get_current_vllm_config()
         # Pure decode nodes (PD-disaggregated kv_consumer) never see a
         # prefill batch, so the fused path could never fire.
@@ -95,8 +120,18 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
             or config.parallel_config.decode_context_parallel_size != 1
         ):
             return "context parallelism owns the TP group"
-        if not get_current_hardware_profile().supports(HardwareCapability.MM_REDUCE_SCATTER_BF16):
-            return "hardware does not support the BF16 MM ReduceScatter kernel"
+        if not get_current_hardware_profile().supports(self.REQUIRED_CAPABILITY):
+            return "hardware does not support the fused MM ReduceScatter kernel"
+        return None
+
+    def _quant_weight_reason(self) -> str | None:
+        """Quantization scheme and weight dtype contract, fixed after loading."""
+        layer = self.layer
+        if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            return "requires an unquantized linear method"
+        weight = getattr(layer, "weight", None)
+        if weight is None or weight.ndim != 2 or weight.dtype != torch.bfloat16:
+            return "requires unquantized BF16 projection weights"
         return None
 
     def apply_impl(self, input_: torch.Tensor):
@@ -128,8 +163,11 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
         if not self.MIN_K <= x.shape[1] < self.MAX_K:
             return False
         # The model gates the token count to the range where fusion pays
-        # off; TP ranks see the same count after the SP all-gather.
-        if not self.min_tokens <= x.shape[0] < self.max_tokens:
+        # off; TP ranks see the same count after the SP all-gather. A None
+        # upper bound means every long-enough batch fuses.
+        if not self.min_tokens <= x.shape[0]:
+            return False
+        if self.max_tokens is not None and x.shape[0] >= self.max_tokens:
             return False
         return self._weight_supported(x)
 
@@ -182,4 +220,92 @@ class SequenceParallelMMReduceScatterOp(CustomRowParallelOp):
             self.hcom,
             self.tp_size,
             reduce_op="sum",
+        )
+
+
+class SequenceParallelQuantMMReduceScatterOp(SequenceParallelMMReduceScatterOp):
+    """W8A8_DYNAMIC INT8 variant of the SP MMRS op, same output contract.
+
+    The activation is dynamically quantized per token and the fused kernel
+    runs the INT8 MM + ReduceScatter with BF16 output. Only the quantization
+    contract, the weight layout check and the fused kernel call differ from
+    the BF16 parent; the RS ownership and the fused/fallback branch stay
+    identical. The model enables this variant only for long prefill batches
+    (min_tokens, no upper bound: the kernel limit is the GEMM inner
+    dimension, and long prefills are exactly where fusion pays off).
+
+    The loaded INT8 weight is [K, N] after ModelSlim's transpose and may be
+    cast to NZ (weight_nz_mode=2). The fused kernel accepts both ND and NZ
+    operands, so the loaded weight is passed through as-is on every fused
+    call (no conversion, nothing cached): a replaced or in-place-mutated
+    weight is seen on the very next call.
+    """
+
+    REQUIRED_CAPABILITY = HardwareCapability.MM_REDUCE_SCATTER_INT8
+
+    @staticmethod
+    def supports_layer(layer) -> bool:
+        """Whether the layer runs the Ascend INT8 W8A8_DYNAMIC scheme."""
+        quant_method = getattr(layer, "quant_method", None)
+        if not isinstance(quant_method, AscendLinearMethod):
+            return False
+        # Do not accept subclasses such as FP8/PDMix with different scale ABIs.
+        return type(quant_method.quant_method) is AscendW8A8DynamicLinearMethod
+
+    def __init__(self, layer, attention_layer_name: str, *, min_tokens: int, max_tokens: int | None = None):
+        super().__init__(layer, attention_layer_name, min_tokens=min_tokens, max_tokens=max_tokens)
+
+    def _quant_weight_reason(self) -> str | None:
+        if not self.supports_layer(self.layer):
+            return "requires the Ascend INT8 W8A8_DYNAMIC linear method"
+        weight = getattr(self.layer, "weight", None)
+        if weight is None or weight.ndim != 2 or weight.dtype != torch.int8:
+            return "requires INT8 W8A8 projection weights"
+        return None
+
+    def _weight_supported(self, x: torch.Tensor) -> bool:
+        """INT8 weight [K, N] and per-channel scale contract, per forward."""
+        weight = self.layer.weight
+        scale = getattr(self.layer, "weight_scale_fp32", None)
+        return (
+            weight.ndim == 2
+            and weight.dtype == torch.int8
+            and weight.shape == (x.shape[1], self.layer.output_size)
+            and self.layer.output_size > 0
+            and weight.is_contiguous()
+            and scale is not None
+            and scale.dtype == torch.float32
+            and scale.shape == (self.layer.output_size,)
+            and torch_npu.get_npu_format(weight) in (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ)
+        )
+
+    def _run_fused(self, input_: torch.Tensor) -> torch.Tensor:
+        """INT8 dynamic-quant MM + ReduceScatter through the fused path.
+
+        Only real rows are quantized; zero INT8 rows with scale one are
+        exact zeros, matching the zero padding sp_reduce_scatter applies to
+        the GEMM result. _can_fuse has already validated weight and scale;
+        the loaded weight goes to the kernel as-is in its ND or NZ layout.
+        """
+        logger.info_once("Layer MMRS fused path active")
+        scheme = self.quant_method.quant_method
+        prepared = scheme.prepare_input_for_overlap(self.layer, input_.contiguous())
+        assert prepared is not None and prepared.scale is not None
+        quantized = prepared.quantized
+        token_scale = prepared.scale.reshape(-1, 1)
+        padding = (-quantized.shape[0]) % self.tp_size
+        if padding:
+            quantized = F.pad(quantized, (0, 0, 0, padding))
+            token_scale = F.pad(token_scale, (0, 0, 0, padding), value=1.0)
+        # comm_mode is left to the device adaptor's per-platform default,
+        # same as the BF16 path.
+        return DeviceOperator.npu_mm_reduce_scatter_base(
+            quantized,
+            self.layer.weight,
+            self.hcom,
+            self.tp_size,
+            reduce_op="sum",
+            x1_scale=token_scale.contiguous(),
+            x2_scale=self.layer.weight_scale_fp32.reshape(1, -1).contiguous(),
+            output_dtype=torch.bfloat16,
         )
