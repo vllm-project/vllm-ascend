@@ -61,7 +61,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--speculative-config"
-      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false}'
+      - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}'
     test_content:
       - chat_completion
     prompts:
@@ -93,7 +93,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--speculative-config"
-      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false,"enable_adaptive_verification": true}'
+      - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false,"enable_adaptive_verification": true}'
     test_content:
       - chat_completion
     prompts:
