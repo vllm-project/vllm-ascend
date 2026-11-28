@@ -1,0 +1,5 @@
+pr: 23653
+entries:
+  - category: documentation
+    text: >-
+      Added Qwen3.6-27B W8A8 TP2 tutorial presets to Recipes for A2 and A3.
