@@ -101,10 +101,17 @@ def align_hisparse_indexer_specs(
                 alignment = math.lcm(alignment, spec.head_size, torch.float32.itemsize)
             else:
                 alignment = math.lcm(alignment, spec.page_size_bytes)
+            if packed_row_bytes is not None:
+                # Ascend PA_BSND requires shared-slab block_stride to be aligned
+                # to a whole page (block_size * packed_row_bytes). Because vllm
+                # Core's get_hisparse_kv_cache_groups() drops block_stride_alignment
+                # when rebuilding HiSparseHotSpec/HiSparseResidentSpec, propagate
+                # this alignment via the co-pooled AscendSFAIndexerCacheSpec.
+                alignment = math.lcm(alignment, spec.block_size * packed_row_bytes)
         elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
-            # Core derives these synthetic specs without the source row alignment.
+            # Core derives these synthetic specs without the source page alignment.
             # Declare it before shared-slab sizing, never round runtime addresses.
-            alignment = math.lcm(alignment, packed_row_bytes)
+            alignment = math.lcm(alignment, spec.block_size * packed_row_bytes)
         if alignment != spec.get_block_stride_alignment():
             updates["block_stride_alignment"] = alignment
         aligned[name] = replace(spec, **updates) if updates else spec

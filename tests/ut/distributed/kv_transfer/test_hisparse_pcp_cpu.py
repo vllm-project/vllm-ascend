@@ -492,3 +492,118 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     impl.hisparse_cache.finish_kv_update.assert_not_called()
     assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
+
+
+@pytest.mark.parametrize("block_stride", [128, 256, 192])
+def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, block_stride):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    cache = handle()
+    cache.all_context_pages_resident = True
+    cache.dummy_batch = False
+    cache.draft_layer = False
+    cache.block_table = torch.tensor([[3, 1], [2, 0]], dtype=torch.int32)
+    cache.runtime.request_state_indices = torch.tensor([0, 1], dtype=torch.int32)
+    page_stride = block_stride // 128
+    cache.view = NS(
+        cache=torch.zeros(4, block_stride, C8_ROW_BYTES, dtype=torch.int8),
+        attention_cache=torch.zeros(max(6, 4 * page_stride), 128, C8_ROW_BYTES, dtype=torch.int8),
+        block_size=128,
+        attention_block_stride=block_stride,
+    )
+    impl.hisparse_cache = cache
+
+    meta = NS(
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_reqs=2,
+        num_actual_tokens=3,
+        hisparse_for_capture=False,
+    )
+    query = torch.zeros(4, 1, 8)
+    query_rope = torch.zeros(4, 1, 4)
+    logical_topk = torch.full((4, 128), -1, dtype=torch.int32)
+    logical_topk[:2, :4] = torch.tensor([[0, 129, -1, 300], [128, 5, 256, -1]], dtype=torch.int32)
+    logical_topk[2:] = 99
+    query_ends = torch.tensor([1, 3], dtype=torch.int32)
+    key_lengths = torch.tensor([10, 20], dtype=torch.int32)
+
+    monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    monkeypatch.setattr(sfa_hisparse.torch, "npu", NS(is_current_stream_capturing=lambda: False), raising=False)
+    pa_bsnd = Mock(return_value="pa-bsnd-out")
+    monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", pa_bsnd)
+
+    out = impl._try_c8_resident_prefill(query, query_rope, logical_topk, meta, query_ends, key_lengths)
+    if block_stride % 128 == 0:
+        assert out == "pa-bsnd-out"
+        q, q_rope, _, topk, _, q_ends, k_lens = pa_bsnd.call_args.args
+        assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 128))
+        assert q_ends.tolist() == [2]
+        assert k_lens.tolist() == [20]
+        assert pa_bsnd.call_args.kwargs["block_table"].tolist() == [[2 * page_stride, 0]]
+    else:
+        assert out is None
+        pa_bsnd.assert_not_called()
+
+
+def test_bf16_staged_prefill_reuses_paged_sfa_with_pcp_padding(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = False
+    impl.kv_lora_rank = 8
+    impl.qk_rope_head_dim = 4
+    impl.index_group_index = 0
+    cache = handle()
+    cache.all_context_pages_resident = False
+    cache.runtime.host_cache = torch.zeros(2, 16, 12)
+    impl.hisparse_cache = cache
+
+    staged = torch.zeros(2, 16, 12)
+    staged_table = torch.tensor([[0, 1]], dtype=torch.int32)
+    impl.index_group = NS(
+        set_logical_topk_ready=Mock(),
+        stage_prefill_rows=Mock(return_value=(staged, staged_table, torch.tensor([0, 0], dtype=torch.int32))),
+    )
+
+    meta = NS(
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_reqs=1,
+        num_actual_tokens=2,
+        hisparse_for_capture=False,
+        req_id_per_token=torch.tensor([0, 0, 0, 0], dtype=torch.int32),
+        query_start_loc=torch.tensor([2], dtype=torch.int32),
+        prefill_valid_token_mask=torch.tensor([[True], [True], [False], [False]]),
+        prefill=NS(host_staging_plan=NS(block_size=16)),
+        block_size=16,
+    )
+    pa_bsnd = Mock(return_value=torch.ones(2, 1, 8))
+    monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", pa_bsnd)
+    monkeypatch.setattr(impl, "_attention_physical", Mock())
+
+    out = impl._execute_sparse_flash_attention_process(
+        torch.zeros(4, 1, 8),
+        torch.zeros(4, 1, 4),
+        (),
+        torch.zeros(4, 1, 4, dtype=torch.int32),
+        meta,
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([10], dtype=torch.int32),
+    )
+    assert out.shape == (4, 1, 8)
+    assert (out[2:] == 0).all()
+    q, q_rope, (latent, rope), topk, _, q_ends, k_lens = pa_bsnd.call_args.args
+    assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 4))
+    assert (latent.shape, rope.shape) == ((2, 16, 1, 8), (2, 16, 1, 4))
+    assert q_ends.tolist() == [2] and k_lens.tolist() == [10]
+    assert pa_bsnd.call_args.kwargs["block_table"] is staged_table
