@@ -136,6 +136,38 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
         install:
           pip: false
+  ascend_w8a8_0731_a3:
+    model_id: Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
+    label: W8A8 0731 (Ascend A3 PD)
+    precision: int8
+    vram_minimum_gb: 341
+    supported_hardware: [ascend_910c]
+    supported_frontends: [python]
+    supported_features: [tool_calling, reasoning]
+    min_vllm_version: '0.32.0'
+    hardware_overrides:
+      ascend_910c:
+        docker_shm_size: "512g"
+        install:
+          pip: false
+    extra_args:
+      - --quantization ascend
+      - --served-model-name dsv4
+      - --max-model-len 512000
+      - --block-size 32
+      - --no-disable-hybrid-kv-cache-manager
+      - --attention_config.indexer_kv_dtype int8
+      - --tokenizer-mode deepseek_v4
+      - --tool-call-parser deepseek_v4
+      - --reasoning-parser deepseek_v4
+      - --enable-auto-tool-choice
+      - --trust-remote-code
+      - --seed 1024
+      - >-
+        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}'
+      - >-
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}'
+
 meta:
   hardware:
     ascend_950dt_8x: verified
@@ -322,3 +354,90 @@ presets:
       This preset records the lane that was actually run for this variant on
       `ascend_910b`. It is not evidence for FP8 (Preview), NVFP4 (RedHat),
       single-node DEP, PD, or any multi-node shape.
+  ascend_a3_pd:
+    label: "A3 W8A8 0731 PD"
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8_0731_a3]
+    default: false
+    description: "Two A3 nodes with DP2/TP1/PCP8 Prefill and DP16/TP1 Decode."
+    source:
+      label: "vLLM Ascend v0.32.0rc tutorial"
+      href: "https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/DeepSeek-V4-Flash.html#a3-series-pd-separation-deployment-with-dspark"
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      kv_offload: "off"
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+      HCCL_EXEC_TIMEOUT: "204"
+      HCCL_CONNECT_TIMEOUT: "120"
+      HCCL_OP_EXPANSION_MODE: AIV
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        pcp: 8
+        data_parallel_lb: external
+        env:
+          HCCL_BUFFSIZE: "1800"
+          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+        args:
+          - --max-num-batched-tokens 16384
+          - --max-num-seqs 16
+          - --gpu-memory-utilization 0.94
+          - --enforce-eager
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+          '--additional-config':
+            enable_cpu_binding: true
+            enable_fused_mc2: 1
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_connector: MooncakeHybridConnector
+              kv_port: '30000'
+              kv_connector_extra_config:
+                prefill: {dp_size: 2, tp_size: 1, pp_size: null}
+                decode: {dp_size: 16, tp_size: 1, pp_size: null}
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        data_parallel_lb: external
+        env:
+          HCCL_BUFFSIZE: "2400"
+        args:
+          - --max-num-batched-tokens 480
+          - --max-num-seqs 60
+          - --gpu-memory-utilization 0.95
+          - --async-scheduling
+          - --no-enable-prefix-caching
+        json_args:
+          '--compilation-config':
+            cudagraph_mode: FULL_DECODE_ONLY
+          '--additional-config':
+            ascend_compilation_config:
+              enable_npugraph_ex: true
+              enable_static_kernel: false
+            enable_cpu_binding: true
+            multistream_overlap_shared_expert: true
+            recompute_scheduler_enable: true
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_connector: MooncakeHybridConnector
+              kv_port: '30100'
+              kv_connector_extra_config:
+                prefill: {dp_size: 2, tp_size: 1, pp_size: null}
+                decode: {dp_size: 16, tp_size: 1, pp_size: null}
