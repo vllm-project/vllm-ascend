@@ -80,6 +80,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so.
     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
+    # HCCL communication window size in MiB. CANN tiling reads it directly
+    # (including for dispatch_ffn_combine); when unset, CANN uses 200 MiB.
+    "HCCL_BUFFSIZE": lambda: os.getenv("HCCL_BUFFSIZE", None),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when

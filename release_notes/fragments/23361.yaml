@@ -1,0 +1,8 @@
+pr: 23361
+entries:
+  - category: bugfix
+    text: >-
+      Fixed A3 fused-MC2 (enable_fused_mc2=1) startup failing with an AI Core MTE fault when
+      --max-num-batched-tokens could not fit the HCCL AllToAll window. The server now stops early
+      with a clear error naming the fix; raise HCCL_BUFFSIZE (MiB) or lower --max-num-batched-tokens.
+    hardware: [A3]

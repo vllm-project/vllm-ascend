@@ -53,6 +53,7 @@ def _make_vllm_config(
         enforce_eager=True,
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
+        get_hidden_size=lambda: hidden_size,
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
@@ -196,6 +197,99 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+def _patch_fused_mc2_window_deps(monkeypatch, *, device_type=AscendDeviceType.A3, ep_world_size=16):
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+
+
+def _fused_mc2_config(**kwargs):
+    return _make_vllm_config(max_num_batched_tokens=12288, top_k_experts=6, hidden_size=5120, **kwargs)
+
+
+def test_fused_mc2_window_guard_rejects_batch_beyond_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
+    with pytest.raises(ValueError, match="needs about 1090 MiB per TP rank"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_accepts_larger_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "2048")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_divides_batch_across_tp_ranks(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config(tensor_parallel_size=4))
+
+
+def test_fused_mc2_window_guard_rejects_a2_fused_mc2_batch(monkeypatch):
+    # A2 selects FUSED_MC2 for fused MC2 with EP16 before the capacity
+    # comparison, so the same oversized batch must be rejected there too.
+    _patch_fused_mc2_window_deps(monkeypatch, device_type=AscendDeviceType.A2)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
+    with pytest.raises(ValueError, match="needs about 1090 MiB per TP rank"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+@pytest.mark.parametrize("ep_world_size", [1, 33])
+def test_fused_mc2_window_guard_skips_ep_sizes_outside_fused_mc2_selection(monkeypatch, ep_world_size):
+    # Fused MC2 is not selected at EP=1 or above EP=32, so the batch will use
+    # MC2/ALLGATHER/ALLTOALL instead and must not be rejected.
+    _patch_fused_mc2_window_deps(monkeypatch, ep_world_size=ep_world_size)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("65535", 65535),
+        ("65536", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+        ("-1", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+        ("not-a-number", afc._HCCL_DEFAULT_BUFFSIZE_MIB),
+    ],
+)
+def test_configured_hccl_buffsize_mib_matches_tiling_uint16_range(monkeypatch, value, expected):
+    # The C++ tiling stores HCCL_BUFFSIZE in a uint16_t and uses the 200 MiB
+    # default above 65535; the Python pre-flight must apply the same policy.
+    monkeypatch.setenv("HCCL_BUFFSIZE", value)
+
+    assert afc._configured_hccl_buffsize_mib() == expected
+
+
+def test_fused_mc2_window_guard_accepts_uint16_max_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "65535")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_falls_back_for_hccl_buffsize_above_uint16(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "65536")
+
+    with pytest.raises(ValueError, match="HCCL_BUFFSIZE is 200 MiB"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_skips_kv_consumer_only_node(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config(kv_role="kv_consumer"))
 
 
 @pytest.mark.parametrize(
@@ -771,6 +865,8 @@ def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, 
         afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=fused)
     )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    # This test asserts the per-rank capacity math, not the HCCL window guard.
+    monkeypatch.setattr(afc, "_validate_fused_mc2_hccl_window", lambda _: None)
     config = _make_vllm_config(tensor_parallel_size=2, max_num_batched_tokens=524288)
     config.parallel_config.prefill_context_parallel_size = 8
     config.speculative_config = None
