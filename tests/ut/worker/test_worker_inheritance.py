@@ -12,7 +12,6 @@ import pytest
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "discard",
     "checkpoint_prepare",
     "checkpoint_restore",
     "_scoped_allocator_max_split",

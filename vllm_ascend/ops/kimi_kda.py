@@ -97,10 +97,11 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
     ) -> None:
         projection_size = num_heads * head_dim
         if head_parallel:
-            # This path bypasses MergedColumnParallelLinear.__init__, whose
-            # #66784 weight loaders now require the padding state.
+            # Explicit head-parallel ranks bypass the merged and stacked
+            # constructors. Keep their checkpoint metadata in sync.
             self.padding_size = 0
             self.output_sizes = [num_heads, projection_size, projection_size]
+            self.shard_ids = tuple(range(len(self.output_sizes)))
             ColumnParallelLinear.__init__(
                 self,
                 hidden_size,
@@ -111,6 +112,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 quant_config=quant_config,
                 prefix=prefix,
             )
+            self.loaded_shard_ids: dict[str, set[str | int]] = {}
         else:
             super().__init__(
                 input_size=hidden_size,
@@ -197,6 +199,10 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 f"expected {tuple(param_shard.shape)}, got {tuple(fused_weight.shape)}"
             )
         param_shard.copy_(fused_weight)
+        # F is composed locally, so its rows never pass through the merged loader.
+        # Older loaders only accept a shard ID and do not track loaded parameters.
+        if hasattr(self, "validate_shard_id") and hasattr(self, "pop_missing_shards"):
+            self.validate_shard_id(_F_PROJ_SHARD_ID, self.weight)
 
 
 def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor:

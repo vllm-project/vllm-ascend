@@ -140,7 +140,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector, needs_mamba_state_copy_after_load
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -599,7 +599,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             callable(copy_mamba_state)
             and has_kv_transfer_group()
-            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+            and needs_mamba_state_copy_after_load(get_kv_transfer_group())
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 

@@ -235,6 +235,9 @@ class NPUWorker(GPUWorker):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.npugraph_memory_bytes = 0
+        # Set once the RL extra cleanup has torn down HCCL groups and ACL graphs,
+        # cleared when the KV cache wakes and the graphs are recaptured.
+        self._extra_cleanup_pending = False
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
@@ -263,9 +266,6 @@ class NPUWorker(GPUWorker):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
-
-    def discard(self, tags: tuple[str, ...]) -> None:
-        raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
 
     def checkpoint_prepare(self) -> None:
         raise NotImplementedError("GPUWorker.checkpoint_prepare is not validated on Ascend.")
@@ -375,10 +375,21 @@ class NPUWorker(GPUWorker):
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
+            # Set first so the worker-side pending state survives a partial
+            # teardown failure and is ready for wake_up() recovery once the
+            # caller invokes it.
+            self._extra_cleanup_pending = True
             self.sleep_wakeup_manager.sleep()
         self.synchronize_device()
 
+        # Unregister Mooncake before the KV connector hook, matching discard()
+        # (which unregisters Mooncake before delegating to super().discard()).
+        # sleep() and wake_up() do not call super() yet, so they repeat the KV
+        # connector hooks of upstream's GPUWorker by hand; RFC #22572 P6
+        # converges both to super(), which drops these copies.
         global_te.unregister_buffer()
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
         backend.suspend(discardable)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -408,23 +419,42 @@ class NPUWorker(GPUWorker):
                 drain()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        nz_mode = get_ascend_config().weight_nz_mode
-        if nz_mode:
-            raise ValueError(
-                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
-                "or enable additional_config.rl_config (enabled: true) which disables NZ "
-                "automatically."
-            )
+        # Weights stay resident across a KV-only release/wake, so FRACTAL_NZ
+        # weights are unaffected and only weight-bearing wakes reject NZ.
+        wake_weights = tags is None or "weights" in tags
+        if wake_weights:
+            self._check_nz_disabled()
         self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
+            # Reverse the sleep/discard unregister order (and match future
+            # super().wake_up() in RFC #22572 P6): restore KV connector caches
+            # before re-registering Mooncake buffers.
+            if has_kv_transfer_group():
+                get_kv_transfer_group().restore_kv_caches()
             global_te.reregister_buffer()
 
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
-        if cleanup_enabled:
+        # Restore only what a sleep tore down: a discard releases the KV pool
+        # but leaves HCCL groups and ACL graphs valid.
+        if self._extra_cleanup_pending:
             self.sleep_wakeup_manager.wakeup(tags)
+            # A weights-only wake restores HCCL but leaves graph recapture to
+            # the KV-cache wake, so the restore is complete only then.
+            if tags is None or "kv_cache" in tags:
+                self._extra_cleanup_pending = False
         self.synchronize_device()
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        if "weights" in tags:
+            # Fail before unregistering buffers or releasing memory if the
+            # matching weights wake would reject FRACTAL_NZ.
+            self._check_nz_disabled()
+        if "kv_cache" in tags:
+            # Mooncake hands KV-cache device addresses to the NIC for one-sided
+            # reads. Unregister them before the memory is released, as sleep
+            # does; wake_up(["kv_cache"]) registers them again.
+            self.synchronize_device()
+            global_te.unregister_buffer()
+        super().discard(tags)
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -469,6 +499,10 @@ class NPUWorker(GPUWorker):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector
+
+            if isinstance(getattr(model_runner, "kv_connector", None), C8VScaleKVConnector):
+                model_runner.kv_connector = model_runner.kv_connector.release_cache_views()
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
@@ -1271,6 +1305,10 @@ class NPUWorker(GPUWorker):
             kv_cache_config,
             kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
         )
+
+        from vllm_ascend.worker.v2.kv_connector import maybe_wrap_c8_v_scale_connector
+
+        maybe_wrap_c8_v_scale_connector(self.model_runner, kv_cache_config, self.vllm_config.kv_transfer_config)
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition.

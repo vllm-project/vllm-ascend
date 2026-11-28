@@ -171,12 +171,16 @@ def test_prepare_beta_does_not_repeat_auxiliary_sigmoid():
 
 
 @pytest.mark.parametrize("f_b_is_local", [False, True])
-def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
+@pytest.mark.parametrize("head_parallel", [False, True], ids=["tp", "pcp"])
+def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool, head_parallel: bool):
+    # Both cases own shard 2. The PCP case reaches it from TP rank 0.
+    tp_rank, tp_size = (0, 1) if head_parallel else (2, 4)
     with (
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=4),
-        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
+        patch("vllm_ascend.ops.kimi_kda.get_head_parallel_rank", return_value=2),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size", return_value=tp_size),
+        patch("vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp_size),
     ):
         linear = _KDAFusedBFGLinear(
             hidden_size=6,
@@ -185,6 +189,7 @@ def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
             tp_size=4,
             quant_config=None,
             prefix="model.layers.0.self_attn.in_proj_gfab",
+            head_parallel=head_parallel,
         )
 
     linear.weight.data.zero_()
@@ -207,6 +212,13 @@ def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
     torch.testing.assert_close(linear.weight[:2], b_weight[4:6])
     torch.testing.assert_close(linear.weight[2:8], expected_f)
     torch.testing.assert_close(linear.weight[8:], g_weight[12:18])
+
+    if head_parallel:
+        assert linear.pop_missing_shards() == []
+        # Start another load with only B and G. F must be reported missing.
+        linear.weight.weight_loader(linear.weight, b_weight, 0)
+        linear.weight.weight_loader(linear.weight, g_weight, 2)
+        assert linear.pop_missing_shards() == ["weight.1"]
 
 
 def test_fused_bfg_linear_recomposes_f_after_source_reload():

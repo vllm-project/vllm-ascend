@@ -1,0 +1,7 @@
+pr: 23230
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup failure (aclnnDynamicMxQuantV3 error 161002) for quantized
+      MoE models whose checkpoint quantizes the router gate, such as
+      Qwen3-30B-A3B with a ModelSlim W4A8-MXFP pack on vLLM v0.33.0.

@@ -20,7 +20,6 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
@@ -128,12 +127,7 @@ def _make_plan(num_blocks=3, main_head_size=4):
     config = _make_config()
     specs = _make_specs(main_head_size)
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    plan = get_glm5_next_kv_cache_config(
-        config,
-        groups,
-        num_blocks * bytes_per_block,
-    )
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=num_blocks)
     return config, groups, plan
 
 
@@ -223,7 +217,9 @@ def test_v2_glm_shared_slots_reject_missing_layers(v2_glm_cache_plan):
 
 
 @pytest.mark.parametrize("kernel_size", [4, 8])
-def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size):
+def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size, tmp_path):
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader, request_manager_blocks
+
     config = _make_config()
     specs = _make_specs()
     specs[INDEXER] = replace(
@@ -236,7 +232,7 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     )
     register_all_kvcache_specs(None)
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=3)
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
@@ -264,6 +260,24 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     assert torch.count_nonzero(key[2].view(torch.uint8)) == 0
     assert torch.count_nonzero(scale[:2]) == 0
     assert torch.all(key[1].view(torch.uint8) == 23)
+
+    # The group table holds manager IDs. Verify the dump against the bound scale view.
+    runner = SimpleNamespace(
+        kv_cache_config=plan,
+        kv_caches={INDEXER: scale},
+        kernel_block_sizes=[kernel_size],
+        attn_groups=[[group]],
+        requests={"r": SimpleNamespace(block_ids=([1],))},
+    )
+    for page, row in enumerate(scale):
+        row.fill_(page)
+    reader = KvCacheReader(runner)
+    manager_rows = request_manager_blocks(runner, "r")
+    (snap,) = reader.iter_request_snapshots(req_id="r", manager_block_ids_by_group=manager_rows, out_dir=tmp_path)
+    expected = [2, 3] if kernel_size == 4 else [1]
+    assert snap.payload["block_ids"] == expected
+    assert snap.payload["tensor"][:, 0, 0, 0].tolist() == expected
+    assert reader.estimate_dump_bytes(manager_block_ids_by_group=manager_rows) == snap.payload["tensor"].nbytes
 
 
 def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):

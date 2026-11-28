@@ -36,7 +36,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -60,7 +59,7 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
     # Round-trip fixtures persist every recurrent checkpoint, not sparse tails.
     config.cache_config.prefix_cache_retention_interval = None
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
+    return get_glm5_next_kv_cache_config(config, groups, num_blocks=24)
 
 
 def make_glm53_caches(plan):

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -612,3 +614,209 @@ def test_failed_shared_session_exits_from_foreground_before_reusing_resources(en
     assert fatal.value.__cause__ is error
     assert state._hixl_session is session
     session.close.assert_not_called()
+
+
+def test_placement_export_setup_and_pp_stitching(monkeypatch, tmp_path: Path):
+    rank0_path = tmp_path / "rank0" / "placement.json"
+    rank2_path = tmp_path / "rank2" / "placement.json"
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    s0 = AscendEplbState.__new__(AscendEplbState)
+    s0.model_states = {}
+    with pytest.raises(RuntimeError, match="initialized distributed"):
+        s0.enable_placement_export(str(rank0_path))
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2))
+    monkeypatch.setattr(eplb_state, "_get_pp_topology", lambda: (0, 1, None))
+    with pytest.raises(ValueError, match="one EP group per PP stage"):
+        s0.enable_placement_export(str(rank0_path))
+
+    monkeypatch.setattr(eplb_state, "get_ip", lambda: "127.0.0.1")
+    same_node_calls: list[int] = []
+
+    def _same_node(_g, src):
+        same_node_calls.append(src)
+        return [True, True]
+
+    monkeypatch.setattr(eplb_state, "in_the_same_node_as", _same_node)
+    stages: list[AscendEplbState] = []
+    for pp_rank, local_path in ((0, rank0_path), (1, rank2_path)):
+        monkeypatch.setattr(eplb_state, "_get_pp_topology", lambda r=pp_rank: (r, 2, object()))
+        st = AscendEplbState.__new__(AscendEplbState)
+        st.model_states = {}
+        st.enable_placement_export(str(local_path))
+        st.model_states["t"] = SimpleNamespace(
+            model=SimpleNamespace(num_logical_experts=2, num_physical_experts=2),
+            _placement_export_map=torch.tensor([[0, 1]] if pp_rank == 0 else [[1, 0]]),
+        )
+        st._placement_model_roles = {"t": "target"}
+        if pp_rank == 1:
+            st.model_states["d"] = SimpleNamespace(
+                model=SimpleNamespace(num_logical_experts=2, num_physical_experts=2),
+                _placement_export_map=torch.tensor([[1, 0]]),
+            )
+            st._placement_model_roles["d"] = "draft"
+        stages.append(st)
+
+    gathered: list = [
+        None,
+        {
+            "pp_rank": 1,
+            "target": stages[1]._build_local_role_entry("target"),
+            "draft": stages[1]._build_local_role_entry("draft"),
+            "endpoint": None,
+        },
+    ]
+    monkeypatch.setattr(
+        eplb_state,
+        "all_gather_object",
+        lambda out, val, group=None: (
+            gathered.__setitem__(val["pp_rank"], val),
+            out.__setitem__(slice(None), gathered),
+        ),
+    )
+    try:
+        for pp_rank, st in enumerate(stages):
+            monkeypatch.setattr(eplb_state, "_get_pp_topology", lambda r=pp_rank: (r, 2, object()))
+            st.setup_pp_placement_export()
+        assert same_node_calls == [0, 0]
+        assert stages[0]._exporter is not None and stages[1]._exporter is not None
+
+        def eval_stage(idx: int, target_ratio: float, draft_ratio: float | None = None) -> None:
+            def fake_stats(ms, _steps=None):
+                if ms is stages[idx].model_states.get("t"):
+                    return (target_ratio, 1)
+                if ms is stages[idx].model_states.get("d") and draft_ratio is not None:
+                    return (draft_ratio, 1)
+                return None
+
+            monkeypatch.setattr(stages[idx], "_compute_model_window_ratio_stats", fake_stats)
+            stages[idx]._maybe_evaluate_and_export_placement()
+
+        # 1. Baseline requires all active PP stages (1.4 and 1.8 -> global 1.6); no file written.
+        eval_stage(1, 1.8, 1.5)
+        assert stages[0]._exporter.min_peak_to_mean_ratio is None
+        eval_stage(0, 1.4)
+        assert stages[0]._exporter.min_peak_to_mean_ratio == pytest.approx(1.6)
+        assert not rank0_path.exists()
+
+        # 2. Local Stage 1 gain (1.5) + Stage 0 regression (1.9 -> global 1.7 > 1.6) does not export.
+        stages[0].model_states["t"]._placement_export_map.copy_(torch.tensor([[1, 0]]))
+        stages[0]._exporter.mark_committed("target")
+        stages[1].model_states["t"]._placement_export_map.copy_(torch.tensor([[0, 1]]))
+        stages[1]._exporter.mark_committed("target")
+        eval_stage(1, 1.5, 1.6)
+        assert not rank0_path.exists()
+        eval_stage(0, 1.9)
+        assert not rank0_path.exists()
+
+        # 3. Whole-model improvement waits for both stages, then stitches on rank 0 only.
+        stages[0].model_states["t"]._placement_export_map.copy_(torch.tensor([[0, 1]]))
+        eval_stage(1, 1.1, 1.6)
+        assert not rank0_path.exists()
+        eval_stage(0, 1.2)
+        assert rank0_path.exists() and not rank2_path.exists()
+        assert json.loads(rank0_path.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "ep_size": 2,
+            "target": {
+                "num_logical_experts": 2,
+                "num_redundant_experts": 0,
+                "physical_to_logical_map": [[0, 1], [0, 1]],
+            },
+            "draft": {"num_logical_experts": 2, "num_redundant_experts": 0, "physical_to_logical_map": [[1, 0]]},
+        }
+
+        # 4. Draft-only commit exports only when draft's own ratio improves.
+        stages[1].model_states["d"]._placement_export_map.copy_(torch.tensor([[0, 1]]))
+        stages[1]._exporter.mark_committed("draft")
+        eval_stage(1, 1.3, 1.7)
+        assert json.loads(rank0_path.read_text(encoding="utf-8"))["draft"]["physical_to_logical_map"] == [[1, 0]]
+        stages[1]._exporter.mark_committed("draft")
+        eval_stage(1, 1.3, 1.1)
+        assert json.loads(rank0_path.read_text(encoding="utf-8"))["draft"]["physical_to_logical_map"] == [[0, 1]]
+    finally:
+        for st in stages:
+            if st._exporter is not None:
+                st._exporter.close()
+
+
+@pytest.mark.parametrize("ep_rank", [0, 1])
+def test_ratio_gated_export_lifecycle_and_rank0_only_write(monkeypatch, tmp_path: Path, ep_rank: int):
+    path = tmp_path / "placement.json"
+    improved_map = torch.tensor([[0, 2, 1, 0]])
+    loads = [90.0, 10.0]
+
+    def fake_reduce(tensor: torch.Tensor, op=torch.distributed.ReduceOp.SUM, group=None):
+        if tensor.dtype == torch.int32:
+            tensor.fill_(1)
+        else:
+            tensor.fill_(max(loads) if op == torch.distributed.ReduceOp.MAX else sum(loads))
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank, world_size=2))
+    monkeypatch.setattr(
+        eplb_state, "get_eplb_group", lambda: SimpleNamespace(cpu_group=object(), device_group=object())
+    )
+    monkeypatch.setattr(eplb_state, "all_reduce", fake_reduce)
+    monkeypatch.setattr(
+        upstream_eplb_state.EplbState, "rearrange", lambda self, is_profile=False, rank_mapping=None: None
+    )
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", MagicMock())
+
+    ms = SimpleNamespace(
+        model=SimpleNamespace(num_logical_experts=3, num_physical_experts=4, num_moe_layers=1),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 2]]),
+        expert_load_window=torch.tensor([[[1, 1, 1, 1]], [[0, 0, 0, 0]]], dtype=torch.int64),
+        _placement_export_map=torch.tensor([[0, 1, 0, 2]]),
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended, state.is_async, state.policy = False, False, None
+    state.expert_load_window_size = 2
+    state.parallel_config = SimpleNamespace(enable_elastic_ep=False)
+    monkeypatch.setattr(state, "_has_global_fresh_recorded_load", lambda: True)
+    state.model_states = {}
+    state.enable_placement_export(str(path))
+    assert state._exporter is not None
+    exporter = state._exporter
+    state.model_states["t"] = ms
+    state._placement_model_roles = {"t": "target"}
+    state._initialize_load_stats_state(ms)
+    state._num_recorded_load_steps = 1
+    state._local_load_collection_mask[0] = int(ep_rank == 0)
+    state._physical_load_sample_slots[0] = 0 if ep_rank == 0 else -1
+
+    # 1st rearrange: baseline recorded (1.8), initial layout is not written.
+    state.rearrange()
+    assert exporter.min_peak_to_mean_ratio == pytest.approx(1.8)
+    assert not path.exists()
+
+    # 2nd rearrange after commit with lower ratio (1.1): only rank 0 writes.
+    ms._placement_export_map.copy_(improved_map)
+    exporter.mark_committed()
+    loads[:] = [55.0, 45.0]
+    state.rearrange()
+    assert path.exists() == (ep_rank == 0)
+    expected = {
+        "version": 1,
+        "ep_size": 2,
+        "target": {"num_logical_experts": 3, "num_redundant_experts": 1, "physical_to_logical_map": [[0, 2, 1, 0]]},
+    }
+    if ep_rank == 0:
+        assert json.loads(path.read_text(encoding="utf-8")) == expected
+
+    # Unchanged cycle with lower ratio (1.04) updates min without rewriting; worse ratio (1.5) keeps file.
+    loads[:] = [52.0, 48.0]
+    with patch("vllm_ascend.distributed.eplb.placement.write_placement_snapshot") as write_mock:
+        state.rearrange()
+        write_mock.assert_not_called()
+    assert exporter.min_peak_to_mean_ratio == pytest.approx(1.04)
+
+    ms._placement_export_map.copy_(torch.tensor([[1, 2, 0, 1]]))
+    exporter.mark_committed()
+    loads[:] = [75.0, 25.0]
+    state.rearrange()
+    if ep_rank == 0:
+        assert json.loads(path.read_text(encoding="utf-8")) == expected

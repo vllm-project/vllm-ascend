@@ -851,6 +851,13 @@ def _wrap_move_to_workspace(original_move):
                 result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                export_map = getattr(model_state, "_placement_export_map", None)
+                committed_layer_map = getattr(pending_result, "new_physical_to_logical_map", None)
+                if export_map is not None and committed_layer_map is not None:
+                    export_map[layer_idx].copy_(committed_layer_map)
+                    on_committed = getattr(model_state, "_on_placement_layer_committed", None)
+                    if on_committed is not None:
+                        on_committed()
                 if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):

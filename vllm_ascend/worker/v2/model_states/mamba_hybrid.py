@@ -43,6 +43,7 @@ from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBui
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.kv_connector import needs_mamba_state_copy_after_load
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
@@ -328,7 +329,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).
             return
-        if has_kv_transfer_group() and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False):
+        if has_kv_transfer_group() and needs_mamba_state_copy_after_load(get_kv_transfer_group()):
             # Sync KV loads run later in KVConnector.pre_forward. Keep the
             # decision kernel above before attention metadata construction,
             # but copy the loaded state only after pre_forward has completed.

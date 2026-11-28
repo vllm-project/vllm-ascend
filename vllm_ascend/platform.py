@@ -109,7 +109,7 @@ QWEN_FA3_TARGETS = frozenset(
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "expert_placement_path", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 _DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
@@ -1299,6 +1299,21 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     # EPLB load. Keep target validation strict and preserve other checks.
     if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
         raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
+    expert_placement_path = eplb_config.get("expert_placement_path")
+    if expert_placement_path is not None:
+        if not isinstance(expert_placement_path, str):
+            raise ValueError("additional_config.eplb_config.expert_placement_path must point to a .json file.")
+        normalized_path = expert_placement_path.strip()
+        basename = os.path.basename(normalized_path)
+        if (
+            not normalized_path
+            or not basename.endswith(".json")
+            or basename == ".json"
+            or os.path.isdir(normalized_path)
+        ):
+            raise ValueError("additional_config.eplb_config.expert_placement_path must point to a .json file.")
+        if not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+            raise ValueError("additional_config.eplb_config.expert_placement_path requires --enable-eplb.")
     if vllm_config.parallel_config.enable_eplb:
         upstream_eplb_config = vllm_config.parallel_config.eplb_config
         if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
