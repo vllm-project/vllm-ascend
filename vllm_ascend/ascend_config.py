@@ -66,6 +66,124 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
+_ROW_BYTES_ENGRAM_SSD = 288
+_SLOT_META_BYTES_ENGRAM_SSD = 12
+_IO_SLOT_BYTES_ENGRAM_SSD = 16 * 1024  # SSDF_BUFSZ in the native reader
+
+
+@config
+class EngramSSDConfig:
+    """``additional_config["engram_ssd"]``: Engram SSD offload (default off).
+
+    ``cache_payload_bytes`` is the per-TP-shared-group payload budget for
+    BOTH layers combined (decimal bytes; no GB/GiB mixing). Directory, slot
+    metadata, rebuild peak and IO buffers are accounted separately in
+    :meth:`resource_estimate` and must fit ``total_host_budget_bytes``.
+    """
+
+    enabled: bool = False
+    manifest: str = ""
+    # manifest 的 artifact identity(version 串), 启动时精确匹配, 见 ssd/manifest.py
+    artifact_version: str = ""
+    table_paths: list[str] = dataclasses.field(default_factory=list)
+    cache_payload_bytes: int = 20_000_000_000
+    threads_per_disk: int = 16
+    queue_depth: int = 1024
+    # AIO event capacity per worker, independent of the submission queue depth.
+    io_setup_events: int = 1280
+    # 空 = 部署层必须显式给同 NUMA 的可用 CPU; 无法唯一确定时拒绝启动。
+    io_cpu_list: list[int] = dataclasses.field(default_factory=list)
+    # 每 owner(同 TP 位 DP 组 leader)的宿主内存上限; 0 = 必须由部署明确给出。
+    total_host_budget_bytes: int = 0
+    # 行缓存目录重建阈值(tombstone 数); 0 = capacity/4 起步值, 按实测调。
+    rebuild_threshold: int = 0
+    # One total budget for post-warmup rendezvous, worker RPC and global ack.
+    protocol_activation_timeout_s: int = 1800
+    layerwise_overlap: bool | None = None
+    prefill_lookahead: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate_engram_ssd(self):
+        if self.prefill_lookahead and (not self.enabled or self.layerwise_overlap is False):
+            raise ValueError("Engram SSD prefill_lookahead requires enabled layerwise_overlap")
+        if self.protocol_activation_timeout_s <= 0:
+            raise ValueError("protocol_activation_timeout_s must be positive")
+        if self.cache_payload_bytes <= 0:
+            raise ValueError("cache_payload_bytes must be positive (decimal bytes)")
+        if not (1 <= self.threads_per_disk <= 64):
+            raise ValueError("threads_per_disk must be in [1, 64]")
+        if not (1 <= self.queue_depth < (1 << 20)):
+            raise ValueError("queue_depth must be in [1, 2^20)")
+        if self.io_setup_events < 1:
+            raise ValueError("io_setup_events must be >= 1")
+        if self.total_host_budget_bytes < 0:
+            raise ValueError("total_host_budget_bytes must be non-negative")
+        if not self.enabled:
+            return self
+        if not self.manifest:
+            raise ValueError("engram_ssd.enabled requires manifest path")
+        if not self.artifact_version:
+            raise ValueError("engram_ssd.enabled requires artifact_version "
+                             "(the packed manifest's identity string)")
+        if len(self.table_paths) not in (1, 2):
+            raise ValueError("table_paths must name 1 full packed file or 2 "
+                             "files (second = exact L14 slice)")
+        if self.total_host_budget_bytes == 0:
+            raise ValueError("engram_ssd requires an explicit "
+                             "total_host_budget_bytes per owner")
+        if len(self.table_paths) == 2 and not self.io_cpu_list:
+            raise ValueError("dual-disk mode requires an explicit io_cpu_list")
+        return self
+
+    def resolve_overlap(
+        self, *, layerwise_supported: bool, lookahead_supported: bool
+    ) -> EngramSSDConfig:
+        """Resolve omitted options after the model establishes its parallel topology."""
+        if self.layerwise_overlap and not layerwise_supported:
+            raise ValueError(
+                "layerwise Engram SSD requires eager or FULL_DECODE_ONLY in MRV2, "
+                "TP1/PP1, ordered layers, and shared slots for a full DP/PCP batch"
+            )
+        layerwise = layerwise_supported and self.layerwise_overlap is not False
+        lookahead_supported = layerwise and lookahead_supported
+        if self.prefill_lookahead and not lookahead_supported:
+            raise ValueError("Engram SSD prefill_lookahead requires layerwise overlap, eager execution, DP1 and DCP1")
+        return dataclasses.replace(
+            self,
+            layerwise_overlap=layerwise,
+            prefill_lookahead=lookahead_supported and self.prefill_lookahead is not False,
+        )
+
+    def capacity(self, row_bytes: int = _ROW_BYTES_ENGRAM_SSD) -> int:
+        """两层共享的载荷槽位数。"""
+        if row_bytes not in (264, 288):
+            raise ValueError(f"Unsupported Engram SSD row size: {row_bytes}")
+        return self.cache_payload_bytes // row_bytes
+
+    def resource_estimate(self, row_bytes: int = _ROW_BYTES_ENGRAM_SSD) -> dict:
+        """常驻与峰值内存账本(bytes, 每 TP 共享组一份; 共享平面只计物理一份)。"""
+        cap = self.capacity(row_bytes)
+        buckets = 8
+        while buckets < cap * 3 // 2 + 1:
+            buckets *= 2
+        payload = cap * row_bytes
+        directory = buckets * 8
+        slot_meta = cap * _SLOT_META_BYTES_ENGRAM_SSD
+        rebuild_peak = directory
+        disks = max(1, len(self.table_paths))
+        io_buffers = disks * self.threads_per_disk * self.queue_depth * _IO_SLOT_BYTES_ENGRAM_SSD
+        resident = payload + directory + slot_meta + io_buffers
+        return {
+            "capacity": cap, "payload_bytes": payload, "directory_bytes": directory,
+            "directory_buckets": buckets, "slot_meta_bytes": slot_meta,
+            "rebuild_peak_bytes": rebuild_peak, "io_buffer_bytes": io_buffers,
+            "decode_resident_bytes": resident, "peak_bytes": resident + rebuild_peak,
+            "budget_bytes": self.total_host_budget_bytes,
+            "within_budget": (resident + rebuild_peak) <= self.total_host_budget_bytes
+            if self.total_host_budget_bytes else None,
+        }
+
+
 @config(config=ConfigDict(frozen=True))
 class KVPPConfig:
     """Configuration for KV layer parallelism on Ascend."""
@@ -716,6 +834,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
+    engram_ssd: EngramSSDConfig = dataclasses.field(default_factory=EngramSSDConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
@@ -786,7 +905,50 @@ class AscendConfig:
 
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
-    # pydantic after-validator). Preserves the original __init__ ordering —
+    # pydantic after-validator).
+    def _validate_engram_ssd_cross_config(self, vc, engram_config) -> list[str]:
+        """Collect unsupported SSD deployment settings before starting workers."""
+        problems: list[str] = []
+        pc = vc.parallel_config
+        if self.shared_engram is not None:
+            problems.append("engram_ssd is incompatible with shared_engram")
+        if pc.pipeline_parallel_size != 1:
+            problems.append("engram_ssd requires PP=1")
+        if (getattr(pc, "nnodes", 1) != 1
+                or getattr(pc, "data_parallel_size_local", pc.data_parallel_size) != pc.data_parallel_size):
+            problems.append("engram_ssd requires all DP/PCP workers on the same node")
+        if pc.enable_eplb or pc.enable_elastic_ep:
+            problems.append("engram_ssd is incompatible with EPLB and elastic EP")
+        if pc.use_ubatching:
+            problems.append("engram_ssd requires one batch at a time per worker")
+        if vc.model_config.enable_sleep_mode:
+            problems.append("engram_ssd is incompatible with sleep mode")
+        if engram_config is None:
+            problems.append("engram_ssd requires an engram_config")
+        else:
+            if not getattr(engram_config, "cpu_offload", False):
+                problems.append("engram_ssd requires engram cpu_offload=True")
+            if engram_config.embedding_across_dp or engram_config.use_thp or engram_config.disk_offload:
+                problems.append("engram_ssd requires embedding_across_dp, use_thp and disk_offload to be disabled")
+            dp_size = pc.data_parallel_size * pc.prefill_context_parallel_size
+            if dp_size > 1 and not getattr(engram_config, "dp_shared_memory", False):
+                problems.append("engram_ssd with DP*PCP>1 requires "
+                                "dp_shared_memory=True (leader-owned payload plane)")
+            disks = max(len(self.engram_ssd.table_paths), 1)
+            if (dp_size > 1 and self.engram_ssd.io_cpu_list
+                    and len(self.engram_ssd.io_cpu_list)
+                    < disks * self.engram_ssd.threads_per_disk):
+                problems.append(
+                    f"DP mode needs >= {disks * self.engram_ssd.threads_per_disk} "
+                    f"io CPUs for {disks} disk(s), "
+                    f"got {len(self.engram_ssd.io_cpu_list)}")
+        est = self.engram_ssd.resource_estimate()
+        if est["within_budget"] is False:
+            problems.append(
+                f"engram_ssd peak estimate {est['peak_bytes']} exceeds "
+                f"total_host_budget_bytes {self.engram_ssd.total_host_budget_bytes}")
+        return problems
+
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
@@ -811,6 +973,11 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if self.engram_ssd.enabled:
+            problems = self._validate_engram_ssd_cross_config(vc, engram_config)
+            if problems:
+                raise ValueError(
+                    "engram_ssd configuration rejected: " + "; ".join(problems))
         if self.enable_force_eplb:
             logger.warning(
                 "enable_force_eplb is enabled: it forces a deterministic round-robin "

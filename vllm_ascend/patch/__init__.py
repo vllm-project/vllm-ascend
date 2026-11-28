@@ -1530,3 +1530,10 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+# Engram SSD startup lifecycle (platform/patch_engine_core.py):
+#   EngineCore.__init__ is wrapped for shared SSD workers. It runs
+#   the SSD engine-parent rendezvous / worker activation RPC / global ack only
+#   when SSD offload shares a cache across DP or PCP, after warmup and before READY.
+#   Existing run_engine_core import path reinstalls it under multiprocessing
+#   spawn. No upstream post-warmup/pre-READY extension point currently exists.
+#   Remove this wrapper when upstream exposes that startup lifecycle hook.

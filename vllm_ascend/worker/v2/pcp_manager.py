@@ -811,6 +811,17 @@ class AscendPCPManager(PCPManager):
             hidden_restore_idx=hidden_restore_idx,
         )
 
+    def prefill_lookahead_layout(self, num_tokens: int) -> tuple[tuple[slice, ...], int]:
+        # Compute a singleton eager layout without changing the live PCP mapping.
+        lengths = np.array([num_tokens], dtype=np.int32)
+        prefilling = np.array([True])
+        boundaries = np.array([0, num_tokens], dtype=np.int32)
+        segments = self._get_rank_segments(self.pcp_rank, lengths, prefilling, boundaries)
+        return (
+            tuple(segment.global_batch_slice for segment in segments),
+            self.get_num_tokens_for_dispatch(lengths, prefilling),
+        )
+
     def build_attention_context(
         self,
         input_batch: AscendInputBatch | None = None,

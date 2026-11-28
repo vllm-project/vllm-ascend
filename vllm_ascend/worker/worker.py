@@ -208,6 +208,10 @@ class NPUWorker(GPUWorker):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         ascend_config = init_ascend_config(vllm_config)
+        if ascend_config.engram_ssd.enabled:
+            from vllm_ascend.models.deepseek_v41.engram.ssd.distributed import ProtocolEpoch
+
+            ProtocolEpoch.reset()
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging(ascend_config.ascend_log_path)
@@ -1332,6 +1336,18 @@ class NPUWorker(GPUWorker):
 
     # Lockstep wave sync for idle DP ranks (never burns manual_dump);
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    def activate_engram_ssd_protocol(self, epoch: int = 1) -> int:
+        """Activate the row-sharing protocol after engine warmup.
+
+        Called on every DP worker by the parent process after ALL engine
+        cores finish warmup, before READY; never self-timed inside a worker.
+        """
+        from vllm_ascend.models.deepseek_v41.engram.ssd.distributed import ProtocolEpoch
+
+        active_epoch = ProtocolEpoch.activate(epoch)
+        logger.info("Engram SSD DP protocol activated (epoch=%d)", active_epoch)
+        return active_epoch
+
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
