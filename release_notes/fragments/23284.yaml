@@ -1,0 +1,13 @@
+pr: 23284
+entries:
+  - category: performance
+    text: >-
+      Admit in-page GDN state checkpoints to the prefix cache on a repeat
+      sighting. Track first sightings in a bounded candidate table and skip
+      an otherwise unnecessary first-sighting prefill split within a page.
+      Candidate tracking applies to local prefix caching without speculative
+      decoding or KV transfer. Bind each chain to a full-attention cache key
+      and group. The chain survives KV page migration and is reclaimed when
+      that cache entry is evicted or the prefix cache is reset.
+      Complete candidate hash chains can promote an earlier common PMU
+      boundary, including when the prompts fit within one scheduler block.

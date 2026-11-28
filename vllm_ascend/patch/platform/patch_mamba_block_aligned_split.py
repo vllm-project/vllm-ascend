@@ -37,6 +37,7 @@ import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -55,6 +56,56 @@ _EXPECTED_PARAMETERS = (
 )
 
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
+
+
+def _elide_first_tail_checkpoint(
+    scheduler: Scheduler, request: Request, start: int, num_new_tokens: int, aligned_tokens: int
+) -> int:
+    if getattr(request, "_ascend_gdn_promotion", 0):
+        request._ascend_gdn_promotion = 0
+    if not getattr(scheduler, "mamba_partial_cache_hit", False) or scheduler.mamba_has_prefill_checkpoint_blocks:
+        return aligned_tokens
+
+    end = start + num_new_tokens
+    page_size = scheduler.cache_config.block_size
+    if (
+        end != request.num_prompt_tokens
+        or end != request.num_tokens
+        or start // page_size != (end - 1) // page_size
+        or (scheduler.mamba_shared_prefix_checkpoint and start < request.shared_prefix_boundary < end)
+    ):
+        return aligned_tokens
+
+    tail = get_mamba_prefill_checkpoint_position(
+        request.num_prompt_tokens,
+        scheduler.hash_block_size,
+        False,
+        num_hash_lookahead_tokens=scheduler.num_hash_lookahead_tokens,
+    )
+    if not start < tail < end or aligned_tokens != num_new_tokens and start + aligned_tokens != tail:
+        return aligned_tokens
+
+    from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager, MambaManager
+
+    coordinator = scheduler.kv_cache_manager.coordinator
+    managers = [m for m in coordinator.single_type_managers if isinstance(m, MambaManager)]
+    if managers and all(
+        isinstance(m, AscendMambaManager)
+        and m.block_size == page_size
+        and not m.has_prefill_checkpoint_blocks
+        and m.checkpoint_candidate_key(request, tail) is not None
+        for m in managers
+    ):
+        manager = managers[0]
+        step = scheduler.hash_block_size
+        lower_bound = start if getattr(coordinator, "supports_gdn_interior_promotion", False) else tail - step
+        for position in range(tail, lower_bound, -step):
+            if manager.has_repeated_checkpoint(request, position):
+                if position != tail:
+                    request._ascend_gdn_promotion = position
+                return position - start
+        return num_new_tokens
+    return aligned_tokens
 
 
 @functools.wraps(_original_mamba_block_aligned_split)
@@ -175,7 +226,7 @@ def _mamba_block_aligned_split(
             replay_boundary = max(request.num_prompt_tokens - block_size, 0)
             if start < replay_boundary < start + result:
                 result = replay_boundary - start
-        return result
+        return _elide_first_tail_checkpoint(self, request, num_computed_tokens, num_new_tokens, result)
     finally:
         for name, value in original_drop_values.items():
             setattr(self, name, value)
