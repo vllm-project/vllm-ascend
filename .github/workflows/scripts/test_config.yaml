@@ -48,6 +48,7 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
     - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
+    - tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py
     - tests/e2e/pull_request/one_card/test_hisparse_attention.py
     - tests/e2e/pull_request/one_card/test_hisparse_integration.py
     - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
@@ -76,6 +77,8 @@ skip_tests:
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+  # Temporarily skip while A3 NPU startup timeouts are investigated in PR #23118.
+  - tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py
 
 # === Accuracy Tests ===
 # The accuracy test files. All A3 partitions now target 560T labels directly,
@@ -87,6 +90,7 @@ accuracy_tests:
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8b_dspark_batch_sharded.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py
   - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py

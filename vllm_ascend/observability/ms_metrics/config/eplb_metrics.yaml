@@ -1,23 +1,29 @@
-# EPLB hotness is the first custom handler migrated to vLLM Ascend.
-- symbol: vllm_ascend.eplb.core.eplb_worker:EplbWorker.do_update
-  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_do_update_hotness_handler
+# EPLB for Model Runner V2. The handlers only read state that upstream
+# EplbState already produces. The load-balance entry hooks
+# ``AscendEplbState._sync_load_pass``, a pass-through override that exists
+# only to give this provider a ``vllm_ascend`` symbol to attach to; it adds
+# no behaviour. Entries fire on balancedness-log or rebalance-interval events
+# rather than every decode step.
+#
+# Load balance needs EPLB enabled and --eplb-config.log_balancedness true
+# (upstream default false: balancedness logging adds communication), with
+# log_balancedness_interval setting the sample cadence; otherwise these series
+# stay empty. Weight transfer needs EPLB enabled but no logging switch.
 
-- symbol: vllm_ascend.eplb.core.eplb_device_transfer_loader:D2DExpertWeightLoader.update_expert_map_and_weight
-  handler: ms_service_metric.provider_handlers:phase_all_handler
-  metrics:
-    - name: eplb:expert_weight_update:duration
+- symbol: vllm_ascend.distributed.eplb.eplb_state:AscendEplbState._sync_load_pass
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_sync_load_handler
 
-- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_expert_map
-  handler: ms_service_metric.provider_handlers:phase_all_handler
-  metrics:
-    - name: eplb:expert_map_update:duration
-
-- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_log2phy_map
-  handler: ms_service_metric.provider_handlers:phase_all_handler
-  metrics:
-    - name: eplb:log2phy_map_update:duration
-
-- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_expert_weight
-  handler: ms_service_metric.provider_handlers:phase_all_handler
-  metrics:
-    - name: eplb:expert_weight_replace:duration
+# HIXL communicator: one accumulator per layer, recorded when the layer is
+# executed. HIXL transfers are receiver-initiated, so add_send is never called
+# on that path: eplb:transfer:send_experts always reads 0 and only recv_experts,
+# comm_requests and est_bytes carry values. The send hook is kept for push-based
+# communicators. The Gloo communicator inherits add_send/add_recv from upstream
+# and is therefore out of scope; see the PR description.
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.set_transfer_context
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_context_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.add_send
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_send_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.add_recv
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_recv_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.execute
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_execute_handler

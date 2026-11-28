@@ -34,8 +34,8 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
+from vllm_ascend.worker.v2.spec_decode.mtp import get_mtp_draft_parallel_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
 )
@@ -56,10 +56,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             model_config_for_vllm = copy.copy(draft_model_config)
             model_config_for_vllm.hf_overrides = {}
 
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
+        parallel_config = get_mtp_draft_parallel_config(self.vllm_config)
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=model_config_for_vllm,
@@ -275,30 +272,17 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
         # Call GPU AR generate_draft (sample + update_draft_inputs) without the
         # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        if vllm_version_is("0.33.0"):
-            TargetDependentARSpeculator._generate_draft(
-                self,
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                # vLLM #60335 added `num_speculative_steps` on main.
-                num_speculative_steps,
-            )
-        else:
-            TargetDependentARSpeculator._decode(
-                self,
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                # vLLM #60335 added `num_speculative_steps` on main.
-                num_speculative_steps,
-            )
+        TargetDependentARSpeculator._decode(
+            self,
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            # vLLM #60335 added `num_speculative_steps` on main.
+            num_speculative_steps,
+        )
         if attn_metadata is None or torch.npu.is_current_stream_capturing():
             return
         self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)

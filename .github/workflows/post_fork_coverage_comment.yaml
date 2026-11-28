@@ -20,24 +20,17 @@
 # read-only and cannot write PR comments, so the whole job is done here with
 # a token that has pull-requests: write.
 #
-# Two triggers:
-# - workflow_run (E2E completed) is the main path: it fires once the E2E run
-#   finishes (including re-runs). The run does NOT need to be green - the
-#   comment only depends on the cpu-ut jobs having uploaded the
-#   coverage-report artifact, which they do on success even when the e2e
-#   matrix fails. There is no per-job completion trigger in GitHub Actions,
-#   so run completion is the earliest point a fork comment can be posted.
+# Single trigger:
+# - workflow_run (E2E completed) fires once the E2E run finishes (including
+#   re-runs). The run does NOT need to be green - the comment only depends on
+#   the cpu-ut jobs having uploaded the coverage-report artifact, which they
+#   do on success even when the e2e matrix fails. There is no per-job
+#   completion trigger in GitHub Actions, so run completion is the earliest
+#   point a fork comment can be posted.
 #   NOTE: for fork PRs the workflow_run payload carries an empty
 #   pull_requests[] array, so the PR number is not read from the payload -
 #   it travels in the pr-context artifact uploaded by the E2E run's
 #   upload-pr-context job (pr_test.yaml).
-# - pull_request_target (opened/synchronize) covers the rare case where a
-#   run for the head sha already exists when the PR is opened or re-opened.
-#   The run does not need to be green: cpu-ut uploads the coverage-report
-#   artifact even on failed runs, so the latest run is used regardless of
-#   its conclusion. Without the workflow_run trigger, a fork PR would never
-#   get its comment, because this event fires at push time, before a run for
-#   the new head sha can exist.
 #
 # SECURITY: this workflow never checks out or executes the fork's code. It
 # only downloads the diff-coverage markdown produced by the trusted
@@ -55,10 +48,6 @@ on:
       - E2E
     types:
       - completed
-  pull_request_target:
-    types:
-      - opened
-      - synchronize
 
 concurrency:
   # Key by head SHA (same pattern as bot_ci_gate_comment.yaml): a batch of
@@ -68,7 +57,7 @@ concurrency:
   # newest one posts. Do NOT key by workflow_run.id (no dedup, runs pile up
   # in the runner queue) or by pull_requests[0].number (empty for fork PRs
   # on workflow_run, which would collapse every PR into one group).
-  group: post-coverage-comment-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  group: post-coverage-comment-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 permissions:
@@ -83,45 +72,17 @@ jobs:
     # run's upload-pr-context job) gates the posting inside the steps - so a
     # failed e2e matrix does not block the comment as long as cpu-ut
     # uploaded the coverage report.
-    if: >-
-      ${{
-        github.event_name == 'pull_request_target' ||
-        github.event_name == 'workflow_run'
-      }}
     # Self-hosted CPU label: this org has no GitHub-hosted runners, so
     # ubuntu-latest would queue forever. Lightweight artifact-download and
     # comment-posting steps only.
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
-      - name: Find pull_request run for this head
-        if: ${{ github.event_name == 'pull_request_target' }}
-        id: find-run
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Any run for this head sha qualifies: cpu-ut uploads the
-            // coverage-report artifact even when the run ends red, so there
-            // is no reason to require status success.
-            const { data } = await github.rest.actions.listWorkflowRunsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'pr_test.yaml',
-              head_sha: context.payload.pull_request.head.sha,
-              event: 'pull_request',
-              per_page: 1,
-            });
-            return data.workflow_runs[0]?.id || '';
-
       - name: Resolve source run id
         id: resolve-run
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            # The E2E run that just completed. Its cpu-ut jobs may have
-            # uploaded coverage-report even when the run itself failed.
-            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_id=${{ steps.find-run.outputs.result }}" >> "$GITHUB_OUTPUT"
-          fi
+          # The E2E run that just completed. Its cpu-ut jobs may have
+          # uploaded coverage-report even when the run itself failed.
+          echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
 
       - name: Download PR context
         if: ${{ steps.resolve-run.outputs.run_id != '' }}
@@ -141,19 +102,15 @@ jobs:
         if: ${{ steps.resolve-run.outputs.run_id != '' }}
         id: resolve-pr-number
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            # workflow_run.pull_requests is empty for fork PRs, so the PR
-            # number comes from the pr-context artifact. Its absence also
-            # proves this run is not a pull_request run - do not comment.
-            if [ -f ./pr-context/pr_context.json ]; then
-              pr_number=$(python3 -c "import json; print(json.load(open('./pr-context/pr_context.json'))['pr_number'])")
-              echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
-            else
-              echo "::warning::pr-context artifact not found; nothing to post"
-              echo "pr_number=" >> "$GITHUB_OUTPUT"
-            fi
+          # workflow_run.pull_requests is empty for fork PRs, so the PR
+          # number comes from the pr-context artifact. Its absence also
+          # proves this run is not a pull_request run - do not comment.
+          if [ -f ./pr-context/pr_context.json ]; then
+            pr_number=$(python3 -c "import json; print(json.load(open('./pr-context/pr_context.json'))['pr_number'])")
+            echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
           else
-            echo "pr_number=${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+            echo "::warning::pr-context artifact not found; nothing to post"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download diff coverage report

@@ -7,7 +7,7 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
-from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
+from vllm_ascend.utils import enable_sfa
 
 
 def get_cp_max_num_reqs(vllm_config: Any) -> int:
@@ -34,21 +34,6 @@ def use_dcp_q_replicate(vllm_config) -> bool:
         logger.warning_once("Ascend dcp_q_replicate is not supported for LoRA adapters; disabling Q replication.")
         return False
     return True
-
-
-def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
-    """Shard PCP decode requests, including speculative target verification.
-
-    The decision uses declared vLLM fields so cloning a draft
-    ``ParallelConfig`` with ``replace()`` remains supported. KPool models
-    keep replicated decodes so every PCP rank advances its head-sharded
-    Mamba state in the same request order.
-    """
-    if model_uses_kpool_indexer(getattr(vllm_config, "model_config", None)):
-        # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
-        # recurrent-state ownership and request ordering across PCP ranks.
-        return False
-    return vllm_config.parallel_config.pcp_shard_decode_requests
 
 
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
@@ -181,7 +166,7 @@ class DCPImplMixin:
         head_end = head_start + num_heads
         return tuple(query[:, head_start:head_end].contiguous() for query in queries)
 
-    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False):
+    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False, output_mask=None):
         pcp_group = getattr(self, "pcp_group", None)
         if pcp_group is not None and pcp_group.world_size > 1:
             # Match SFA: TP exchanges distinct head shards, then PCP gathers
@@ -195,6 +180,7 @@ class DCPImplMixin:
                 self.tp_group.unique_name,
                 pcp_group.unique_name,
                 defer_combine=defer_combine,
+                **({"output_mask": output_mask} if output_mask is not None else {}),
             )
         return torch.ops.vllm.dcp_a2a_fused(
             attn_output,
@@ -203,4 +189,5 @@ class DCPImplMixin:
             1,
             self.dcp_group.unique_name if self.dcp_size > 1 else "",
             defer_combine=defer_combine,
+            **({"output_mask": output_mask} if output_mask is not None else {}),
         )

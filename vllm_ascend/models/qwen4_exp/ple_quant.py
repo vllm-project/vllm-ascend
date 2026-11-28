@@ -159,8 +159,7 @@ def load_ple_quantized_weights(
                 )
             if index in embedding._ple_seen_scale_shards:
                 raise ValueError(f"Duplicate PLE scale shard: {index}")
-            # Use the parameter loader so shared host storage also honors its
-            # owner-only writes and error propagation across DP replicas.
+            # Load this replica's scale shard with the same ETP row mapping as its codes.
             embedding.weight_scale.weight_loader(embedding.weight_scale, value, checkpoint_start=checkpoint_start)
             embedding._ple_seen_scale_shards.add(index)
             if index in embedding._ple_expected_scale_shards:

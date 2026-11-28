@@ -46,6 +46,14 @@ class TestAscendAttentionBackend310(TestBase):
         result = AscendAttentionBackend310.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 75, 20, 16))
 
+    def test_get_preferred_block_size(self):
+        self.assertEqual(AscendAttentionBackend310.get_supported_kernel_block_sizes(), [128, 64])
+        self.assertTrue(AscendAttentionBackend310.supports_block_size(64))
+        self.assertTrue(AscendAttentionBackend310.supports_block_size(128))
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(16), 128)
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(64), 128)
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(128), 128)
+
 
 class TestAscendAttentionBackendImpl310(TestBase):
     def setUp(self):
@@ -108,7 +116,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
         result = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -155,7 +163,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -191,7 +199,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -219,7 +227,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.num_prefills = 0
         mock_using_paged_attention.return_value = True
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 

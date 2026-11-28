@@ -33,14 +33,8 @@ msgstr ""
 "\"getting_started/quick_start/ascend_image/image_download_mirror.inc.md\" "
 "%}{% endfilter %}"
 
-msgid "=== \"Ubuntu\""
-msgstr "=== \"Ubuntu\""
-
 msgid "<span id=\"quick-start-atlas-a3-ubuntu\"></span>"
 msgstr "<span id=\"quick-start-atlas-a3-ubuntu\"></span>"
-
-msgid "=== \"openEuler\""
-msgstr "=== \"openEuler\""
 
 msgid "<span id=\"quick-start-atlas-a3-openeuler\"></span>"
 msgstr "<span id=\"quick-start-atlas-a3-openeuler\"></span>"
@@ -51,13 +45,15 @@ msgstr "#### 启动容器 {: #quick-start-atlas-a3-container }"
 msgid "???+ warning \"A3 container startup requirements\""
 msgstr "???+ warning \"A3容器启动要求\""
 
-msgid ""
-"A3 uses a dual-DIE design and requires two Ascend device nodes, such as "
-"`/dev/davinci0` and `/dev/davinci1`."
-msgstr "A3采用双DIE设计，需要两个昇腾设备节点，例如 `/dev/davinci0` 和 `/dev/davinci1`。"
-
 msgid "=== \"Ubuntu\""
 msgstr "=== \"Ubuntu\""
 
 msgid "=== \"openEuler\""
 msgstr "=== \"openEuler\""
+
+msgid ""
+"A3 uses a dual-DIE design: one NPU appears as two DIE devices, so "
+"`ASCEND_VISIBLE_DEVICES=0-1` selects one NPU."
+msgstr ""
+"A3 采用双 DIE 设计：一个 NPU 会呈现为两个 DIE 设备，因此 `ASCEND_VISIBLE_DEVICES=0-1` 选择的是一个 "
+"NPU。"

@@ -137,8 +137,6 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
     def test_pp_auxiliary_states_match_unsplit_target(self):
         from vllm.v1.worker.gpu.pp_utils import PPHandler
 
-        from vllm_ascend.utils import vllm_version_is
-
         class TargetLayer(nn.Module):
             use_sequence_parallel = False
 
@@ -174,10 +172,12 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
                     )
                     if not group.is_last_rank:
                         incoming = PPHandler.relay_aux_hidden_states(handler, incoming, output)
-                    elif vllm_version_is("0.33.0"):
-                        return output
-                    else:
+                    elif hasattr(PPHandler, "add_upstream_aux_hidden_states"):
+                        # vLLM main merges the earlier stages' slots in the runner.
                         return PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
+                    else:
+                        # v0.34.0 already collects them through the model's forward.
+                        return output
 
         expected = run((0, 6))
         for cuts in ((0, 2, 4, 6), (0, 0, 3, 6), (0, 3, 6, 6)):

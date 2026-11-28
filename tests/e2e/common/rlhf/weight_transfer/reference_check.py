@@ -3,14 +3,18 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
+import base64
 import json
 from contextlib import contextmanager
+from io import BytesIO
 
+from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
+    FIXED_WEIGHT_SEED,
     FixedRandomWeightSource,
     fixed_startup_checkpoint,
 )
@@ -116,7 +120,7 @@ def reference_serve_args(
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
 _REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
+    tuple[str, int, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
 ] = {}
 
 
@@ -129,6 +133,7 @@ def reference_signature(
     tensor_parallel_size: int,
     device_index: int,
     env_dict: dict[str, str] | None = None,
+    payload_seed: int = FIXED_WEIGHT_SEED,
     server_host: str = "127.0.0.1",
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Signature of a server that loaded the payload at normal startup.
@@ -141,6 +146,7 @@ def reference_signature(
     """
     cache_key = (
         case.id,
+        payload_seed,
         gpu_memory_utilization,
         tensor_parallel_size,
         device_index,
@@ -167,16 +173,46 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
+        signature = generation_signature(
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+        )
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
 
 
+IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
+
+
+def _quadrant_png_data_url(size: int = 384) -> str:
+    """``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
+    processor does not have to resize the input
+    """
+    half = size // 2
+    image = Image.new("RGB", (size, size), (0, 0, 128))
+    image.paste((255, 0, 128), (half, 0, size, half))
+    image.paste((0, 255, 128), (0, half, half, size))
+    image.paste((255, 255, 128), (half, half, size, size))
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+IMAGE_DATA_URL = _quadrant_png_data_url()
+
+
 def generation_signature(
-    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...]
+    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False
 ) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison."""
+    """Capture deterministic text and logprobs for exact reload comparison.
+
+    ``image_prompt`` appends one chat request carrying an image for multimodal
+    cases: the vision tower only runs when an image is in the batch, so without
+    it a dropped, renamed or reshaped vision tensor would not move the signature
+    and the case would prove nothing about the tower.
+    """
     signature = []
     for prompt in prompts:
         response = client.completions.create(
@@ -191,6 +227,27 @@ def generation_signature(
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
         signature.append((choice.text, token_logprobs))
+    if image_prompt:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": IMAGE_PROMPT},
+                        {"type": "image_url", "image_url": {"url": IMAGE_DATA_URL}},
+                    ],
+                }
+            ],
+            max_tokens=8,
+            temperature=0,
+            seed=0,
+            logprobs=True,
+        )
+        choice = response.choices[0]
+        token_logprobs = tuple(item.logprob for item in (choice.logprobs.content or ()))
+        assert token_logprobs, f"{model}: image generation returned no token logprobs"
+        signature.append((choice.message.content or "", token_logprobs))
     return signature
 
 
@@ -213,6 +270,7 @@ def weight_transfer_servers(
     reference = reference_signature(
         source,
         case,
+        payload_seed=source.seed,
         port=get_open_port(),
         gpu_memory_utilization=gpu_memory_utilization,
         tensor_parallel_size=tensor_parallel_size,
@@ -235,7 +293,9 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
+        dummy_signature = generation_signature(
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+        )
         yield server, reference, dummy_signature
 
 

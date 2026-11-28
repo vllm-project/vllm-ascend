@@ -6,7 +6,6 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "2048"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   SERVER_PORT: "DEFAULT_PORT"
 server_cmd: &server_cmd
   - "--prefix-cache-retention-interval"

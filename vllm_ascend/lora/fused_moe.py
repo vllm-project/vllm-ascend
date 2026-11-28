@@ -32,6 +32,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
@@ -168,10 +169,16 @@ def sync_lora_context(quant_method, lora_context):
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
-    if getattr(base_layer, "dynamic_eplb", False):
+    vllm_config = get_current_vllm_config_or_none()
+    enable_eplb = bool(
+        (vllm_config is not None and vllm_config.parallel_config.enable_eplb)
+        or getattr(getattr(base_layer, "moe_config", None), "enable_eplb", False)
+    )
+    if enable_eplb:
         raise AssertionError(
-            "Ascend MoE LoRA is incompatible with dynamic EPLB "
-            "(expert migration would break the per-expert LoRA layout)."
+            "Ascend MoE LoRA is incompatible with EPLB "
+            "(expert placement and migration do not rearrange per-expert LoRA weights). "
+            "Disable --enable-eplb when using MoE LoRA."
         )
     if get_ascend_config().enable_fused_mc2 != 0:
         raise AssertionError(

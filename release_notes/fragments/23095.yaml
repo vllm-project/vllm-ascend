@@ -1,0 +1,4 @@
+pr: 23095
+entries:
+  - category: dependency
+    text: The A2, A3, and A5 container images now ship with Mooncake NPU 0.3.14.post1.

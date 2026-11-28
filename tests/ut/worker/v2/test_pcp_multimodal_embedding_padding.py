@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -48,6 +50,47 @@ def test_pcp_multimodal_embedding_keeps_unpadded_merge_inputs(actual_tokens, pad
     assert passed_mask.shape == (actual_tokens,)
     assert torch.equal(result, embeddings)
     state.model.set_embedding_num_tokens_padded.assert_called_once_with(padded_tokens)
+
+
+@pytest.mark.parametrize("use_pcp", [True, False], ids=["pcp", "non-pcp"])
+def test_empty_image_window_reaches_token_embedding(use_pcp):
+    state = AscendModelState.__new__(AscendModelState)
+    state.model = SimpleNamespace(set_embedding_num_tokens_padded=Mock())
+    state.pcp_manager = object() if use_pcp else None
+    state.supports_mm_inputs = True
+    state.mm_pruner = None
+    state.prompt_embeds_state = None
+    state.execute_mm_encoder = Mock()
+
+    encoder = EncoderRunner.__new__(EncoderRunner)
+    encoder.is_realtime = False
+    image = MultiModalFeatureSpec(
+        data=None, modality="image", identifier="image", mm_position=PlaceholderRange(offset=8, length=10)
+    )
+    encoder.encoder_cache = SimpleNamespace(mm_features={"request": [image]})
+    encoder.gather_mm_embeddings = Mock(wraps=encoder.gather_mm_embeddings)
+    if not use_pcp:
+        encoder.gather_mm_embeddings.return_value = ([], torch.empty(0, dtype=torch.bool))
+    encoder.get_inputs_embeds = Mock(return_value=torch.zeros(1, 4))
+    state.encoder_runner = encoder
+    batch = SimpleNamespace(
+        req_ids=["request"],
+        input_ids=torch.tensor([0]),
+        num_tokens=0,
+        num_tokens_after_padding=1,
+        num_scheduled_tokens=np.array([0]),
+        query_start_loc_np=np.array([0, 0]),
+        prefill_len_np=np.array([18]),
+        num_computed_tokens_np=np.array([10]),
+    )
+
+    state.prepare_inputs_embeds({}, batch, req_states=None)
+
+    assert encoder.gather_mm_embeddings.call_count == (0 if use_pcp else 1)
+    state.model.set_embedding_num_tokens_padded.assert_called_once_with(1)
+    ids, mm_embeds, mm_mask = encoder.get_inputs_embeds.call_args.args
+    assert ids.numel() == mm_mask.numel() == 0
+    assert mm_embeds == []
 
 
 @pytest.mark.parametrize("publish_span", [False, True])

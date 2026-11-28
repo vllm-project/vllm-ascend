@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT = 7.0
 
 
 def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
@@ -51,7 +52,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
             w1=torch.randn(1, 4, 8),
             w2=torch.randn(1, 8, 4),
             quant_type=QuantType.NONE,
-            dynamic_eplb=False,
             activation=MoEActivation.SITU,
         )
         token_dispatch_output = MoETokenDispatchOutput(
@@ -85,6 +85,47 @@ class TestMoERuntimeArgs(unittest.TestCase):
         self.assertEqual(mlp_compute_input.activation_situ_beta, 4.0)
         self.assertEqual(mlp_compute_input.activation_situ_linear_beta, 25.0)
 
+    def test_build_mlp_compute_input_takes_swiglu_limits_from_the_executing_layer(self):
+        # Same-shaped layers share the communication object's moe_config, so both
+        # limits come from the executing layer. SWIGLUSTEP uses its default for None and 0.0.
+        # Only the plain limit falls back to the shared config.
+        hidden_states = torch.randn(2, 4)
+        token_dispatch_output = MoETokenDispatchOutput(
+            hidden_states=hidden_states,
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            combine_metadata=MoEAllGatherCombineMetadata(
+                topk_weights=torch.ones(2, 1),
+                expanded_row_idx=torch.arange(2, dtype=torch.int32),
+                restore_shape=torch.Size([2, 4]),
+            ),
+        )
+        shared_config = SimpleNamespace(swiglu_limit=4.0, activation_situ_beta=None, activation_situ_linear_beta=None)
+        for layer, expected in (
+            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=5.0)), (5.0, 5.0)),
+            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=None)), (0.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
+            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=0.0)), (0.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
+            (None, (4.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
+        ):
+            with self.subTest(layer=layer):
+                fused_experts_input = build_fused_experts_input(
+                    hidden_states=hidden_states,
+                    topk_weights=torch.ones(2, 1),
+                    topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+                    w1=torch.randn(1, 4, 8),
+                    w2=torch.randn(1, 8, 4),
+                    layer=layer,
+                    quant_type=QuantType.NONE,
+                )
+                mlp_compute_input = build_mlp_compute_input(
+                    fused_experts_input=fused_experts_input,
+                    token_dispatch_output=token_dispatch_output,
+                    moe_config=shared_config,
+                    use_fusion_ops=False,
+                )
+                self.assertEqual((mlp_compute_input.swiglu_limit, mlp_compute_input.swiglustep_limit), expected)
+
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (
             QuantType.NONE,
@@ -106,7 +147,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w1=torch.randn(2, 8, 16),
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
-                    dynamic_eplb=True,
                     expert_map=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
                     global_redundant_expert_num=2,
                     mc2_mask=torch.tensor([True, False, True, False]),
@@ -119,7 +159,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertIs(fused_experts_input.hidden_states, hidden_states)
                 self.assertIs(fused_experts_input.topk_weights, topk_weights)
                 self.assertIs(fused_experts_input.topk_ids, topk_ids)
-                self.assertTrue(fused_experts_input.dynamic_eplb)
                 self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
                 self.assertEqual(fused_experts_input.routing.global_redundant_expert_num, 2)
                 self.assertEqual(fused_experts_input.activation, "gelu")
@@ -142,7 +181,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
             w1=w1,
             w2=w2,
             quant_type=QuantType.W8A8,
-            dynamic_eplb=False,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
@@ -169,7 +207,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
             w1=torch.randn(1, 4, 8),
             w2=torch.randn(1, 8, 4),
             quant_type=QuantType.NONE,
-            dynamic_eplb=False,
         )
 
         token_dispatch_input = build_token_dispatch_input(
@@ -194,7 +231,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w1=torch.randn(2, 8, 16),
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
-                    dynamic_eplb=False,
                 )
 
     def test_build_mlp_compute_input_derives_fusion_and_preserves_mxfp_params(self):
@@ -212,7 +248,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w1=torch.randn(2, 8, 16),
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
-                    dynamic_eplb=False,
                     mxfp_act_quant_type=mxfp_dtype,
                     mxfp_weight_quant_type=mxfp_dtype,
                     mxfp_scale_dtype=torch.float32,
@@ -263,7 +298,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w1=torch.randn(2, 8, 16),
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
-                    dynamic_eplb=False,
                     mxfp_act_quant_type=mxfp_dtype,
                     mxfp_weight_quant_type=mxfp_dtype,
                     mxfp_scale_dtype=torch.float32,
