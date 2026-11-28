@@ -174,6 +174,8 @@ def allow_v2_model_runner_without_triton() -> Iterator[None]:
 
 
 class NPUWorker(GPUWorker):
+    profiler: Any | None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1289,37 +1291,21 @@ class NPUWorker(GPUWorker):
         max_iterations: int | None = None,
         profiler_kwargs: dict | None = None,
     ):
-        # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
-        if self.profiler_config is None or self.profiler_config.profiler is None:
-            raise RuntimeError(
-                "Profiling is not enabled. Please set --profiler-config to enable "
-                "profiling. Example: "
-                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
-                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
-            )
+        if (
+            is_start
+            and self.profiler is None
+            and self.profiler_config is not None
+            and self.profiler_config.profiler is not None
+        ):
+            self.profiler = TorchNPUProfilerWrapper(self.profiler_config)
 
-        profiler = self.profiler  # type: ignore[has-type]
-        if is_start:
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-            trace_name = f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
-
-            if profiler is None:
-                profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
-                self.profiler = profiler
-                logger.debug("Starting torch profiler with trace name: %s", trace_name)
-            # Else: profiler already initialized. Restart profiling but keep the
-            # original trace name from the first initialization.
-            # vLLM main supports per-session profiler kwargs; the release
-            # wrapper has no slot for them.
-            profiler.set_profiler_kwargs(profiler_kwargs)
-            profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
-        else:
-            if profiler is None:
-                logger.warning("Profiler was not started, nothing to stop.")
-                return
-            profiler.stop()
+        return super().profile(
+            is_start=is_start,
+            profile_prefix=profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
+        )
 
     def synchronize_device(self) -> None:
         torch.npu.synchronize()

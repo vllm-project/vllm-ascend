@@ -41,6 +41,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
+| `npu_profiler_config`               | dict | `{}`    | Native NPU profiler startup defaults: `with_stack` and `experimental_config` (`profiler_level`, `mstx`). These fields have no equivalents in upstream `ProfilerConfig`. See [Service Profiling Guide](../../developer_guide/performance_and_debug/service_profiling_guide.md). |
 | `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
@@ -77,6 +78,23 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
+
+**npu_profiler_config**
+
+These defaults supplement `--profiler-config`; they do not enable profiling by
+themselves. They are validated as typed configuration, and unknown fields are
+rejected. Session `profiler_kwargs` override the startup values for one capture
+only; subsequent captures start from the same startup defaults.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `with_stack` | bool | `false` | Native NPU stack collection. The existing `--profiler-config.torch_profiler_with_stack` continues to control NPU `with_modules`. |
+| `experimental_config.profiler_level` | str | `"Level1"` | One of `Level0`, `Level1`, `Level2`, `Level_none`. `Level_none` requires `mstx=true`. |
+| `experimental_config.mstx` | bool | `false` | Collect existing MSTX markers. |
+
+```bash
+--additional-config '{"npu_profiler_config":{"with_stack":false,"experimental_config":{"profiler_level":"Level2","mstx":true}}}'
+```
 
 <span id="runtime_guard"></span>**runtime_guard**
 

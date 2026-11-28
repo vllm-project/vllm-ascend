@@ -62,6 +62,84 @@ Send the following request to start the profiling service:
 curl -X POST http://localhost:8080/start_profile
 ```
 
+To override settings for a single collection session, send a JSON body:
+
+```bash
+curl -X POST http://localhost:8080/start_profile \
+  -H 'Content-Type: application/json' \
+  -d '{"profile_prefix":"shapes","profiler_kwargs":{"record_shapes":true,"profile_memory":false,"with_modules":false}}'
+```
+
+Each session starts from a snapshot of the server's startup settings, then
+applies only that request's overrides. It never inherits the preceding
+session's temporary settings. Passing no `profiler_kwargs`, or an empty object,
+restores the startup settings. Explicit `false` values override `true` startup
+settings; lists replace the startup list, while `experimental_config` is merged
+field by field. An empty `experimental_config` inherits its startup values.
+
+| `profiler_kwargs` option | Type | Startup default source |
+| --- | --- | --- |
+| `record_shapes` | bool | `--profiler-config.torch_profiler_record_shapes` |
+| `profile_memory` | bool | `--profiler-config.torch_profiler_with_memory` |
+| `with_flops` | bool | `--profiler-config.torch_profiler_with_flops` |
+| `with_modules` | bool | `--profiler-config.torch_profiler_with_stack` (existing Ascend mapping) |
+| `with_stack` | bool | `--additional-config.npu_profiler_config.with_stack` (`false` when omitted) |
+| `activities` | list[str] | `--profiler-config.torch_profiler_activities`; unset means `["CPU", "NPU"]` |
+| `output_dir` | str | `--profiler-config.torch_profiler_dir` |
+| `experimental_config.profiler_level` | str | `additional_config.npu_profiler_config.experimental_config.profiler_level` (`"Level1"` when omitted) |
+| `experimental_config.mstx` | bool | `additional_config.npu_profiler_config.experimental_config.mstx` (`false` when omitted) |
+
+Runtime activities accept `CPU` and `NPU`, without duplicates. For startup
+`torch_profiler_activities`, use upstream's `PrivateUse1` name for NPU; it is
+mapped to `NPU`. Other device activity names are rejected. `output_dir` must be
+an absolute local directory path inside each worker's container; mount the
+corresponding host directory to retain traces. A matching path on multiple
+hosts does not imply shared storage.
+
+The NPU-only startup configuration uses `--additional-config` because upstream
+`ProfilerConfig` does not define these fields. For example:
+
+```bash
+vllm serve /path/to/model \
+  --profiler-config '{"profiler":"torch","torch_profiler_dir":"/profiles/default","torch_profiler_with_memory":true,"ignore_frontend":true}' \
+  --additional-config '{"npu_profiler_config":{"with_stack":false,"experimental_config":{"profiler_level":"Level2","mstx":true}}}'
+```
+
+Override only the desired fields in a session:
+
+```bash
+curl -X POST http://localhost:8080/start_profile \
+  -H 'Content-Type: application/json' \
+  -d '{"profile_prefix":"level1","profiler_kwargs":{"output_dir":"/profiles/session1","activities":["CPU","NPU"],"with_flops":false,"experimental_config":{"profiler_level":"Level1"}}}'
+```
+
+In this example, `mstx` remains `true` and `profile_memory` remains `true` from
+startup. The next session without overrides returns to `/profiles/default`
+and `Level2`. Stop the current session before starting the next one.
+
+`profiler_level` accepts `Level0`, `Level1`, `Level2`, and `Level_none`.
+`Level_none` requires `mstx=true`. MSTX enables collection of existing markers;
+it does not add application markers. The legacy `msprof_tx` spelling and other
+experimental options are not accepted. Unknown keys, invalid enum values, and
+non-boolean values for boolean fields are rejected before starting collection.
+
+These options configure the worker NPU profiler; they do not change the API
+server's frontend CPU profiler or its output directory. Use
+`--profiler-config.ignore_frontend=true` to collect only worker traces. Native
+NPU `with_stack` and `with_modules` are separate options; `with_stack` can add
+substantial collection overhead.
+
+Stop the current session before applying different settings. Each new session
+creates a fresh NPU profiler and uses its current `profile_prefix`, worker rank
+suffix, and a unique session identifier in the trace name. Sessions using the
+same prefix still have distinct names. Schedule options, stage-based captures,
+and trace merging are outside this interface.
+
+`delay_iterations` and `max_iterations` can also be supplied as non-negative
+integers at the top level of this JSON body. They count worker iterations.
+After an automatic stop at `max_iterations`, send `/stop_profile` before
+starting another HTTP session to clear the frontend session guard.
+
 Send the following request to stop the profiling service:
 
 ```bash

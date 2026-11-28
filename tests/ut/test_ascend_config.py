@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from pydantic import TypeAdapter
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -41,6 +42,7 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
+    NPUProfilerConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -103,6 +105,38 @@ def test_config_modules_do_not_load_vllm_config():
         "assert 'vllm.config' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+class TestNPUProfilerConfig(TestBase):
+    def test_defaults_and_nested_startup_config(self):
+        defaults = NPUProfilerConfig()
+        self.assertFalse(defaults.with_stack)
+        self.assertFalse(defaults.experimental_config.mstx)
+        self.assertEqual(defaults.experimental_config.profiler_level, "Level1")
+        configured = TypeAdapter(NPUProfilerConfig).validate_python(
+            {"with_stack": True, "experimental_config": {"profiler_level": "Level2", "mstx": True}}
+        )
+        self.assertTrue(configured.with_stack)
+        self.assertTrue(configured.experimental_config.mstx)
+        self.assertEqual(configured.experimental_config.profiler_level, "Level2")
+        self.assertFalse(NPUProfilerConfig().experimental_config.mstx)
+
+    def test_invalid_startup_options_are_rejected(self):
+        for values in (
+            {"unknown": True},
+            {"with_stack": "true"},
+            {"experimental_config": {"profiler_level": 1}},
+            {"experimental_config": {"profiler_level": "Level3"}},
+            {"experimental_config": {"profiler_level": "Level_none", "mstx": False}},
+            {"experimental_config": {"mstx": 1}},
+            {"experimental_config": {"export_type": "Text"}},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                TypeAdapter(NPUProfilerConfig).validate_python(values)
+        valid = TypeAdapter(NPUProfilerConfig).validate_python(
+            {"experimental_config": {"profiler_level": "Level_none", "mstx": True}}
+        )
+        self.assertEqual(valid.experimental_config.profiler_level, "Level_none")
 
 
 class TestRlConfig(TestBase):

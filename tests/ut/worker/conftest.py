@@ -20,5 +20,7 @@ def _stub_ascend_config(monkeypatch):
             ascend_compilation_config=object(),
             eplb_config=object(),
             ascend_warmup_config=SimpleNamespace(enable_early_kernel_warmup=False, enable_early_nz_warmup=False),
+            msmonitor_use_daemon=False,
+            npu_profiler_config=_ascend_config_module.NPUProfilerConfig(),
         ),
     )
