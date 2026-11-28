@@ -289,7 +289,9 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, s
 @pytest.mark.parametrize("lookahead", [0, 5])
 def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     current_config = SimpleNamespace(
-        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2, tensor_parallel_size=2, decode_context_parallel_size=2
+        ),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     cache_config = SimpleNamespace(block_size=256)
@@ -313,7 +315,9 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
             ring_capacity=16 + lookahead,
         )
 
-    indexer_spec = indexer.get_kv_cache_spec(current_config)
+    indexer_spec = indexer.get_kv_cache_spec(None)
+    assert indexer_spec.dcp_replication_size == 1
+    assert indexer.get_kv_cache_spec(current_config) == replace(indexer_spec, dcp_replication_size=2)
     state_spec = state.get_kv_cache_spec(None)
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
     assert isinstance(indexer_spec, AscendIndexerKPoolSpec)

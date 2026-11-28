@@ -48,7 +48,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        if self.use_layerwise_transfer and self.pcp_size > 1 and self.dcp_size > self.tp_size:
+        if self.use_layerwise_transfer and self.pcp_size > 1 and self.dcp_size > 1:
             self.put_step = 1
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False

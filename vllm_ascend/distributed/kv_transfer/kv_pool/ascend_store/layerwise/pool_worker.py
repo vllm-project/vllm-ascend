@@ -161,7 +161,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _init_key_head_config(self, model_config) -> None:
         super()._init_key_head_config(model_config)
-        if self.use_layerwise_transfer and self.pcp_size > 1 and self.dcp_size > self.tp_size:
+        if self.use_layerwise_transfer and self.pcp_size > 1 and self.dcp_size > 1:
             self.put_step = 1
             self.head_or_tp_rank = self.tp_rank
         if self.tp_mismatch:

@@ -44,6 +44,7 @@ def _create_attention_group(spec, config, indexer):
     def init_base(self, *args, **kwargs):
         self.dcp_size = 8
         self.kernel_block_size = 128
+        self.nope = False
 
     with (
         patch.object(DCPMetadataBuilderMixin, "__init__", init_base),

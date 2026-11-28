@@ -42,7 +42,7 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
 
 
 @pytest.mark.parametrize("has_index_topk, has_compress_ratios", [(False, False), (True, True)])
-def test_kpool_without_sparse_main_attention_is_not_sfa(has_index_topk, has_compress_ratios):
+def test_kpool_without_sparse_main_attention_is_not_sfa(monkeypatch, has_index_topk, has_compress_ratios):
     config = SimpleNamespace(index_kpool=4)
     if has_index_topk:
         config.index_topk = 2048
@@ -50,10 +50,25 @@ def test_kpool_without_sparse_main_attention_is_not_sfa(has_index_topk, has_comp
         config.compress_ratios = [4]
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=config),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=32),
+        cache_config=SimpleNamespace(block_size=128),
+        kv_transfer_config=None,
     )
+    monkeypatch.setattr(platform, "enable_sp", lambda config: False)
 
     assert not enable_sfa(vllm_config)
+    assert not enable_sfa_dcp_replicated_indexer(vllm_config)
+    platform._validate_sfa_dcp_kv_sp(vllm_config)
+    assert vllm_config.parallel_config.cp_kv_cache_interleave_size == 32
+
+
+def test_outer_config_compression_excludes_sfa_dcp():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=2048), hf_config=SimpleNamespace(compress_ratios=[4])
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+    )
     assert not enable_sfa_dcp_replicated_indexer(vllm_config)
 
 

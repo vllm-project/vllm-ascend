@@ -381,8 +381,9 @@ class TestPCPPoolWorker(unittest.TestCase):
         model.get_layers_start_end_indices.assert_not_called()
         model.get_num_layers.assert_not_called()
 
-    def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
-        for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
+    def test_nonzero_pcp_rank_saves_each_physical_memcache_key_with_dcp(self):
+        keys = set()
+        for dcp_size, tp_rank in ((1, 0), (2, 1), (2, 3)):
             with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
                 worker = make_worker(
                     self,
@@ -394,9 +395,12 @@ class TestPCPPoolWorker(unittest.TestCase):
                     pcp_size=2,
                     pcp_rank=1,
                     dcp_size=dcp_size,
+                    dcp_rank=dcp_size - 1,
                 )
-                worker.dcp_rank = dcp_size - 1
-                self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+                self.assertEqual(worker._is_layerwise_save_owner(0), dcp_size > 1)
+                if dcp_size > 1:
+                    keys.add(worker._make_layerwise_full_key(0, "hash"))
+        self.assertEqual(len(keys), 2)
 
     def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
         spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")

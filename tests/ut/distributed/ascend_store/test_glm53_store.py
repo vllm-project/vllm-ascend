@@ -341,7 +341,9 @@ class TestGLM53Store(unittest.TestCase):
         self.check_layerwise_round_trip()
 
     def test_memcache_layerwise_round_trip_keeps_pcp_dcp_attention_shards(self):
-        self.check_layerwise_round_trip(tp_size=1, pcp_size=4, pp_size=1, dcp_size=4)
+        for tp_size, pcp_size in ((1, 4), (2, 2)):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size):
+                self.check_layerwise_round_trip(tp_size=tp_size, pcp_size=pcp_size, pp_size=1, dcp_size=pcp_size)
 
     def test_layerwise_recoverssm_restores_model_state_shards(self):
         for backend, tp_size, pcp_size in (("memcache", 2, 1), ("memcache", 1, 2), ("mooncake", 1, 2)):
@@ -420,7 +422,7 @@ class TestGLM53Store(unittest.TestCase):
                 pcp_rank=pcp_rank,
                 tp_rank=rank,
                 dcp_size=dcp_size,
-                dcp_rank=(pcp_rank * tp_size + rank) % dcp_size,
+                dcp_rank=(rank * pcp_size + pcp_rank) % dcp_size,
                 pp_size=pp_size,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
@@ -459,7 +461,8 @@ class TestGLM53Store(unittest.TestCase):
             self.doCleanups()
 
         state_shards = tp_size * pcp_size
-        self.assertEqual(len(readable), pp_size * (dcp_size + 3 * state_shards * len(hashes)))
+        attention_shards = state_shards if dcp_size > 1 else 1
+        self.assertEqual(len(readable), pp_size * (attention_shards + 3 * state_shards * len(hashes)))
         backend_class = worker.layerwise_backend
         start_patch(self, f"{backend_class.__module__}.{backend_class.__name__}.create_scheduler_client")
         # The scheduler builds its coordinator from vllm_config, which

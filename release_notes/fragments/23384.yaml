@@ -1,0 +1,4 @@
+pr: 23384
+entries:
+  - category: feature
+    text: GLM-5.3-Flash now supports decode context parallelism for sparse attention with a KPool indexer. Prefill can combine PCP and DCP with Mooncake KV transfer and layerwise MemCache prefix reuse on 950DT.

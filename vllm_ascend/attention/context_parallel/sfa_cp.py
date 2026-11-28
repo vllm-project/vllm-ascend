@@ -84,11 +84,14 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-def _get_sfa_indexer_output_width(vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor | None = None) -> int:
+def _get_sfa_indexer_output_width(
+    vllm_config: VllmConfig | None, topk_indices_buffer: torch.Tensor | None = None
+) -> int:
     """Include the KPool tail and any padding in a shared MTP index buffer."""
+    model_config = getattr(vllm_config, "model_config", None)
     for config in (
-        getattr(vllm_config.model_config, "hf_text_config", None),
-        getattr(vllm_config.model_config, "hf_config", None),
+        getattr(model_config, "hf_text_config", None),
+        getattr(model_config, "hf_config", None),
     ):
         index_topk = getattr(config, "index_topk", None)
         if isinstance(index_topk, int) and index_topk > 0:

@@ -26,7 +26,8 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config.parallel_config.prefill_context_parallel_size = 4
         cache = self.make_cache_config(2)
         previous_keys: set[str] = set()
-        for tp_size, dcp_size, interleave in ((1, 1, 1), (1, 2, 1), (1, 4, 1), (1, 4, 128), (2, 4, 128)):
+        layouts = ((1, 1, 1), (1, 2, 1), (1, 4, 1), (1, 4, 128), (2, 4, 128), (4, 4, 128), (8, 4, 128))
+        for tp_size, dcp_size, interleave in layouts:
             config.parallel_config.tensor_parallel_size = tp_size
             config.parallel_config.decode_context_parallel_size = dcp_size
             config.parallel_config.cp_kv_cache_interleave_size = interleave
@@ -40,7 +41,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
             for group in range(2):
                 full, partial = set(), set()
                 for stage, pcp, tp in product(range(2), range(4), range(tp_size)):
-                    dcp = (pcp * tp_size + tp) % dcp_size
+                    dcp = (tp * 4 + pcp) % dcp_size
                     full.add(builder.make_full_key(group, "hash", tp, stage, pcp, dcp))
                     partial.add(builder.make_partial_key("model", "req", group, 0, 13, tp, stage, pcp))
                 probes = builder.make_hit_check_keys(group, "hash", tp_size)

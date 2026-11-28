@@ -98,6 +98,12 @@ def test_kpool_dcp_cache_pages_cover_replicated_history(dcp_size, block_size, po
     assert enable_sfa_dcp_replicated_indexer(config) == (dcp_size > 1)
 
 
+@pytest.mark.parametrize("config, expected", [(None, False), (_config(128, 2), True)])
+def test_replicated_indexer_uses_active_config_if_available(monkeypatch, config, expected):
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    assert enable_sfa_dcp_replicated_indexer() is expected
+
+
 def test_kpool_dcp_rejects_inconsistent_replication_and_keeps_tail_replicated():
     spec = _spec(128, 2, 4)
     with pytest.raises(AssertionError, match="replication size"):
@@ -131,6 +137,12 @@ def test_sfa_dcp_indexer_width_includes_tail_and_buffer_padding(pool_size, buffe
 @pytest.mark.parametrize("index_topk", [None, 0, -1])
 def test_sfa_dcp_indexer_width_rejects_missing_or_invalid_topk(index_topk):
     config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=index_topk)))
+    with pytest.raises(RuntimeError, match="index_topk must be set"):
+        cp._get_sfa_indexer_output_width(config)
+
+
+@pytest.mark.parametrize("config", [None, SimpleNamespace(model_config=None)])
+def test_sfa_dcp_indexer_width_requires_model_config(config):
     with pytest.raises(RuntimeError, match="index_topk must be set"):
         cp._get_sfa_indexer_output_width(config)
 

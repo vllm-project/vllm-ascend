@@ -199,10 +199,10 @@ class MemcacheBackend(Backend):
         pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
         dcp_size = getattr(parallel, "decode_context_parallel_size", 1)
         pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        # TP-only DCP stripes a single GVA. When DCP spans PCP, each
-        # physical worker owns its full object, including mixed SFA/KPool groups.
+        # DCP groups enumerate PCP workers first, even when TP >= DCP.
+        # Give each worker its own completion key for the local shard.
         pcp_shard_namespace = ""
-        if pcp_size > 1 and dcp_size > parallel.tensor_parallel_size:
+        if pcp_size > 1 and dcp_size > 1:
             pcp_sharded_group_ids = set(range(num_groups))
             pcp_shard_namespace = (
                 f"@pp_size:{pp_size}@tp_size:{parallel.tensor_parallel_size}@dcp_size:{dcp_size}"

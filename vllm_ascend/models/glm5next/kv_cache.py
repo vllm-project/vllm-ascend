@@ -104,7 +104,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig | None) -> KVCacheSpec:
+        parallel_config = getattr(vllm_config, "parallel_config", None)
         return AscendIndexerKPoolSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -115,7 +116,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
-            dcp_replication_size=vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_replication_size=getattr(parallel_config, "decode_context_parallel_size", 1),
             tokens_per_state=self.compress_ratio,
         )
 

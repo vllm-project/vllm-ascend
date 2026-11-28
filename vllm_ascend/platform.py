@@ -1831,7 +1831,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
     model_config = vllm_config.model_config
-    use_sparse = model_uses_sfa_sparse(model_config) or model_uses_kpool_indexer(model_config)
+    use_sparse = model_uses_sfa_sparse(model_config, include_kpool=True)
     # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
     # Mooncake pull path transfers kernel blocks and retains the DCP token
     # interleave; changing that interleave after worker initialization would
