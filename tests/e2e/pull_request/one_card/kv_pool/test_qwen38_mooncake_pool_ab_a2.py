@@ -33,6 +33,6 @@ from tests.e2e.pull_request.one_card.kv_pool.kv_pool_helpers import MODEL, run
     ],
     ids=["mooncake_bulk_tier2", "mooncake_layerwise_tier3"],
 )
-@patch.dict("os.environ", {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@patch.dict("os.environ", {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_qwen38_mooncake_pool_ab_a2(backend: str, use_layerwise: bool):
     run(backend, use_layerwise)
