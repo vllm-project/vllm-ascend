@@ -35,6 +35,7 @@ class QuantType(Enum):
     W4A8MXFP = 6  # W is MXFP4, A is MXFP8
     W8A8FP = 7  # W and A are FP8
     W4A16MXFP = 8  # W is MXFP4, A is BF16 or FP16
+    W4A4 = 9  # W and A are INT4; dispatch floating point tokens
 
 
 # Quant types whose weight layouts the A5 MegaMoe (FUSED_MC2) operator supports.

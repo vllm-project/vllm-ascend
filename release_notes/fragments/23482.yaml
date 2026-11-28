@@ -1,0 +1,6 @@
+pr: 23482
+entries:
+  - category: feature
+    text: Added support for ModelSlim symmetric INT4 W4A4 routed experts, including Qwen3.8-Flash-Next mixed-precision checkpoints. Use `--quantization ascend` with `--additional-config '{"enable_fused_mc2":0}'`; EPLB is unsupported.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

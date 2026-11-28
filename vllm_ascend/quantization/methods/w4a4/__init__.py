@@ -17,11 +17,13 @@
 """W4A4 quantization methods for Ascend NPU."""
 
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
+from .w4a4_int_moe import AscendW4A4DynamicFusedMoEMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a4_mxfp4_flatquant import AscendW4A4MXFP4FlatQuantDynamicLinearMethod
 
 __all__ = [
+    "AscendW4A4DynamicFusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
