@@ -41,7 +41,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
-    get_sparse_flash_mla_plan_buffer_size,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -99,7 +98,10 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
+# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
+# QLI and the legacy metadata op use 1024.
 SAS_METADATA_BUFFER_SIZE = 1024
+SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
 QLI_METADATA_BUFFER_SIZE = 1024
 
 
@@ -810,7 +812,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
-            get_sparse_flash_mla_plan_buffer_size(self.device)
+            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
             if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
                 sparse_flash_mla_metadata,
