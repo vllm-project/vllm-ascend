@@ -24,12 +24,14 @@ import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
+_REQUIRE_FUNCTIONAL_ALL_REDUCE = is_torch_equal_or_newer("2.14.0")
 logger = logging.getLogger(__name__)
 
 
@@ -194,6 +196,13 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 device_group=self.device_group,
                 unique_name=self.unique_name,
             )
+
+    def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        if _REQUIRE_FUNCTIONAL_ALL_REDUCE:
+            # vllm::all_reduce is functional even when the communicator's
+            # regular or quantized HCCL fallback mutates its input.
+            input_ = input_.clone()
+        return super()._all_reduce_out_place(input_)
 
     def _release_hccl_resources(self) -> bool:
         destroyed = False

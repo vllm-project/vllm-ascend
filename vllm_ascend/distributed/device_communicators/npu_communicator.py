@@ -19,15 +19,12 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 from vllm.logger import logger
-from vllm.utils.torch_version import is_torch_equal_or_newer
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
     QuantizedAllReduce,
 )
 from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import Mxfp8AllReduce
-
-_REQUIRE_FUNCTIONAL_ALL_REDUCE = is_torch_equal_or_newer("2.14.0")
 
 
 class _NpuAll2AllManager:
@@ -101,10 +98,6 @@ class NPUCommunicator(DeviceCommunicatorBase):
                     )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        if _REQUIRE_FUNCTIONAL_ALL_REDUCE:
-            # vllm::all_reduce has a functional schema. HCCL fallbacks, including
-            # the quantized backends' small-input path, reduce their input in place.
-            input_ = input_.clone()
         if self.quantized_ar is not None and self.world_size > 1:
             return self.quantized_ar.all_reduce(input_)
         return super().all_reduce(input_)
