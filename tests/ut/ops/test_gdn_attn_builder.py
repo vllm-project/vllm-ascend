@@ -538,7 +538,7 @@ def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
 def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size):
     config = _make_vllm_config(num_speculative_tokens=3)
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
     assert builder.supports_update_block_table is (pcp_size == 1)
 
@@ -550,7 +550,7 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
         num_speculative_tokens=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
     )
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
     common = create_common_attn_metadata(BatchSpec([24, 48], [1, 1]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4) + 100
@@ -562,7 +562,7 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
 
 def test_mixed_prefill_sentinels_do_not_cancel_live_drafts():
     config = _make_vllm_config(num_speculative_tokens=3)
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    spec = LegacyMambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = AscendGDNAttentionMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     common = create_common_attn_metadata(BatchSpec([24, 8], [2, 8]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4)
