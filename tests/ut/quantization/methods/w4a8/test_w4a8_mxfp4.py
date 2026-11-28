@@ -166,7 +166,8 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.mock_nz_npu.float4_e2m1fn_x2 = 296
         self.mock_nz_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
 
-    def test_v2_eplb_uses_expert_weight_list(self):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    def test_v2_eplb_uses_current_expert_weight_list(self, mock_empty_cache):
         vllm_config = create_mock_vllm_config()
         vllm_config.parallel_config.enable_eplb = True
         with (
@@ -181,6 +182,21 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
         self.assertTrue(scheme.supports_eplb)
         self.assertTrue(scheme.use_expert_weight_list)
+        layer = self._make_moe_layer()
+        scheme.process_weights_after_loading(layer)
+        with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
+            context.use_mega_moe = True
+            for field, experts in (
+                ("w1", layer.w13_weight_list),
+                ("w1_scale", layer.w13_weight_scale_list),
+                ("w2_scale", layer.w2_weight_scale_list),
+            ):
+                with self.subTest(field=field):
+                    old = getattr(scheme.get_fused_mc2_weights(layer), field)[0]
+                    experts[0] = experts[0].clone()
+                    new = getattr(scheme.get_fused_mc2_weights(layer), field)[0]
+                    self.assertNotEqual(old.data_ptr(), new.data_ptr())
+                    self.assertEqual(new.data_ptr(), experts[0].data_ptr())
 
     def test_get_weight_static_method(self):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
@@ -355,9 +371,16 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertTrue(self.scheme.use_expert_weight_list)
         self.assertFalse(hasattr(layer, "w13_weight"))
         self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+        # A loader can bind the final storage after post-processing.
+        for group in (layer.w13_weight_list, layer.w13_weight_scale_list, layer.w2_weight_scale_list):
+            group[0].data = group[0].clone()
         with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
             context.use_mega_moe = True
             weights = self.scheme.get_fused_mc2_weights(layer)
+            repeated = self.scheme.get_fused_mc2_weights(layer)
+        self.assertIs(repeated.w1, weights.w1)
+        self.assertIs(repeated.w1_scale, weights.w1_scale)
+        self.assertIs(repeated.w2_scale, weights.w2_scale)
         for actual, canonical in ((weights.w1, layer.w13_weight_list), (weights.w2, layer.w2_weight_list)):
             self.assertEqual(len(actual), len(canonical))
             self.assertTrue(all(a.data_ptr() == b.data_ptr() for a, b in zip(actual, canonical, strict=True)))

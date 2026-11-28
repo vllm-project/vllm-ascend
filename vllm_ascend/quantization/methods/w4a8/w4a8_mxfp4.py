@@ -177,7 +177,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
+        self.enable_eplb = vllm_config.parallel_config.enable_eplb is True
+        self.use_expert_weight_list = self.enable_eplb
 
     @staticmethod
     def get_weight(
@@ -237,17 +238,30 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             quant_method=self,
         )
 
+    @staticmethod
+    def _make_megamoe_views(
+        layer: torch.nn.Module,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        # MegaMoe reads packed W13 bytes and E8M0 scale bytes. Each view
+        # shares storage with the canonical expert tensor used by GMM.
+        return (
+            [weight.view(torch.uint8) for weight in layer.w13_weight_list],
+            [scale.view(torch.float8_e8m0fnu) for scale in layer.w13_weight_scale_list],
+            [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list],
+        )
+
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if self.use_expert_weight_list:
             if _EXTRA_CTX.use_mega_moe:
-                # SiTU keeps semantic FP4 on w13; MegaMoe needs packed bytes.
-                # The views preserve EPLB updates. w2 is already packed uint8.
-                w1 = [weight.view(torch.uint8) for weight in layer.w13_weight_list]
+                views = getattr(layer, "_mxfp4_megamoe_views", None)
+                if views is None:
+                    views = self._make_megamoe_views(layer)
+                    # The loader has bound its final storage by the first
+                    # forward. EPLB can still replace expert slots afterwards.
+                    if not self.enable_eplb:
+                        layer._mxfp4_megamoe_views = views
+                w1, w1_scale, w2_scale = views
                 w2 = layer.w2_weight_list
-                # Reinterpret checkpoint bytes without copying: EPLB updates
-                # the same scale storage that MegaMoe consumes.
-                w1_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w13_weight_scale_list]
-                w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
             shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None) if _EXTRA_CTX.use_mega_moe else None
@@ -356,6 +370,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # gets zero-copy transposed views from _get_mlp_weights.
             layer.w13_weight_scale_list = [scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)]
             layer.w2_weight_scale_list = [scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)]
+            layer._mxfp4_megamoe_views = None
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale

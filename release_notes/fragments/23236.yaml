@@ -1,0 +1,5 @@
+pr: 23236
+entries:
+  - category: performance
+    text: Reduced host overhead in A5 MXFP4 MegaMoE inference by preparing weight and scale views once per layer when EPLB is disabled.
+    hardware: [A5]
