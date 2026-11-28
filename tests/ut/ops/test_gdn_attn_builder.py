@@ -51,6 +51,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba import cached_decode as cached_decode_module
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -1343,11 +1344,18 @@ def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
     config = _make_vllm_config(mamba_cache_mode="align")
     config.cache_config.hash_block_size = 16
     config.cache_config.cache_hit_alignment_tokens = 128
+    if vllm_version_is("0.34.0"):
+        checkpoint_alignment = {"get_kv_cache_checkpoint_alignment": lambda _: 16}
+    else:
+        checkpoint_alignment = {
+            "get_cache_checkpoint_alignment": lambda: 16,
+            "requires_grid_checkpoint_alignment": False,
+        }
     config.compilation_config.static_forward_context = {
         name: Mock(
             spec=AscendGatedDeltaNetAttention,
             _ascend_internal_checkpoint_enabled=True,
-            get_kv_cache_checkpoint_alignment=lambda _: 16,
+            **checkpoint_alignment,
         )
         for name in ("g0", "g1")
     }
