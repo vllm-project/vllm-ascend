@@ -1568,6 +1568,12 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | Unset | No | [0, 7] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
+For DeepSeek V4.1 with Memcache, start the prefill role with `--enforce-eager` and set
+`"backend": "memcache", "use_layerwise": true` in its AscendStoreConnector extra configuration.
+The worker keeps shared KV source buffers resident while later attention layers read them.
+In a disaggregated deployment, set `"use_layerwise": false` on the decode role's pool connector.
+The P-to-D connector is configured separately.
+
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
 `ASCEND_GLOBAL_RESOURCE_CONFIG` is a JSON string passed to HIXL. Common fields are:

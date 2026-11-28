@@ -1,0 +1,4 @@
+pr: 23460
+entries:
+  - category: feature
+    text: DeepSeek V4.1 can load and save shared-source KV caches layer by layer with the Memcache backend during eager prefill.

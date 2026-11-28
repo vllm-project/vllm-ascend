@@ -41,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     validate_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import has_shared_kv_sources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     is_kv_save_role,
@@ -117,6 +118,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        self.supports_composite_kv_loads = (
+            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
+        )
+        self.supports_composite_kv_saves = self.supports_composite_kv_loads
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
