@@ -14,6 +14,9 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -59,6 +62,7 @@ from .topk_buffer import share_topk_buffer
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
     from vllm.models.qwen4_exp.common.qsa_indexer import (
         QSAIndexerBackend,
         QSAIndexerMetadataBuilder,
@@ -501,7 +505,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         *,
         token_to_req: torch.Tensor,
@@ -531,7 +535,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
@@ -551,6 +555,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
+            cu_q = getattr(attn_metadata, "qsa_request_cu_q", None)
             result = qsa_gbsa_attention(
                 query[:num_tokens],
                 key_cache,
@@ -561,6 +566,8 @@ class AscendQSAImpl(AttentionImplBase[Any]):
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                query_start_loc=cu_q,
+                max_query_len=max(attn_metadata.max_query_len, 1) if cu_q is not None else 1,
                 prepared_metadata=getattr(
                     attn_metadata,
                     "qsa_gbsa_metadata",
@@ -593,6 +600,19 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         draft_attn_metadatas=None,
     ):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
+
+
+_qsa_full_graph_replay = ContextVar("qsa_full_graph_replay", default=False)
+
+
+@contextmanager
+def qsa_metadata_build_scope(*, full_graph: bool) -> Iterator[None]:
+    """Expose the Qwen model state's replay mode during the parent metadata build."""
+    token = _qsa_full_graph_replay.set(full_graph)
+    try:
+        yield
+    finally:
+        _qsa_full_graph_replay.reset(token)
 
 
 class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
@@ -661,6 +681,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         *,
         for_capture: bool = False,
     ):
+        full_graph_mode = _qsa_full_graph_replay.get()
         pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         full_pcp_graph = pcp_context is not None and common_attn_metadata.graph_pad_size >= 0
         if full_pcp_graph:
@@ -673,6 +694,21 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             num_write_tokens = batch.num_tokens_after_padding if full_pcp_graph else batch.num_tokens
             metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
         metadata.qsa_request_plan = None
+        if pcp_context is None and (for_capture or full_graph_mode):
+            if for_capture:
+                metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
+            else:
+                n = common_attn_metadata.num_reqs
+                starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
+                if (
+                    n > 0
+                    and n == metadata.block_table.shape[0]
+                    and len(starts) == n + 1
+                    and starts[0] == 0
+                    and starts[-1] == metadata.num_actual_tokens
+                    and all(end >= start for start, end in zip(starts, starts[1:]))
+                ):
+                    metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
         if for_capture or full_pcp_graph:
             return metadata
         phases = common_attn_metadata.is_prefilling
@@ -684,6 +720,20 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
                 common_attn_metadata.num_actual_tokens,
                 phases,
             )
+        # A packed query segment is the causal suffix of its request. Graph
+        # padding and PCP sharding can break that relationship.
+        elif not full_graph_mode and pcp_context is None and common_attn_metadata.graph_pad_size < 0:
+            n = common_attn_metadata.num_reqs
+            starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
+            if (
+                n > 0
+                and n == metadata.block_table.shape[0]
+                and len(starts) == n + 1
+                and starts[0] == 0
+                and starts[-1] == metadata.num_actual_tokens
+                and all(end > start for start, end in zip(starts, starts[1:]))
+            ):
+                metadata.qsa_request_cu_q = common_attn_metadata.query_start_loc[: n + 1].to(torch.int64)
         return metadata
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):

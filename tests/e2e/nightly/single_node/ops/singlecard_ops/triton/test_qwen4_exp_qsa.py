@@ -208,3 +208,106 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
     graph.replay()
     torch.npu.synchronize()
     _assert_gbsa_close(captured_output, expected_replay)
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5 GBSA")
+@pytest.mark.parametrize("query_width", [1, 3])
+@torch.inference_mode()
+def test_qsa_request_page_table_graph_replay(query_width):
+    from types import SimpleNamespace
+
+    from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+    from vllm_ascend.models.qwen4_exp.input_adapter import Qwen4ExpPreparedInputAdapter
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSAImpl, AscendQSAMetadataBuilder, qsa_metadata_build_scope
+
+    rows = 3 * query_width
+    query = torch.randn(rows, 12, 256, dtype=torch.bfloat16, device="npu")
+    key = torch.randn(9, 128, 1, 256, dtype=query.dtype, device="npu")
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    pages = torch.arange(9, dtype=torch.int32, device="npu").reshape(3, 3)
+    offsets = pages.new_empty(4)
+    raw = SimpleNamespace(
+        token_to_req=pages.new_empty(rows), logical_positions=pages.new_empty(rows), seq_lens=pages.new_empty(3)
+    )
+    layer = SimpleNamespace(
+        num_heads=12,
+        num_kv_heads=1,
+        head_dim=256,
+        indexer=SimpleNamespace(token_topk=2048, compress_ratio=4),
+        topk_indices_buffer=torch.arange(515, dtype=torch.int32, device="npu").repeat(rows, 1),
+    )
+    builder = AscendQSAMetadataBuilder.__new__(AscendQSAMetadataBuilder)
+    impl = AscendQSAImpl(12, 256, 256**-0.5, 1, "auto")
+    adapter = Qwen4ExpPreparedInputAdapter(torch.nn.Module())
+
+    def prepare(counts, lengths, *, capture=False, eager=False):
+        starts = torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32)
+        offsets.copy_(starts)
+        raw.seq_lens.copy_(torch.tensor(lengths))
+        # Unmapped graph rows have no logical position in the indexer metadata.
+        raw.token_to_req.copy_(
+            torch.tensor(
+                [i if length else 0 for i, (count, length) in enumerate(zip(counts, lengths)) for _ in range(count)]
+            )
+        )
+        raw.logical_positions.copy_(
+            torch.tensor(
+                [p if length else -1 for count, length in zip(counts, lengths) for p in range(length - count, length)]
+            )
+        )
+        common = AscendCommonAttentionMetadata(
+            query_start_loc=offsets,
+            query_start_loc_cpu=starts,
+            seq_lens=raw.seq_lens,
+            num_reqs=3,
+            num_actual_tokens=rows,
+            max_query_len=max(counts),
+            max_seq_len=384,
+            block_table_tensor=pages,
+            slot_mapping=raw.token_to_req,
+            is_prefilling=torch.zeros(3, dtype=torch.bool),
+        )
+        with qsa_metadata_build_scope(full_graph=not (capture or eager)):
+            meta = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+        adapter._prepare_gbsa(layer, meta, raw, full_graph=not (capture or eager), prepared_this_step={})
+        return meta
+
+    def dispatch(meta):
+        return impl._dispatch_qsa(
+            layer, query, (key, value), meta, output, raw.token_to_req, raw.logical_positions, raw.seq_lens
+        )
+
+    uniform = [query_width] * 3
+    captured = prepare(uniform, uniform, capture=True)
+    dispatch(captured)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        dispatch(captured)
+
+    cases = [(uniform, [153, 201, 279]), (uniform, [259, 131, 0])]
+    if query_width == 3:
+        cases.extend([([2, 4, 3], [199, 267, 130]), ([4, 5, 0], [145, 249, 0]), ([2, 3, 4], [145, 249, 0])])
+    for step, (counts, lengths) in enumerate(cases, 1):
+        pages.copy_(torch.arange(9, dtype=torch.int32).roll(step).reshape(3, 3))
+        query.copy_(torch.randn_like(query))
+        replay = prepare(counts, lengths)
+        assert replay.qsa_request_cu_q.data_ptr() == captured.qsa_request_cu_q.data_ptr()
+        assert replay.qsa_gbsa_metadata.data_ptr() == captured.qsa_gbsa_metadata.data_ptr()
+        expected = qsa_gbsa_attention(
+            query,
+            key,
+            value,
+            layer.topk_indices_buffer,
+            pages,
+            raw.token_to_req,
+            raw.logical_positions,
+            raw.seq_lens,
+            torch.empty_like(query),
+        )
+        graph.replay()
+        live_rows = sum(c for c, length in zip(counts, lengths) if length)
+        torch.testing.assert_close(output[:live_rows], expected[:live_rows], rtol=0, atol=0)
+        if all(lengths):
+            torch.testing.assert_close(dispatch(prepare(counts, lengths, eager=True)), expected, rtol=0, atol=0)

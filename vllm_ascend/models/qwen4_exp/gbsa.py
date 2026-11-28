@@ -25,6 +25,9 @@ def qsa_gbsa_attention(
     seq_lens: torch.Tensor,
     output: torch.Tensor,
     prepared_metadata: torch.Tensor | None = None,
+    *,
+    query_start_loc: torch.Tensor | None = None,
+    max_query_len: int | None = None,
 ) -> torch.Tensor:
     if key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("QSA GBSA requires 4-D K/V caches")
@@ -55,12 +58,28 @@ def qsa_gbsa_attention(
     if logical_positions.shape != (query.shape[0],):
         raise ValueError("QSA GBSA logical positions must match query rows")
 
-    sparse_idx, sparse_count, row_visible_lens, cu_q, row_block_table = prepare_qsa_gbsa_inputs(
-        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
+    if query_start_loc is not None:
+        if query_start_loc.shape != (block_table.shape[0] + 1,):
+            raise ValueError("QSA GBSA needs one query boundary per request plus the final offset")
+        if query_start_loc.dtype != torch.int64:
+            raise ValueError("QSA GBSA query boundaries must be int64")
+        if query_start_loc.device != query.device:
+            raise ValueError("QSA GBSA query boundaries must match query device")
+    if max_query_len is None:
+        if query_start_loc is not None and prepared_metadata is None:
+            raise ValueError("QSA GBSA packed query layout requires max_query_len")
+        effective_max_query_len = 1
+    elif max_query_len < 1:
+        raise ValueError("QSA GBSA max_query_len must be positive")
+    else:
+        effective_max_query_len = max_query_len
+
+    sparse_idx, sparse_count, kv_lengths, cu_q, page_table = prepare_qsa_gbsa_inputs(
+        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads, query_start_loc
     )
     common = dict(
         cu_seqlens_q=cu_q,
-        seqused_kv=row_visible_lens,
+        seqused_kv=kv_lengths,
         layout_q="TND",
         layout_kv="PA_BBND",
         layout_sparse_pattern=4,
@@ -79,7 +98,7 @@ def qsa_gbsa_attention(
             num_kv_heads,
             query.shape[-1],
             [1, GBSA_COMPRESS_RATIO],
-            max_seqlen_q=1,
+            max_seqlen_q=effective_max_query_len,
             max_seqlen_kv=int(logical_max_seqlen_kv),
             **common,
         )
@@ -91,7 +110,7 @@ def qsa_gbsa_attention(
         sparse_count,
         [1, GBSA_COMPRESS_RATIO],
         metadata=metadata,
-        block_table=row_block_table,
+        block_table=page_table,
         softmax_scale=query.shape[-1] ** -0.5,
         **common,
     )

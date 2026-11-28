@@ -82,14 +82,15 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         return model_inputs
 
     def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        metadata = super().prepare_attn(*args, **kwargs)
+        from .qsa import qsa_metadata_build_scope
+
         cudagraph_mode = kwargs.get("cudagraph_mode")
         if cudagraph_mode is None and len(args) > 1:
             cudagraph_mode = args[1]
-        self.qsa_prepared_input_adapter.prepare_attention_metadata(
-            metadata,
-            full_graph=cudagraph_mode == CUDAGraphMode.FULL,
-        )
+        full_graph = cudagraph_mode == CUDAGraphMode.FULL
+        with qsa_metadata_build_scope(full_graph=full_graph):
+            metadata = super().prepare_attn(*args, **kwargs)
+        self.qsa_prepared_input_adapter.prepare_attention_metadata(metadata, full_graph=full_graph)
         return metadata
 
     def _uses_global_mamba_pcp(self) -> bool:
@@ -114,6 +115,9 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         """Bind length consumers once, after target and draft KV initialization."""
         from vllm_ascend.models.qwen4_exp.cpu_length_sync import can_skip_qwen_cpu_length_sync
 
+        draft_model = getattr(getattr(runner, "speculator", None), "model", None)
+        if isinstance(draft_model, nn.Module):
+            self.qsa_prepared_input_adapter.register_model(draft_model)
         self._skip_spec_cpu_length_sync = False
         if not can_skip_qwen_cpu_length_sync(runner):
             return
