@@ -1,0 +1,5 @@
+pr: 22382
+entries:
+  - category: bugfix
+    text: Fixed text-only GLM-5.3-Flash checkpoints crashing during engine startup with a rotary-cache reshape error; multimodal checkpoints were unaffected because the vision tower's rope table registers first.
+    model: glm-5.3-flash
