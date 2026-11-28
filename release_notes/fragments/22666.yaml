@@ -1,0 +1,10 @@
+pr: 22666
+entries:
+  - category: performance
+    text: >-
+      HiSparse request resolution on Ascend A3 (910B/910C) is about 42% faster at
+      the production shape of 32 query rows with top-k 2048. A resolve call drops
+      from roughly 3.4 ms to 1.95 ms and its share of the decode iteration span
+      falls from 47.6% to 35.4%. There is no API, configuration, default-behaviour
+      or output change; existing deployments get the improvement without doing
+      anything.

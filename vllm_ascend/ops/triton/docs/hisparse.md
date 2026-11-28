@@ -206,7 +206,7 @@ operator tests.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_hisparse_arch22_ops.py -k invalidation
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_hisparse_invalidate_written_slots.py
 pytest -sv tests/ut/model_executor/warmup/test_hisparse_recycled_invalidate.py
 pytest -sv tests/ut/model_executor/warmup/test_hisparse_representatives.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse_representatives.py
