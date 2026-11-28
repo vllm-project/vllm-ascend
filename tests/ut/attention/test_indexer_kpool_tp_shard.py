@@ -49,6 +49,7 @@ def _builder(tp_size: int = 4, **overrides) -> AscendIndexerKPoolMetadataBuilder
     """Builder with only the fields shard planning touches."""
     builder = AscendIndexerKPoolMetadataBuilder.__new__(AscendIndexerKPoolMetadataBuilder)
     builder.tp_size = tp_size
+    builder._aligned_shard_rows = overrides.pop("aligned_shard_rows", None)
     builder.pcp_size = overrides.pop("pcp_size", 1)
     builder.compress_ratio = POOL_SIZE
     builder.device = torch.device("cpu")
@@ -118,6 +119,20 @@ def test_row_shard_gate_rejects_unsupported_configurations():
     assert not _builder()._indexer_row_sharding_supported(rows, graph_capture=True)
     assert not _builder(cudagraph_mode=CUDAGraphMode.FULL)._indexer_row_sharding_supported(rows, graph_capture=False)
     assert not _builder()._indexer_row_sharding_supported(rows - 1, graph_capture=False)
+
+
+def test_full_aligned_chunk_shards_only_with_deep_history():
+    rows = 7 * 1152
+    builder = _builder(tp_size=8, aligned_shard_rows=rows)
+    assert not builder._indexer_row_sharding_supported(rows - 1, graph_capture=False)
+    assert not builder._indexer_row_sharding_supported(rows + 1, graph_capture=False)
+    assert not builder._indexer_row_sharding_supported(rows, graph_capture=True)
+    assert builder._build_indexer_row_shard(_common_metadata([rows], [rows]), graph_capture=False) is None
+    with patch(f"{MODULE}.get_tensor_model_parallel_rank", return_value=0):
+        shard = builder._build_indexer_row_shard(_common_metadata([rows], [2 * rows]), graph_capture=False)
+        normal = builder._build_indexer_row_shard(_common_metadata([8192], [2 * rows]), graph_capture=False)
+    assert shard is not None and shard.project_full_head_weights and sum(shard.sizes) == rows
+    assert normal is not None and not normal.project_full_head_weights
 
 
 def test_row_shard_slices_tile_rows_and_rebase_requests():
