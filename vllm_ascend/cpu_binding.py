@@ -94,24 +94,41 @@ class DeviceInfo:
         logic_ids: set[int] = set()
         for _, chip_map in self.npu_map_info.items():
             for _, logic_str in chip_map.items():
-                if logic_str and logic_str.isdigit():
+                if logic_str and logic_str.isdecimal():
                     logic_ids.add(int(logic_str))
         return sorted(logic_ids)
 
     @staticmethod
     def get_npu_map_info() -> dict[str, dict[str, str]]:
         npu_map_info: dict[str, dict[str, str]] = {}
-        npu_info, _ = execute_command(["npu-smi", "info", "-m"])
+        npu_info, return_code = execute_command(["npu-smi", "info", "-m"])
         npu_map = [line.strip() for line in npu_info.splitlines() if line.strip()]
+        if return_code != 0 or not npu_map:
+            raise RuntimeError(
+                "Failed to get NPU map info: 'npu-smi info -m' exited with "
+                f"code {return_code} and produced no parseable output."
+            )
 
         header = DeviceInfo.split_npu_smi_header(npu_map[0])
+        if "NPU ID" not in header:
+            raise RuntimeError(
+                "Failed to parse 'npu-smi info -m' output: missing 'NPU ID' column "
+                f"in header {header!r}. The npu-smi output format may have changed."
+            )
         npu_id_idx = header.index("NPU ID")
         chip_id_idx = header.index("Chip ID") if "Chip ID" in header else None
         chip_logic_id_idx = header.index("Chip Logic ID") if "Chip Logic ID" in header else None
+        max_column_idx = max(idx for idx in (npu_id_idx, chip_id_idx, chip_logic_id_idx) if idx is not None)
 
         for line in npu_map[1:]:
             parts = line.split()
+            if len(parts) <= max_column_idx:
+                continue
             npu_id = parts[npu_id_idx]
+            if not npu_id.isdecimal():
+                # A row whose NPU ID is not numeric cannot produce a valid
+                # mapping; skip it like other malformed rows.
+                continue
 
             chip_id = "0"
             if chip_id_idx is not None:
@@ -121,11 +138,18 @@ class DeviceInfo:
                 chip_logic_id = parts[chip_logic_id_idx]
             else:
                 chip_logic_id = npu_id
-            if not chip_logic_id.isdigit():
+            if not chip_logic_id.isdecimal():
                 continue
             if npu_id not in npu_map_info:
                 npu_map_info[npu_id] = {}
             npu_map_info[npu_id][chip_id] = chip_logic_id
+        if not npu_map_info:
+            raise RuntimeError(
+                "Failed to parse 'npu-smi info -m' output: header "
+                f"{header!r} was recognized but none of the {len(npu_map) - 1} "
+                "data rows produced a valid NPU mapping. "
+                "The npu-smi output format may have changed."
+            )
         return npu_map_info
 
     def resolve_logic_id(self, npu_id: str, chip_id: str | None) -> int:
@@ -139,7 +163,7 @@ class DeviceInfo:
                 "Failed to resolve chip_logic_id because the process table does not contain chip_id "
                 f"and NPU {npu_id} has {len(chip_map)} mapped chips."
             )
-        if not chip_logic_id or not chip_logic_id.isdigit():
+        if not chip_logic_id or not chip_logic_id.isdecimal():
             raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
         return int(chip_logic_id)
 
@@ -166,12 +190,24 @@ class DeviceInfo:
                 chip_id = None
                 if proc_npu_field == "NPU Chip":
                     chip_id = npu_chip_parts[1]
-                if not npu_id.isdigit() or (chip_id is not None and not chip_id.isdigit()):
+                if not npu_id.isdecimal() or (chip_id is not None and not chip_id.isdecimal()):
                     continue
                 running_npu_set.add(self.resolve_logic_id(npu_id, chip_id))
         if ASCEND_RT_VISIBLE_DEVICES:
-            devices_str = ASCEND_RT_VISIBLE_DEVICES
-            devices_list = [int(x) for x in devices_str.split(",")]
+            devices_list: list[int] = []
+            for token in ASCEND_RT_VISIBLE_DEVICES.split(","):
+                token = token.strip()
+                if not token:
+                    # Tolerate empty tokens from leading/trailing/double
+                    # commas (e.g. "0,1,"). Skipping them never changes the
+                    # selected device set.
+                    continue
+                if not token.isdecimal():
+                    raise RuntimeError(
+                        "Invalid ASCEND_RT_VISIBLE_DEVICES value "
+                        f"{ASCEND_RT_VISIBLE_DEVICES!r}: expected a comma-separated list of NPU device ids."
+                    )
+                devices_list.append(int(token))
             running_npu_set = set(devices_list) & running_npu_set
         if not running_npu_set:
             raise RuntimeError("Can not get running npu info.")
@@ -283,7 +319,7 @@ class CpuAlloc:
         cpu_numa_map, _ = execute_command(["lscpu", "-e=CPU,NODE"])
         for line in cpu_numa_map.splitlines():
             line = line.strip()
-            if not line or not line[0].isdigit():
+            if not line or not line[0].isdecimal():
                 continue
             cpu_str, node_str = line.split()
             cpu = int(cpu_str)
@@ -299,7 +335,7 @@ class CpuAlloc:
             if "Thread(s) per core:" not in line:
                 continue
             value = line.split(":", 1)[1].strip()
-            if value.isdigit():
+            if value.isdecimal():
                 return int(value)
         return None
 
@@ -310,7 +346,7 @@ class CpuAlloc:
             if "uvb_poll_window_thread" not in line:
                 continue
             parts = line.split()
-            if len(parts) >= 2 and parts[1].isdigit():
+            if len(parts) >= 2 and parts[1].isdecimal():
                 thread_ids.append(parts[1])
         return thread_ids
 

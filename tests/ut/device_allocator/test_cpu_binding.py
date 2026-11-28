@@ -1289,6 +1289,82 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.assertEqual(calls, ["build_cpu_pools"])
 
 
+class TestNpuSmiParsingHardening(unittest.TestCase):
+    """get_npu_map_info / get_running_npus must fail with actionable
+    RuntimeError messages instead of bare IndexError/ValueError tracebacks
+    or silently empty mappings when npu-smi fails or its output format
+    changes."""
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_raises_on_empty_output(self, mock_execute_command):
+        mock_execute_command.return_value = ("", 0)
+        with self.assertRaisesRegex(RuntimeError, "npu-smi info -m"):
+            DeviceInfo.get_npu_map_info()
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_raises_on_nonzero_return_code(self, mock_execute_command):
+        mock_execute_command.return_value = ("NPU ID  Chip ID  Chip Logic ID  Chip Name\n0 0 0 Ascend", 1)
+        with self.assertRaisesRegex(RuntimeError, "code 1"):
+            DeviceInfo.get_npu_map_info()
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_raises_when_npu_id_column_missing(self, mock_execute_command):
+        mock_execute_command.return_value = ("Chip ID  Chip Name\n0 Ascend", 0)
+        with self.assertRaisesRegex(RuntimeError, "NPU ID"):
+            DeviceInfo.get_npu_map_info()
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_skips_short_rows(self, mock_execute_command):
+        mock_execute_command.return_value = (
+            "NPU ID  Chip ID  Chip Logic ID  Chip Name\n0 0 0 Ascend\nbroken\n1 0 1 Ascend",
+            0,
+        )
+        self.assertEqual(DeviceInfo.get_npu_map_info(), {"0": {"0": "0"}, "1": {"0": "1"}})
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_skips_non_numeric_npu_id_rows(self, mock_execute_command):
+        mock_execute_command.return_value = (
+            "NPU ID  Chip ID  Chip Logic ID  Chip Name\nbad 0 0 Ascend\n1 0 1 Ascend",
+            0,
+        )
+        self.assertEqual(DeviceInfo.get_npu_map_info(), {"1": {"0": "1"}})
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_raises_on_header_only_output(self, mock_execute_command):
+        mock_execute_command.return_value = ("NPU ID  Chip ID  Chip Logic ID  Chip Name", 0)
+        with self.assertRaisesRegex(RuntimeError, "none of the 0 data rows"):
+            DeviceInfo.get_npu_map_info()
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_npu_map_info_raises_when_all_rows_skipped(self, mock_execute_command):
+        mock_execute_command.return_value = (
+            "NPU ID  Chip ID  Chip Logic ID  Chip Name\nbroken\n0 0 - Mcu",
+            0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "none of the 2 data rows"):
+            DeviceInfo.get_npu_map_info()
+
+    @patch("vllm_ascend.cpu_binding.ASCEND_RT_VISIBLE_DEVICES", "0, x")
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_running_npus_rejects_invalid_visible_devices(self, mock_execute_command):
+        mock_execute_command.return_value = ("| NPU Chip | Process id |\n| 0 0 | 1234 | vllm |", 0)
+        device_info = object.__new__(DeviceInfo)
+        device_info.npu_map_info = {"0": {"0": "0"}}
+        with self.assertRaisesRegex(RuntimeError, "ASCEND_RT_VISIBLE_DEVICES"):
+            device_info.get_running_npus()
+
+    @patch("vllm_ascend.cpu_binding.ASCEND_RT_VISIBLE_DEVICES", " 0 , 1 ")
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_get_running_npus_tolerates_spaced_visible_devices(self, mock_execute_command):
+        mock_execute_command.return_value = (
+            "| NPU Chip | Process id |\n| 0 0 | 1234 | vllm |\n| 1 0 | 1235 | vllm |",
+            0,
+        )
+        device_info = object.__new__(DeviceInfo)
+        device_info.npu_map_info = {"0": {"0": "0"}, "1": {"0": "1"}}
+        self.assertEqual(device_info.get_running_npus(), [0, 1])
+
+
 class TestBindingSwitch(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.platform.machine")
     def test_is_arm_cpu(self, mock_machine):
