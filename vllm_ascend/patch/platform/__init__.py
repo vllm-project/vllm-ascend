@@ -38,6 +38,7 @@ import vllm_ascend.patch.platform.patch_engine_core  # noqa
 import vllm_ascend.patch.platform.patch_metrics_level  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_layout  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_replayssm_config  # noqa
 
@@ -112,3 +113,24 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 # Upstream plan: contribute physical-block accounting to vLLM and remove this
 # patch once both supported vLLM versions cover first-time and shared-block
 # admission accounting.
+#
+# ** File: platform/patch_kv_cache_layout.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.utils.resolve_kv_cache_layout`
+#      `vllm.v1.engine.core.resolve_kv_cache_layout`
+#    Why:
+#       `EngineCore` resolves the global KV cache layout from raw worker owner
+#       specs before calling `get_global_kv_cache_groups`. Moving Ascend hybrid
+#       page alignment into `AscendKVCacheConfigBuilder` leaves owner specs
+#       unpadded, so DCP-sharded target + replicated draft + Mamba configs
+#       appear to have mixed page sizes during layout resolution.
+#    How:
+#       Evaluate `effective_kv_cache_specs_for_layout` on synthetic copies so
+#       `resolve_kv_cache_layout` and `get_global_kv_cache_groups` agree on
+#       planned page sizes while keeping owner `KVCacheSpec` objects intact.
+#    Related PR (if no, explain why):
+#       No upstream hook currently exposes builder-planned specs prior to
+#       `resolve_kv_cache_layout`.
+#    Future Plan:
+#       Remove this patch once upstream `KVCacheConfigBuilder` participates in
+#       layout resolution or runs spec planning before `resolve_kv_cache_layout`.

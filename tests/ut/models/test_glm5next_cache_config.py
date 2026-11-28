@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
@@ -151,7 +152,9 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=None)
     specs = make_specs(pool)
+    owner_geometry = {name: (spec.block_size, spec.page_size_padded) for name, spec in specs.items()}
     groups = get_glm5_next_kv_cache_groups(config, dict(reversed(list(specs.items()))))
+    assert {name: (spec.block_size, spec.page_size_padded) for name, spec in specs.items()} == owner_geometry
     layout = _get_glm5_next_cache_layout(groups)
     assert layout is not None
     assert groups[0].layer_names == [
@@ -160,6 +163,9 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     ]
     assert len(groups) == 5  # full, state, and three interleaved KDA groups
     assert layout.main_slot_count == layout.small_slot_count == 1
+    assert layout.main_page_size > layout.small_page_size
+    repeated = get_glm5_next_kv_cache_groups(config, specs)
+    assert _get_glm5_next_cache_layout(repeated) == layout
 
     bytes_per_block = layout.main_page_size + layout.small_page_size
     budget = 20 * bytes_per_block
@@ -232,14 +238,22 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     )
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
     plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    planned_specs = {
+        name: spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+    }
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
-    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    (tail,) = view_kpool_tail_cache(tail_name, planned_specs[tail_name], raw, plan.num_blocks)
+    page_rows = planned_specs[tail_name].page_size_bytes // (
+        2 * planned_specs[tail_name].head_size * tail.element_size()
+    )
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
-    keys, scales = view_compressed_indexer_cache(indexer_name, specs[indexer_name], raw, backend, 128)
+    keys, scales = view_compressed_indexer_cache(indexer_name, planned_specs[indexer_name], raw, backend, 128)
     page_bytes = descriptor.size // plan.num_blocks
     assert keys.shape == (15, 32, 1, 128)
     assert scales.shape == (15, 32, 1, 1)
@@ -406,3 +420,31 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
+
+
+@pytest.mark.parametrize("large_owner", ["indexer", "tail"])
+def test_glm53_flash_small_pool_does_not_pad_main_pool(large_owner):
+    specs = make_specs()
+    main_name = "model.layers.3.attn"
+    indexer_name = "model.layers.3.indexer.k_cache"
+    tail_name = "model.layers.3.indexer.tail_cache"
+    main_page = specs[main_name].page_size_bytes
+    small_page = 2 * main_page
+    large_name = indexer_name if large_owner == "indexer" else tail_name
+    specs[large_name] = replace(specs[large_name], page_size_padded=small_page)
+    original = dict(specs)
+
+    config = make_config()
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    assert layout.main_page_size == main_page
+    assert layout.small_page_size == small_page
+    assert all(group.kv_cache_spec.page_size_bytes == main_page for group in layout.mamba_groups)
+    cost = layout.main_slot_count * main_page + layout.small_slot_count * small_page
+    assert get_glm5_next_pool_bytes_per_block(groups) == cost
+    physical = get_glm5_next_kv_cache_config(config, groups, 7 * cost)
+    assert physical.num_blocks == 7
+    assert sum(tensor.size for tensor in physical.kv_cache_tensors) == 7 * cost
+    assert {tensor.block_stride for tensor in physical.kv_cache_tensors} == {main_page, small_page}
+    assert all(specs[name] is spec for name, spec in original.items())

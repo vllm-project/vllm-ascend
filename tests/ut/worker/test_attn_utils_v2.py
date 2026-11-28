@@ -2624,6 +2624,8 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
 
 @pytest.mark.parametrize("indexer_dtype,indexer_scale_dim", [(torch.bfloat16, 0), (torch.int8, 1)])
 def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_dtype, indexer_scale_dim):
+    from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
+
     specs = {
         "main": AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16),
         "indexer": AscendSFAIndexerCacheSpec(
@@ -2636,7 +2638,7 @@ def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_d
         ),
     }
     original = dict(specs)
-    attn_utils._align_hybrid_attention_page_sizes(specs, minimum_page_size=800000)
+    _align_hybrid_attention_page_sizes(specs, minimum_page_size=800000)
     # PR4's paired planner aligns recurrent states to main pages separately.
     # Enlarging token blocks to equalize MLA/indexer bytes changes ownership.
     assert specs == original
@@ -3351,6 +3353,8 @@ def _step5_ring_spec() -> CircularBufferSpec:
 
 
 def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers() -> None:
+    from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
+
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.1.self_attn": _step5_sw_spec(),
@@ -3362,7 +3366,7 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
     }
     summary_before = specs[STEP5_SUMMARY]
 
-    attn_utils._align_hybrid_attention_page_sizes(specs)
+    _align_hybrid_attention_page_sizes(specs)
 
     # Dense layers still align: the sliding-window page doubles its block
     # to reach the main page.
@@ -3378,6 +3382,8 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
 def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page() -> None:
     """Without the aux-name exclusion the same geometry must fail, pinning
     that the suffix filter (not the geometry) spares the summary layers."""
+    from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
+
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.3.self_attn": FullAttentionSpec(
@@ -3385,7 +3391,7 @@ def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page(
         ),
     }
     with pytest.raises(ValueError, match="Cannot align"):
-        attn_utils._align_hybrid_attention_page_sizes(specs)
+        _align_hybrid_attention_page_sizes(specs)
 
 
 def _step5_tensors_and_groups():
