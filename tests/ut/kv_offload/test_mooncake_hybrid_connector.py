@@ -1248,3 +1248,28 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 class TestMooncakeHybridConnectorLoadedGroups(unittest.TestCase):
     def test_loaded_group_ids_hook_is_version_gated(self):
         self.assertIn("get_loaded_kv_cache_group_ids", MooncakeConnector.__dict__)
+
+
+class TestHybridGroupCountClamp(unittest.TestCase):
+    """Regression: the KV transfer loop must not index past the shortest group list.
+
+    With speculative decoding enabled on the decode side only, the draft/MTP
+    layers form an extra KV cache group locally, so the prefill side reports
+    fewer groups in ``remote_block_ids`` than ``self.hma_group_size``. Before the
+    fix the loop used ``range(self.hma_group_size)`` and raised IndexError, which
+    ``_handle_request()`` swallowed, leaving the request waiting for KV until the
+    client timed out.
+    """
+
+    def test_common_group_count_clamps_to_shortest_list(self):
+        count = KVCacheRecvingThread._common_group_count
+        # decode side has one extra draft group; prefill reports a single group
+        self.assertEqual(count(2, ([1, 2],), ([3, 4],)), 1)
+        # both sides agree
+        self.assertEqual(count(2, ([1], [2]), ([3], [4])), 2)
+        # local block ids are the shortest list
+        self.assertEqual(count(2, ([1], [2]), ([3],)), 1)
+        # empty groups still count as a group
+        self.assertEqual(count(3, ([], [], []), ([], [], [])), 3)
+        # never exceed the shortest list
+        self.assertEqual(count(4, ([1],), ([2], [3])), 1)
