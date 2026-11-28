@@ -1,7 +1,0 @@
-pr: 23639
-entries:
-  - category: bugfix
-    text: >-
-      Fixed a MiniMax-M3.1-Flash startup failure with Transformers 5.19.0 when a DSpark
-      checkpoint specifies the SwiGLU-OAI activation. Affected runs reported
-      `Unexpected MiniMax draft decoder semantics`.
