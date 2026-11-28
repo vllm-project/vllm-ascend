@@ -1,0 +1,7 @@
+pr: 23683
+entries:
+  - category: performance
+    text: >-
+      HiSparse speculative decode batches padded for ACL graphs can now overlap
+      Host KV writeback with drafting, avoiding the serialized fallback previously
+      used for padded batches.
