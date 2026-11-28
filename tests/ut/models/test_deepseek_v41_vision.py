@@ -271,9 +271,7 @@ def test_v41_loads_only_local_vision_weights(monkeypatch, image_enabled, first_p
         "vllm.model_executor.offloader.get_offloader", lambda: SimpleNamespace(supports_tower_offload=False)
     )
     mm_config = SimpleNamespace(get_limit_per_prompt=lambda modality: int(image_enabled))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(get_multimodal_config=lambda: mm_config), use_v2_model_runner=True
-    )
+    config = SimpleNamespace(model_config=SimpleNamespace(get_multimodal_config=lambda: mm_config))
     with wrapper._mark_tower_model(config, {"image"}):
         wrapper.vision = None
         if image_enabled:

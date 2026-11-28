@@ -90,7 +90,7 @@ def supports_a3_mla(
     if cfg.model_config.hf_config.model_type != "kimi_k31":
         return False
     spec = cfg.speculative_config
-    if not getattr(cfg, "use_v2_model_runner", False) or spec is None:
+    if spec is None:
         return False
     if spec.method == "dflash":
         if not dflash_draft_window or impl.use_dcp or not supports_a3_mla_window():

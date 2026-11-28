@@ -219,7 +219,7 @@ def quant_methods(monkeypatch, request):
     monkeypatch.setattr(
         routed_experts,
         "get_current_vllm_config",
-        lambda: SimpleNamespace(use_v2_model_runner=True, model_config=SimpleNamespace(runner_type="generate")),
+        lambda: SimpleNamespace(model_config=SimpleNamespace(runner_type="generate")),
     )
     monkeypatch.setattr("vllm_ascend.distributed.expert_transfer.expert_offload_manager.LayerOffloadBinding", binding)
     monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")
