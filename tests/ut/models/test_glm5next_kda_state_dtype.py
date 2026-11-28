@@ -31,6 +31,7 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
     layer.use_recoverssm = False
     layer.model_config, layer.cache_config = config.model_config, cache_config
     layer.tp_size, layer.num_heads, layer.head_dim, layer.conv_size, layer.num_spec = 1, 64, 128, 4, 5
+    config.compilation_config = SimpleNamespace(static_forward_context={"layer": layer})
     return layer, config
 
 
