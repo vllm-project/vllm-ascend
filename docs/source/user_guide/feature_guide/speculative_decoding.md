@@ -6,7 +6,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 
 ### Working Principle
 
-vLLM Ascend implements speculative decoding through a **speculator-verifier** architecture.
+vLLM Ascend follows upstream vLLM's **speculator-verifier** architecture for speculative decoding.
 
 1. The **Speculator** generates draft (speculative) tokens using various methods, from simple n-gram matching to neural-network-based draft models.
 2. The **Rejection Sampler** verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional block verification configured through `speculative_config.rejection_sample_method`.
