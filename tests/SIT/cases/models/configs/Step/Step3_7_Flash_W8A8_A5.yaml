@@ -52,6 +52,7 @@ test_cases:
     test_content:
       - spec_decode_acceptance
     acceptance_rate:
+      benchmark: acc_aime2026
       baseline: [0.9140, 0.7951, 0.6791]
       tolerance: 0.05
     benchmarks:
