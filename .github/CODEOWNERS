@@ -166,7 +166,6 @@
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/logger.py @wangxiyuan
 /vllm_ascend/meta_registration.py @ZT-AIA
-/vllm_ascend/mrv2_utils.py @yzeyu71
 /vllm_ascend/platform.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 # /vllm_ascend/profiling_config.py
 /vllm_ascend/utils.py @wxsIcey @Ronald1995 @Tflowers-0129 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan

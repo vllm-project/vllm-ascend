@@ -67,11 +67,6 @@ msgstr "## MS Service Profiler"
 msgid "### 0. Build from Source and Upgrade"
 msgstr "### 0. 从源码构建并升级"
 
-msgid ""
-"The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package."
-" Use the following commands to install or upgrade from source."
-msgstr "`msserviceprofiler` 工具随 CANN Toolkit 包预装。使用以下命令从源码安装或升级。"
-
 msgid "### 1. Preparation"
 msgstr "### 1. 准备工作"
 
@@ -604,3 +599,9 @@ msgstr ""
 
 msgid "##### Configuration File Updates"
 msgstr "##### 配置文件更新"
+
+msgid ""
+"The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package."
+" If you need to upgrade it, use the following commands to build and upgrade "
+"from source."
+msgstr "`msserviceprofiler` 工具已随 CANN Toolkit 软件包预装。如需升级，请使用以下命令从源码构建并升级。"
