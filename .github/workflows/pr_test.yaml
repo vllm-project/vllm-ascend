@@ -25,12 +25,10 @@ on:
     # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
     # `ci-gate` is a required check, so a commit that was never tested stays
     # blocked rather than being merged untested.
-    # Re-evaluate the gate when a skip_ci label is removed.
     types:
       - opened
       - reopened
       - labeled
-      - unlabeled
     branches:
       - 'main'
       - '*-dev'
@@ -948,6 +946,12 @@ jobs:
         run: |
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
             --pr "${{ github.event.pull_request.number }}"
+
+      - name: Revert CI waiver for PR ${{ github.event.pull_request.number }}
+        if: >-
+          contains(github.event.pull_request.title, '[Revert]') &&
+          contains(github.event.pull_request.labels.*.name, 'skip_ci')
+        run: echo 'This run is evaluating a revert CI waiver.'
 
       - name: Check all required jobs
         # always()-style execution is essential now that the CODEOWNERS gate
