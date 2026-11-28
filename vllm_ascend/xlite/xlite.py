@@ -433,9 +433,32 @@ class StandardXliteModel(XliteModelBase):
 
         re_prefix = f"{mlp_prefix}.experts.routed_experts"
         re_kwargs: WeightGetterConfig = {"secondary_flattening": f"{re_prefix}.local_num_experts"}
-        xlite_model.re_up_gate = get_layer_weights(layers, f"{re_prefix}.w13_weight", **re_kwargs)
-        xlite_model.re_down = get_layer_weights(layers, f"{re_prefix}.w2_weight", **re_kwargs)
+        # Under dynamic EPLB (and CANN mega-moe) the quant methods replace the packed expert weights with per-expert
+        # `*_list` clones — the tensors the rebalance loop migrates in place — so fall back to them.
+        xlite_model.re_up_gate_scale_bias = get_layer_weights(
+            layers, f"{re_prefix}.w13_scale_bias", f"{re_prefix}.w13_scale_bias_list", **re_kwargs
+        )
+        xlite_model.re_down_scale_bias = get_layer_weights(
+            layers, f"{re_prefix}.w2_scale_bias", f"{re_prefix}.w2_scale_bias_list", **re_kwargs
+        )
+
+        # W4A8 `*_list` entries keep the loader's int8 (int4x2-packed) dtype instead of the int32 view the backend
+        # expects (it then re-views INT4); re-viewing shares storage, so the binding stays live across rebalances.
+        is_int4_packed = bool(xlite_model.re_up_gate_scale_bias)
+
+        def view_int4_packed(weight: torch.Tensor) -> torch.Tensor:
+            return weight.view(torch.int32) if is_int4_packed and weight.dtype == torch.int8 else weight
+
+        wt_kwargs: WeightGetterConfig = {**re_kwargs, "post_processor": view_int4_packed}
+        xlite_model.re_up_gate = get_layer_weights(
+            layers, f"{re_prefix}.w13_weight", f"{re_prefix}.w13_weight_list", **wt_kwargs
+        )
+        xlite_model.re_down = get_layer_weights(
+            layers, f"{re_prefix}.w2_weight", f"{re_prefix}.w2_weight_list", **wt_kwargs
+        )
         xlite_config.experts_weight_nz = bool(xlite_model.re_up_gate) and self.is_tensor_nz(xlite_model.re_up_gate[0])
+
+        self._build_eplb(layers, re_prefix)
 
         # bias terms
         with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
@@ -454,12 +477,131 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.quant_attn_weight_nz = bool(xlite_model.mha_qkv) and self.is_tensor_nz(xlite_model.mha_qkv[0])
         xlite_config.quant_attn_weight_transpose = bool(xlite_model.mha_qkv)
 
-        xlite_model.re_up_gate_scale_bias = get_layer_weights(layers, f"{re_prefix}.w13_scale_bias", **re_kwargs)
-        xlite_model.re_down_scale_bias = get_layer_weights(layers, f"{re_prefix}.w2_scale_bias", **re_kwargs)
-
         re_kwargs["post_processor"] = self._transform_deq_scale
-        xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{re_prefix}.w13_weight_scale", **re_kwargs)
-        xlite_model.re_down_scale = get_layer_weights(layers, f"{re_prefix}.w2_weight_scale", **re_kwargs)
+        # Under EPLB the migrated scale tensors are the per-expert fp32 lists (W8A8: `w13_weight_scale_fp32_list`;
+        # W4A8: `w13_weight_scale_list`), while the packed originals are deleted.
+        xlite_model.re_up_gate_scale = get_layer_weights(
+            layers,
+            f"{re_prefix}.w13_weight_scale",
+            f"{re_prefix}.w13_weight_scale_fp32_list",
+            f"{re_prefix}.w13_weight_scale_list",
+            **re_kwargs,
+        )
+        xlite_model.re_down_scale = get_layer_weights(
+            layers, f"{re_prefix}.w2_weight_scale", f"{re_prefix}.w2_weight_scale_list", **re_kwargs
+        )
+
+    def _build_eplb(self, layers: Sequence[nn.Module], re_prefix: str) -> None:
+        """Dock the xlite backend with the upstream EPLB state (`--enable-eplb`, Model Runner V2).
+
+        Every MoE layer's router carries an :class:`AscendEplbLayerState` whose tensors the upstream rebalance loop
+        updates in place, so binding them zero-copy keeps the zero-captured xlite model live across rearrangements:
+
+        - ``expert_replica_routing_table`` ``[num_rows, n_routed_experts]``: logical→physical map. The backend remaps
+          the MoE gate outputs row-wise (``table[t % num_rows][L]``), mirroring the native
+          ``ascend_eplb_map_to_physical`` — including the per-token-row replica rotation. Bound whenever EPLB is
+          active: rearrangement may permute experts across ranks even with zero redundant experts.
+        - ``expert_load_view`` ``[n_routed_experts + num_redundant_experts]``: per-forward expert token counts the
+          backend accumulates, gated by the shared ``should_record_tensor``. Without it the upstream policies would
+          rebalance on an all-zero load window.
+
+        The legacy V1 ``eplb_config`` EPLB (``DYNAMIC_EPLB`` env, ``RoutedExperts.log2phy``) is a different,
+        deprecated machinery and is not supported.
+
+        Args:
+            layers (Sequence[nn.Module]): The transformer layers to resolve the EPLB state from.
+            re_prefix (str): The dotted prefix of the routed-experts module within a decoder layer.
+
+        Returns:
+            None: `self.xlite_config.num_redundant_experts` and the `self.xlite_model` EPLB bindings are updated
+                in-place.
+
+        Raises:
+            ValueError: If redundant experts are allocated without the upstream EPLB layer state, if the linked xlite
+                backend predates the EPLB binding contract, or if a resolved state tensor is not a contiguous int32
+                tensor of the expected shape (only such tensors can be bound zero-copy and tracked in place).
+        """
+        xlite_config, xlite_model = self.xlite_config, self.xlite_model
+        experts = next((routed for layer in layers if (routed := get_dotted_attr(layer, re_prefix)) is not None), None)
+        if experts is None or (moe_config := get_dotted_attr(experts, "moe_config")) is None:
+            return
+        num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
+
+        tables: list[torch.Tensor] = []
+        loads: list[torch.Tensor] = []
+        record_flag: torch.Tensor | None = None
+        for layer in layers:
+            routed = get_dotted_attr(layer, re_prefix)
+            if routed is None:  # dense layer, aligned with the `moe_gate` binding
+                continue
+            state = get_dotted_attr(routed, "router.eplb_state")
+            table = get_dotted_attr(state, "expert_replica_routing_table")
+            load = get_dotted_attr(state, "expert_load_view")
+            if table is None or table.numel() == 0 or load is None:
+                continue
+            if (
+                table.dtype != torch.int32
+                or not table.is_contiguous()
+                or table.shape[-1] != xlite_config.n_routed_experts
+            ):
+                raise ValueError(
+                    f"xlite: unsupported EPLB routing table (dtype={table.dtype}, shape={tuple(table.shape)}, "
+                    f"contiguous={table.is_contiguous()}); expected a contiguous int32 tensor whose last dim is "
+                    f"[{xlite_config.n_routed_experts}] so it can be bound zero-copy and tracked across rebalances."
+                )
+            if load.dtype != torch.int32 or not load.is_contiguous() or load.shape[0] != moe_config.num_experts:
+                raise ValueError(
+                    f"xlite: unsupported EPLB expert-load view (dtype={load.dtype}, shape={tuple(load.shape)}); "
+                    f"expected a contiguous int32 tensor of shape [{moe_config.num_experts}]."
+                )
+            if record_flag is None and (record_flag := get_dotted_attr(state, "should_record_tensor")) is not None:
+                # Upstream's should_record_tensor became a 0-dim bool scalar (vLLM #37234): bool and
+                # int8 share 1-byte storage, so view zero-copy as a 1-element 1-D int8 tensor — the
+                # backend reads one byte (the low byte covers int32 too) and the controller's
+                # in-place fill_() stays visible through the view.
+                if record_flag.dtype == torch.bool:
+                    record_flag = record_flag.view(torch.int8).view(1)
+                if record_flag.dtype not in (torch.int32, torch.int8) or record_flag.numel() != 1:
+                    raise ValueError(
+                        f"xlite: unsupported EPLB record flag (dtype={record_flag.dtype}, "
+                        f"shape={tuple(record_flag.shape)}); expected an int32/int8/bool scalar tensor."
+                    )
+                if record_flag.ndim != 1:
+                    record_flag = record_flag.view(1)
+            tables.append(table)
+            loads.append(load)
+
+        if not tables:
+            if num_redundant_experts > 0:
+                raise ValueError(
+                    f"xlite: {num_redundant_experts} redundant experts are allocated but no upstream EPLB layer "
+                    "state was found on the MoE layers; xlite EPLB requires Model Runner V2 with --enable-eplb "
+                    "(the legacy V1 eplb_config path is not supported)."
+                )
+            return
+        if (num_moe_layers := xlite_config.n_layers - xlite_config.n_dense_layers) != len(tables):
+            raise ValueError(
+                f"xlite: EPLB expert map count mismatch: {len(tables)} maps for {num_moe_layers} MoE layers."
+            )
+        if record_flag is None:
+            raise ValueError("xlite: EPLB layer state carries no shared should_record_tensor.")
+        if not all(
+            hasattr(xlite_model, attr) for attr in ("expert_replica_routing_table", "expert_load", "record_expert_load")
+        ):
+            raise ValueError(
+                "xlite: the linked xlite backend does not implement the EPLB binding contract "
+                "(Model.expert_replica_routing_table / expert_load / record_expert_load); "
+                "EPLB cannot be enabled for xlite."
+            )
+        xlite_config.num_redundant_experts = num_redundant_experts
+        xlite_model.expert_replica_routing_table = tables
+        xlite_model.expert_load = loads
+        xlite_model.record_expert_load = record_flag
+        logger.info_once(
+            "xlite: EPLB active (%d redundant experts); bound per-layer routing tables, expert-load views and the "
+            "record flag; rebalances update them in place.",
+            num_redundant_experts,
+        )
 
     def init_matmul_weights(
         self,

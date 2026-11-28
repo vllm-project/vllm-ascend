@@ -1,0 +1,10 @@
+pr: 23550
+entries:
+  - category: feature
+    text: >-
+      The xlite frontend (`additional_config.xlite_graph_config`) now supports upstream EPLB
+      (`--enable-eplb`, Model Runner V2): MoE gate outputs are remapped logical-to-physical
+      per token row through the upstream `expert_replica_routing_table`, and per-forward
+      expert load is recorded into the upstream expert-load views, so dynamic expert
+      rebalancing works under xlite without rebinding. Requires the matching xlite build
+      (EPLB-v2 binding contract).
