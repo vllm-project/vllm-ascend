@@ -110,7 +110,7 @@ msgid ""
 "`weight_nz_mode=2`. Found on GLM-5.3-Flash; see "
 "[Preconditions for o_proj / MLP TP](#preconditions-for-o_proj-mlp-tp). |"
 msgstr ""
-"| 权重 NZ 格式 | 在 A5（Ascend 950DT）上，对于带视觉输入的多模态模型，`mlp_tensor_parallel_size > 1` 不能与 `weight_nz_mode=2` 叠加使用。该问题已在 GLM-5.3-Flash 上发现；参见[o_proj / MLP TP 的前提条件](#preconditions-for-o_proj-mlp-tp)。 |"
+"| 权重 NZ 格式 | 在 A5（Ascend 950DT）上，对于带视觉输入的多模态模型，`mlp_tensor_parallel_size > 1` 不能与 `weight_nz_mode=2` 叠加使用。该问题已在 GLM-5.3-Flash 上发现；参见[o_proj / MLP TP 的前提条件](#o_proj-mlp-tp)。 |"
 
 msgid "#### Models"
 msgstr "#### 模型"
