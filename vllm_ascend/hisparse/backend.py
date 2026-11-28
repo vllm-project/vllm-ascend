@@ -84,7 +84,6 @@ def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
 
 
 class AscendHiSparseBackend(HiSparseBackend):
-    supports_shared_host_pool = True
     stats_dtype = torch.int64
     # Verified for row and page D2H on the installed A5 runtime. Use this
     # conservative bound so the driver never receives an oversized batch.
@@ -258,3 +257,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         result = offload.sparse_copy(mapped_src, device_dst, lengths, count, device)
         if result not in (None, 0):
             raise RuntimeError(f"MemFabric HiSparse page restore failed: {result}")
+
+
+class AscendSharedHostHiSparseBackend(AscendHiSparseBackend):
+    """Expose shared Host support during Core cache planning."""
+
+    supports_shared_host_pool = True

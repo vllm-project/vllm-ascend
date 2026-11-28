@@ -32,6 +32,7 @@ def make_layout(model="flash", *, block_size=32, cache_format="a3", buffers=2, i
     if independent is not None:
         extra["layerwise_independent_layers"] = independent
     runtime = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=hf,
             hf_text_config=hf,
@@ -293,7 +294,6 @@ def make_capacity_inputs(monkeypatch, model):
 
     runtime, groups, specs = make_layout(model, buffers=3, independent=[0, 1])
     runtime.model_config.original_max_model_len = runtime.model_config.max_model_len = 128
-    runtime.attention_config = SimpleNamespace(hisparse_config=None)
     runtime.max_in_flight_tokens = 32
     runtime.num_prefill_lookahead_tokens = 0
     builder = AscendKVCacheConfigBuilder()

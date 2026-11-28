@@ -304,6 +304,11 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_hisparse_backend_cls(cls) -> str:
+        from vllm_ascend.hisparse.host_pool import share_host_pool_for_planning
+
+        # Core resolves this name on each lookup and caches instances by class name.
+        if share_host_pool_for_planning.get():
+            return "vllm_ascend.hisparse.backend.AscendSharedHostHiSparseBackend"
         return "vllm_ascend.hisparse.backend.AscendHiSparseBackend"
 
     @classmethod

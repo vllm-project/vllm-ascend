@@ -815,6 +815,7 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
 def test_platform_builder_uses_qwen_pool_accounting(override) -> None:
     groups = _groups()
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp")),
         cache_config=SimpleNamespace(num_gpu_blocks_override=override, prefix_cache_retention_interval=None),
     )

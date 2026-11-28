@@ -17,9 +17,12 @@ def core_hisparse_backend():
 
 @pytest.fixture
 def config():
+    from vllm.config import KVTransferConfig
+
     return NS(
-        kv_transfer_config=NS(
+        kv_transfer_config=KVTransferConfig(
             kv_connector="MultiConnector",
+            kv_role="kv_both",
             kv_connector_extra_config={
                 "connectors": [
                     {"kv_connector": "HiSparseConnector"},
@@ -119,10 +122,12 @@ def test_existing_private_allocator_does_not_replace_core_shared_allocator(monke
 @pytest.mark.parametrize(
     "connector, tp_size, shared",
     [
-        ("HiSparseConnector", 2, True),
-        ("HiSparseConnector", 1, False),
-        ("MultiConnector", 2, True),
-        ("MultiConnector", 1, False),
+        ("standalone", 2, False),
+        ("pd_default", 2, False),
+        ("pd_memfabric", 2, True),
+        ("pd_memfabric", 1, False),
+        ("ascendstore", 2, False),
+        ("ascendstore_memfabric", 2, False),
     ],
 )
 def test_core_pool_plan_selects_memfabric_allocator(
@@ -133,20 +138,36 @@ def test_core_pool_plan_selects_memfabric_allocator(
     from vllm.v1.hisparse import layout, runtime
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.hisparse.host_pool import AscendHiSparseOffloadManager
+    from vllm_ascend.platform import NPUPlatform
 
-    config.kv_transfer_config.kv_connector = connector
+    use_private_memfabric = connector == "ascendstore_memfabric"
+    if connector == "standalone":
+        config.kv_transfer_config.kv_connector = "HiSparseConnector"
+    elif connector == "pd_default":
+        config.kv_transfer_config.kv_connector_extra_config["connectors"][1].pop("kv_connector_extra_config")
+    elif connector in ("ascendstore", "ascendstore_memfabric"):
+        children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+        children[0]["kv_role"] = "kv_both"
+        if use_private_memfabric:
+            children[0]["kv_connector_extra_config"] = {"transfer_backend": "memfabric"}
+        children[1] = {
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"backend": "memcache", "load_async": True},
+        }
     config.parallel_config.tensor_parallel_size = config.parallel_config.world_size = tp_size
     config.model_config = NS(max_model_len=128)
-    backend = AscendHiSparseBackend()
     monkeypatch.setattr(core_config, "get_current_vllm_config_or_none", lambda: config)
-    monkeypatch.setattr(core_hisparse_backend, "get_hisparse_backend", lambda: backend)
-    monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
+    monkeypatch.setattr(core_hisparse_backend, "current_platform", NPUPlatform)
+    private_backend = core_hisparse_backend.get_hisparse_backend()
+    assert not private_backend.supports_shared_host_pool
     alignment = runtime.SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     page_bytes = alignment + alignment // 2
     source_group = NS(host_resident=True, kv_cache_spec=NS(page_size_bytes=page_bytes, block_size=128))
-    plan = layout.create_hisparse_layout(config, [source_group], host_budget=7 * alignment)
+    with host_pool.plan_shared_host_pool(config.kv_transfer_config):
+        plan = layout.create_hisparse_layout(config, [source_group], host_budget=7 * alignment)
+    assert core_hisparse_backend.get_hisparse_backend() is private_backend
     assert plan.shared_host_pool is shared
     assert plan.host_block_stride == (2 * alignment if shared else page_bytes)
     assert plan.host_num_blocks == (3 if shared else 4)
@@ -157,14 +178,15 @@ def test_core_pool_plan_selects_memfabric_allocator(
     tp_group = NS(rank_in_group=0)
 
     def allocate_shared(sizes, *, group):
-        assert shared or connector == "MultiConnector"
+        assert shared or connector == "pd_memfabric"
         assert sizes == [64]
         assert group is (tp_group if shared else None)
         return region
 
     def allocate_private(shape, dtype, *, memfabric):
-        assert connector == "HiSparseConnector"
-        assert shape == (64,) and dtype == torch.int8 and not memfabric
+        assert not shared and connector != "pd_memfabric"
+        assert shape == (64,) and dtype == torch.int8
+        assert memfabric is use_private_memfabric
         return backing
 
     monkeypatch.setattr(host_pool, "MemFabricSharedHostRegion", allocate_shared)
@@ -179,7 +201,7 @@ def test_core_pool_plan_selects_memfabric_allocator(
     )
     pool = runtime.HiSparseHostPool(config, cache_config)
     source = pool.allocate(64)
-    if shared or connector == "MultiConnector":
+    if shared or connector == "pd_memfabric":
         manager = AscendHiSparseOffloadManager.from_host_pool(pool)
         assert manager.shared_region is pool.shared_region is (region if shared else None)
     else:
