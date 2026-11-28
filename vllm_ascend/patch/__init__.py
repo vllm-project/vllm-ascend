@@ -1773,3 +1773,20 @@
 #       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
 #    Future Plan:
 #       Remove once the supported vLLM version includes upstream PR #63165.
+
+# ** File: worker/patch_mm_input_norm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fusion.mm_input_norm.FusedMMInputNorm`
+#    Why:
+#       Processor-derived normalization buffers must not be required in legacy
+#       sharded checkpoints or overwritten by dummy weight initialization.
+#    How:
+#       Backport vllm-ascend #20008: wrap construction once and register
+#       weight/bias as nonpersistent buffers without changing their values.
+#       Skip installation when the module is absent (as in vLLM v0.30.0).
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/62767
+#       https://github.com/vllm-project/vllm-ascend/pull/20008
+#    Future Plan:
+#       Remove when every supported vLLM baseline either predates this module
+#       or includes commit 90c4a1a73eecea0428ee4303ad96c9fdeaac3f80 (or its fix).

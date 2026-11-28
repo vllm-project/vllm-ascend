@@ -299,11 +299,21 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
     assert init_eplb.call_count == legacy_init_calls
 
 
-def test_process_weights_after_loading_uses_version_specific_layout(
-    monkeypatch,
-):
+@pytest.mark.parametrize(
+    "weight_shapes",
+    [
+        pytest.param(((2, 3, 4), (2, 4, 3)), id="shape-changing-initial-load"),
+        pytest.param(((2, 3, 3), (2, 3, 3)), id="compatible-weight-update"),
+    ],
+)
+def test_process_weights_after_loading_uses_version_specific_layout(monkeypatch, weight_shapes):
     method = _build_unquantized_method()
-    layer = _build_weight_layer()
+    layer = SimpleNamespace(
+        w13_weight=nn.Parameter(torch.randn(weight_shapes[0]), requires_grad=False),
+        w2_weight=nn.Parameter(torch.randn(weight_shapes[1]), requires_grad=False),
+    )
+    original_parameters = (layer.w13_weight, layer.w2_weight)
+    original_pointers = tuple(weight.data_ptr() for weight in original_parameters)
     w13_loader = MagicMock()
     w2_loader = MagicMock()
     layer.w13_weight.weight_loader = w13_loader
@@ -330,6 +340,19 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
     assert layer.w13_weight.weight_loader is w13_loader
     assert layer.w2_weight.weight_loader is w2_loader
+
+    if weight_shapes[0] == weight_shapes[1]:
+        updated_weights = tuple(torch.randn_like(weight) for weight in original_parameters)
+        for weight, updated in zip(original_parameters, updated_weights):
+            weight.copy_(updated)
+        method.process_weights_after_loading(layer)
+        for name, original, pointer in zip(("w13_weight", "w2_weight"), original_parameters, original_pointers):
+            assert getattr(layer, name) is original
+            assert original.data_ptr() == pointer
+        for weight, updated in zip(original_parameters, updated_weights):
+            torch.testing.assert_close(weight, updated.transpose(1, 2))
+        assert layer.w13_weight.weight_loader is w13_loader
+        assert layer.w2_weight.weight_loader is w2_loader
 
 
 def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
