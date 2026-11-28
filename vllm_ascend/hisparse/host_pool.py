@@ -13,7 +13,9 @@ from __future__ import annotations
 import ctypes
 import math
 import mmap
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from threading import Lock
 from typing import TYPE_CHECKING
@@ -23,6 +25,8 @@ from vllm.triton_utils import triton
 
 if TYPE_CHECKING:
     from vllm.config import KVTransferConfig
+
+share_host_pool_for_planning: ContextVar[bool] = ContextVar("share_host_pool_for_planning", default=False)
 
 _ACL_HOST_REGISTER_MAPPED = 0
 _ACL_HAC_AIV = 3
@@ -313,6 +317,16 @@ def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
         if extra.get("transfer_backend") == "memfabric" and not extra.get("use_layerwise", False):
             return True
     return False
+
+
+@contextmanager
+def plan_shared_host_pool(transfer: KVTransferConfig | None) -> Iterator[None]:
+    """Select a shared Host pool only for an explicitly configured MemFabric P/D path."""
+    token = share_host_pool_for_planning.set(uses_memfabric_pd(transfer))
+    try:
+        yield
+    finally:
+        share_host_pool_for_planning.reset(token)
 
 
 class AscendHiSparseOffloadManager:

@@ -10,6 +10,7 @@ no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import fields, replace
 
 from vllm.config import VllmConfig
@@ -152,12 +153,19 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         num_blocks: int,
     ) -> KVCacheConfig:
         """Materialize Core's block count before planning layerwise reuse."""
-        if self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups) is None:
-            return _attach_transfer_and_speculation_metadata(
-                vllm_config,
-                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
-            )
-        return get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+        host_pool_plan: AbstractContextManager[None] = nullcontext()
+        if vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.hisparse.host_pool import plan_shared_host_pool
+
+            # TODO: Support a shared HiSparse Host pool across TP ranks with AscendStore.
+            host_pool_plan = plan_shared_host_pool(vllm_config.kv_transfer_config)
+        with host_pool_plan:
+            if self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups) is None:
+                return _attach_transfer_and_speculation_metadata(
+                    vllm_config,
+                    super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+                )
+            return get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
 
     def _get_pool_bytes_per_block(
         self,
