@@ -502,6 +502,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          CI_CONTINUE_SELECTED_TESTS_ON_ERROR: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && contains(github.event.pull_request.labels.*.name, 'main2main') }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
