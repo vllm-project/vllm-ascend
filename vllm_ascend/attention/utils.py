@@ -79,8 +79,8 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
-RuntimeComponentShape = tuple[int, int, int, int]
-KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+# Shapes follow kernel axis order. The last dimension counts elements of the component's storage dtype.
+KVCacheRuntimeShapesAndDtypes = tuple[tuple[tuple[int, ...], ...], tuple[torch.dtype, ...]]
 
 
 def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

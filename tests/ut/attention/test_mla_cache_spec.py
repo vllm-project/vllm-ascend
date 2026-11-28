@@ -11,11 +11,13 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SparseCacheRole
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
 
 @pytest.mark.parametrize(
@@ -66,6 +68,8 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, num
     actual = layer.get_kv_cache_spec(config)
     assert isinstance(actual, AscendMLAAttentionSpec)
     assert actual.num_heads == heads
+    assert (actual.kv_lora_rank, actual.qk_rope_head_dim) == (512, 64)
+    assert actual.mla_cache_layout == "component_major"
     assert layer.num_heads == 12
     for field in (
         "kv_quant_mode",
@@ -96,16 +100,18 @@ def _make_owner(impl, backend, rope_dim=64):
     return layer
 
 
-def _get_owner_spec(monkeypatch, layer):
+def _get_owner_spec(monkeypatch, layer, *, is_draft=False, **config_kwargs):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=layer.kv_lora_rank + layer.qk_rope_head_dim,
         dtype=torch.bfloat16,
+        is_draft=is_draft,
     )
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        **config_kwargs,
     )
     return layer.get_kv_cache_spec(config)
 
@@ -145,6 +151,88 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     assert spec.page_size_bytes == 128 * (640 if quantized else 1152)
     if quantized:
         assert spec.cache_dtype_str is None
+    assert spec.rope_dtype == (torch.bfloat16 if quantized else None)
+
+
+def test_quantized_draft_spec_uses_its_own_rope_dtype(monkeypatch):
+    def unexpected_quant_query(*_args):
+        raise AssertionError("Draft spec must use the layer's existing FA quantization decision")
+
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", unexpected_quant_query)
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.fa_quant_layer = True
+    impl.use_flashmla = False
+    impl.dtype = torch.float8_e4m3fn
+    impl.head_size = 576
+    layer = _make_owner(impl, AscendMLABackend)
+    spec = _get_owner_spec(
+        monkeypatch,
+        layer,
+        is_draft=True,
+        speculative_config=SimpleNamespace(method="dspark", draft_model_config=SimpleNamespace(dtype=torch.float16)),
+        quant_config=SimpleNamespace(enable_fa_quant=False, get_kv_quant_dtype=unexpected_quant_query),
+    )
+
+    assert spec.dtype == torch.float8_e4m3fn
+    assert spec.rope_dtype == torch.float16
+
+
+def test_quant_flashmla_keeps_one_storage_dtype(monkeypatch):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.fa_quant_layer = True
+    impl.use_flashmla = True
+    impl.head_size = 576
+    impl.dtype = torch.float8_e4m3fn
+    layer = _make_owner(impl, AscendMLABackend)
+    spec = _get_owner_spec(monkeypatch, layer)
+    assert spec.rope_dtype is None
+    shapes, dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(spec, 2, None)
+    assert shapes == ((2, 128, 1, 576),)
+    assert dtypes == (torch.float8_e4m3fn,)
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("kernel_blocks_per_manager", [1, 2])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blocks_per_manager, is_draft):
+    def unexpected_config_lookup():
+        raise AssertionError("Runtime component dtypes must come from the spec")
+
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", unexpected_config_lookup)
+    widths = (576,) if fused else (512, 64)
+    dtypes = (cache_dtype,) if fused else (cache_dtype, torch.float16 if is_draft else torch.bfloat16)
+    row_bytes = sum(width * dtype.itemsize for width, dtype in zip(widths, dtypes, strict=True))
+    spec = AscendMLAAttentionSpec(
+        block_size=128 * kernel_blocks_per_manager,
+        num_kv_heads=1,
+        head_size=row_bytes,
+        dtype=cache_dtype,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        mla_cache_layout="token_interleaved" if fused else "component_major",
+        rope_dtype=None if fused else dtypes[1],
+        is_draft=is_draft,
+    )
+    merged = AscendMLAAttentionSpec.merge([spec, spec])
+    assert merged.rope_dtype == spec.rope_dtype
+    shapes, actual_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(merged, 2, None, 128)
+    assert actual_dtypes == dtypes
+    assert shapes == tuple((2 * kernel_blocks_per_manager, 128, 1, width) for width in widths)
+    slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+    raw = torch.zeros(2 * spec.page_size_bytes, dtype=torch.int8)
+    views = create_cache_component_views(raw, shapes, actual_dtypes, slot_bytes)
+    assert tuple(view.dtype for view in views) == dtypes
+    if not fused:
+        assert views[1].data_ptr() - views[0].data_ptr() == 128 * 512
+        with pytest.raises(ValueError, match="smaller than its cache components"):
+            AscendMLABackend.get_runtime_shapes_and_dtypes(replace(spec, head_size=576), 2, None, 128)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([spec, replace(spec, rope_dtype=torch.float32)])
+    if not fused:
+        floating_spec = replace(spec, dtype=torch.bfloat16, head_size=576, rope_dtype=None)
+        _, floating_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(floating_spec, 2, None, 128)
+        assert floating_dtypes == (torch.bfloat16, torch.bfloat16)
 
 
 def test_sfa_owner_reuses_execution_width_without_customizing(monkeypatch):

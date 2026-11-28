@@ -55,6 +55,7 @@ from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapesAndDtypes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
@@ -152,6 +153,47 @@ class AscendMLABackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Return NHD Tensor shapes and storage dtypes for FIA and FlashMLA."""
+        if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+            raise ValueError("MLA runtime views require component dimensions in the cache spec.")
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("MLA kernel block size must divide the manager block size.")
+        kernel_blocks_per_manager = spec.block_size // block_size
+        prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
+        widths: tuple[int, ...] = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        dtypes: tuple[torch.dtype, ...] = (spec.dtype, spec.rope_dtype if spec.rope_dtype is not None else spec.dtype)
+        # Legacy MLA specs encode page bytes through head_size/dtype. Preserve
+        # split FIA components (which can have mixed dtypes) and fused FlashMLA
+        # storage until a follow-up unifies the storage metadata.
+        if spec.mla_cache_layout == "token_interleaved":
+            widths = (sum(widths),)
+            dtypes = (spec.dtype,)
+        if any(spec.page_size_bytes % (kernel_blocks_per_manager * dtype.itemsize) for dtype in dtypes):
+            raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
+        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+        row_bytes = sum(width * dtype.itemsize for width, dtype in zip(widths, dtypes, strict=True))
+        if spec.num_kv_heads * block_size * row_bytes > slot_bytes:
+            raise ValueError("MLA kernel slot is smaller than its cache components.")
+        return tuple((*prefix, width) for width in widths), dtypes
+
+    @staticmethod
+    def format_runtime_views(
+        spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        if spec.mla_cache_layout == "token_interleaved":
+            (cache,) = components
+            return cache
+        return tuple(components)
+
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         use_dcp = is_dcp_enabled()
@@ -215,10 +257,27 @@ class AscendMLAAttention(MLAAttention):
         if spec.cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE and not use_sfa_hif8:
             values["kv_quant_mode"] = KVQuantMode.NONE
 
+        # FA-quantized split FIA stores NoPE in the quantized dtype and keeps
+        # RoPE in the owning model's original dtype.
+        rope_dtype = None
+        if (
+            getattr(self.impl, "fa_quant_layer", False)
+            and not getattr(self.impl, "use_flashmla", False)
+            and not (use_sfa_turboquant or use_sfa_c8)
+        ):
+            model_config = vllm_config.model_config
+            if (spec.is_draft or self.is_draft_layer) and draft_config is not None:
+                model_config = draft_config
+            rope_dtype = model_config.dtype
+
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
         values.update(
             num_heads=storage_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
+            rope_dtype=rope_dtype,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
