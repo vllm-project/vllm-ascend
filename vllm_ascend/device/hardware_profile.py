@@ -57,6 +57,8 @@ class HardwareCapability(Enum):
     # Legacy default: replace vLLM's custom-op list with ``["all"]`` during
     # platform configuration. Runtime extension loading is a separate contract.
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    # TorchNPU 2.14 requires direct host submission during model ACL graph capture.
+    ACLGRAPH_DIRECT_HOST_SUBMISSION = auto()
     # Register ATB extension entry points eagerly during worker construction.
     ATB_EXTENSIONS = auto()
     # Run the ATB matmul warmup that avoids first-request cache-write latency.
@@ -407,6 +409,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.ACLGRAPH_DIRECT_HOST_SUBMISSION,
     HardwareCapability.GMM1_SITU_QUANT_MSD,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,

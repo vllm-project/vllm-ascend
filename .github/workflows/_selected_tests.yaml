@@ -504,11 +504,6 @@ jobs:
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          if [ "${{ steps.torch-214.outcome == 'success' && matrix.group.npu_type == 'a3' }}" = "true" ]; then
-            # The TorchNPU 2.14 trial uses direct host submission for A3 ACL graphs.
-            export TASK_QUEUE_ENABLE=0
-            echo "TorchNPU A3 ACL graph runtime: TASK_QUEUE_ENABLE=$TASK_QUEUE_ENABLE"
-          fi
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
           fi

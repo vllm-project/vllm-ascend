@@ -178,6 +178,31 @@ def allow_v2_model_runner_without_triton() -> Iterator[None]:
             gpu_worker.HAS_TRITON = has_triton
 
 
+@contextmanager
+def _direct_host_submission_for_aclgraph_capture(mode: CUDAGraphMode) -> Iterator[None]:
+    if (
+        mode == CUDAGraphMode.NONE
+        or getattr(torch_npu, "__version__", "") != "2.14.0"
+        or not get_current_hardware_profile().supports(HardwareCapability.ACLGRAPH_DIRECT_HOST_SUBMISSION)
+    ):
+        yield
+        return
+
+    previous_mode = torch_npu.npu.get_task_queue_enable()
+    if previous_mode != 1:
+        yield
+        return
+
+    # TorchNPU drains pending launches when switching modes. Limit the switch
+    # to startup capture, before the worker begins accepting requests.
+    logger.info_once("Using direct host submission during TorchNPU 2.14 ACL graph capture.")
+    torch_npu.npu.set_task_queue_enable(0)
+    try:
+        yield
+    finally:
+        torch_npu.npu.set_task_queue_enable(previous_mode)
+
+
 class NPUWorker(GPUWorker):
     def __init__(
         self,
@@ -1097,7 +1122,8 @@ class NPUWorker(GPUWorker):
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            npugraph_memory_bytes = self.model_runner.capture_model()
+            with _direct_host_submission_for_aclgraph_capture(self.vllm_config.compilation_config.cudagraph_mode):
+                npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
