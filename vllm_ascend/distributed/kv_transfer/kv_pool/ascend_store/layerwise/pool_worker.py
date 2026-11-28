@@ -120,11 +120,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
         )
-        self.dflash_draft_layer_names = (
-            frozenset(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
-            if self.use_layerwise_transfer
-            else frozenset()
-        )
         self._dflash_save_pending = False
         if (
             self.backend_name != "memcache"
@@ -196,8 +191,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
         stage_num_layers = self.num_layers
-        dflash_draft_names: frozenset[str] = getattr(self, "dflash_draft_layer_names", frozenset())
-        self._dflash_draft_start_layer: int | None = None
+        self.pool_draft_physical_ids: frozenset[int] = frozenset()
+        self._first_local_draft_layer: int | None = None
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -226,13 +221,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layerwise_key_layer_offset = 0
 
         if self.kv_cache_config is not None:
-            draft_names = getattr(self, "_dspark_draft_layer_names", ())
+            excluded_draft_names = getattr(self, "_dspark_draft_layer_names", ())
+            pool_draft_names: set[str] = set()
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
-            target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
             if self.use_layerwise_transfer:
+                pool_draft_names.update(getattr(self.kv_cache_config, "dflash_draft_layer_names", ()))
                 self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
                 if (
-                    draft_names
+                    excluded_draft_names
                     and self._layerwise_reuse_layout is None
                     and getattr(self, "_dspark_prefix_keys", None) is None
                 ):
@@ -240,14 +236,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     # pool for prefix storage and load/save addressing.
                     # DSpark also writes context KV when K=0 skips attention;
                     # use the DFlash step boundary instead of attention hooks.
-                    dflash_draft_names = dflash_draft_names.union(draft_names)
-                    self._dspark_draft_layer_names = draft_names = set()
-                    target_specs = layer_specs
+                    pool_draft_names.update(excluded_draft_names)
+                    self._dspark_draft_layer_names = excluded_draft_names = set()
+            pool_specs = {name: spec for name, spec in layer_specs.items() if name not in excluded_draft_names}
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
                 for group_spec in self.kv_cache_config.kv_cache_groups
                 for layer_name in group_spec.layer_names
-                if layer_name not in draft_names
+                if layer_name not in excluded_draft_names
             }
             if getattr(self, "has_shared_kv", False):
                 # Execution layers include holes; group ordinals stay dense.
@@ -260,7 +256,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
                     self._recurrent_layers = {
                         self._global_to_local_layer[self._extract_physical_layer_index(name)]
-                        for name, spec in target_specs.items()
+                        for name, spec in pool_specs.items()
                         if isinstance(spec, MambaSpec)
                     }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
@@ -271,14 +267,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
-                self._init_dflash_draft_layers(target_specs.keys() & dflash_draft_names)
+                self._init_pool_draft_layers(pool_specs.keys() & pool_draft_names)
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
                     continue
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
-                    if layer_name in draft_names:
+                    if layer_name in excluded_draft_names:
                         continue
                     physical_layer = self._extract_physical_layer_index(layer_name)
                     physical_layers.add(self._global_to_local_layer[physical_layer])
@@ -356,18 +352,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
-    def _init_dflash_draft_layers(self, draft_names: set[str]) -> None:
-        # Only ordinary-pool layers participate; companion caches own the rest.
-        self.dflash_draft_layer_names = frozenset(draft_names)
-        # DSpark attention hooks and SWA caches name the same physical layer differently.
-        self.dflash_draft_layer_indices = frozenset(self._extract_physical_layer_index(name) for name in draft_names)
-        draft_layers = {self._global_to_local_layer[layer] for layer in self.dflash_draft_layer_indices}
-        if not draft_layers:
+    def _init_pool_draft_layers(self, pool_draft_names: set[str]) -> None:
+        if not pool_draft_names:
             return
-        first_draft_layer = min(draft_layers)
-        if draft_layers != set(range(first_draft_layer, self.num_layers)):
-            raise ValueError("DFlash draft layers must follow target layers in the pool")
-        self._dflash_draft_start_layer = first_draft_layer
+        # Attention hooks and cache registrations can name the same physical layer differently.
+        self.pool_draft_physical_ids = frozenset(self._extract_physical_layer_index(name) for name in pool_draft_names)
+        local_draft_ids = {self._global_to_local_layer[layer] for layer in self.pool_draft_physical_ids}
+        first_local_draft_layer = min(local_draft_ids)
+        if local_draft_ids != set(range(first_local_draft_layer, self.num_layers)):
+            raise ValueError("Draft layers must follow target layers in the pool")
+        self._first_local_draft_layer = first_local_draft_layer
 
     @staticmethod
     def _remap_layout_to_stage_local(
@@ -1597,7 +1591,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         else:
             window_end = self.current_layer + self.num_prefetch_layers
         window_end = min(window_end, self.num_layers - 1)
-        draft_start = getattr(self, "_dflash_draft_start_layer", None)
+        draft_start = getattr(self, "_first_local_draft_layer", None)
         if draft_start is not None:
             # Draft context load runs after target attention has stopped creating gates.
             if self.current_layer < draft_start:
@@ -1633,7 +1627,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def load_dflash_draft_kv(self) -> None:
         # Finish draft reads before post_forward releases the step's pool leases.
-        first_draft_layer = self._dflash_draft_start_layer
+        first_draft_layer = self._first_local_draft_layer
         if first_draft_layer is None:
             return
         # no_forward also calls finish_forward, without running any layer hooks.
