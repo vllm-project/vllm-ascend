@@ -534,14 +534,12 @@ def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
 @pytest.mark.parametrize("pcp_size", [1, 2])
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size, use_v2):
+def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size):
     config = _make_vllm_config(num_speculative_tokens=3)
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    config.use_v2_model_runner = use_v2
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
-    assert builder.supports_update_block_table is (use_v2 and pcp_size == 1)
+    assert builder.supports_update_block_table is (pcp_size == 1)
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -1007,8 +1005,7 @@ def test_host_update_block_table_refreshes_conv_bindings_after_queued_writes():
     assert updated.spec_decode_metadata.use_upstream_recurrent == source.spec_decode_metadata.use_upstream_recurrent
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
+def test_decode_layout_reuse_respects_padding_changes():
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -1016,8 +1013,7 @@ def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
         num_speculative_blocks=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
-    builder.vllm_config.use_v2_model_runner = use_v2
-    builder.supports_update_block_table = use_v2
+    builder.supports_update_block_table = True
     template = None
     previous_count = None
     for count in [2, 2, 1, 1, 2]:
@@ -1029,9 +1025,6 @@ def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
         metadata = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
         assert metadata.num_accepted_tokens.tolist() == [count] * count + [1] * (2 - count)
         assert metadata.spec_query_start_loc.tolist() == [min(i, count) * 4 for i in range(3)]
-        if not use_v2:
-            assert builder._decode_layout_metadata is None
-            continue
         assert builder._decode_layout_metadata is not None
         if count != previous_count:
             assert builder._decode_layout_metadata is not template
