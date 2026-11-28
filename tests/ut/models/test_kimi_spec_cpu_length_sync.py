@@ -77,7 +77,8 @@ def test_copy_and_wait_after_rejection(runner, monkeypatch, native, dcp, recover
         req_id_to_index={"a": 0, "b": 1},
     )
     runner.num_computed_tokens_cpu = torch.full((2,), -1)
-    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(2, dtype=torch.int32))
+    seq_lens_cpu = torch.zeros(2, dtype=torch.int32)
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=seq_lens_cpu, seq_lens_np=seq_lens_cpu.numpy())
     scheduler = SimpleNamespace(
         num_scheduled_tokens={"a": 4, "b": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["b", "a"])
     )

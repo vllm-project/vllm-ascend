@@ -1,0 +1,12 @@
+pr: 23492
+entries:
+  - category: performance
+    text: >-
+      Model Runner V2 input preparation no longer walks per-request CPU state
+      element by element: scheduled-token bookkeeping now runs as vectorized
+      NumPy over the existing pinned mirrors. With graph-mode speculative
+      decoding on an Atlas 800T A2 server (16 Ascend 910 chips, TP16+EP),
+      decode throughput at 128/256/512 concurrent requests improved by
+      3.0%/5.6%/5.6% and TPOT dropped by 3.6%/5.2%/5.7% versus main, while
+      the per-step mirror update fell from up to ~11 ms to ~1 ms.
+    hardware: [A2]
