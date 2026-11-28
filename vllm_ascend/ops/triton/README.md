@@ -47,7 +47,10 @@ examples and links together.
 | [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
-| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `ops/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
+| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
+| [mamba/aligned_indices.py](mamba/aligned_indices.py) | `worker/v2/model_states/mamba_hybrid.py` | [aligned_indices.md](docs/aligned_indices.md) |
+| [mamba/cached_decode.py](mamba/cached_decode.py) | `attention/gdn_attn_builder.py` | [cached_decode.md](docs/cached_decode.md) |
+| [mamba/graph_state.py](mamba/graph_state.py) | `attention/gdn_attn_builder.py` | [graph_state.md](docs/graph_state.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
@@ -81,8 +84,9 @@ configuration rather than the runner input or sampling interface.
 | [build_window_indices.py](build_window_indices.py) | Model/attention primitive or shared utility |
 | [c2_ring_metadata.py](c2_ring_metadata.py) | Model/attention primitive or shared utility |
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
-| [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
+| [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention and [packed DCP output combine](docs/fused_dcp_lse_combine.md#head-scatter-implementation) |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
+| [dcp/dcp_a2a_rank_tiled.py](dcp/dcp_a2a_rank_tiled.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
 | [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
@@ -90,7 +94,7 @@ configuration rather than the runner input or sampling interface.
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |
 | [engram_lookup.py](engram_lookup.py) | Model/attention primitive or shared utility |
-| [eplb.py](eplb.py) | Model/attention primitive or shared utility |
+| [eplb.py](eplb.py) | Distributed [EPLB mapping and load recording](docs/eplb.md) |
 | [fla/chunk.py](fla/chunk.py) | Linear attention |
 | [fla/chunk_delta_h.py](fla/chunk_delta_h.py) | Linear attention |
 | [fla/chunk_delta_hupdate.py](fla/chunk_delta_hupdate.py) | Linear attention |
@@ -105,6 +109,8 @@ configuration rather than the runner input or sampling interface.
 | [fla/wy_fast.py](fla/wy_fast.py) | Linear attention |
 | [fold_indexer_cache.py](fold_indexer_cache.py) | Model/attention primitive or shared utility |
 | [fused_gdn_gating.py](fused_gdn_gating.py) | Model/attention primitive or shared utility |
+| [gdn/gdn_recoverssm_commit.py](gdn/gdn_recoverssm_commit.py) | GDN RecoverSSM commit. [Operator documentation](docs/gdn_recoverssm_commit.md) |
+| [gdn/gdn_recoverssm_verify.py](gdn/gdn_recoverssm_verify.py) | GDN RecoverSSM verify. [Operator documentation](docs/gdn_recoverssm_verify.md) |
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
@@ -116,9 +122,11 @@ configuration rather than the runner input or sampling interface.
 | [kda/kda.py](kda/kda.py) | KDA computation |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
-| [kda/recoverssm.py](kda/recoverssm.py) | Model state recovery |
+| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
+| [kda/recoverssm.py](kda/recoverssm.py) | KDA RecoverSSM operators and commit context; [operator documentation](docs/kda_recoverssm.md) |
 | [kda/solve_tril.py](kda/solve_tril.py) | KDA computation |
 | [kda/utils.py](kda/utils.py) | KDA computation |
+| [hisparse.py](hisparse.py) | HiSparse mapped-Host refill, Resident gather, KV packing and invalidation; see [operator documentation](docs/hisparse.md). |
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
@@ -128,7 +136,9 @@ configuration rather than the runner input or sampling interface.
 | [linearnorm/split_qkv_rmsnorm_rope_vnorm.py](linearnorm/split_qkv_rmsnorm_rope_vnorm.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_tp_rmsnorm_rope.py](linearnorm/split_qkv_tp_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [mamba/causal_conv1d.py](mamba/causal_conv1d.py) | Model state/attention |
+| [mamba/compact_conv_state.py](mamba/compact_conv_state.py) | [RecoverSSM convolution compaction](docs/compact_conv_state.md) |
 | [mamba/lightning_attn.py](mamba/lightning_attn.py) | Model state/attention |
+| [mamba/prepare_commit_plan.py](mamba/prepare_commit_plan.py) | [RecoverSSM commit planning](docs/prepare_commit_plan.md) |
 | [mamba/state_index.py](mamba/state_index.py) | Model state/attention |
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |
@@ -144,14 +154,18 @@ configuration rather than the runner input or sampling interface.
 | [quantize_indexer_query.py](quantize_indexer_query.py) | Model/attention primitive or shared utility |
 | [quantize_mxfp4_indexer.py](quantize_mxfp4_indexer.py) | Model/attention primitive or shared utility |
 | [query_gather_prep.py](query_gather_prep.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
+| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` and final-injection `combine_final` are documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md) and [qwen4_exp_hc_combine_final.md](docs/qwen4_exp_hc_combine_final.md). |
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
-| [sfa_indexer_store.py](sfa_indexer_store.py) | Model/attention primitive or shared utility |
+| [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
+| [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
+| [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
+| [step5/gated_scale.py](step5/gated_scale.py) | Step5 head-wise attention gate: sigmoid + broadcast multiply fused on the caller's offset-0 gate base. [Operator documentation](docs/step5_gated_scale.md) |
+| [step5/indexer_qkz_norm_rope.py](step5/indexer_qkz_norm_rope.py) | Step5 sparse-indexer Q/K norm + NeoX RoPE with Z passthrough and e4m3-at-store quantization. [Operator documentation](docs/step5_indexer_qkz_norm_rope.md) |
+| [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |

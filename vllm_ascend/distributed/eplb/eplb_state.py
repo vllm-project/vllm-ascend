@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.distributed import all_reduce
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
@@ -314,10 +315,11 @@ class AscendEplbState(_eplb_state.EplbState):
         # refresh_model_routing_tables needs the previous placement to notice.
         # Seeding here rather than on first use also covers the first commit,
         # which already carries the new mapping by the time the tables refresh.
-        model_state = self.model_states[model_config.compute_hash()]
+        key = hash_config_cached(model_config)
+        model_state = self.model_states[key]
         model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+            self._initialize_load_stats_state(model_state)
 
     def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
         super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
@@ -523,6 +525,16 @@ class AscendEplbState(_eplb_state.EplbState):
             log_stats=log_stats,
         )
 
+    def _sync_load_pass(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]:
+        """Observability hook point; upstream owns the behaviour.
+
+        Upstream ``EplbState.step`` calls this only on balancedness logging
+        steps and uses the returned, already reduced load pass. The metric
+        provider can only hook ``vllm_ascend`` symbols, so this pass-through
+        override exists solely to expose that call point to it.
+        """
+        return super()._sync_load_pass(*args, **kwargs)
+
     def collect_global_load_stats(
         self,
     ) -> dict[str, PreparedLoadStats] | None:
@@ -726,7 +738,8 @@ class AscendEplbState(_eplb_state.EplbState):
         super().update_mapping(model_config, expanded_physical_to_logical)
         # Verified main updates a live state during elastic EP. Refresh the
         # Ascend replica table in place so captured graphs use the new mapping.
-        refresh_model_routing_tables(self.model_states[model_config.compute_hash()])
+        key = hash_config_cached(model_config)
+        refresh_model_routing_tables(self.model_states[key])
 
     @classmethod
     def from_mapping(

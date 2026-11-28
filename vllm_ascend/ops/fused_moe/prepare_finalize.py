@@ -20,21 +20,29 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
+from vllm import envs as vllm_envs
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+# Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
+import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
+
+# ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
+_MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
 
 
 class PrepareAndFinalize(ABC):
@@ -249,6 +257,51 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
+    def _mask_runner_padding(self, mc2_mask: torch.Tensor) -> torch.Tensor:
+        """Also mask the graph padding rows the runner marks in ``is_padding``.
+
+        ``mc2_mask`` is built from the token count after graph padding, so it
+        only masks SP and DP-alignment padding. The result is computed once per
+        forward and shared by every MoE layer. It stays a 1D mask, and the AND
+        keeps it no more permissive than ``mc2_mask``.
+        """
+        if not vllm_envs.VLLM_MOE_SKIP_PADDING or not is_forward_context_available():
+            return mc2_mask
+        forward_context = get_forward_context()
+        is_padding = forward_context.is_padding
+        if is_padding is None or _EXTRA_CTX.in_profile_run or self.moe_config.pcp_size > 1:
+            return mc2_mask
+
+        cache = forward_context.additional_kwargs.setdefault(_MC2_RUNNER_PADDING_MASK_KEY, {})
+        key = (dbo_current_ubatch_id(), self.replace_allreduce, mc2_mask.shape[0])
+        if key in cache:
+            return cache[key]
+
+        mask_len = mc2_mask.shape[0]
+        if self.replace_allreduce:
+            # Models such as Kimi-K3 slice is_padding to the local SP rows at
+            # model entry; otherwise take this rank's chunk the same way.
+            local = is_padding
+            if is_padding.shape[0] != self.num_tokens:
+                local = torch.ops.vllm.ascend_sp_padding_mask_impl(is_padding)
+            if local.shape[0] != self.num_tokens:
+                return mc2_mask
+            valid = nn.functional.pad(~local, (0, mask_len - self.num_tokens), value=True)
+        else:
+            if is_padding.shape[0] != self.num_tokens:
+                return mc2_mask
+            pad_size = _EXTRA_CTX.padded_num_tokens - self.num_tokens
+            valid = nn.functional.pad(~is_padding, (0, pad_size), value=True)
+            if self.tp_size > 1:
+                valid = torch.tensor_split(valid, self.tp_size, dim=0)[self.tp_rank]
+            if valid.shape[0] != mask_len:
+                return mc2_mask
+
+        # Never write into mc2_mask: it views the reserved buffer.
+        masked = mc2_mask & valid
+        cache[key] = masked
+        return masked
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -308,6 +361,9 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                     split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
                     hidden_states = split_hidden_states[self.tp_rank]
                     router_logits = split_router_logits[self.tp_rank]
+
+        if mc2_mask is not None:
+            mc2_mask = self._mask_runner_padding(mc2_mask)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
@@ -400,7 +456,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -466,6 +522,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
+        pertoken_scale = None
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
 
@@ -475,6 +532,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
+            # Quantize each token on its owner before replicating it across
+            # PCP. Dispatch reuses the INT8 per-token or MXFP8 block scales.
+            # LoRA needs the original floating-point activations.
+            if self.lora_context is None and hidden_states.shape[0] > 0:
+                if quant_type == QuantType.W8A8:
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                elif quant_type == QuantType.W8A8MXFP:
+                    # Match both A5 dispatch paths: fused init_routing (quant_mode=3)
+                    # and the explicit CEIL quantizer used for MiniMax.
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                        hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
+                    )
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
                 dim=0,
@@ -483,13 +552,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if pertoken_scale is not None:
+                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

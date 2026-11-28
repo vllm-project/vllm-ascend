@@ -23,43 +23,34 @@ from contextlib import contextmanager
 import torch
 
 _lock = threading.RLock()
-_attention_compute_start_gate: AttentionComputeStartGate | None = None
+_attention_load_gate: AttentionLoadGate | None = None
+_attention_save_gate: AttentionSaveGate | None = None
 
 
-class AttentionComputeStartGate:
-    """Gate that opens when the compute stream reaches attention.
+class AttentionLoadGate:
+    """Release future-layer loads after the current layer's load has completed.
 
-    The attention worker records an NPU event immediately before submitting the
-    attention op. MemCache worker threads wait for that event to complete before
-    submitting H2D/L2G work, so transfer starts when the compute stream is
-    actually at the attention boundary rather than merely after the Python call
-    site was reached.
+    MemCache worker threads wait for this compute-stream event before starting
+    the next layer's H2D/L2G transfer.
     """
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self.on_start: Callable[[], None] | None = None
-        self.on_finish: Callable[[], None] | None = None
         self._event: torch.npu.Event | None = None
 
     def record(
         self,
         stream: torch.npu.Stream | None = None,
     ) -> None:
-        stream = stream or torch.npu.current_stream()
-        event = torch.npu.Event()
-        event.record(stream)
         with self._condition:
             if self._event is None:
+                event = torch.npu.Event()
+                event.record(stream or torch.npu.current_stream())
                 self._event = event
                 self._condition.notify_all()
-                if self.on_start is not None:
-                    self.on_start()
 
     def cancel(self) -> None:
         """Release gated tasks after their caller has set its transfer abort flag."""
-        self.on_start = None
-        self.on_finish = None
         self.record()
 
     def wait(self, timeout: float = 10.0) -> bool:
@@ -73,52 +64,86 @@ class AttentionComputeStartGate:
         return True
 
 
-def reset_attention_compute_start_gate() -> AttentionComputeStartGate:
-    """Create a new per-layer gate for MemCache work.
+class AttentionSaveGate:
+    """Record the existing save event once current-layer KV is ready."""
 
-    Layerwise prefetch tasks keep a reference to the gate that was current when
-    they were submitted. The attention path opens that same gate when attention
-    compute is about to be launched.
+    def __init__(self) -> None:
+        self.event: torch.npu.Event | None = None
+        self.on_start: Callable[[], None] | None = None
+        self.on_finish: Callable[[], None] | None = None
+        self._recorded = False
+
+    def record(self, stream: torch.npu.Stream | None = None) -> None:
+        if self._recorded or self.event is None:
+            return
+        self.event.record(stream or torch.npu.current_stream())
+        self._recorded = True
+        if self.on_start is not None:
+            self.on_start()
+
+    def cancel(self) -> None:
+        self.event = None
+        self.on_start = None
+        self.on_finish = None
+
+
+def reset_attention_gates() -> tuple[AttentionLoadGate, AttentionSaveGate]:
+    """Create independent per-layer load and save gates.
+
+    Layerwise prefetch tasks retain their load gate after the current pair is
+    replaced for the next layer.
     """
-    global _attention_compute_start_gate
-    gate = AttentionComputeStartGate()
+    global _attention_load_gate, _attention_save_gate
+    load_gate = AttentionLoadGate()
+    save_gate = AttentionSaveGate()
     with _lock:
-        _attention_compute_start_gate = gate
-    return gate
+        _attention_load_gate = load_gate
+        _attention_save_gate = save_gate
+    return load_gate, save_gate
 
 
-def get_attention_compute_start_gate() -> AttentionComputeStartGate:
+def get_attention_load_gate() -> AttentionLoadGate:
     with _lock:
-        gate = _attention_compute_start_gate
+        gate = _attention_load_gate
     if gate is None:
-        gate = reset_attention_compute_start_gate()
+        gate, _ = reset_attention_gates()
     return gate
+
+
+def record_attention_prefetch_start() -> None:
+    """Allow future-layer loads after the current layer's load has completed."""
+    with _lock:
+        gate = _attention_load_gate
+    if gate is not None:
+        gate.record()
 
 
 def record_attention_compute_start() -> None:
-    """Record the compute-stream boundary immediately before attention."""
+    """Open any remaining load gate and record current-layer KV readiness."""
     with _lock:
-        gate = _attention_compute_start_gate
-    if gate is not None:
-        gate.record()
+        load_gate, save_gate = _attention_load_gate, _attention_save_gate
+    if load_gate is not None:
+        load_gate.record()
+    if save_gate is not None:
+        save_gate.record()
 
 
 @contextmanager
 def attention_transfer_window():
     """Run the configured transfer completion policy after attention submission.
 
-    The event is recorded after cache writes and any preceding collectives. The
-    host then submits the attention kernel. The registered connector callback
-    decides whether to drain, bound, or retain its asynchronous transfer work.
+    The save event is recorded after cache writes and preceding collectives.
+    The connector callback applies its completion policy after attention submission.
     """
     with _lock:
-        gate = _attention_compute_start_gate
-    if gate is None:
+        load_gate, save_gate = _attention_load_gate, _attention_save_gate
+    if load_gate is None or save_gate is None:
         yield
         return
     try:
-        gate.record()
+        load_gate.record()
+        save_gate.record()
         yield
     finally:
-        if gate.on_finish is not None:
-            gate.on_finish()
+        if save_gate.on_finish is not None:
+            save_gate.on_finish()

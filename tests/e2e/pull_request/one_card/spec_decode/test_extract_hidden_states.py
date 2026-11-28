@@ -74,8 +74,6 @@ class ExtractHiddenStatesCase:
     verify_nonzero: bool = True
     # Hybrid smoke test additionally checks the token_ids round-trip.
     verify_token_ids: bool = False
-    # When True, force Model Runner V2 via VLLM_USE_V2_MODEL_RUNNER.
-    use_v2_model_runner: bool = False
     # Token-in / token-out: skip tokenizer init and pass TokensPrompt.
     skip_tokenizer_init: bool = False
 
@@ -108,7 +106,6 @@ CASES = [
             load_format="dummy",
             verify_nonzero=False,
             verify_token_ids=True,
-            use_v2_model_runner=True,
         ),
         id="hybrid_dummy_eager_mrv2",
     ),
@@ -124,7 +121,6 @@ CASES = [
             load_format="dummy",
             verify_nonzero=False,
             verify_token_ids=True,
-            use_v2_model_runner=True,
             skip_tokenizer_init=True,
         ),
         id="dense_dummy_token_in_token_out_mrv2",
@@ -179,11 +175,6 @@ def _verify_token_in_token_out(output, token_prompt: list[int], *, max_tokens: i
 @pytest.mark.parametrize("case", CASES)
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, monkeypatch):
     """Extract hidden states from the target model and validate the dump."""
-    if case.use_v2_model_runner:
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    else:
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-
     generate_inputs = _generate_inputs(case)
     if case.skip_tokenizer_init:
         sampling = SamplingParams(temperature=0, max_tokens=1, detokenize=False)

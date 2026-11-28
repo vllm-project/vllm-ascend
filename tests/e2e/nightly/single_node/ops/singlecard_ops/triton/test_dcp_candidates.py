@@ -13,17 +13,19 @@ from vllm_ascend.ops.triton.sharded_indexer import merge_packed_candidates, pack
 
 
 @pytest.mark.parametrize(
-    "world,rows,topk,local_k,dtype,local_rank",
+    "world,rows,topk,local_k,dtype,local_rank,ties",
     [
-        (1, 1, 2048, 2048, torch.bfloat16, 0),
-        (3, 17, 31, 33, torch.float32, None),
-        (8, 128, 2048, 2048, torch.bfloat16, 7),
-        (16, 48, 2048, 2048, torch.float32, 15),
-        (17, 49, 2048, 2048, torch.bfloat16, 16),
-        (8, 65, 2048, 2051, torch.float32, None),
+        (1, 1, 2048, 2048, torch.bfloat16, 0, False),
+        (3, 17, 31, 33, torch.float32, None, False),
+        (16, 48, 2048, 2048, torch.float32, 15, False),
+        (17, 49, 2048, 2048, torch.bfloat16, 16, False),
+        (8, 65, 2048, 2051, torch.float32, None, False),
+        # Cover ties on the unsorted and presorted merge paths.
+        (3, 17, 31, 33, torch.float32, None, True),
+        (8, 128, 2048, 2048, torch.bfloat16, 7, True),
+        (17, 49, 2048, 2048, torch.bfloat16, 16, True),
     ],
 )
-@pytest.mark.parametrize("ties", [False, True])
 def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k, dtype, local_rank, ties):
     torch.npu.set_device(0)
     interleave = 768
@@ -103,11 +105,12 @@ def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k,
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("world,rows", [(8, 128), (16, 48)])
-def test_sorted_pack_preserves_score_bits_and_large_integer_payloads(dtype, world, rows):
+def test_sorted_pack_preserves_score_bits_at_local_id_limit(dtype, world, rows):
     torch.npu.set_device(0)
     k, rank, interleave = 2048, world - 1, 768
     ids = torch.arange(k, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
-    ids[..., -1] = 1 << 24
+    # Exercise the supported local-ID limit and its mapped global ID.
+    ids[..., -1] = (1 << 20) - 1
     scores = torch.randn(ids.shape).to(dtype)
     scores[..., :7] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0, 1.0, -1.0], dtype=dtype)
     valid = (ids >= 0) & scores.isfinite()
@@ -122,6 +125,53 @@ def test_sorted_pack_preserves_score_bits_and_large_integer_payloads(dtype, worl
         ids.npu(), scores.npu(), world, rank, interleave, sort_candidates=True, fuse_sort=True
     )
     assert torch.equal(actual.cpu(), expected)
+
+
+@pytest.mark.parametrize("sort_candidates,fuse_sort", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_pack_skips_empty_local_prefix_and_padding(sort_candidates, fuse_sort, dtype):
+    # All raw slots look valid, including the empty prefix between two live rows.
+    torch.npu.set_device(0)
+    rows, k = 128, 2048
+    ids = torch.arange(k, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
+    scores = (k - ids).to(dtype)
+    visible = torch.zeros(rows, dtype=torch.int32)
+    visible[[0, 2]] = k
+    device_ids, device_scores, device_visible = ids.npu(), scores.npu(), visible.npu()
+
+    def run():
+        return pack_local_candidates(
+            device_ids,
+            device_scores,
+            8,
+            0,
+            768,
+            sort_candidates=sort_candidates,
+            fuse_sort=fuse_sort,
+            visible_lengths=device_visible,
+        )
+
+    def check(packed):
+        live = visible[:, None] > 0
+        expected_ids = torch.where(live, local_to_global(ids[:, 0], 8, 0, 768), -1)
+        expected_scores = torch.where(live, scores[:, 0].float(), -torch.inf)
+        assert torch.equal(packed.cpu(), torch.stack((expected_ids, expected_scores.view(torch.int32)), -1))
+
+    for _ in range(3):
+        packed = run()
+    check(packed)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run()
+    # Formerly live rows become padding, and previously skipped rows become
+    # live. Raw candidate buffers stay poisoned with plausible data throughout.
+    for active_rows in ([1, 3, rows - 1], [], [0, 2]):
+        visible.zero_()
+        visible[active_rows] = k
+        device_visible.copy_(visible)
+        graph.replay()
+        check(captured)
+    graph.reset()
 
 
 def test_bf16_candidates_pack_and_global_topk_match_reference():

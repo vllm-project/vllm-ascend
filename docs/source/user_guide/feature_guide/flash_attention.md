@@ -163,7 +163,7 @@ Other models have not been tested yet. They will be supported in the future if t
 
 The FA3 feature is under active development. Planned improvements include:
 
-- Open-source the `flash_attn_npu` package
+- Continued maintenance and updates of the `flash_attn_npu` package
 - Support ACL graph capture (host-side tiling optimization)
 - Support for additional NPUs series
 - Expanded model coverage

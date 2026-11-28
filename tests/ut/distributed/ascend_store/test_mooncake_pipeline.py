@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
@@ -44,6 +45,10 @@ class TestMooncakePipeline(unittest.TestCase):
         cache_block_size=16,
         pcp_size=1,
         pcp_rank=0,
+        dcp_size=1,
+        dcp_rank=0,
+        tp_size=2,
+        num_kv_heads=None,
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -79,13 +84,15 @@ class TestMooncakePipeline(unittest.TestCase):
                 use_layerwise=True,
                 pp_rank=stage,
                 pp_partition=(3, 4),
-                tp_size=2,
+                tp_size=tp_size,
                 tp_rank=tp_rank,
-                num_kv_heads=1 if mla else 2,
+                num_kv_heads=(1 if mla else 2) if num_kv_heads is None else num_kv_heads,
                 use_mla=mla,
                 cache_block_size=cache_block_size,
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
             )
         worker.m_store = store
         arrays = {}
@@ -166,7 +173,9 @@ class TestMooncakePipeline(unittest.TestCase):
             ),
         ):
             scheduler = create_kv_pool_scheduler(
-                worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config
+                worker.vllm_config,
+                use_layerwise=True,
+                kv_cache_config=make_resolved_cache_config(worker.vllm_config, worker.kv_cache_config),
             )
         scheduler.store_scheduler = store
         return scheduler
@@ -267,7 +276,11 @@ class TestMooncakePipeline(unittest.TestCase):
                 "MooncakeBackend.create_scheduler_client"
             ),
         ):
-            scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
+            scheduler = create_kv_pool_scheduler(
+                config,
+                use_layerwise=True,
+                kv_cache_config=make_resolved_cache_config(config, workers[0].kv_cache_config),
+            )
         scheduler.store_scheduler = store
         for worker in workers:
             self.run_step(
@@ -297,6 +310,9 @@ class TestMooncakePipeline(unittest.TestCase):
             def compute_hash(self):
                 # Upstream CacheConfig.compute_hash includes block_size.
                 return f"{self.block_size}:{self.cache_dtype}"
+
+            def compile_factors(self):
+                return {"block_size": self.block_size, "cache_dtype": self.cache_dtype}
 
         worker, _ = self.make_stage(0, MemoryRangeStore())
         config = worker.vllm_config
@@ -405,9 +421,13 @@ class TestMooncakePipeline(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
         config = SimpleNamespace(
-            parallel_config=SimpleNamespace(pipeline_parallel_size=2, decode_context_parallel_size=2)
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2,
+                prefill_context_parallel_size=2,
+                decode_context_parallel_size=2,
+            )
         )
-        with self.assertRaisesRegex(ValueError, "decode context parallelism"):
+        with self.assertRaisesRegex(ValueError, "supports PCP or DCP, not both"):
             worker.layerwise_backend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=worker.kv_cache_config,

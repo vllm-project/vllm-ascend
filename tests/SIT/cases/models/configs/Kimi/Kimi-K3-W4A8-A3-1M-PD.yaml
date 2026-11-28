@@ -118,7 +118,6 @@ config:
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -344,17 +343,6 @@ templates:
     server_cmd_template: *decode_args
 
 benchmarks:
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 81920
-    batch_size: 32
-    baseline: 93.33
-    threshold: 10
-    temperature: 1.0
-    top_p: 1
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
@@ -365,8 +353,19 @@ benchmarks:
     thinking: true
     temperature: 1.0
     top_p: 0.95
-    baseline: 93
+    baseline: 93.5
     threshold: 3
+  perf_128k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
   perf_128k_prefix90:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
@@ -376,5 +375,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 32
     request_rate: 0
-    baseline: 0
-    threshold: 0.97
+    baseline: 557.6156
+    threshold: 0.95

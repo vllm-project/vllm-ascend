@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 from collections.abc import Iterable
-from copy import copy
-from types import SimpleNamespace
 
 import torch
 import torch_npu
@@ -32,8 +30,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -47,8 +44,11 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
+from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -64,8 +64,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
-        vllm_config = get_current_vllm_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.lora_context = None
         self._lora_routing = None
 
@@ -105,11 +103,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w13_weight", w13_data)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w2_weight", w2_data)
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        # TODO: Revisit how this check is structured. For example, decide whether to
+        # reuse storage in the same place that chooses the expert weight format.
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name)
+            transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
+            if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
+                # NZ packing reads the NPU storage's base shape. Reusing the
+                # pre-transpose storage here would pack a rectangular matrix
+                # with its old dimensions.
+                weight.data = transposed
+            else:
+                # Preserve the storage used by captured graphs across direct reloads.
+                replace_parameter(layer, name, transposed)
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -117,13 +124,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if use_megamoe or self.dynamic_eplb:
+            if use_megamoe:
                 if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
                     logger.warning_once(
                         "Unquantized MoE weights are not supported by the A5 mega moe "
@@ -163,7 +169,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=QuantType.NONE,
-                dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -179,7 +184,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.use_mega_moe:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
@@ -188,11 +192,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
         else:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
@@ -317,20 +316,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return hidden_states
 
 
-def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_interval: int) -> bool:
-    """Whether EPLB should retain a separate expert-load vector per step."""
-    return dynamic_eplb and policy_type == 3 and collection_interval > 1
-
-
-def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
-    """Build the minimal config view consumed by init_eplb_config."""
-    return SimpleNamespace(
-        expert_map_path=eplb_config.expert_map_path,
-        dynamic_eplb=eplb_config.dynamic_eplb,
-        num_redundant_experts=num_redundant_experts,
-    )
-
-
 def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
     """Allocate an EPLB buffer with the source tensor's NPU storage format."""
     if tensor.device.type != "npu":
@@ -362,6 +347,24 @@ def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
+    def __init__(
+        self,
+        tensors: Iterable[torch.Tensor] = (),
+        nz_cast_spec: NzCastSpec | None = None,
+    ) -> None:
+        super().__init__(tensors)
+        # The cast these tensors were built with, when it was parameterized. A
+        # cast with customize_dtype/input_dtype lands on a C0 variant of
+        # FRACTAL_NZ, and whatever rebuilds these weights elsewhere has to
+        # reproduce it. The receive buffers inherit it through empty_like.
+        self.nz_cast_spec: NzCastSpec | None = nz_cast_spec
+
+    @property
+    def is_cuda(self) -> bool:
+        # NPU expert lists take the native per-row copy path rather than the
+        # CUDA kernel, which requires a single contiguous weight allocation.
+        return self[0].is_cuda
+
     @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
@@ -374,14 +377,19 @@ class EplbExpertTensorList(list[torch.Tensor]):
 
     def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
         # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
-        # the per-expert container (and its aliasing semantics) intact.
-        return type(self)(tensor.view(dtype) for tensor in self)
+        # the per-expert container (and its aliasing semantics) intact. The
+        # reinterpretation is where upstream registers the weights, so the cast
+        # parameters have to survive it.
+        return type(self)((tensor.view(dtype) for tensor in self), self.nz_cast_spec)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
+            return cls(
+                (_empty_like_preserving_npu_format(tensor) for tensor in source),
+                source.nz_cast_spec,
+            )
         return NotImplemented
 
 
@@ -392,15 +400,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     matching upstream vLLM's RoutedExperts responsibility split.
     """
 
-    moe_counter = -1
-
     def __init__(
         self,
         *args,
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        with expert_offload_weights(self, get_ascend_config()):
+            super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -411,19 +418,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
-        self.dynamic_eplb = False
-        self.multi_stage = False
-        self.load_counter = None
-        self.num_iter = None
-        self.moe_load: torch.Tensor | None = None
-        self.ascend_expert_map: torch.Tensor | None = None
-        self.log2phy: torch.Tensor | None = None
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
-        if not self._use_v2_model_runner:
-            self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
@@ -454,7 +451,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     )
                 if not all(is_weak_contiguous(expert_weight) for expert_weight in weight):
                     raise ValueError("Every tensor in an Ascend EPLB expert tensor list must be weakly contiguous.")
-                flattened_weights.append(EplbExpertTensorList(weight))
+                # A quant method that casts its experts with parameters hands
+                # the cast over on the view itself; keep it rather than
+                # rewrapping the tensors into a bare container.
+                flattened_weights.append(
+                    weight if isinstance(weight, EplbExpertTensorList) else EplbExpertTensorList(weight)
+                )
                 continue
             if weight.shape[0] != self.local_num_experts:
                 raise ValueError(
@@ -469,137 +471,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 raise ValueError("Every Ascend EPLB expert row must be flattenable without a copy.") from exc
         return flattened_weights
 
-    def init_eplb(self, n_shared_experts):
-        # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
-        AscendRoutedExperts.moe_counter += 1
-        self.moe_instance_id = AscendRoutedExperts.moe_counter
-
-        eplb_config = get_ascend_config().eplb_config
-
-        # The upstream FusedMoEFactory factory has already included redundant expert
-        # slots in moe_config and allocated RoutedExperts weights accordingly.
-        # Ascend's placement builder operates on logical expert IDs, so give it
-        # a shallow config view with the logical count.
-        placement_moe_config = copy(self.moe_config)
-        placement_moe_config.num_experts = self.moe_config.num_logical_experts + (
-            n_shared_experts if self.mix_placement else 0
-        )
-        allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
-        if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
-            raise ValueError(
-                "Conflicting EPLB redundant expert counts: "
-                f"allocated={allocated_redundancy}, Ascend={eplb_config.num_redundant_experts}."
-            )
-        placement_eplb_config = make_eplb_placement_config(eplb_config, allocated_redundancy)
-        vllm_config = get_current_vllm_config()
-        (
-            self.global_expert_map,
-            self.ascend_expert_map,
-            self.log2phy,
-            self.global_redundant_expert_num,
-        ) = init_eplb_config(
-            placement_eplb_config,
-            AscendRoutedExperts.moe_counter,
-            placement_moe_config,
-            self.mix_placement,
-            n_shared_experts,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
-        )
-
-        self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        local_num_experts = self.moe_config.num_local_experts
-        expected_local_num_experts = (
-            placement_moe_config.num_experts + self.global_redundant_expert_num
-        ) // self.moe_config.ep_size
-        if local_num_experts != expected_local_num_experts:
-            raise ValueError(
-                "EPLB local expert capacity mismatch: "
-                f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
-                "Ensure vLLM and Ascend use the same redundant expert count."
-            )
-        # Keep ExpertMapManager's physical-expert map until checkpoint loading
-        # finishes. The upstream loader uses it to place both original and
-        # redundant physical experts. Ascend execution uses ascend_expert_map,
-        # which maps logical expert IDs to the local physical slots.
-
-        self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
-        self.multi_stage = False
-        self.load_counter = None
-        self.num_iter = None
-        self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
-        # Only FlashLB consumes a time series of expert loads. Other EPLB
-        # policies (including the default SwiftBalance policy) expect one load
-        # vector per layer and rank. Using the collection interval alone here
-        # adds an unexpected window dimension and produces
-        # [layer, rank, interval, expert] after all-gather.
-        if use_multistage_eplb_load(
-            self.dynamic_eplb,
-            eplb_config.eplb_policy_type,
-            eplb_config.expert_heat_collection_interval,
-        ):
-            self.multi_stage = True
-            self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
-            self.num_iter = eplb_config.expert_heat_collection_interval
-            self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
-
-        # Level-2 sleep discards NPU tensors that are not parameters/buffers.
-        # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
-        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
-        self._promote_attr_to_buffer("log2phy")
-        if self.dynamic_eplb:
-            self._promote_attr_to_buffer("moe_load")
-            if self.multi_stage:
-                self._promote_attr_to_buffer("load_counter")
-
-        # Register this MoE layer with EPLB for PP compatibility.
-        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
-        # so only real MoE layers on this rank are registered.
-        VllmEplbAdaptor.register_layer(self)
-
-    def _promote_attr_to_buffer(self, name: str) -> None:
-        """Move an existing tensor attribute onto a Level-2 restorable named buffer."""
-        tensor = getattr(self, name, None)
-        if tensor is None:
-            return
-        delattr(self, name)
-        self.register_buffer(name, tensor)
-
-    def get_eplb_parameter(self, name: str):
-        """Return an expert parameter from the refactored weight owner."""
-        return getattr(self, name)
-
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
-        """Return the global-to-local map used by Ascend MoE execution."""
-        if getattr(self, "_use_v2_model_runner", False):
-            return self.expert_map
-        return getattr(self, "_ascend_expert_map", None)
+        """Return the global-to-local map used by Ascend MoE execution.
 
-    @ascend_expert_map.setter
-    def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
-        object.__setattr__(self, "_ascend_expert_map", expert_map)
-
-    def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
-        """Update the upstream map or preserve the legacy Ascend update API."""
-        if new_expert_map is None:
-            super().update_expert_map()
-            return
-        self.ascend_expert_map = new_expert_map
-        self.expert_map_manager._expert_map = new_expert_map
-
-    def get_log2phy_map(self) -> torch.Tensor | None:
-        return self.log2phy
+        Ascend does not use the AITER expert-mask variant, so the upstream
+        ``expert_map`` property resolves to the registered ``_expert_map``
+        buffer. Read the buffer directly so partial instances used by tests do
+        not need the full ``quant_method`` graph.
+        """
+        return getattr(self, "_expert_map", None)
 
     @property
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
-
-    def clear_moe_load(self) -> None:
-        assert self.moe_load is not None
-        self.moe_load.zero_()
-        if self.multi_stage:
-            assert self.load_counter is not None
-            self.load_counter.zero_()
 
     @property
     def quant_type(self) -> QuantType:
@@ -623,9 +508,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
-        if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
-
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
             num_shared_experts = 0
@@ -689,12 +571,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        prepare_quant_type = self.quant_type
+        if (
+            prepare_quant_type in (QuantType.W8A8, QuantType.W8A8MXFP)
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.pcp_size > 1
+            and not self.moe_config.is_sequence_parallel
+            and (
+                self.apply_router_weight_on_input
+                # Subclasses can override expert selection and read activation values.
+                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter)
+            )
+        ):
+            prepare_quant_type = QuantType.NONE
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -724,48 +619,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
-            eplb_state = self.router.eplb_state
-            if eplb_state is not None:
-                # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
-                # top-level import here would close an import cycle.
-                from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+        eplb_state = self.router.eplb_state
+        if eplb_state is not None:
+            # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
+            # top-level import here would close an import cycle.
+            from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 
-                assert isinstance(eplb_state, AscendEplbLayerState)
-                all_gather_mask = None
-                if use_allgather_eplb():
-                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
-                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
-                eplb_state.record_load(
-                    fused_experts_results.expert_tokens,
-                    fused_experts_results.group_list_type,
-                    topk_ids=topk_ids,
-                    num_source_tokens=num_source_tokens,
-                    is_sequence_parallel=self.moe_config.is_sequence_parallel,
-                    all_gather_mask=all_gather_mask,
-                )
-
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+            assert isinstance(eplb_state, AscendEplbLayerState)
+            all_gather_mask = None
+            if use_allgather_eplb():
+                assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
+            eplb_state.record_load(
+                fused_experts_results.expert_tokens,
+                fused_experts_results.group_list_type,
+                topk_ids=topk_ids,
+                num_source_tokens=num_source_tokens,
+                is_sequence_parallel=self.moe_config.is_sequence_parallel,
+                all_gather_mask=all_gather_mask,
             )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
-            assert self.moe_load is not None
-            if self.multi_stage:
-                assert self.load_counter is not None and self.num_iter is not None
-                cur_iter = torch.remainder(self.load_counter, self.num_iter)
-                self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
-                )
-                self.load_counter.add_(1)
-            else:
-                self.moe_load.add_(local_load)
 
         assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(

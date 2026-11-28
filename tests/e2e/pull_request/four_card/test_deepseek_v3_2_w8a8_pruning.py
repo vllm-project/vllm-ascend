@@ -52,7 +52,6 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
         prefill_pcp_size=1,
         decode_tp_size=2,
         async_scheduling=False,
-        use_model_runner_v2=False,
     )
 
 
@@ -66,5 +65,4 @@ def test_pd_disaggregation_w8a8_sfa_pcp_full_decode_only():
         prefill_pcp_size=2,
         decode_tp_size=1,
         async_scheduling=True,
-        use_model_runner_v2=True,
     )

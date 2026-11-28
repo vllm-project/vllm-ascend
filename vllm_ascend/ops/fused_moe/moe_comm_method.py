@@ -85,7 +85,7 @@ class FusedExpertsResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     shared_activation_overlap_start_evt: torch.npu.Event | None = None
-    # For dynamic_eplb
+    # For EPLB load recording
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
 
@@ -336,6 +336,10 @@ class FusedMC2CommImpl(MoECommMethod):
         if symm_buffer is None:
             return True
 
+        if getattr(self, "_shared_mega_moe_buffer", None) is not None:
+            self._mega_moe_hccl_state_stale = True
+            return True
+
         context_manager = getattr(symm_buffer, "_ctx_manager", None)
         update_group = getattr(context_manager, "update_group", None)
         if not callable(update_group):
@@ -350,6 +354,13 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def refresh_hccl_runtime_state(self) -> bool:
         """Rebind a stale MegaMoe context to the restored MC2 communicator."""
+        shared_buffer = getattr(self, "_shared_mega_moe_buffer", None)
+        if shared_buffer is not None:
+            # Even an already-published rank must participate in a peer's retry.
+            shared_buffer.restore(get_mc2_group())
+            self._mega_moe_hccl_state_stale = False
+            return True
+
         symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
         if symm_buffer is None or not self._mega_moe_hccl_state_stale:
             return True
@@ -388,11 +399,20 @@ class FusedMC2CommImpl(MoECommMethod):
         *,
         is_decode_only_node: bool,
     ):
+        params = self.mega_moe_buffer_params(dispatch_quant_mode, dispatch_quant_out_dtype)
+        return self.get_symm_buffer_for_mega_moe(
+            get_mc2_group().device_group,
+            params.pop("num_experts"),
+            params.pop("num_max_tokens_per_rank"),
+            params.pop("num_topk"),
+            **params,
+        )
+
+    def mega_moe_buffer_params(self, dispatch_quant_mode, dispatch_quant_out_dtype):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -462,11 +482,10 @@ class FusedMC2CommImpl(MoECommMethod):
             self.token_dispatcher.global_bs,
         )
 
-        return self.get_symm_buffer_for_mega_moe(
-            group,
-            num_experts,
-            num_max_tokens_per_rank,
-            num_topk,
+        return dict(
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=num_topk,
             hidden=self.moe_config.hidden_dim,
             # Per the operator's contract, intermediate_hidden is the
             # post-activation width (half of the l1 output width). The
@@ -551,10 +570,10 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
-        # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
-        # so no Dispatch/Combine traffic is involved. The caller skips the
-        # separate shared-expert forward when this payload is present.
+        # Shared experts fused into the MegaMoe operator (A5 MXFP and A3 INT8):
+        # their GMM1 + activation + GMM2 runs inside the kernel on the local
+        # tokens, so no Dispatch/Combine traffic is involved. The caller skips
+        # the separate shared-expert forward when this payload is present.
         shared_kwargs: dict = {}
         # Live payload installed by AscendMoERunner; its fields are filled in
         # when the shared linears finish loading.
@@ -573,9 +592,11 @@ class FusedMC2CommImpl(MoECommMethod):
             )
             # Mixed quantization: declare the shared weight dtype explicitly,
             # otherwise the operator inherits the routed weight type for the
-            # shared descriptors and resolves the wrong shared GMM mode.
+            # shared descriptors and resolves the wrong shared GMM mode. The
+            # payload carries the descriptor family resolved from the shared
+            # linear's own quant type when its weights were rebuilt.
             shared_weight_type = getattr(shared_fusion, "weight_type", None)
-            if shared_weight_type is not None and shared_weight_type != weight_type:
+            if shared_weight_type is not None:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
         # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /

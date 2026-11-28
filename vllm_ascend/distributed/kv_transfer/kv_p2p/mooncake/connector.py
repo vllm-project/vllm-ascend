@@ -6,15 +6,15 @@ The connector classes in this module bridge vLLM's KV connector interface to
 the scheduler-side and worker-side Mooncake implementations. Transfer and
 scheduling details belong in those implementations rather than in this facade.
 
-``MooncakeConnector`` remains an alias for the pull-based connector. The push
-connector initializes its role-specific components; transfer hooks remain pending.
+``MooncakeConnector`` remains an alias for the pull-based connector.
+``MooncakeConnectorV2`` selects pull or layerwise push from extra configuration.
 """
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
+    _MemFabricPullWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import MooncakePushConnectorScheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import MooncakePushConnectorWorker
@@ -252,13 +253,25 @@ class MooncakePullConnector(MooncakeBaseConnector):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_worker = self._create_worker(vllm_config, kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def _create_worker(self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> MooncakePullConnectorWorker:
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        if transfer.kv_connector == "MooncakeConnectorV2" and (
+            transfer.kv_connector_extra_config.get("transfer_backend") == "memfabric"
+        ):
+            return _MemFabricPullWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        return MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""
+
+    requires_full_blocks_on_update_after_alloc = True
+    supports_composite_kv_saves = True
 
     def __init__(
         self,
@@ -268,12 +281,22 @@ class MooncakePushConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        transfer_config = vllm_config.kv_transfer_config
+        assert transfer_config is not None
+        self.is_producer = transfer_config.is_kv_producer
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    @property
+    def supports_layerwise_buffer_reuse(self) -> bool:
+        return (
+            isinstance(self.connector_worker, MooncakePushConnectorWorker)
+            and self.connector_worker.supports_layerwise_buffer_reuse
+        )
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
@@ -285,11 +308,40 @@ class MooncakePushConnector(MooncakeBaseConnector):
         assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
         self.connector_worker.wait_for_save()
 
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
             self.connector_worker.shutdown()
         super().shutdown()
+
+
+class MooncakeConnectorV2(MooncakeBaseConnector):
+    """Select pull by default, or layerwise push via extra configuration."""
+
+    def __new__(
+        cls,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ) -> MooncakeBaseConnector:
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        return cls._get_connector_cls(transfer)(vllm_config, role, kv_cache_config)
+
+    @staticmethod
+    def _get_connector_cls(transfer: KVTransferConfig, *, use_hisparse: bool = False) -> type[MooncakeBaseConnector]:
+        extra_config = transfer.kv_connector_extra_config or {}
+        if extra_config.get("use_layerwise", False):
+            return MooncakePushConnector
+        if use_hisparse:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+
+            return _HiSparseMooncakePullConnector
+        return MooncakePullConnector
 
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.
@@ -299,6 +351,7 @@ MooncakeConnector = MooncakePullConnector
 __all__ = [
     "MooncakeBaseConnector",
     "MooncakeConnector",
+    "MooncakeConnectorV2",
     "MooncakePullConnector",
     "MooncakePushConnector",
 ]

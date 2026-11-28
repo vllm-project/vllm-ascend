@@ -4,13 +4,14 @@
 import sys
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
@@ -62,6 +63,25 @@ def _make_vllm_config(**overrides):
     for name, value in overrides.items():
         setattr(config, name, value)
     return config
+
+
+def test_runner_binds_materialized_kv_cache() -> None:
+    from vllm.v1.worker import utils as worker_utils
+
+    from vllm_ascend.patch.worker import patch_attn_utils
+
+    names = ["model.layers.2.self_attn", "model.layers.0.self_attn"]
+    caches = {name: (torch.zeros(2, 4), torch.zeros(2, 4)) for name in names}
+    layers = {name: SimpleNamespace(kv_cache=None) for name in names}
+    runner_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    assert model_runner_module.bind_kv_cache is worker_utils.bind_kv_cache
+    assert model_runner_module.bind_kv_cache is patch_attn_utils.bind_kv_cache
+    model_runner_module.bind_kv_cache(caches, layers, runner_caches)
+
+    assert runner_caches[0] is caches[names[1]]
+    assert runner_caches[1] is caches[names[0]]
+    assert all(layers[name].kv_cache is cache for name, cache in caches.items())
 
 
 def test_config_accepts_prefix_caching() -> None:
@@ -184,6 +204,12 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     with (
         patch.object(AscendMambaHybridModelState, "__init__", side_effect=init_parent, autospec=True) as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+        # CPU-only UT never registers PrivateUse1 hooks, so the pinned
+        # staging allocation must be disabled here.
+        patch(
+            "vllm_ascend._310p.worker.v2.model_state.is_pin_memory_available",
+            return_value=False,
+        ),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
@@ -517,6 +543,7 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     runner._sampled_tokens_cpu = sampled_tokens
     runner._num_sampled_cpu = num_sampled
     runner._num_rejected_cpu = num_rejected
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
 
     with patch.object(model_runner_module, "_post_update_cpu", return_value=num_sampled.cpu()) as post_update:
         runner.postprocess_sampled(
@@ -552,6 +579,7 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler, needs_
     runner.sampler.needs_cpu_token_history.return_value = needs_cpu_history
     runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
     runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
     for name, dtype in (
         ("_num_sampled_staging", torch.int32),
         ("_num_rejected_staging", torch.int32),
@@ -752,6 +780,20 @@ def test_sampler_logprobs_returns_sampled_and_topk() -> None:
     assert out.logprobs_tensors.logprobs.shape == (1, 3)
 
 
+def _init_packed_copy_buffers(
+    rejection: RejectionSampler310V2,
+    max_num_reqs: int,
+    num_spec: int,
+) -> None:
+    """Set up the packed-D2H staging buffers skipped by ``__new__`` construction."""
+    rejection._packed_width = num_spec + 3
+    rejection._packed_dev = torch.empty(max_num_reqs * rejection._packed_width, dtype=torch.int32)
+    rejection._packed_cpu = torch.empty_like(rejection._packed_dev)
+    rejection._chunked_prefill_cpu = torch.empty(max_num_reqs, dtype=torch.bool)
+    rejection._copy_pending = False
+    rejection._pending_num_reqs = 0
+
+
 def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
     _add_request(sampler, 0, 1, SamplingParams(temperature=0, allowed_token_ids=[2], logprobs=1))
@@ -763,7 +805,7 @@ def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     rejection.sampled_tokens_cpu = torch.empty((1, 2), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=1)
     rejection._copy_event = MagicMock()
     batch = SimpleNamespace(
         num_reqs=1,
@@ -854,7 +896,7 @@ def test_mtp_history_uses_logits_input_rows(num_spec, processor):
     rejection.sampled_tokens_cpu = torch.empty((1, num_spec + 1), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=num_spec)
     rejection._copy_event = MagicMock()
     # Prefix input tokens do not produce logits; they must not count as drafts.
     batch = SimpleNamespace(
@@ -938,7 +980,7 @@ def test_sampler_min_p_masks_low_probability_tokens() -> None:
 
 
 def test_sampler_min_p_restricts_softmax_mass() -> None:
-    """With temp>0, min_p must zero discarded tokens before inverse-CDF."""
+    """With temp>0, min_p must zero discarded tokens before sampling."""
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
@@ -952,7 +994,7 @@ def test_sampler_min_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -975,9 +1017,9 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
 
     assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
     assert sampler.sampling_states.min_p.gpu[0].item() == pytest.approx(0.1)
-    # CPU runners lack the NPU pinned-memory allocator used by random sampling.
+    # Mock the NPU sampler to exercise the sampler on CPU.
     with patch(
-        "vllm_ascend._310p.worker.v2.sampler._random_sample_310p",
+        "vllm_ascend._310p.worker.v2.sampler.random_sample",
         side_effect=lambda probs, generators: probs.argmax(dim=-1),
     ) as random_sample:
         output = sampler(torch.zeros((1, 64), dtype=torch.float32), _make_sampler_batch())
@@ -1016,6 +1058,7 @@ def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
     return SimpleNamespace(
         expanded_idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
         idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        cu_num_logits_np=np.array([0, 1], dtype=np.int32),
         num_reqs=1,
         seq_lens=torch.ones(1, dtype=torch.int32),
     )
@@ -1055,10 +1098,10 @@ def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
 
 
 def test_sampler_top_k_restricts_softmax_mass() -> None:
-    """With temp>0, top-k must zero-out discarded tokens before inverse-CDF.
+    """With temp>0, top-k must zero-out discarded tokens before sampling.
 
     vLLM clears top_k/top_p when temperature==0, so exercise the random path
-    with ``_random_sample_310p`` mocked (CPU-safe; mirrors MRV1 CDF unit style).
+    with ``random_sample`` mocked.
     """
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
@@ -1074,7 +1117,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1097,7 +1140,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
         del generators
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_argmax_sample):
+    with patch.object(sampler_mod, "random_sample", side_effect=_argmax_sample):
         out = sampler(logits, _make_sampler_batch())
     assert int(out.sampled_token_ids.view(-1)[0].item()) == int(logits.argmax(dim=-1).item())
 
@@ -1117,7 +1160,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1170,10 +1213,90 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
 
 
+@pytest.mark.skipif(
+    not hasattr(AttentionGroup, "_with_kernel_block_table"),
+    reason="This vLLM version does not map block tables in AttentionGroup",
+)
+@pytest.mark.parametrize("for_capture", [False, True])
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_capture: bool) -> None:
+    block_tables = Ascend310PBlockTables(
+        block_sizes=[128],
+        max_num_reqs=1,
+        max_num_batched_tokens=2,
+        max_num_blocks_per_group=[1],
+        device=torch.device("cpu"),
+        kernel_block_sizes=[64],
+    )
+    block_tables.append_block_ids(0, ([7],), overwrite=True)
+    (kernel_block_table,) = block_tables.gather_block_tables(np.array([0]), num_reqs_padded=1)
+    common_metadata = MagicMock(block_table_tensor=kernel_block_table)
+    builder = MagicMock()
+    group = AttentionGroup(
+        backend=MagicMock(),
+        layer_names=["layer"],
+        kv_cache_spec=MagicMock(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=64,
+        metadata_builders=[builder],
+    )
+    group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+
+    if for_capture:
+        group.build_metadata_for_cudagraph_capture(common_metadata)
+        (received_metadata,) = builder.build_for_cudagraph_capture.call_args.args
+    else:
+        group.build_metadata(common_metadata)
+        _, received_metadata = builder.build.call_args.args
+
+    assert received_metadata.block_table_tensor is kernel_block_table
+    assert received_metadata.block_table_tensor.tolist() == [[14, 15]]
+
+
+def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
+    target_group = SimpleNamespace()
+    draft_group = SimpleNamespace()
+    target_groups = [[target_group]]
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.max_model_len = 512
+    runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        needs_kv_cache_zeroing=False,
+    )
+
+    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups):
+        assert block_tables is runner.block_tables
+        assert attn_groups is target_groups
+        runner.speculator.attn_groups = [[draft_group]]
+
+    def init_draft_graph(cudagraph_mode):
+        assert target_group.block_table_is_kernel_granular
+        assert draft_group.block_table_is_kernel_granular
+
+    runner.speculator.set_attn.side_effect = set_draft_attn
+    runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph
+    monkeypatch.setattr(
+        model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [128]))
+    )
+    monkeypatch.setattr(model_runner_module, "Ascend310PBlockTables", Mock())
+    monkeypatch.setattr(model_runner_module, "initialize_mamba_ssu_backend", Mock())
+    monkeypatch.setattr(model_runner_module, "ModelAclGraphManager310", Mock())
+    monkeypatch.setattr(model_runner_module, "check_attention_cp_compatibility", Mock())
+    monkeypatch.setattr(model_runner_module, "get_shared_kv_cache_layers", Mock(return_value={}))
+    monkeypatch.setattr(model_runner_module, "bind_kv_cache", Mock())
+    monkeypatch.setattr(model_runner_module, "get_kv_connector", Mock())
+
+    NPUModelRunner310V2.initialize_kv_cache(runner, kv_cache_config)
+
+    runner.speculator.init_cudagraph_manager.assert_called_once()
+
+
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     class FakeAttentionSpec:
         block_size = 128
-        storage_block_size = 128
+        num_states = 128
         page_size_bytes = 4096
         num_kv_heads = 2
         head_size = 128
@@ -1226,7 +1349,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128
-        storage_block_size = 128
+        num_states = 128
         page_size_bytes = 128 * 2 * (128 + 128) * 2
         num_kv_heads = 2
         head_size = 128
@@ -1377,7 +1500,6 @@ def test_worker_selects_v2_runner_on_310p() -> None:
 
     worker = object.__new__(NPUWorker310)
     worker.vllm_config = SimpleNamespace()
-    worker.use_v2_model_runner = True
     worker.device = torch.device("cpu")
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()

@@ -38,6 +38,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     # Per layer: 0 for non-indexer caches, 1 for unreplicated indexers,
     # >1 for replicated indexers. Distinct from kernel blocks per scheduler page.
     indexer_replication_sizes: list[int]
+    dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
 
@@ -52,6 +53,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
+            ("dcp_sharded", self.dcp_sharded),
             ("kv_caches_base_addr", self.kv_caches_base_addr),
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
@@ -117,6 +119,7 @@ class MooncakePPTransferMetadata:
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
 
@@ -151,6 +154,7 @@ class ReqMeta:
     remote_request_id: str
     remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -161,14 +165,15 @@ class PushReqMeta:
     local_block_ids: tuple[tuple[int, ...], ...]
     num_computed_tokens: int
     num_external_tokens: int
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
 class PushSendReqMeta:
     """P source blocks and the prefill range scheduled for this step.
 
-    num_computed_tokens includes the cached prefix; the worker may publish
-    that prefix immediately, but must wait for layer events for new tokens.
+    num_computed_tokens includes the cached prefix. Locally resident prefixes
+    are ready immediately; external prefixes and new tokens need layer events.
     """
 
     # Full D request ID, also used by completion messages.
@@ -184,6 +189,8 @@ class PushSendReqMeta:
     remote_num_computed_tokens: int
     remote_num_external_tokens: int
     remote_worker_addresses: tuple[tuple[int, int, int, str], ...]
+    # External prefix adopted on P, distinct from D's requested transfer range.
+    num_external_tokens: int = 0
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -221,6 +228,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_request_id=kv_transfer_params["remote_request_id"],
             remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
     def add_new_push_req(
@@ -235,6 +243,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             local_block_ids=tuple(tuple(group) for group in local_block_ids),
             num_computed_tokens=kv_transfer_params["num_computed_tokens"],
             num_external_tokens=num_external_tokens,
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
     def add_new_push_send_req(
@@ -245,6 +254,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         num_computed_tokens: int,
         num_scheduled_tokens: int,
         kv_transfer_params: dict[str, Any],
+        num_external_tokens: int = 0,
     ) -> None:
         """Snapshot one scheduled P chunk for the layerwise worker."""
         self.push_send_requests[request_id] = PushSendReqMeta(
@@ -253,6 +263,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             num_prompt_tokens=num_prompt_tokens,
             num_computed_tokens=num_computed_tokens,
             num_scheduled_tokens=num_scheduled_tokens,
+            num_external_tokens=num_external_tokens,
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
