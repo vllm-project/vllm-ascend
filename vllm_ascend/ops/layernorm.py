@@ -19,10 +19,17 @@ import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.model_executor.fusion.kernels.fused_norm_quant import fused_norm_quant
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
+from vllm_ascend.ops.linear import AscendQKVParallelLinear
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.ascend_config import get_ascend_config
 
 # Scanning quant_description is O(number of quantized tensors) and every
 # RMSNorm used to redo it. The answer is a property of the checkpoint, so
@@ -111,6 +118,21 @@ class AscendRMSNorm(RMSNorm):
 
         return x
 
+    def forward_fused(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        linear: AscendQKVParallelLinear,
+    ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
+        key = get_input_quant_key(linear)
+        if(
+            get_ascend_config().ascend_compilation_config.fuse_norm_quant
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and key is not None
+        ):
+            return fused_norm_quant(key, self, hidden_states, residual, linear)
+        return self.forward_oot(hidden_states, residual)
+
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
     def forward_oot(
@@ -127,6 +149,25 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
 
         return x
+
+    def forward_fused(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        linear: AscendQKVParallelLinear,
+        use_sp: bool,
+        is_gdn: bool,
+    ) -> tuple[QuantizedActivation | torch.Tensor, torch.Tensor]:
+        key = get_input_quant_key(linear)
+        if(
+            get_ascend_config().ascend_compilation_config.fuse_norm_quant
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and not use_sp
+            and not is_gdn
+            and key is not None
+        ):
+            return fused_norm_quant(key, self, hidden_states, residual, linear)
+        return self.forward_oot(hidden_states, residual)
 
 
 class LayerNormFn(torch.autograd.Function):

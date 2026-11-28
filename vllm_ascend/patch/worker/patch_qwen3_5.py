@@ -27,6 +27,9 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -131,7 +134,7 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor | QuantizedActivation, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
@@ -224,11 +227,14 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         use_sp = getattr(self, "use_attn_reduce_scatter_for_moe", False)
         full_num_tokens = positions.shape[-1]
 
+        is_gdn = self.layer_type == "linear_attention"
+        in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj  
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj, use_sp, is_gdn)
 
         if use_sp:
             # Attention (full and GDN) needs the full token sequence; the
@@ -256,7 +262,13 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states = sp_reduce_scatter(hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        else:
+            hidden_states, residual = self.post_attention_layernorm.forward_fused(
+                hidden_states, residual, self.mlp.gate_up_proj, use_sp, False,
+            )
+
         if use_sp:
             if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
                 hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
