@@ -14,6 +14,11 @@ from vllm.triton_utils import tl, triton
 
 from .utils import prepare_chunk_indices
 
+# Upper bound on the number of elements a single cumsum tile may hold. It only sizes the
+# BLOCK_T heuristic below; the kernel itself works for any BLOCK_T that is a multiple of
+# CHUNK_SIZE.
+OPTIM_BLOCK_ELEMENT_BUDGET = 2**18
+
 
 @triton.heuristics(
     {"HAS_SCALE": lambda args: args["scale"] is not None, "IS_VARLEN": lambda args: args["cu_seqlens"] is not None}
@@ -48,16 +53,23 @@ def chunk_local_cumsum_scalar_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
+        # Heads span the whole row, time is the block axis, so both axes are bounds-checked: the
+        # last time tile can end before i_block * BLOCK_T + BLOCK_T, and an unchecked tail would
+        # walk past the end of the row into the next head of the same (H, T) block pointer.
         ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
         ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
+        b_s = tl.load(ptr_s, boundary_check=(0, 1)).to(tl.float32)
         b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))
         b_s = tl.trans(b_s, (2, 0, 1))
         b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
         if HAS_SCALE:
             b_o *= scale
-        b_o = tl.trans(b_o, (2, 0, 1))
+        # The permutation above rotates (H, N_CHUNKS, CHUNK_SIZE) into (CHUNK_SIZE, H, N_CHUNKS),
+        # so undo it with the inverse rotation; repeating the same permutation would rotate the
+        # tile again and the final reshape would mix values across heads.
+        b_o = tl.trans(b_o, (1, 2, 0))
         b_o = tl.reshape(b_o, (H, BLOCK_T))
+        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0, 1))
     else:
         ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
         ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
@@ -69,8 +81,8 @@ def chunk_local_cumsum_scalar_kernel(
             b_o *= scale
         b_o = tl.trans(b_o, (1, 0, 2))
         b_o = tl.reshape(b_o, (BLOCK_T, H))
+        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
 
-    tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
     return
 
 
@@ -89,7 +101,17 @@ def chunk_local_cumsum_scalar(
     else:
         B, T, H = g.shape
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
-    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
+    # BLOCK_T must span at least one chunk: the kernel reshapes each tile into
+    # (N_CHUNKS, CHUNK_SIZE, H) with N_CHUNKS = BLOCK_T // CHUNK_SIZE, so BLOCK_T < chunk_size
+    # makes N_CHUNKS zero and the reshape fails. Without the clamp the heuristic collapses that
+    # way as soon as H * chunk_size is large enough that the element budget only allows a
+    # sub-chunk tile (H >= 125 for the GDN chunk_size of 64), and every prefill of such a model
+    # crashes on the first cumsum call. For H <= 64 the raw value is already >= chunk_size, so
+    # those shapes keep exactly the historical tile size.
+    # The budget division itself drops to zero once H * chunk_size exceeds the budget, and
+    # ``next_power_of_2`` is only meaningful for positive values, so keep the operand at 1.
+    optim_block_elements = max(OPTIM_BLOCK_ELEMENT_BUDGET // (H * chunk_size), 1)
+    OPTIM_BLOCK_SIZE = max(triton.next_power_of_2(optim_block_elements), chunk_size)
     if cu_seqlens is not None and block_indices is None:
         block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE)
     num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)

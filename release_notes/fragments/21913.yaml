@@ -1,0 +1,9 @@
+pr: 21913
+entries:
+  - category: bugfix
+    text: >-
+      Fixed an Ascend prefill crash for recurrent-attention models whose v-head count per
+      chunk exceeds 64 (for example 128 heads with a GDN head dimension of 32). The Triton
+      chunk-local cumsum kernel derived a block length smaller than the chunk size, which
+      collapsed the per-chunk reshape and raised an error on the first processed request;
+      the block length is now clamped to at least one chunk.
