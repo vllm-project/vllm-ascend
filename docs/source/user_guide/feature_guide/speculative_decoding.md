@@ -808,6 +808,7 @@ curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:spec_decode_num_draft_toke
 ```
 
 An increase in the counter confirms that speculative decoding generated draft tokens.
+See [vLLM's Prometheus metrics for speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/acceptance_metrics/#relationship-to-prometheus-metrics).
 
 ## Configuration Parameters
 
