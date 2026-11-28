@@ -1,0 +1,10 @@
+pr: 23585
+entries:
+  - category: bugfix
+    text: >-
+      Fixed GDN prefill on Ascend910B/Ascend910_93 failing with aclnn error
+      161002 ("The prepare path is supported on Ascend950 only") on the first
+      real request. q/k L2 normalization is now applied outside the fused
+      operator and the recurrent state uses the K-major layout, instead of the
+      in-kernel spellings that route the call into the Ascend950-only path.
+    hardware: [A2, A3]

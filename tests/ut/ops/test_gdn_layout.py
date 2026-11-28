@@ -6,6 +6,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
+try:
+    from vllm.third_party.flash_linear_attention.ops import l2norm as _l2norm
+except ImportError:  # vLLM before the fla package moved to vllm/third_party
+    from vllm.model_executor.layers.fla.ops import l2norm as _l2norm  # type: ignore[import-not-found]
+
 from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -59,7 +64,7 @@ def test_a5_prefill_layout_preserves_values_and_output(kind, chunk32_enabled):
 
 @pytest.mark.parametrize("backend", ["base", "cann"])
 @pytest.mark.parametrize("sliced", [False, True])
-def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
+def test_head_first_external_l2norm_accepts_multiple_heads(backend, sliced):
     tokens, nk, nv, dim = 7, 2, 4, 128
     qkv = [torch.randn(1, heads, tokens, dim).transpose(1, 2) for heads in (nk, nk, nv)]
     if sliced:
@@ -79,22 +84,27 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
         meta = SimpleNamespace(cu_seqlens_host=(0, count), chunk_indices_chunk64_host=((0, 0),), keep_meta=None)
 
         def fused(q, k, v, *args, **kwargs):
-            # q/k normalization happens inside the fused kernel, so the adaptor
-            # forwards the tensors untouched and only picks the layout by
-            # contiguity: a sliced head-first view cannot stay contiguous.
-            assert kwargs["use_qk_l2norm_in_kernel"] is True
+            # q/k are normalized outside the fused kernel; the adaptor only
+            # picks the layout by contiguity: a sliced head-first view cannot
+            # stay contiguous.
+            assert kwargs["use_qk_l2norm_in_kernel"] is False
+            assert kwargs["state_v_first"] is False
             if sliced:
                 assert kwargs["layout"] == "BSND"
                 expected = [x.contiguous() for x in qkv]
             else:
                 assert kwargs["layout"] == "BNSD"
                 expected = [x.transpose(1, 2) for x in qkv]
-            for got, want in zip((q, k, v), expected):
+            for got, want in zip((q, k), expected[:2]):
                 assert got.is_contiguous()
-                torch.testing.assert_close(got, want)
-            return output, state
+                torch.testing.assert_close(got, torch.nn.functional.normalize(want, dim=-1))
+            assert v.is_contiguous()
+            torch.testing.assert_close(v, expected[2])
+            torch.testing.assert_close(kwargs["initial_state"], state.transpose(-1, -2).contiguous())
+            return output, kwargs["initial_state"]
 
-        actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+        with patch(f"{_l2norm.__name__}.l2norm_fwd", side_effect=norm):
+            actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 
         def fused(q, k, v, *args, **kwargs):
