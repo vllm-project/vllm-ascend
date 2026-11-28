@@ -399,8 +399,8 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             index_layer: index_spec,
         }
         self.assertFalse(is_kv_cache_spec_uniform(layer_specs))
+        uniform_spec = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=layer_specs)
         if vllm_version_is("0.34.0"):
-            uniform_spec = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=layer_specs)
             groups = [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)]
         else:
             from vllm.v1.kv_cache_interface import KVCacheGroup
