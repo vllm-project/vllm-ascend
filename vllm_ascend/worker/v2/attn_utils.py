@@ -437,6 +437,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
     full_graph_mode: bool = False,
+    hisparse_refill: bool = False,
     skip_ring_state_update: bool | None = None,
     req_ids_tensor: torch.Tensor | None = None,
     token_to_req: torch.Tensor | None = None,
@@ -723,7 +724,9 @@ def build_attn_metadata(
                                 and bool((query_start_loc_cpu[: num_reqs + 1].diff() == max_query_len).all())
                             )
                             if can_group_spec_gdn:
-                                grouped_spec_gdn = attn_metadata_builder.begin_grouped_spec_gdn()
+                                grouped_spec_gdn = attn_metadata_builder.begin_grouped_spec_gdn(
+                                    hisparse_refill=hisparse_refill
+                                )
                         if grouped_spec_gdn is not None and accepted is not None:
                             metadata = attn_metadata_builder.build_grouped_spec_gdn(
                                 attn_group._with_kernel_block_table(variant_common), accepted, grouped_spec_gdn

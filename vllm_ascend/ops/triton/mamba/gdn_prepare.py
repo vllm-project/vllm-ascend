@@ -38,6 +38,7 @@ def _prepare_gdn_kernel(
     SPEC_WIDTH: tl.constexpr,
     MIXED_SPEC: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    USE_FIRST_STATE_SLOT: tl.constexpr,
     TABLE_ROW_STRIDE: tl.constexpr,
     TABLE_COL_STRIDE: tl.constexpr,
     SEQ_LEN_STRIDE: tl.constexpr,
@@ -79,7 +80,7 @@ def _prepare_gdn_kernel(
         length = end - begin
         source_begin = begin
         seq_len = tl.load(seq_lens + row * SEQ_LEN_STRIDE, active, 0)
-        start_block = tl.maximum((seq_len - 1) // BLOCK_SIZE, 0)
+        start_block = 0 if USE_FIRST_STATE_SLOT else tl.maximum((seq_len - 1) // BLOCK_SIZE, 0)
         is_spec: tl.constexpr = HAS_SPEC
         if MIXED_SPEC:
             group_row = tl.load(layout + row * 2)
@@ -140,13 +141,15 @@ class GroupedSpecGDN:
     """Combine pure spec metadata launches without changing graph-owned buffers."""
 
     def __init__(self) -> None:
+        self.hisparse_refill = False
         self._pending: list[
             tuple[int, tuple[torch.Tensor | None, ...], dict[str, int], tuple[torch.Tensor, ...], tuple[int, ...]]
         ] = []
         self._addresses: tuple[tuple[int, ...], ...] | None = None
         self._pointers: torch.Tensor | None = None
 
-    def reset(self) -> None:
+    def reset(self, *, hisparse_refill: bool = False) -> None:
+        self.hisparse_refill = hisparse_refill
         self._pending.clear()
 
     def stage(self, grid, arguments, geometry, group_tensors, shared_inputs) -> None:
@@ -225,6 +228,7 @@ def prepare_gdn(
     block_size: int,
     pad_block_id: int,
     grouped_spec: GroupedSpecGDN | None = None,
+    use_first_state_slot: bool = False,
 ) -> None:
     """Populate GDN metadata buffers through a single Triton launch.
 
@@ -268,6 +272,7 @@ def prepare_gdn(
         SPEC_WIDTH=spec_width,
         MIXED_SPEC=mixed_spec,
         BLOCK_SIZE=block_size,
+        USE_FIRST_STATE_SLOT=use_first_state_slot,
         TABLE_ROW_STRIDE=block_table.stride(0),
         TABLE_COL_STRIDE=block_table.stride(1),
         SEQ_LEN_STRIDE=seq_lens.stride(0),

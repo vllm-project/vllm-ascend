@@ -308,7 +308,8 @@ def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
     assert all(kernel is compiled_kernels[0] for kernel in compiled_kernels)
 
 
-def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts():
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "none"])
+def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts(mamba_cache_mode):
     device = torch.device("npu:0")
     builders = [
         _make_builder(
@@ -316,7 +317,7 @@ def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts
             num_heads=32,
             num_speculative_tokens=5,
             builder_cls=AscendGDNHostMetadataBuilder,
-            mamba_cache_mode="align",
+            mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=5,
             cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
         )
@@ -345,7 +346,7 @@ def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts
         for builder in builders:
             builder.spec_state_indices_tensor.fill_(-1)
             builder.num_accepted_tokens.fill_(-1)
-        grouped = builders[0].begin_grouped_spec_gdn()
+        grouped = builders[0].begin_grouped_spec_gdn(hisparse_refill=mamba_cache_mode == "none")
         actual = [
             builder.build_grouped_spec_gdn(metadata, accepted, grouped)
             for builder, metadata in zip(builders, per_group, strict=True)

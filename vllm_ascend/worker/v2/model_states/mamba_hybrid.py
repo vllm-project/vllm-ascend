@@ -591,6 +591,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            hisparse_refill=getattr(input_batch, "hisparse_refill", False),
         )
         graph_writes: dict[GDNGraphStateUpdater, list] = {}
         for group_id, group, builder, (first_layer, updater) in followers:

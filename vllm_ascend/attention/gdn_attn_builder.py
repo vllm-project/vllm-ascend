@@ -1664,9 +1664,12 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         grouped_spec: GroupedSpecGDN | None = None,
     ) -> GDNAttentionMetadata | None:
         # Request validation and phase classification have already run in build.
+        cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        use_first_state_slot = cache_mode == "none" and grouped_spec is not None and grouped_spec.hisparse_refill
         if (
             self._spec_conv_indices is None
-            or self.vllm_config.cache_config.mamba_cache_mode != "align"
+            or (cache_mode != "align" and not use_first_state_slot)
+            or (use_first_state_slot and m.block_table_tensor.shape[1] < self.num_spec + 1)
             or (num_spec_decodes > 0 and self.kv_cache_spec.num_speculative_blocks < self.num_spec)
         ):
             return None
@@ -1783,6 +1786,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             block_size=self.kv_cache_spec.block_size,
             pad_block_id=self._SPEC_GRAPH_PAD_SLOT_ID,
             grouped_spec=grouped_spec,
+            use_first_state_slot=use_first_state_slot,
         )
         if cached is not None:
             return cached[3]
@@ -1837,10 +1841,10 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             self._grouped_spec_views = (m.num_reqs, m.num_actual_tokens, views, metadata)
         return metadata
 
-    def begin_grouped_spec_gdn(self) -> GroupedSpecGDN:
+    def begin_grouped_spec_gdn(self, *, hisparse_refill: bool = False) -> GroupedSpecGDN:
         if self._grouped_spec_gdn is None:
             self._grouped_spec_gdn = GroupedSpecGDN()
-        self._grouped_spec_gdn.reset()
+        self._grouped_spec_gdn.reset(hisparse_refill=hisparse_refill)
         return self._grouped_spec_gdn
 
     def build_grouped_spec_gdn(
