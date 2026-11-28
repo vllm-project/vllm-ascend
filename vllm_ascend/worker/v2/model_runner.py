@@ -73,6 +73,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_attn_kv_plan import supports_dsa_target_metadata_graph
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -583,6 +584,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             else None
         )
+        if supports_dsa_target_metadata_graph(self.vllm_config):
+            self.model_state.device_metadata = TargetDeviceMetadata(full_graph_only=True)
+            logger.info("DSA target metadata producers will be captured in FULL graphs.")
 
         # Register the exact bound state-copy layouts; kernel_warmup owns
         # compilation before model dummy runs and graph capture.
@@ -801,7 +805,11 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with dp_coordination_context:
+        metadata = getattr(self.model_state, "device_metadata", None)
+        target_scope = (
+            metadata.replay_target() if getattr(metadata, "full_graph_only", False) is True else nullcontext()
+        )
+        with dp_coordination_context, target_scope:
             d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
                 output = super().execute_model(
