@@ -29,8 +29,9 @@ the READs without recording them can still sample zero while the transfer is
 running.
 """
 
-import regex as re
 from typing import Any
+
+import regex as re
 
 from vllm_ascend.observability.ms_metrics.handlers.common import (
     MetricSpec,
