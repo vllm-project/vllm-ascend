@@ -119,7 +119,7 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls, embed_nam
     with (
         patch.object(quarot_utils, "lmhead_tp_enable", return_value=lmhead_tp),
         patch.object(quarot_utils, "get_rotation_path", return_value=rotation_path),
-        patch.object(qwen3_dflash2, "get_rotation_path", return_value=rotation_path),
+        patch.object(qwen3_dflash2, "resolve_rotation_path", return_value=rotation_path),
         patch.object(quarot_utils, "VocabParallelEmbedding", side_effect=vocab_layer),
         patch.object(quarot_utils, "ParallelLMHead", side_effect=vocab_layer),
     ):
@@ -160,7 +160,7 @@ def test_quarot_draft_rebuild_preserves_vocab_layout(tmp_path, monkeypatch, mode
     )
     group = SimpleNamespace(world_size=8, rank_in_group=0)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda config: "rotation")
-    monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda config: "rotation")
+    monkeypatch.setattr(qwen3_dflash2, "resolve_rotation_path", lambda config, **_: "rotation")
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda path: rotation)
     monkeypatch.setattr(quarot_utils, "ParallelLMHead", vocab_ops.AscendParallelLMHead)
     monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)

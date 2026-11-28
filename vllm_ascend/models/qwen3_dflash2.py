@@ -25,7 +25,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
-from vllm_ascend.models.quarot_utils import align_draft_weights
+from vllm_ascend.models.quarot_utils import align_draft_weights, resolve_rotation_path
 from vllm_ascend.ops.kimi_mla import kimi_mla_draft_window
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -33,7 +33,6 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     gather_lm_head_hidden_states,
     gather_lm_head_outputs,
 )
-from vllm_ascend.utils import get_rotation_path
 
 _MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
@@ -440,11 +439,12 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         return names
 
     def post_process(self, vllm_config: VllmConfig) -> None:
-        if get_rotation_path(vllm_config) is None:
+        rotation_path = resolve_rotation_path(vllm_config, allow_fallback=True)
+        if rotation_path is None:
             return
         if not hasattr(self.model, "fc"):
             raise ValueError("DFlash2 with a QuaRot target requires auxiliary hidden states.")
-        align_draft_weights(self, self.model.fc, vllm_config)
+        align_draft_weights(self, self.model.fc, vllm_config, allow_fallback=True, rotation_path=rotation_path)
 
     def compute_candidates(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(self.lm_head.quant_method, UnquantizedEmbeddingMethod):

@@ -93,7 +93,7 @@ def test_post_process_aligns_weights_without_modifying_target(
     )
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda received: "/rotation" if rotated else None)
-    monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda received: "/rotation" if rotated else None)
+    monkeypatch.setattr(qwen3_dflash2, "resolve_rotation_path", lambda received, **_: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
     loader = MagicMock(return_value=rotation)
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", loader)
@@ -155,7 +155,7 @@ def test_dflash2_without_aux_hidden_states_requires_unrotated_target(monkeypatch
     draft.model = torch.nn.Module()
     draft.model.use_aux_hidden_state = False
     config = SimpleNamespace()
-    monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda received: "/rotation" if rotated else None)
+    monkeypatch.setattr(qwen3_dflash2, "resolve_rotation_path", lambda received, **_: "/rotation" if rotated else None)
     align = MagicMock()
     monkeypatch.setattr(qwen3_dflash2, "align_draft_weights", align)
 
