@@ -42,6 +42,7 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiMLAAttention,
+    store_mla_draft_context_kv,
 )
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -53,19 +54,6 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
-
-
-def _normalize_dspark_mla_cache(
-    kv_cache: object,
-    kv_lora_rank: int,
-) -> tuple[torch.Tensor, ...] | object:
-    """Expose the NoPE/RoPE logical views consumed by MLA writers."""
-    if isinstance(kv_cache, torch.Tensor):
-        return (
-            kv_cache[..., :kv_lora_rank],
-            kv_cache[..., kv_lora_rank:],
-        )
-    return kv_cache
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -241,44 +229,7 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         if context_states.numel() == 0:
             return
         cos, sin = get_cos_and_sin_mla(context_positions)
-        for layer_idx, layer in enumerate(self.layers):
-            attn = layer.self_attn
-            slots = (
-                context_slot_mapping[layer_idx]
-                if isinstance(context_slot_mapping, (list, tuple))
-                else context_slot_mapping
-            )
-            if slots is None and context_slot_mapping is not None:
-                continue
-            assert attn.impl.kv_lora_rank is not None
-            if slots is not None:
-                normalized_cache = _normalize_dspark_mla_cache(attn.kv_cache, attn.impl.kv_lora_rank)
-                if attn.impl._cache_requires_prolog_v3_writer(normalized_cache):
-                    attn.impl.exec_context_kv_prolog_v3(
-                        context_states,
-                        cos,
-                        sin,
-                        normalized_cache,
-                        slots,
-                    )
-                    continue
-
-            assert attn.fused_qkv_a_proj is not None
-            assert attn.q_lora_rank is not None
-            qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
-            kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
-            # Startup profiling measures the projection before caches exist.
-            if slots is None:
-                continue
-            # Context writes bypass MLA forward's fused-cache view split.
-            attn.impl.exec_kv_prefill(
-                kv_no_split,
-                cos,
-                sin,
-                normalized_cache,
-                slots,
-                return_bf16_kv=False,
-            )
+        store_mla_draft_context_kv(self.layers, context_states, cos, sin, context_slot_mapping)
 
     def forward(
         self,

@@ -51,7 +51,6 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     # Scope platform initialization state and suppress log-file creation only.
     monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
     monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
-    monkeypatch.setattr(VllmConfig, "use_v2_model_runner", VllmConfig.use_v2_model_runner)
     validator = "_validate_model_runner"
     monkeypatch.setattr(VllmConfig, validator, getattr(VllmConfig, validator))
     monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda log_dir: None)

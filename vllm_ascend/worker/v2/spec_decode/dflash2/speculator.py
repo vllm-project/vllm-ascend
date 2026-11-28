@@ -78,8 +78,9 @@ def _selector_walk_kernel_ascend(
         )
 
         if effective_temp == 0.0:
-            best = tl.max(scores, axis=0)
-            index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
+            # torch.argmax picks the first NaN even when another candidate is +inf.
+            is_nan = scores != scores
+            choice_scores = tl.where(tl.max(is_nan.to(tl.int32), axis=0) != 0, is_nan.to(tl.float32), scores)
         else:
             # Verification uses a probability-ratio test, so draft and target
             # draws must use independent noise streams, as in Ascend's sampler.
@@ -91,10 +92,11 @@ def _selector_walk_kernel_ascend(
             gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
             uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
             noise = -tl.log(-_log1p_neg_stable(uniform))
-            sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
-            best = tl.max(sampled_scores, axis=0)
-            index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
+            sampled_scores = scores / effective_temp + noise
+            # An all-NaN proposal ties at -inf and selects the first candidate.
+            choice_scores = tl.where(sampled_scores == sampled_scores, sampled_scores, -float("inf"))
 
+        _, index = tl.max(tl.where(mask, choice_scores, -float("inf")), axis=0, return_indices=True)
         tl.store(
             realized_scores_ptr + candidate_base + offsets,
             scores,
