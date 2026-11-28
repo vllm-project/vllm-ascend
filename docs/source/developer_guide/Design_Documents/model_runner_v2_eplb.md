@@ -13,9 +13,6 @@ behind this ownership model, see
 user-visible configuration and the supported feature matrix, see the
 [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
-For fixed deployment initialization from a deployment document, see
-[EPLB Deployment Import and Static Initialization](eplb_placement.md).
-
 ## Mental model
 
 EPLB has a control plane and a data plane:

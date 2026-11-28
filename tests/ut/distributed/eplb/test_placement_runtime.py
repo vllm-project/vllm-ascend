@@ -1,267 +1,165 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import tempfile
-import unittest
-from pathlib import Path
+import json
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+import pytest
 import torch
+import torch.nn as nn
 
-from tests.ut.distributed.eplb.test_placement import make_metadata, write_placement
-from vllm_ascend.distributed.eplb import placement_runtime as runtime
-from vllm_ascend.distributed.eplb.placement import EplbPlacement
+from vllm_ascend.distributed.eplb.placement_runtime import (
+    RuntimeRoleSpec,
+    bind_role_placement_to_model,
+    build_model_role_spec,
+    collective_call,
+    load_placement_snapshot,
+    local_expert_ids_for_role,
+    parse_placement_snapshot,
+    read_and_slice_target_placement,
+    slice_pp_target_role,
+    validate_role_against_spec,
+)
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 
 
-class TestPlacementRuntime(unittest.TestCase):
-    def setUp(self):
-        self.group = SimpleNamespace(size=lambda: 2, rank=lambda: 0)
+def _sample_payload(*, with_draft: bool = False) -> dict:
+    payload: dict = {
+        "version": 1,
+        "ep_size": 2,
+        "target": {
+            "num_logical_experts": 4,
+            "num_redundant_experts": 2,
+            "physical_to_logical_map": [[3, 0, 1, 0, 2, 1], [1, 2, 0, 3, 1, 0]],
+        },
+    }
+    if with_draft:
+        payload["draft"] = {
+            "num_logical_experts": 4,
+            "num_redundant_experts": 2,
+            "physical_to_logical_map": [[2, 1, 0, 0, 3, 1]],
+        }
+    return payload
 
-        def gather(output, value, *, group):
-            output[:] = [value] * group.size()
 
-        self.gather = patch.object(runtime.dist, "all_gather_object", side_effect=gather)
-        self.gather.start()
-        self.addCleanup(self.gather.stop)
-        self.barrier = patch.object(runtime.dist, "barrier")
-        self.barrier.start()
-        self.addCleanup(self.barrier.stop)
+class _FakeGroup:
+    def __init__(self, rank: int, world_size: int) -> None:
+        self._rank = rank
+        self._size = world_size
 
-        self.leader = patch.object(runtime.dist, "get_global_rank", return_value=0)
-        self.leader.start()
-        self.addCleanup(self.leader.stop)
+    def rank(self) -> int:
+        return self._rank
 
-        def broadcast(object_list, *, src, group):
-            # The leader already filled the payload in its own process.
-            return None
+    def size(self) -> int:
+        return self._size
 
-        self.broadcast = patch.object(runtime.dist, "broadcast_object_list", side_effect=broadcast)
-        self.broadcast.start()
-        self.addCleanup(self.broadcast.stop)
-        self.placement = EplbPlacement(make_metadata(), ((0, 1, 2, 0, 1, 3),), {"workload": "test"})
 
-    def test_collective_validation_reports_remote_failure(self):
-        def gather(output: list[Any], value: Any, *, group):
-            output[:] = [None, "ValueError: wrong model"]
+def test_parse_and_load_placement_snapshot(tmp_path):
+    path = tmp_path / "placement.json"
+    payload = _sample_payload(with_draft=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-        with (
-            patch.object(runtime.dist, "all_gather_object", side_effect=gather),
-            self.assertRaisesRegex(ValueError, "rank 1.*wrong model"),
+    snapshot = load_placement_snapshot(path)
+    assert snapshot.version == 1
+    assert snapshot.ep_size == 2
+    assert snapshot.target.num_physical_experts == 6
+    assert snapshot.target.num_layers == 2
+    assert snapshot.draft is not None and snapshot.draft.num_layers == 1
+    assert len(snapshot.digest()) == 64
+
+
+@pytest.mark.parametrize(
+    ("mutator", "match"),
+    [
+        (lambda d: d.update(version=3), "Unsupported EPLB placement version"),
+        (lambda d: d.update(extra=1), "must contain"),
+        (lambda d: d.update(ep_size=5), "divisible by ep_size"),
+        (lambda d: d["target"].update(physical_to_logical_map=[[0, 1, 2, 0, 1, 2]]), "does not cover every logical"),
+        (lambda d: d["target"].update(physical_to_logical_map=[[0, 0, 1, 2, 3, 1]]), "duplicate logical experts"),
+        (lambda d: d["target"].update(physical_to_logical_map=[[0, 1, 2, 3, 4, 0]]), "invalid logical expert ID"),
+    ],
+)
+def test_parse_placement_snapshot_rejects_invalid_inputs(mutator, match):
+    payload = _sample_payload()
+    mutator(payload)
+    with pytest.raises(ValueError, match=match):
+        parse_placement_snapshot(payload)
+
+
+def test_build_model_role_spec_and_pp_slicing():
+    assert build_model_role_spec(None) is None
+    assert build_model_role_spec(SimpleNamespace(moe_layers=[])) is None
+    moe_model = SimpleNamespace(
+        moe_layers=[object(), object()], num_logical_experts=4, num_redundant_experts=2, num_physical_experts=6
+    )
+    spec = build_model_role_spec(moe_model)
+    assert spec == RuntimeRoleSpec(num_logical_experts=4, num_redundant_experts=2, num_layers=2)
+
+    snapshot = parse_placement_snapshot(_sample_payload())
+    validate_role_against_spec(snapshot.target, "target", spec)
+    stage0 = RuntimeRoleSpec(num_logical_experts=4, num_redundant_experts=2, num_layers=1)
+    stage1 = RuntimeRoleSpec(num_logical_experts=4, num_redundant_experts=2, num_layers=1)
+    assert slice_pp_target_role(snapshot, 2, 0, [None, spec]) is None
+    sliced = slice_pp_target_role(snapshot, 2, 1, [stage0, stage1])
+    assert sliced is not None and sliced.physical_to_logical_map == ((1, 2, 0, 3, 1, 0),)
+
+    with pytest.raises(ValueError, match="layer count mismatch"):
+        slice_pp_target_role(snapshot, 2, 0, [stage0])
+
+
+def test_read_and_slice_target_placement_single_and_pp(tmp_path):
+    path = tmp_path / "placement.json"
+    path.write_text(json.dumps(_sample_payload()), encoding="utf-8")
+    spec_full = RuntimeRoleSpec(num_logical_experts=4, num_redundant_experts=2, num_layers=2)
+
+    with (
+        patch("torch.distributed.get_global_rank", return_value=0),
+        patch("torch.distributed.broadcast_object_list"),
+        patch(
+            "torch.distributed.all_gather_object",
+            side_effect=lambda out, obj, group: out.__setitem__(slice(None), [obj] * group.size()),
+        ),
+    ):
+        snap, target = read_and_slice_target_placement(str(path), lambda: spec_full, _FakeGroup(0, 2))
+        assert snap.ep_size == 2 and target == snap.target
+
+        stage_spec = RuntimeRoleSpec(num_logical_experts=4, num_redundant_experts=2, num_layers=1)
+        raw_text = path.read_text(encoding="utf-8")
+        with patch(
+            "torch.distributed.broadcast_object_list",
+            side_effect=lambda buf, **_: buf.__setitem__(0, raw_text) if len(buf) == 1 else None,
         ):
-            runtime.collective_call(lambda: 42, self.group, "test")
-
-    def test_consensus_rejects_different_rank_files(self):
-        def gather(output: list[Any], value: Any, *, group):
-            output[:] = [None, None] if value is None else [value, "different"]  # type: ignore[list-item]
-
-        with (
-            patch.object(
-                runtime.dist,
-                "all_gather_object",
-                side_effect=lambda out, val, *, group: out.__setitem__(
-                    slice(None), [val, "other"] if val is not None else [None, None]
-                ),
-            ),
-            self.assertRaisesRegex(ValueError, "differs across"),
-        ):
-            runtime.verify_placement_consensus(self.placement, self.group)
-
-    def test_loading_checks_model_before_migration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "deployment.json")
-            write_placement(path, self.placement)
-            metadata = make_metadata()
-            metadata["model"] = "wrong-model"
-            with self.assertRaisesRegex(ValueError, "model mismatch"):
-                runtime.read_placement_collectively(path, metadata, self.group)
-
-    def test_loading_validates_draft_placement(self):
-        draft_metadata = make_metadata()
-        draft_metadata.update(
-            model="draft-model",
-            num_logical_experts=2,
-            num_redundant_experts=0,
-            layer_names=["layers.0.draft.moe"],
-        )
-        placement = EplbPlacement(
-            self.placement.metadata,
-            self.placement.physical_to_logical,
-            self.placement.provenance,
-            draft=EplbPlacement(draft_metadata, ((0, 1),), {"workload": "draft"}),
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "deployment.json")
-            write_placement(path, placement)
-            loaded = runtime.read_placement_collectively(
-                path,
-                make_metadata(),
-                self.group,
-                draft_metadata=draft_metadata,
+            snap_pp, pp_role = read_and_slice_target_placement(
+                str(path), lambda: stage_spec, _FakeGroup(0, 2), _FakeGroup(0, 2), pp_rank=1
             )
-            self.assertEqual(loaded, placement)
-            wrong = dict(draft_metadata)
-            wrong["model"] = "wrong-draft"
-            with self.assertRaisesRegex(ValueError, "model mismatch"):
-                runtime.read_placement_collectively(
-                    path,
-                    make_metadata(),
-                    self.group,
-                    draft_metadata=wrong,
-                )
+        assert pp_role is not None and pp_role.physical_to_logical_map == snap_pp.target.physical_to_logical_map[1:]
 
-    def _patch_passthrough_collective(self):
-        return patch.object(
-            runtime,
-            "collective_call",
-            side_effect=lambda operation, group, description: operation(),
+        with pytest.raises(FileNotFoundError, match="could not be read"):
+            read_and_slice_target_placement(str(tmp_path / "missing.json"), lambda: spec_full, _FakeGroup(0, 2))
+
+
+def test_bind_role_placement_and_routed_experts_slot_mapping():
+    snapshot = parse_placement_snapshot(_sample_payload())
+    layers = []
+    for _ in range(2):
+        layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+        nn.Module.__init__(layer)
+        layer.moe_config = SimpleNamespace(num_logical_experts=4, num_experts=6, ep_rank=1, ep_size=2)
+        layer._expert_map = torch.tensor([-1, -1, -1, 0, 1, 2, 3], dtype=torch.int32)
+        layer.expert_map_manager = SimpleNamespace(
+            _expert_map=layer._expert_map,
+            map_global_to_local=lambda gid, em=layer._expert_map: int(em[gid].item()),
+            num_fused_shared_experts=1,
         )
+        layers.append(layer)
+    moe_model = SimpleNamespace(moe_layers=layers)
 
-    def test_loading_reads_only_on_the_leader(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "deployment.json")
-            write_placement(path, self.placement)
-            with patch.object(
-                runtime.dist,
-                "broadcast_object_list",
-                side_effect=lambda object_list, *, src, group: None,
-            ) as broadcast:
-                loaded = runtime.read_placement_collectively(path, make_metadata(), self.group)
-            self.assertEqual(loaded, self.placement)
-            self.assertEqual(broadcast.call_args.kwargs["src"], 0)
+    bind_role_placement_to_model(moe_model, snapshot.target, ep_size=2, ep_rank=1)
+    assert local_expert_ids_for_role(snapshot.target, ep_size=2, ep_rank=1) == {0, 1, 2, 3}
+    assert local_expert_ids_for_role(snapshot.target, ep_size=1, ep_rank=0) is None
+    assert [layers[0]._map_global_expert_id_to_local_expert_id(i) for i in range(4)] == [0, 2, 1, -1]
+    assert layers[0]._map_global_expert_id_to_local_expert_id(4) == 3
 
-    def test_loading_does_not_read_on_a_non_leader(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "deployment.json")
-            write_placement(path, self.placement)
-            text = Path(path).read_text(encoding="utf-8")
-            self.group.rank = lambda: 1
-
-            def broadcast(object_list, *, src, group):
-                object_list[0] = text
-
-            with patch.object(runtime.dist, "broadcast_object_list", side_effect=broadcast):
-                loaded = runtime.read_placement_collectively(
-                    str(Path(directory) / "absent.json"),
-                    make_metadata(),
-                    self.group,
-                )
-            self.assertEqual(loaded, self.placement)
-
-    def test_loading_reports_missing_on_the_leader(self):
-        with self.assertRaisesRegex(FileNotFoundError, "could not be read on EPLB rank 0"):
-            runtime.read_placement_collectively(
-                str(Path(tempfile.mkdtemp()) / "deployment.json"),
-                make_metadata(),
-                self.group,
-            )
-
-    def _make_install_state(self, rank, *, tensor_lists=False):
-        old = torch.tensor([[0, 1, 2, 3, 0, 1]])
-        global_weights = torch.arange(4, dtype=torch.float32).reshape(4, 1) + 10
-        local = old[0, rank * 3 : (rank + 1) * 3]
-        weights = [global_weights[local].clone(), (global_weights[local] * 2).clone()]
-        buffers = [torch.zeros_like(weight) for weight in weights]
-        if tensor_lists:
-            weights = [list(weight.unbind()) for weight in weights]
-            buffers = [list(buffer.unbind()) for buffer in buffers]
-
-        class Communicator:
-            def set_stream(self, stream):
-                pass
-
-            def set_transfer_context(self, mapping, layer_idx):
-                pass
-
-            def add_send(self, tensors, peer, expert):
-                pass
-
-            def add_recv(self, tensors, peer, expert):
-                # Emulate the transport boundary using real peer expert tensors.
-                for index, tensor in enumerate(tensors):
-                    tensor.copy_(global_weights[expert] * (index + 1))
-
-            def execute(self):
-                pass
-
-        model_state = SimpleNamespace(
-            model=SimpleNamespace(num_logical_experts=4, expert_weights=[weights]),
-            physical_to_logical_map=old.clone(),
-            logical_to_physical_map=torch.full((1, 4, 3), -1, dtype=torch.long),
-            logical_replica_count=torch.zeros((1, 4), dtype=torch.long),
-            communicator=Communicator(),
-            expert_buffer=buffers,
-        )
-        state = SimpleNamespace(
-            model_states={"target": model_state},
-            async_worker=None,
-            prepare_movement_resources=MagicMock(),
-            release_movement_resources=MagicMock(),
-            placement_device_group=lambda: SimpleNamespace(size=lambda: 2, rank=lambda: rank),
-            refresh_placement_layer=MagicMock(),
-        )
-        return state, model_state, global_weights
-
-    def test_install_local_swap_remote_exchange_and_tensor_lists(self):
-        target = (1, 0, 3, 2, 0, 1)
-        placement = EplbPlacement(make_metadata(), (target,), {})
-        for rank in range(2):
-            for tensor_lists in (False, True):
-                with self.subTest(rank=rank, tensor_lists=tensor_lists):
-                    self.group.rank = lambda rank=rank: rank
-                    state, model_state, global_weights = self._make_install_state(rank, tensor_lists=tensor_lists)
-                    expected = global_weights[list(target[rank * 3 : (rank + 1) * 3])]
-
-                    def refresh(committed, layer, expected=expected):
-                        actual = torch.stack(list(committed.model.expert_weights[layer][0]))
-                        torch.testing.assert_close(actual, expected)
-                        self.assertEqual(committed.physical_to_logical_map.tolist(), [list(target)])
-
-                    state.refresh_placement_layer.side_effect = refresh
-                    runtime.install_placement(state, placement, self.group, MagicMock())
-                    state.refresh_placement_layer.assert_called_once_with(model_state, 0)
-                    self.assertEqual(model_state.logical_replica_count.tolist(), [[2, 2, 1, 1]])
-                    for expert, count in enumerate(model_state.logical_replica_count[0].tolist()):
-                        slots = model_state.logical_to_physical_map[0, expert, :count].tolist()
-                        self.assertEqual(slots, [slot for slot, logical in enumerate(target) if logical == expert])
-                    state.prepare_movement_resources.assert_called_once_with()
-                    state.release_movement_resources.assert_called_once_with()
-
-    def test_unchanged_install_does_not_initialize_transport(self):
-        state, _, _ = self._make_install_state(0)
-        unchanged = EplbPlacement(make_metadata(), ((0, 1, 2, 3, 0, 1),), {})
-        runtime.install_placement(state, unchanged, self.group, MagicMock())
-        state.prepare_movement_resources.assert_not_called()
-        state.refresh_placement_layer.assert_not_called()
-
-    def test_install_rejects_running_background_worker(self):
-        state, _, _ = self._make_install_state(0)
-        state.async_worker = object()
-        with self.assertRaisesRegex(ValueError, "precede the background worker"):
-            runtime.install_placement(state, self.placement, self.group, MagicMock())
-        state.prepare_movement_resources.assert_not_called()
-
-    def test_install_rejects_missing_draft_model_state(self):
-        state, _, _ = self._make_install_state(0)
-        draft_metadata = make_metadata()
-        draft_metadata.update(
-            model="draft-model",
-            num_logical_experts=2,
-            num_redundant_experts=0,
-            layer_names=["layers.0.draft.moe"],
-        )
-        placement = EplbPlacement(
-            self.placement.metadata,
-            self.placement.physical_to_logical,
-            self.placement.provenance,
-            draft=EplbPlacement(draft_metadata, ((0, 1),), {}),
-        )
-        with self.assertRaisesRegex(ValueError, "missing its draft model state"):
-            runtime.install_placement(
-                state,
-                placement,
-                self.group,
-                MagicMock(),
-                model_states={"target": state.model_states["target"]},
-            )
+    with pytest.raises(ValueError, match="collective_test failed"):
+        collective_call(lambda: (_ for _ in ()).throw(RuntimeError("boom")), _FakeGroup(0, 1), "collective_test")

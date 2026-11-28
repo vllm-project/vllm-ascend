@@ -486,6 +486,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        static_slots = getattr(self, "_static_logical_to_local_slot", None)
+        if static_slots is not None:
+            if expert_id < self.moe_config.num_logical_experts:
+                return static_slots.get(expert_id, -1)
+            redundant = self.moe_config.num_experts - self.moe_config.num_logical_experts
+            return super()._map_global_expert_id_to_local_expert_id(expert_id + redundant)
+        return super()._map_global_expert_id_to_local_expert_id(expert_id)
+
     @property
     def quant_type(self) -> QuantType:
         quant_type = QuantType.NONE

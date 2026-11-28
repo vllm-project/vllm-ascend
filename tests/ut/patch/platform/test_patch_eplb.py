@@ -979,52 +979,79 @@ def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch
     consumed_event.record.assert_not_called()
 
 
-def test_row_copies_keep_tensor_list_support():
-    """Upstream batches rows through `dst[0]`, which is a list on Ascend."""
-    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
-    batched_calls = []
+def test_static_weight_loading_patches_filter_mapping_and_loader():
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.model_loader import base_loader, default_loader, ep_weight_filter
 
-    def upstream_copy_rows(dst, dst_rows, src, src_rows):
-        # Mirrors the batched helper: every entry is read as one tensor.
-        batched_calls.append((list(dst_rows), list(src_rows)))
-        for d, s in zip(dst, src):
-            for i, j in zip(dst_rows, src_rows):
-                d[i].copy_(s[j], non_blocking=True)
+    from vllm_ascend.distributed.eplb.placement_runtime import (
+        ACTIVE_STATIC_CONTROLLER,
+        ACTIVE_STATIC_ROLE_PLACEMENT,
+        RolePlacement,
+    )
 
-    with patch.object(rebalance_execute, "copy_rows", upstream_copy_rows, create=True):
-        patch_eplb._patch_row_copies()
-        copy_rows = rebalance_execute.copy_rows
+    patch_eplb._patch_initial_expert_layout()
+    patch_eplb._patch_static_weight_loading()
+    placement = RolePlacement(
+        num_logical_experts=4,
+        num_redundant_experts=2,
+        physical_to_logical_map=((3, 0, 1, 0, 2, 1),),
+    )
 
-        source = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-        buffers = [list(torch.zeros(4, 2).unbind()) for _ in range(2)]
-        weights = [list(source.unbind()) for _ in range(2)]
-        copy_rows(buffers, [0, 2], weights, [1, 3])
+    routed = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(routed)
+    routed.moe_config = SimpleNamespace(ep_size=2, num_experts=6, num_logical_experts=4, is_act_and_mul=True)
+    routed.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
+    routed.ckpt_gate_proj_name = "gate_proj"
+    routed.ckpt_down_proj_name = "down_proj"
+    routed.ckpt_up_proj_name = "up_proj"
+    routed.lora_base_layer_prefix = ""
+    routed.shared_expert_online_loader = None
+    wrapper = torch.nn.Module()
+    wrapper.experts = routed
 
-        torch.testing.assert_close(
-            torch.stack([buffers[0][0], buffers[0][2]]),
-            torch.stack([weights[0][1], weights[0][3]]),
-        )
-        assert batched_calls == []
+    token = ACTIVE_STATIC_ROLE_PLACEMENT.set(placement)
+    try:
+        assert default_loader.compute_eplb_local_expert_ids(4, 2, 2, 0) == {0, 1, 3}
+        assert ep_weight_filter.compute_eplb_local_expert_ids(4, 2, 2, 1) == {0, 1, 2}
+        gate_entries = [eid for _, _, eid, shard in routed.get_expert_mapping() if shard == "w1"]
+        assert gate_entries == [0, 1, 2, 3]
+        make_entries = [
+            eid
+            for _, _, eid, shard in RoutedExperts.make_expert_params_mapping(
+                wrapper, "gate_proj", "down_proj", "up_proj", num_experts=4, num_redundant_experts=2
+            )
+            if shard == "w1"
+        ]
+        assert make_entries == [0, 1, 2, 3]
+    finally:
+        ACTIVE_STATIC_ROLE_PLACEMENT.reset(token)
 
-        plain_dst = [torch.zeros(4, 2)]
-        plain_src = [source.clone()]
-        copy_rows(plain_dst, [1], plain_src, [2])
+    class _DummyLoader(base_loader.BaseModelLoader):
+        def download_model(self, model_config):
+            return None
 
-        assert batched_calls == [([1], [2])]
-        torch.testing.assert_close(plain_dst[0][1], plain_src[0][2])
+        def load_weights(self, model, model_config):
+            assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is placement
 
-
-def test_row_copy_patch_is_idempotent():
-    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
-    with patch.object(rebalance_execute, "copy_rows", lambda *args: None, create=True):
-        patch_eplb._patch_row_copies()
-        patched = rebalance_execute.copy_rows
-        patch_eplb._patch_row_copies()
-        assert rebalance_execute.copy_rows is patched
-
-
-def test_row_copy_patch_skips_releases_without_the_batched_helper():
-    rebalance_execute = pytest.importorskip("vllm.distributed.eplb.rebalance_execute")
-    with patch.object(rebalance_execute, "copy_rows", None, create=True):
-        patch_eplb._patch_row_copies()
-        assert rebalance_execute.copy_rows is None
+    controller = MagicMock()
+    controller.bind_model_for_static_load.side_effect = lambda *_: ACTIVE_STATIC_ROLE_PLACEMENT.set(placement)
+    ctrl_token = ACTIVE_STATIC_CONTROLLER.set(controller)
+    try:
+        with (
+            patch.object(base_loader, "initialize_model", return_value=torch.nn.Linear(2, 2)),
+            patch.object(base_loader, "process_weights_after_loading"),
+            patch.object(base_loader, "log_online_quantization"),
+            patch.object(base_loader, "log_model_inspection"),
+        ):
+            loader = _DummyLoader(SimpleNamespace(device="cpu"))
+            vllm_cfg = SimpleNamespace(
+                device_config=SimpleNamespace(device="cpu"),
+                load_config=SimpleNamespace(device="cpu", load_format="safetensors"),
+                quant_config=None,
+            )
+            model_cfg = SimpleNamespace(dtype=torch.float32, quantization=None)
+            loader.load_model(vllm_cfg, model_cfg)
+        controller.bind_model_for_static_load.assert_called_once()
+        assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is None
+    finally:
+        ACTIVE_STATIC_CONTROLLER.reset(ctrl_token)

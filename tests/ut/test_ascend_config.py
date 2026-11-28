@@ -333,10 +333,28 @@ class TestAscendConfig(TestBase):
 
     def test_eplb_static_configuration(self):
         self.assertEqual(EplbConfig().mode, "dynamic")
-        self.assertEqual(EplbConfig(mode="static", expert_placement_path="deployment.json").mode, "static")
-        with self.assertRaisesRegex(ValueError, "requires mode='static'"):
-            EplbConfig(expert_placement_path="deployment.json")
-        for kwargs in ({"mode": "static"}, {"mode": "auto"}):
+        self.assertEqual(
+            EplbConfig(expert_placement_path="  /tmp/deployment.json  ").expert_placement_path,
+            "/tmp/deployment.json",
+        )
+        self.assertEqual(
+            EplbConfig(
+                mode="static",
+                expert_placement_path="deployment.json",
+                load_collection_phase="decode",
+            ).load_collection_phase,
+            "decode",
+        )
+        invalid_cases: tuple[dict[str, Any], ...] = (
+            {"mode": "static"},
+            {"mode": "auto"},
+            {"expert_placement_path": ""},
+            {"expert_placement_path": "   "},
+            {"expert_placement_path": ".json"},
+            {"expert_placement_path": "/tmp/.json"},
+            {"expert_placement_path": "/tmp/placement.txt"},
+        )
+        for kwargs in invalid_cases:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 EplbConfig(**kwargs)
 

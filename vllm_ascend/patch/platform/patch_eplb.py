@@ -19,9 +19,11 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
-from vllm.distributed.eplb import rebalance_execute as _rebalance_execute
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
+from vllm.model_executor.model_loader import base_loader as _base_loader
+from vllm.model_executor.model_loader import default_loader as _default_loader
+from vllm.model_executor.model_loader import ep_weight_filter as _ep_weight_filter
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -36,6 +38,11 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     refresh_model_routing_tables,
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.placement_runtime import (
+    ACTIVE_STATIC_CONTROLLER,
+    ACTIVE_STATIC_ROLE_PLACEMENT,
+    local_expert_ids_for_role,
+)
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
@@ -421,6 +428,21 @@ def _patch_initial_expert_layout() -> None:
         _build_distributed_initial_expert_map
     )
     routed_experts = _routed_experts.RoutedExperts
+
+    original_build = routed_experts.build_expert_params_mapping
+    if not getattr(original_build, _PATCH_MARKER, False):
+        build_signature = signature(original_build)
+
+        @wraps(original_build)
+        def _build_expert_params_mapping(*args, **kwargs):
+            if ACTIVE_STATIC_ROLE_PLACEMENT.get() is not None:
+                bound = build_signature.bind(*args, **kwargs)
+                bound.arguments["num_redundant_experts"] = 0
+                return original_build(*bound.args, **bound.kwargs)
+            return original_build(*args, **kwargs)
+
+        setattr(_build_expert_params_mapping, _PATCH_MARKER, True)
+        routed_experts.build_expert_params_mapping = staticmethod(_build_expert_params_mapping)
 
     original_get = routed_experts.get_expert_mapping
     if not getattr(original_get, _PATCH_MARKER, False):
@@ -898,36 +920,48 @@ def _wrap_move_to_workspace(original_move):
     return _move_to_workspace
 
 
-def _copy_rows_for_tensor_lists(original_copy_rows: Any) -> Any:
-    """Keep row installation working for per-expert tensor lists.
+def _patch_static_weight_loading() -> None:
+    loader_cls = _base_loader.BaseModelLoader
+    original_create_model = loader_cls.create_model
+    if not getattr(original_create_model, _PATCH_MARKER, False):
 
-    Ascend holds one tensor per parameter for every expert, so
-    ``expert_weights[layer]`` is a list of lists. The upstream batched row copy
-    reads ``dst[0].is_cuda`` and the row length from ``d.shape[0]``, which
-    assumes every entry is a single tensor; the row-indexed copy it replaced
-    accepted both layouts.
-    """
+        @wraps(original_create_model)
+        def _create_model(self, vllm_config, model_config, prefix=""):
+            model = original_create_model(self, vllm_config, model_config, prefix=prefix)
+            controller = ACTIVE_STATIC_CONTROLLER.get()
+            if controller is not None:
+                controller.bind_model_for_static_load(model, vllm_config, model_config)
+            return model
 
-    @wraps(original_copy_rows)
-    def _copy_rows(dst: Any, dst_rows: Any, src: Any, src_rows: Any) -> None:
-        if dst and isinstance(dst[0], (list, tuple)):
-            for d, s in zip(dst, src):
-                for i, j in zip(dst_rows, src_rows):
-                    d[i].copy_(s[j], non_blocking=True)
-            return
-        original_copy_rows(dst, dst_rows, src, src_rows)
+        setattr(_create_model, _PATCH_MARKER, True)
+        loader_cls.create_model = _create_model  # type: ignore[method-assign]
 
-    setattr(_copy_rows, _PATCH_MARKER, True)
-    return _copy_rows
+    original_load_model = loader_cls.load_model
+    if not getattr(original_load_model, _PATCH_MARKER, False):
 
+        @wraps(original_load_model)
+        def _load_model(self, vllm_config, model_config, prefix=""):
+            try:
+                return original_load_model(self, vllm_config, model_config, prefix=prefix)
+            finally:
+                ACTIVE_STATIC_ROLE_PLACEMENT.set(None)
 
-def _patch_row_copies() -> None:
-    original_copy_rows = getattr(_rebalance_execute, "copy_rows", None)
-    # Releases before the batched helper index destination rows directly and
-    # already accept tensor lists.
-    if original_copy_rows is None or getattr(original_copy_rows, _PATCH_MARKER, False):
-        return
-    setattr(_rebalance_execute, "copy_rows", _copy_rows_for_tensor_lists(original_copy_rows))  # noqa: B010
+        setattr(_load_model, _PATCH_MARKER, True)
+        loader_cls.load_model = _load_model  # type: ignore[method-assign]
+
+    original_compute = _ep_weight_filter.compute_eplb_local_expert_ids
+    if not getattr(original_compute, _PATCH_MARKER, False):
+
+        @wraps(original_compute)
+        def _compute_eplb_local_expert_ids(num_experts, num_redundant_experts, ep_size, ep_rank):
+            role_placement = ACTIVE_STATIC_ROLE_PLACEMENT.get()
+            if role_placement is not None:
+                return local_expert_ids_for_role(role_placement, ep_size, ep_rank)
+            return original_compute(num_experts, num_redundant_experts, ep_size, ep_rank)
+
+        setattr(_compute_eplb_local_expert_ids, _PATCH_MARKER, True)
+        _ep_weight_filter.compute_eplb_local_expert_ids = _compute_eplb_local_expert_ids
+        _default_loader.compute_eplb_local_expert_ids = _compute_eplb_local_expert_ids
 
 
 def _patch_async_move_to_workspace() -> None:
@@ -944,4 +978,4 @@ _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_changed_layer_transfer()
 _patch_async_move_to_workspace()
-_patch_row_copies()
+_patch_static_weight_loading()

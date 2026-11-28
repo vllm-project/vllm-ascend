@@ -34,8 +34,10 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import (
     KVPPConfig,
+    StairConfig,
     get_ascend_config,
     init_ascend_config,
+    is_draft_config_context,
 )
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -45,7 +47,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.distributed.eplb.config import validate_eplb_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -108,6 +109,8 @@ QWEN_FA3_TARGETS = frozenset(
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
+_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "mode", "expert_placement_path", "stair_config"})
+_V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 _DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
 
@@ -1028,7 +1031,7 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
     If GPU-specific or currently unsupported parameters are set by the user,
     log a warning and reset them to safe values.
     """
-    validate_eplb_config(vllm_config)
+    _validate_eplb_config(vllm_config)
     model_config = vllm_config.model_config
     # ==================== 1. Model Config ====================
     if model_config:
@@ -1253,6 +1256,88 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             "seconds for execute_model RPC calls in multiprocessing must be "
             "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
         )
+
+
+def _validate_eplb_config(vllm_config: VllmConfig) -> None:
+    if vllm_config.parallel_config.enable_eplb:
+        offload = vllm_config.offload_config
+        if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
+            raise ValueError(
+                "EPLB is incompatible with weight offload/prefetch on Ascend. "
+                "Set cpu_offload_gb=0 and offload_group_size=0, or disable EPLB."
+            )
+    additional_config = vllm_config.additional_config or {}
+    eplb_config = additional_config.get("eplb_config", {})
+    if not isinstance(eplb_config, dict):
+        raise TypeError("additional_config.eplb_config must be a dictionary.")
+
+    unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
+    stair_config = eplb_config.get("stair_config")
+    unsupported_stair_fields = (
+        sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    )
+    if unsupported_eplb_fields or unsupported_stair_fields:
+        ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
+        logger.warning(
+            "Model Runner V2 EPLB currently supports only these parameters: "
+            "additional_config.eplb_config fields %s; stair_config fields %s. "
+            "The following parameters are unsupported and will be ignored: %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
+            sorted(_V2_STAIR_CONFIG_FIELDS),
+            ignored_fields,
+        )
+        eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
+        if isinstance(stair_config, dict):
+            eplb_config["stair_config"] = {
+                key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
+            }
+        additional_config = dict(additional_config)
+        additional_config["eplb_config"] = eplb_config
+        vllm_config.additional_config = additional_config
+    mode = eplb_config.get("mode", "dynamic")
+    if mode not in ("dynamic", "static"):
+        raise ValueError("additional_config.eplb_config.mode must be 'dynamic' or 'static'.")
+    if mode != "dynamic" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.mode='static' requires --enable-eplb.")
+    load_collection_phase = eplb_config.get("load_collection_phase", "all")
+    # Disabled drafts inherit this target-only setting but never collect
+    # EPLB load. Keep target validation strict and preserve other checks.
+    if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
+    expert_placement_path = eplb_config.get("expert_placement_path")
+    if expert_placement_path is not None:
+        if not isinstance(expert_placement_path, str):
+            raise ValueError("additional_config.eplb_config.expert_placement_path must point to a .json file.")
+        normalized_path = expert_placement_path.strip()
+        basename = os.path.basename(normalized_path)
+        if (
+            not normalized_path
+            or not basename.endswith(".json")
+            or basename == ".json"
+            or os.path.isdir(normalized_path)
+        ):
+            raise ValueError("additional_config.eplb_config.expert_placement_path must point to a .json file.")
+        if not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+            raise ValueError("additional_config.eplb_config.expert_placement_path requires --enable-eplb.")
+    if mode == "static" and vllm_config.parallel_config.enable_eplb and expert_placement_path is None:
+        raise ValueError("Static EPLB requires additional_config.eplb_config.expert_placement_path.")
+    if vllm_config.parallel_config.enable_eplb:
+        upstream_eplb_config = vllm_config.parallel_config.eplb_config
+        if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
+            raise ValueError(
+                "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                f"but got {upstream_eplb_config.communicator!r}. "
+                "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
+            )
+        if not upstream_eplb_config.use_async:
+            logger.warning(
+                "Synchronous EPLB is not supported on Ascend; "
+                "parameter=eplb_config.use_async, value=False, "
+                "action: forcing asynchronous EPLB."
+            )
+            upstream_eplb_config.use_async = True
+        if vllm_config.parallel_config.enable_elastic_ep:
+            raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
 
 
 def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:

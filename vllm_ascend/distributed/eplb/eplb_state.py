@@ -30,6 +30,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.network_utils import get_ip
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
@@ -304,15 +305,15 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._close_error: Exception | None = None
         self._hixl_session: _HixlSession | None = None
-        self.static_mode = False
-        self._static_observation_step = 0
-        self._static_observation_due = False
-        self._static_recording_enabled = True
+        self._exporter: PlacementExporter | None = None
+        self._placement_model_roles: dict[str, str] = {}
+        self._last_included_load_steps: torch.Tensor | None = None
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
         if self.device_index is None:
             self.device_index = torch.accelerator.current_device_index()
+        self.static_mode = False
 
     @property
     def uses_custom_load_stats(self) -> bool:
@@ -323,8 +324,91 @@ class AscendEplbState(_eplb_state.EplbState):
     def _tracks_load_sample_axis(self) -> bool:
         return self.uses_custom_load_stats or getattr(self, "_exporter", None) is not None
 
+    def _add_static_model(self, model, model_config, model_name: str | None = None) -> None:
+        self.validate_ep_configuration(model)
+        self.is_async = False
+        role_placement = getattr(model, "_static_role_placement", None)
+        if role_placement is not None:
+            physical_to_logical_map = torch.tensor(
+                role_placement.physical_to_logical_map,
+                dtype=torch.long,
+                device=self.device,
+            )
+        else:
+            token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
+            try:
+                initial = _eplb_state.EplbState.build_initial_global_physical_to_logical_map(
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                )
+            finally:
+                EXPERT_MAPPING_EP_SIZE.reset(token)
+            physical_to_logical_map = (
+                torch.tensor(initial, dtype=torch.long, device=self.device)
+                .unsqueeze(0)
+                .expand(model.num_moe_layers, -1)
+                .contiguous()
+            )
+        logical_cpu, replicas_cpu = _eplb_state.compute_logical_maps(
+            physical_to_logical_map.cpu(),
+            model.num_logical_experts,
+        )
+        padding = (model.num_redundant_experts + 1) - logical_cpu.shape[-1]
+        if padding < 0:
+            raise ValueError("Static EPLB placement exceeds the allocated replica capacity")
+        if padding:
+            logical_cpu = torch.nn.functional.pad(logical_cpu, (0, padding), value=-1)
+        logical_to_physical_map = logical_cpu.to(device=self.device, dtype=torch.long)
+        logical_replica_count = replicas_cpu.to(device=self.device, dtype=torch.long)
+        expert_load_pass = torch.zeros(
+            (model.num_moe_layers, model.num_physical_experts),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        model.expert_weights = []
+        for layer_idx, layer in enumerate(model.moe_layers):
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_pass,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+            if isinstance(layer.eplb_state, _eplb_state.EplbLayerState) and not isinstance(
+                layer.eplb_state, AscendEplbLayerState
+            ):
+                layer.eplb_state = AscendEplbLayerState.from_upstream(layer.eplb_state)
+                layer.eplb_state.refresh_expert_replica_routing_table()
+            if layer.eplb_state is not None:
+                layer.eplb_state.load_recording_enabled = False
+        empty_communicator: Any = None
+        self.model_states[hash_config_cached(model_config)] = _eplb_state.EplbModelState(
+            physical_to_logical_map=physical_to_logical_map,
+            physical_to_logical_map_buffer=physical_to_logical_map,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            expert_load_pass=expert_load_pass,
+            expert_load_pass_buffer=expert_load_pass,
+            expert_load_window=torch.empty(
+                (0, model.num_moe_layers, model.num_physical_experts),
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            last_expert_load=torch.empty((0, model.num_logical_experts), dtype=torch.int64, device=self.device),
+            model_name=model_name or model_config.model,
+            model=model,
+            expert_buffer=[],
+            rebalanced=False,
+            eplb_stats=None,
+            device_index=self.device_index,
+            communicator=empty_communicator,
+            num_unpadded_tokens_tensors=None,
+        )
+
     def add_model(self, model, model_config, model_name: str | None = None) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
+        if getattr(self, "static_mode", False):
+            self._add_static_model(model, model_config, model_name=model_name)
+            return
         if self._hixl_session is not None:
             raise RuntimeError("Cannot add EPLB models after HIXL initialization")
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
@@ -547,35 +631,27 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def start_async_loop(self, *args, **kwargs) -> None:
         if not self._suspended and not getattr(self, "static_mode", False):
-            self.prepare_movement_resources()
+            communicators = {
+                key: model_state.communicator
+                for key, model_state in self.model_states.items()
+                if isinstance(model_state.communicator, AscendHixlEplbCommunicator)
+            }
+            if communicators and self._hixl_session is None:
+                self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
+                self._hixl_session.initialize(communicators)
+            if self._hixl_session is not None:
+                self._hixl_session.check_usable()
             super().start_async_loop(*args, **kwargs)
 
-    def prepare_movement_resources(self) -> None:
-        """Share registration between dynamic workers and startup-only installs."""
-        communicators = {
-            key: model_state.communicator
-            for key, model_state in self.model_states.items()
-            if isinstance(model_state.communicator, AscendHixlEplbCommunicator)
-        }
-        if communicators and self._hixl_session is None:
-            self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
-            self._hixl_session.initialize(communicators)
-        if self._hixl_session is not None:
-            self._hixl_session.check_usable()
-
-    def release_movement_resources(self) -> None:
-        """Release startup registrations only after all installation work is done."""
-        if self._hixl_session is not None:
-            self._hixl_session.close()
-            self._hixl_session = None
-
-    @staticmethod
-    def placement_device_group() -> Any:
-        return get_eplb_group().device_group
-
-    @staticmethod
-    def refresh_placement_layer(model_state: Any, layer_idx: int) -> None:
-        refresh_model_routing_tables(model_state, layer_idx)
+    def prepare_forward(
+        self,
+        model_config,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        if getattr(self, "static_mode", False):
+            return
+        super().prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(
@@ -667,109 +743,6 @@ class AscendEplbState(_eplb_state.EplbState):
         )
         return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
 
-    def update_static_observation_schedule(self) -> bool:
-        """Schedule lightweight static load sampling and Info logging.
-
-        Static serving keeps EPLB routing and the fixed deployment, but does
-        not run dynamic collection, planning, or weight migration. Sampling one
-        forward at the configured rearrangement cadence keeps the peak-to-
-        average load observable without maintaining a full sliding window.
-        """
-        interval = max(1, int(self.parallel_config.eplb_config.step_interval))
-        self._static_observation_due = self._static_observation_step % interval == 0
-        return self._static_observation_due
-
-    def set_static_recording_enabled(self, enabled: bool, *, force: bool = False) -> None:
-        """Toggle the layer switch only when static observation changes.
-
-        Static serving keeps recording disabled for ordinary forwards so the
-        fused MoE path and captured graphs omit the recording operator. A
-        scheduled observation forward temporarily enables it, records one
-        sample, and then disables it again in ``step_static_observability``.
-        """
-        if not force and self._static_recording_enabled == enabled:
-            return
-        for model_state in self.model_states.values():
-            for layer in model_state.model.moe_layers:
-                layer.eplb_state.load_recording_enabled = enabled
-        self._static_recording_enabled = enabled
-
-    def disable_static_recording(self, *, force: bool = False) -> None:
-        """Keep the recording operator out of ordinary static forwards."""
-        self.set_static_recording_enabled(False, force=force)
-        if self.should_record_tensor is not None:
-            self.should_record_tensor.fill_(False)
-
-    def step_static_observability(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-    ) -> None:
-        """Advance static observations without starting a dynamic EPLB cycle."""
-        if is_profile:
-            for model_state in self.model_states.values():
-                model_state.expert_load_pass.zero_()
-            self.set_static_recording_enabled(False)
-            if self.should_record_tensor is not None:
-                self.should_record_tensor.fill_(False)
-            return
-
-        if is_dummy:
-            self._static_observation_step += 1
-            self._static_observation_due = False
-            for model_state in self.model_states.values():
-                model_state.expert_load_pass.zero_()
-            self.set_static_recording_enabled(False)
-            if self.should_record_tensor is not None:
-                self.should_record_tensor.fill_(False)
-            return
-
-        if self._static_observation_due:
-            self._log_static_load_stats()
-
-        self._static_observation_step += 1
-        self._static_observation_due = False
-        for model_state in self.model_states.values():
-            model_state.expert_load_pass.zero_()
-        self.set_static_recording_enabled(False)
-        if self.should_record_tensor is not None:
-            self.should_record_tensor.fill_(False)
-
-    def _log_static_load_stats(self) -> None:
-        """Log rank-local static load stats without an EP collective.
-
-        Static serving must not wait on the other data-parallel prefill
-        engines. In particular, the EP group in P=DP2 x TP8 spans two
-        independently scheduled engine cores; entering a device AllReduce
-        from the hot path deadlocks when only one DP rank has work.
-        """
-        ep_group = get_ep_group().device_group
-        for model_state in self.model_states.values():
-            expert_load_pass = model_state.expert_load_pass
-            local_expert_load = expert_load_pass.reshape(
-                expert_load_pass.shape[0],
-                ep_group.size(),
-                -1,
-            )[:, ep_group.rank()].float()
-            avg_tokens_tensor = local_expert_load.mean()
-            max_tokens_tensor = local_expert_load.max()
-            with gpu_sync_allowed():
-                avg_tokens, max_tokens = torch.stack([avg_tokens_tensor, max_tokens_tensor]).tolist()
-            balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-            peak_to_average = max_tokens / avg_tokens if avg_tokens > 0 else 0.0
-            logger.info(
-                "Ascend static EPLB load observation: model=%s step=%d "
-                "ep_rank=%d scope=local avg_tokens=%.2f max_tokens=%.2f "
-                "peak_to_average=%.4f balancedness=%.4f",
-                model_state.model_name,
-                self._static_observation_step,
-                ep_group.rank(),
-                avg_tokens,
-                max_tokens,
-                peak_to_average,
-                balancedness,
-            )
-
     def step(
         self,
         is_dummy: bool = False,
@@ -778,10 +751,6 @@ class AscendEplbState(_eplb_state.EplbState):
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
         if getattr(self, "static_mode", False):
-            self.step_static_observability(
-                is_dummy=is_dummy,
-                is_profile=is_profile,
-            )
             return
         self.raise_if_close_failed()
         if self._hixl_session is not None:
@@ -962,7 +931,6 @@ class AscendEplbState(_eplb_state.EplbState):
         if should_gate and not self._has_global_fresh_recorded_load():
             return None
 
-        global_load_stats = None
         if use_custom_async_stats:
             self._last_included_load_steps = None
             global_load_stats = self.collect_global_load_stats()
