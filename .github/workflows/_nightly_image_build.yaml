@@ -44,7 +44,7 @@ on:
       target:
         required: true
         type: string
-        description: "Build target: 'a2', 'a3', '310p', 'a5' or 'a5-ubx'"
+        description: "Build target: 'a2', 'a3', '310p', 'a5', 'a5-ubx' or 'a5-pcie'"
       vllm_ascend_branch:
         required: false
         type: string
@@ -155,6 +155,7 @@ jobs:
             a3)   UBUNTU_DOCKERFILE=Dockerfile.a3;   OPENEULER_DOCKERFILE=Dockerfile.a3.openEuler ;;
             a5)   UBUNTU_DOCKERFILE=Dockerfile.a5;   OPENEULER_DOCKERFILE=Dockerfile.a5.openEuler ;;
             a5-ubx) UBUNTU_DOCKERFILE=Dockerfile.a5.ubx; OPENEULER_DOCKERFILE=Dockerfile.a5.ubx.openEuler ;;
+            a5-pcie) UBUNTU_DOCKERFILE=Dockerfile.a5.PCIe; OPENEULER_DOCKERFILE=Dockerfile.a5.PCIe.openEuler ;;
             310p) UBUNTU_DOCKERFILE=Dockerfile.310p; OPENEULER_DOCKERFILE=Dockerfile.310p.openEuler ;;
             *)
               echo "::error::Unsupported target '${{ inputs.target }}'"
@@ -265,11 +266,12 @@ jobs:
             PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
-          # a5-ubx reuses the a5 nightly Dockerfile and only switches the base
-          # image tag variant, so there is no per-variant Dockerfile to keep in
-          # sync. All other targets map 1:1 to Dockerfile.nightly.<target>.
+          # a5-ubx / a5-pcie reuse the a5 nightly Dockerfile and only switch the
+          # base image tag variant, so there is no per-variant Dockerfile to keep
+          # in sync. All other targets map 1:1 to Dockerfile.nightly.<target>.
           case "${{ inputs.target }}" in
             a5-ubx) NIGHTLY_DOCKERFILE="Dockerfile.nightly.a5"; BASE_VARIANT="-ubx" ;;
+            a5-pcie) NIGHTLY_DOCKERFILE="Dockerfile.nightly.a5"; BASE_VARIANT="-pcie" ;;
             *)      NIGHTLY_DOCKERFILE="Dockerfile.nightly.${{ inputs.target }}"; BASE_VARIANT="" ;;
           esac
 
