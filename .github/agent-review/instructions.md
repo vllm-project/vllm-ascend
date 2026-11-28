@@ -83,7 +83,10 @@ Return exactly one JSON object with all six fields, without Markdown fences or s
       "line": 42,
       "severity": "MUST-FIX",
       "rule": "general",
-      "body": "Explain the problem, when it occurs, and its impact."
+      "title": "Empty input prevents offline startup",
+      "body": "The offline entry point accepts an empty list. Accessing its first element raises IndexError before the worker starts.",
+      "suggestion": "Return the default configuration when the list is empty.",
+      "replacement": {"start_line": 42, "code": "return items[0] if items else default_config"}
     }
   ],
   "updates": [
@@ -103,7 +106,8 @@ The example defines the structure, not the default values. All review output is 
 - `coverage_complete`: Reflect actual review completion. A complete review may still have open findings.
 - `unfinished_work`: List each remaining static check as a string naming the file or symbol and what to verify. Use an empty array when `coverage_complete` is true.
 - `requires_human`: True only when a maintainer must resolve a design decision. Explain the options and trade-offs. Unfinished review work alone does not require this flag.
-- `findings`: New problems only. The workflow assigns IDs. Use repository-relative paths and exact 1-based new-side line numbers, or `null` when no suitable line exists. Cite a rule you have read and applied, or use `general`. Keep each finding to 1–4 sentences.
+- `findings`: New problems only. The workflow assigns IDs. Use repository-relative paths and exact 1-based new-side line numbers, or `null` when no suitable line exists. Cite a rule you have read and applied, or use `general`. Give each finding a short `title`. In `body`, explain what fails, when, and why it matters. In `suggestion`, describe how to address it.
+- For a precise local fix, include `replacement`. Its `code` replaces the lines from `start_line` through the finding's `line`, inclusive. Copy the intended indentation and supply only the replacement text. Use an empty string to delete the lines. Omit `replacement` for findings without a line or when the fix spans files or still requires a design choice. The workflow generates the diff.
 - `updates`: Use IDs from the open and resolved findings at most once each, with `open` or `resolved`. Cite current code or diff evidence. If a problem moves, give its current location in the evidence. Omitted IDs remain unchanged.
 
 Choose severity based on impact, not uncertainty:
