@@ -439,6 +439,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def forward(
