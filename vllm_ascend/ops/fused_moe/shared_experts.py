@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
@@ -94,6 +95,43 @@ class SubmittedSharedExpertGateUp:
     gate_up_input_scale: torch.Tensor | None
     local_dp_metadata: tuple[int, int] | None
     path: SharedExpertMLPPath
+
+
+def _run_shared_sparse_situ(
+    gate_up: torch.Tensor,
+    expert_tokens: torch.Tensor,
+    beta: float,
+    linear_beta: float,
+) -> torch.Tensor:
+    return torch.ops.custom.npu_situ_and_mul_sparse(
+        gate_up,
+        expert_tokens,
+        beta=beta,
+        alpha=linear_beta,
+        high_precision=False,
+    )
+
+
+class AscendSharedSparseSituAndMul(SituAndMul):
+    """Use the recipes sparse SiTU activation for NPU BF16 shared experts."""
+
+    def __init__(self, beta: float, linear_beta: float | None):
+        super().__init__(beta=beta, linear_beta=linear_beta, compile_native=False)
+        self.register_buffer(
+            "_all_rows_expert_tokens",
+            torch.tensor([torch.iinfo(torch.int64).max], dtype=torch.int64),
+            persistent=False,
+        )
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            x.device.type != "npu"
+            or x.dtype != torch.bfloat16
+            or self.linear_beta is None
+            or not hasattr(torch.ops.custom, "npu_situ_and_mul_sparse")
+        ):
+            return super().forward_native(x)
+        return _run_shared_sparse_situ(x, self._all_rows_expert_tokens, self.beta, self.linear_beta)
 
 
 class AscendSharedExperts:
@@ -297,23 +335,28 @@ class AscendSharedExperts:
     def prepare_input_async(
         self,
         hidden_states: torch.Tensor,
+        comm_stream: torch.npu.Stream | None = None,
     ) -> PreparedSharedExpertInput:
         """Start the SP-only input all-gather on the shared-expert stream.
 
-        The caller must wait for ``ready_event`` before enqueueing routed-path
-        collectives.  This method is intended to overlap the gather only with
-        a routed input transform such as Kimi-K3's latent projection.
+        Generic callers wait for ``ready_event`` before routed collectives.
+        Kimi's dedicated MC2 Decode schedule instead passes it to shared
+        input preparation, allowing Dispatch to overlap the gather tail.
         """
         if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         input_ready = torch.npu.current_stream().record_event()
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
+        stream = comm_stream if comm_stream is not None else shared_experts_calculation_stream()
+        hidden_states.record_stream(stream)
+        with npu_stream_switch(stream, enabled=True):
             torch.npu.current_stream().wait_event(input_ready)
             # Keep TP padding across the custom-op boundary; the shared MLP
             # trims it before computation.
             hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
             all_gather_done = torch.npu.current_stream().record_event()
+        hidden_states.record_stream(shared_experts_calculation_stream())
+        hidden_states.record_stream(torch.npu.current_stream())
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
             is_gathered=True,
@@ -381,6 +424,10 @@ class AscendSharedExperts:
             milestones.shared_input_ready,
             "shared_input_ready",
         )
+        # Kimi Decode hands the AG event directly to this consumer stream.
+        # Wait before any activation preparation, including quantization.
+        if prepared_input.ready_event is not None:
+            torch.npu.current_stream().wait_event(prepared_input.ready_event)
         hidden_states = prepared_input.hidden_states
         local_dp_metadata = None
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
@@ -466,6 +513,11 @@ class AscendSharedExperts:
         prepared_input = prepare_input(layer, hidden_states)
         return hidden_states if prepared_input is None else prepared_input
 
+    def _compute_stream_context(self):
+        if not self.multistream_overlap:
+            return nullcontext()
+        return npu_stream_switch(shared_experts_calculation_stream(), enabled=True)
+
     def enqueue_gate_up_after_router(
         self,
         prepared_execution: PreparedSharedExpertExecution,
@@ -480,7 +532,7 @@ class AscendSharedExperts:
         """
         path = self._select_mlp_path()
         gate_up_input_scale = None
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+        with self._compute_stream_context():
             self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
                 # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
@@ -595,6 +647,12 @@ class AscendSharedExperts:
             milestones.shared_activation_overlap_start,
             "shared_activation_overlap_start",
         )
+        if isinstance(self.situ_activation, AscendSharedSparseSituAndMul):
+            # Keep the same activation/rounding in integrated, serial and
+            # staged Kimi paths. The Down wrapper owns subsequent MX quant.
+            activated = self.apply_activation(submitted_gate_up.gate_up)
+            self._wait_for_routed_stage(milestones, milestones.routed_combine_start, "routed_combine_start")
+            return self.part2(submitted_gate_up.hidden_states, activated)
         if self.situ_activation is not None:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
                 x=submitted_gate_up.gate_up,
@@ -729,7 +787,8 @@ class AscendSharedExperts:
         # This join is intentionally stream-based. The shared forward executes
         # inside an opaque custom op for ACL Graph, so a Python-side Event
         # assigned inside that op is not available while its fake path traces.
-        torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
+        if self.multistream_overlap:
+            torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
     def forward(
         self,
@@ -740,7 +799,7 @@ class AscendSharedExperts:
     ) -> torch.Tensor:
         mode = self.parallel_mode()
         if submitted_gate_up is None:
-            with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            with self._compute_stream_context():
                 hidden_states, local_dp_metadata = self._prepare_execution_input(
                     prepared_input,
                     milestones,
@@ -758,7 +817,7 @@ class AscendSharedExperts:
             )
 
         local_dp_metadata = submitted_gate_up.local_dp_metadata
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+        with self._compute_stream_context():
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
                 self._wait_for_milestone(

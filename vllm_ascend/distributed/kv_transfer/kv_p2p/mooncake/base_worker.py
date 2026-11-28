@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.attention.kimi_c8_static import pa_nz_prolog_view
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -279,6 +280,7 @@ class MooncakeBaseConnectorWorker:
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
         configured_layer_names: set[str] = set()
+        kimi_c8_contracts: list[tuple[str, float] | None] = []
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(tensor_config):
@@ -307,6 +309,32 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                contract = None
+                draft_prefixes = getattr(getattr(self, "vllm_config", None), "_kimi_c8_draft_layer_prefixes", ())
+                is_draft_layer = any(
+                    layer_name == prefix or layer_name.startswith(prefix + ".") for prefix in draft_prefixes
+                )
+                if getattr(spec, "static_fp8_pa_nz", False) and not is_draft_layer:
+                    if len(caches) != 1:
+                        raise ValueError("Kimi C8 transfer requires one PA_NZ cache tensor")
+                    pa_nz_prolog_view(caches[0])
+                    layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                    # The impl owns the value used by both the C8 writer
+                    # and FA. A legacy module scale must not override it.
+                    impl = getattr(layer, "impl", None)
+                    if impl is None:
+                        inner = getattr(getattr(layer, "mla_attn", None), "mla_attn", None)
+                        impl = getattr(inner, "impl", None)
+                    descale = getattr(impl, "fak_descale_float", None)
+                    if descale is None:
+                        descale = getattr(layer, "fak_descale_float", None)
+                    if descale is None or descale.numel() != 1:
+                        raise ValueError("Kimi C8 transfer requires one loaded static KV descale")
+                    scalar = float(descale.detach().float().cpu().item())
+                    if not math.isfinite(scalar) or scalar <= 0:
+                        raise ValueError("Kimi C8 transfer descale must be finite and positive")
+                    contract = ("kimi_e4m3_pa_nz_native_v2", scalar)
+                kimi_c8_contracts.append(contract)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
@@ -382,6 +410,7 @@ class MooncakeBaseConnectorWorker:
             block_size_scales=block_size_scales_per_layer,
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
+            kimi_c8_contracts=kimi_c8_contracts,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata

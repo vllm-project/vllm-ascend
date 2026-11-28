@@ -6,11 +6,16 @@ Source the CANN environment and set the HCCL/GLOO interface before running:
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 4 32 256 512
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 256 --graph
     torchrun --nproc_per_node=8 test_mega_moe.py --tokens 2048 --input-scale 10
+    torchrun --nproc_per_node=8 test_mega_moe.py --tokens 1 32 256 --v2-prefill
+    torchrun --nproc_per_node=8 test_mega_moe.py --experts 232 --tokens 1 32 256 --v2-prefill --eplb
 
 Use a fresh process for each graph shape to isolate CANN/HCCL graph lifetime.
 Defaults retain 28 local experts and the routed FFN dimensions of an EP32
 Kimi K3 deployment, scaled to EP8 for a single-node operator test. Latency is
 reported, not asserted: eager and graph replay have different launch costs.
+The V2 prefill case exercises the production DP dispatch wrapper with unequal
+real counts and an idle last rank. A5 requires a null active mask, so the
+numerical reference includes all padded rows and checks their receive counts.
 """
 
 import argparse
@@ -47,13 +52,18 @@ def main():
     p.add_argument("--activation", choices=["situ", "silu"], default="situ")
     p.add_argument("--graph", action="store_true")
     p.add_argument("--input-scale", type=float, default=1.0)
+    p.add_argument("--v2-prefill", action="store_true")
+    p.add_argument("--eplb", action="store_true", help="Use EPLB weight lists; --experts includes redundant slots")
     a = p.parse_args()
     rank = int(os.environ["RANK"])
     world = int(os.environ["WORLD_SIZE"])
+    if a.v2_prefill and (a.graph or world < 2):
+        p.error("--v2-prefill requires multiple ranks and eager execution")
     torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("hccl")
     group = dist.new_group(backend="hccl")
     mega_group = dist.new_group(backend="hccl")
+    dp_cpu_group = dist.new_group(backend="gloo") if a.v2_prefill else None
     name = group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
     mega_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
     torch.manual_seed(20260928 + rank)
@@ -86,6 +96,7 @@ def main():
         # Exercise the production weight producer for both layouts. Only backend
         # selection is isolated from the global model configuration in this test.
         layer = torch.nn.Module()
+        layer.activation = a.activation
         for name, dims in (("w13", (2 * a.intermediate, a.hidden)), ("w2", (a.hidden, a.intermediate))):
             w, scale = make_weights(*dims)
             layer.register_parameter(name + "_weight", torch.nn.Parameter(w, requires_grad=False))
@@ -94,9 +105,11 @@ def main():
         for name, value in layer.named_parameters():
             baseline.register_parameter(name, torch.nn.Parameter(value.clone(), requires_grad=False))
         method = object.__new__(w4a8_mxfp4.AscendW4A8MXFPDynamicFusedMoEMethod)
+        method.use_expert_weight_list = False
         with patch.object(w4a8_mxfp4, "get_current_vllm_config", return_value=None):
             with patch.object(w4a8_mxfp4, "use_cann_megamoe", return_value=False):
                 method.process_weights_after_loading(baseline)
+            method.use_expert_weight_list = a.eplb
             with patch.object(w4a8_mxfp4, "use_cann_megamoe", return_value=True):
                 method.process_weights_after_loading(layer)
         with patch.object(w4a8_mxfp4, "_EXTRA_CTX", SimpleNamespace(use_mega_moe=True)):
@@ -128,6 +141,45 @@ def main():
     comm.token_dispatcher.global_bs = 0
     print(json.dumps({"rank": rank, "stage": "initialized", "config": vars(a)}), flush=True)
 
+    active_mask = None
+
+    def prepare_v2_prefill(tokens):
+        from vllm_ascend.patch.worker.patch_v2 import patch_model_runner
+        from vllm_ascend.worker.v2.moe_utils import (
+            get_v2_moe_batch_state,
+            record_v2_moe_batch_phase,
+            v2_moe_batch_context,
+        )
+
+        num_actual_tokens = 0 if rank == world - 1 else max(1, tokens // (rank + 1))
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, tensor_parallel_size=1),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=max(a.tokens)),
+            kv_transfer_config=None,
+        )
+        dp_group = SimpleNamespace(cpu_group=dp_cpu_group)
+        with (
+            patch.object(patch_model_runner, "get_dp_group", return_value=dp_group),
+            patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
+            patch.object(patch_model_runner, "get_mc2_tokens_capacity", return_value=max(a.tokens)),
+            patch.object(patch_model_runner, "use_cann_megamoe", return_value=True),
+            patch.object(patch_model_runner, "_kimi_megamoe_weights_supported", return_value=True),
+            v2_moe_batch_context(config, max(1, num_actual_tokens), dummy_run=num_actual_tokens == 0, is_profile=False),
+        ):
+            record_v2_moe_batch_phase(
+                SimpleNamespace(
+                    num_tokens=num_actual_tokens,
+                    is_prefilling_np=torch.tensor([True], device="cpu"),
+                )
+            )
+            desc, sync = patch_model_runner.dispatch_cg_and_sync_dp(
+                None, 1, max(1, num_actual_tokens), None, world, rank
+            )
+            state = get_v2_moe_batch_state(config)
+            assert state.prefill_ready and desc.cg_mode.value == 0
+            assert desc.num_tokens == tokens and torch.all(sync.num_tokens_across_dp == tokens)
+            return state
+
     def fused(x, ids, probs):
         inp = build_fused_experts_input(
             hidden_states=x,
@@ -140,8 +192,9 @@ def main():
             mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
             mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
             mxfp_use_bf16=True,
-            dynamic_eplb=False,
+            dynamic_eplb=a.eplb,
             activation=a.activation,
+            mc2_mask=active_mask,
         )
         return comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
 
@@ -270,6 +323,9 @@ def main():
 
     with torch.inference_mode():
         for tokens in a.tokens:
+            v2_state = prepare_v2_prefill(tokens) if a.v2_prefill else None
+            if v2_state is not None:
+                active_mask = torch.arange(tokens, device="npu") < v2_state.num_actual_tokens
             x = torch.randn((tokens, a.hidden), device="npu", dtype=torch.bfloat16) * a.input_scale
             logits = torch.rand((tokens, a.experts), device="npu")
             ids = logits.topk(a.topk, dim=-1).indices.to(torch.int32)
@@ -291,6 +347,8 @@ def main():
                     {
                         "rank": rank,
                         "tokens": tokens,
+                        "valid_tokens": v2_state.num_actual_tokens if v2_state is not None else tokens,
+                        "v2_prefill": a.v2_prefill,
                         "relative_rmse": relative_rmse,
                         "cosine": cosine,
                         "max_abs_error": (out - ref).abs().max().item(),

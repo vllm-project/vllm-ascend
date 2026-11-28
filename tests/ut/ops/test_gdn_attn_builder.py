@@ -340,7 +340,10 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
-    assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert (
+        AscendKimiK3DeltaAttention.get_attn_backend(SimpleNamespace(use_mega_kda_replayssm=False))
+        is AscendGDNHostMetadataBackend
+    )
     assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
@@ -1458,3 +1461,29 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
+
+
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_mega_metadata_accepts_single_state_page_with_full_verify_window(graph_mode):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        builder_cls=ascend_gdn_attn_builder.AscendMegaKDAHostMetadataBuilder,
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+        cudagraph_mode=graph_mode,
+    )
+    common = create_common_attn_metadata(BatchSpec([12] * 8, [4] * 8), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(1, 9, dtype=torch.int32).reshape(8, 1)
+    common.is_prefilling = torch.zeros(8, dtype=torch.bool)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(8, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((8,), 3, dtype=torch.int32),
+        mega_first_verify=torch.ones(8, dtype=torch.int32),
+    )
+    assert metadata.num_spec_decodes == 8 and metadata.mega_query_lens == (4,) * 8
+    assert metadata.spec_state_indices_tensor[:8, 0].tolist() == list(range(1, 9))
+    assert metadata.mega_first_verify[:8].tolist() == metadata.mega_conv_accepted_tokens[:8].tolist() == [1] * 8

@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import torch
 import vllm.envs as envs
 from torch import nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -23,6 +24,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
@@ -33,6 +35,10 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -51,12 +57,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.models.common.ops.sequence_parallel import (
-    sp_all_gather,
-    sp_padding_mask,
-    sp_reduce_scatter,
-    sp_shard,
-)
 from vllm.models.kimi_k3.amd.linear import (
     KimiDecoderLayer as UpstreamKimiDecoderLayer,
 )
@@ -85,16 +85,32 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend import envs as ascend_envs
+from vllm_ascend.ascend_config import get_ascend_config, is_kimi_c8_config
+from vllm_ascend.ascend_forward_context import register_kimi_moe_quant_type
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedSparseSituAndMul
+from vllm_ascend.ops.kimi_attn_res import (
+    AttnResBackend,
+    AttnResQueryPlan,
+    load_attn_res_fused_ops,
+    resolve_attn_res_mode,
+)
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
+from vllm_ascend.ops.kimi_situ import initialize_kimi_situ_ops
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, shared_experts_calculation_stream
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -161,8 +177,8 @@ class AscendKimiK3DeltaAttention(AscendKimiK3DeltaAttentionBase):
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         super().__init__(config, vllm_config, prefix)
         if self.uses_mixed_projection:
-            # Set before weight loading so fused QKV uses the same NZ GMM
-            # layout as the routed projections.
+            # Keep the single-group NZ layout for the eager fused QKV path.
+            # Latent MoE projections use ordinary NZ Quant Matmul instead.
             self.in_proj_qkvgfab._single_group_gmm_nz = True
 
     def _matmul_fused_qkv(
@@ -328,6 +344,14 @@ def is_moe_layer_idx(config, layer_idx: int) -> bool:
     )
 
 
+def _get_kimi_router_stream(vllm_config: VllmConfig) -> torch.npu.Stream | None:
+    if not get_ascend_config().multistream_overlap_shared_expert:
+        return None
+    if not hasattr(vllm_config, "_kimi_router_stream"):
+        vllm_config._kimi_router_stream = torch.npu.Stream()
+    return vllm_config._kimi_router_stream
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -361,6 +385,11 @@ class AscendKimiMoE(nn.Module):
         activation_situ_beta = config.activation_situ_beta if config.hidden_act == "situ" else None
         activation_situ_linear_beta = config.activation_situ_linear_beta if config.hidden_act == "situ" else None
 
+        if config.hidden_act == "situ" and get_current_hardware_profile().supports(
+            HardwareCapability.CANN_MEGAMOE_MXFP
+        ):
+            initialize_kimi_situ_ops()
+
         self.gate = GateLinear(
             input_size=hidden_size,
             output_size=num_experts,
@@ -381,6 +410,15 @@ class AscendKimiMoE(nn.Module):
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
             )
+            if (
+                config.hidden_act == "situ"
+                and activation_situ_linear_beta is not None
+                and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+            ):
+                self.shared_experts.act_fn = AscendSharedSparseSituAndMul(
+                    self.shared_experts.act_fn.beta,
+                    self.shared_experts.act_fn.linear_beta,
+                )
         else:
             self.shared_experts = None
 
@@ -389,7 +427,10 @@ class AscendKimiMoE(nn.Module):
         self.routed_expert_up_proj: ReplicatedLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
-            self.routed_expert_down_proj = AscendKimiK3RoutedLinear(
+            # Match recipes: use Quant Matmul in both warmup and graph capture.
+            # Ordinary ReplicatedLinear keeps the logical weight [K, N] before
+            # the configured NZ conversion, without a singleton GMM dimension.
+            self.routed_expert_down_proj = ReplicatedLinear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
@@ -399,7 +440,7 @@ class AscendKimiMoE(nn.Module):
             self.routed_expert_norm = (
                 RMSNorm(self.moe_hidden_size, eps=config.rms_norm_eps) if self.latent_moe_use_norm else None
             )
-            self.routed_expert_up_proj = AscendKimiK3RoutedLinear(
+            self.routed_expert_up_proj = ReplicatedLinear(
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
@@ -441,6 +482,23 @@ class AscendKimiMoE(nn.Module):
             num_redundant_experts=num_redundant_experts,
         )
 
+        # Keep routing and stream decisions inside the runtime MoE op. The
+        # gate remains registered only here for checkpoint compatibility.
+        object.__setattr__(self.experts, "_kimi_gate", self.gate)
+        object.__setattr__(
+            self.experts,
+            "_kimi_router_stream",
+            _get_kimi_router_stream(vllm_config),
+        )
+        if self.shared_experts is not None and get_ascend_config().multistream_overlap_shared_expert:
+            # Share a communication stream across this model's MoE layers;
+            # keep it separate from both Router and shared Cube/Vector work.
+            if not hasattr(vllm_config, "_kimi_shared_compute_stream"):
+                vllm_config._kimi_shared_compute_stream = shared_experts_calculation_stream()
+            if not hasattr(vllm_config, "_kimi_shared_comm_stream"):
+                vllm_config._kimi_shared_comm_stream = torch.npu.Stream()
+            object.__setattr__(self.experts, "_kimi_shared_comm_stream", vllm_config._kimi_shared_comm_stream)
+
         # Use the factory's validated counts, including its effective EP size.
         moe_config = self.experts.moe_config
         self.n_routed_experts = num_experts
@@ -452,10 +510,9 @@ class AscendKimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
-            router_logits=router_logits,
+            router_logits=hidden_states,
         )
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -533,6 +590,9 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         attention_layer.impl.scale = float(self.scaling)
         attention_layer.impl.rotary_emb = rotary_emb
         attention_layer.impl.use_mla_rope = use_rope
+        if getattr(attention_layer.impl, "is_draft_cache", False):
+            attention_layer.impl.non_causal_multi_token_decode = non_causal_multi_token_decode
+            attention_layer.impl.use_flashmla = attention_layer.impl._can_use_flashmla()
 
     @property
     def _attention_layer(self):
@@ -553,6 +613,10 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     @property
     def kv_cache(self):
         return self._attention_layer.kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value):
+        self._attention_layer.kv_cache = value
 
     @property
     def kv_cache_dtype(self):
@@ -717,6 +781,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         defer_mlp_add: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
         **kwargs,
     ):
         if self.use_attn_residuals:
@@ -728,6 +793,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prepared_attn_input=prepared_attn_input,
                 defer_mlp_add=defer_mlp_add,
                 optimize_prefill=optimize_prefill,
+                attn_res_op=attn_res_op,
             )
         return super().forward(positions, hidden_states, residual, **kwargs)
 
@@ -746,11 +812,13 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         addend: torch.Tensor | None = None,
         return_materialized: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # The previous MLP add is rounded to BF16 before it becomes either a
         # DSpark raw prefix or an AttnRes input. A block boundary stores that
         # same prefix, while the mixture reads only the older valid slots.
-        return torch.ops._C_ascend.attn_res_fwd(
+        op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
+        return op(
             prefix_sum,
             addend,
             block_residual,
@@ -773,28 +841,32 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         defer_mlp_add: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
     ):
-        """Each residual point runs one native add/AttnRes/RMSNorm kernel."""
+        """Run each residual point through the selected add/AttnRes/RMSNorm backend."""
         if prepared_attn_input is None:
             prepared_attn_input = self.prepare_attn_residual(
-                hidden_states, block_residual, optimize_prefill=optimize_prefill
+                hidden_states, block_residual, optimize_prefill=optimize_prefill, attn_res_op=attn_res_op
             )
         hidden_states, prefix_sum, _ = prepared_attn_input
         if self.is_block_write_layer:
             prefix_sum = None
 
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            hidden_states = hidden_states[: positions.shape[0]]
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            positions=positions,
-        )
+        if self.use_sequence_parallel and getattr(self.self_attn, "overlap_mega_kda_commit", False):
+            hidden_states = self.self_attn.forward_with_all_gather(hidden_states, positions)
+        else:
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
         if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
-        op = torch.ops._C_ascend.attn_res_fwd
+        op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
         hidden_states, prefix_sum, _ = op(
             hidden_states if prefix_sum is None else prefix_sum,
             None if prefix_sum is None else hidden_states,
@@ -828,6 +900,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return hidden_states, block_residual
 
 
+@support_torch_compile
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
@@ -856,6 +929,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.attn_res_fused_ops = None
+        if (
+            config.attn_res_block_size is not None
+            and getattr(config, "attn_res_mode", "fused") == "fused"
+            and ascend_envs.VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED
+        ):
+            self.attn_res_fused_ops = load_attn_res_fused_ops()
+        self.attn_res_mode = resolve_attn_res_mode(config, fused_available=self.attn_res_fused_ops is not None)
+        if config.attn_res_block_size is not None:
+            if getattr(config, "attn_res_mode", "fused") == "fused" and self.attn_res_mode == "two_phase":
+                logger.warning_once("Kimi K3 fused AttnRes unavailable or disabled; falling back to two_phase")
+            logger.info("Kimi K3 AttnRes mode: %s", self.attn_res_mode)
+            if self.attn_res_fused_ops is not None:
+                logger.info(
+                    "Kimi K3 AttnRes Update+RMSNorm fusion: %s", self.attn_res_fused_ops.update_rms_norm is not None
+                )
+        self.attn_res_query_plan: AttnResQueryPlan | None = None
         self.vocab_size = config.vocab_size
         # Only the last PP stage loads the drafter. Select its aux contract
         # on every stage before upstream reserves receive buffers/relay slots.
@@ -925,6 +1015,21 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
+        if is_kimi_c8_config(vllm_config):
+            self._bind_c8_metadata_prelaunch()
+
+    def _bind_c8_metadata_prelaunch(self) -> None:
+        # Bind once; launch inside KDA's existing eager-break, never traced Python.
+        first_kda = None
+        for layer in self.layers:
+            attention = getattr(layer, "self_attn", None)
+            if isinstance(attention, AscendKimiK3DeltaAttention) and first_kda is None:
+                first_kda = attention
+            impl = getattr(attention, "impl", None)
+            if getattr(impl, "kimi_c8_mode", False):
+                if first_kda is not None:
+                    first_kda._kimi_c8_metadata_prelaunch = impl._prelaunch_kimi_c8_metadata
+                return
 
     def _cache_aux_pp_layout(self) -> None:
         super()._cache_aux_pp_layout()
@@ -986,9 +1091,66 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(
+        result = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        if self.config.attn_res_block_size is not None and self.attn_res_mode != "native":
+            self._prepare_attn_res_query_plan()
+        return result
+
+    def _prepare_attn_res_query_plan(self) -> None:
+        specs = []
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            specs.append((layer.self_attention_res_proj, layer.self_attention_res_norm, layer.prev_valid_blocks))
+            specs.append(
+                (
+                    layer.mlp_res_proj,
+                    layer.mlp_res_norm,
+                    layer.prev_valid_blocks + int(layer.is_block_write_layer),
+                )
+            )
+        if get_pp_group().is_last_rank:
+            specs.append(
+                (
+                    self.output_attn_res_proj,
+                    self.output_attn_res_norm,
+                    cdiv(self.end_layer, self.config.attn_res_block_size),
+                )
+            )
+        if self.attn_res_query_plan is None:
+            self.attn_res_query_plan = AttnResQueryPlan(specs)
+        else:
+            self.attn_res_query_plan.refresh(specs)
+
+    def _start_flash_mla_metadata(self) -> None:
+        """Start all shared FlashMLA metadata builds before the layer loop."""
+        if not is_forward_context_available():
+            return
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+        started = set()
+        for layer in self.layers:
+            self_attn = getattr(layer, "self_attn", None)
+            impl = getattr(self_attn, "impl", None)
+            if impl is None or not hasattr(impl, "start_flash_mla_metadata"):
+                continue
+            layer_name = getattr(self_attn, "layer_name", None) or getattr(impl, "layer_name", None)
+            layer_metadata = attn_metadata.get(layer_name)
+            flash = (
+                layer_metadata.get_external_flashmla(getattr(impl, "flash_mla_layout", None))
+                if layer_metadata is not None
+                else None
+            )
+            if (
+                flash is None
+                or not getattr(flash, "metadata_async", False)
+                or getattr(layer_metadata, "num_decode_tokens", 0) <= 0
+                or id(flash) in started
+            ):
+                continue
+            impl.start_flash_mla_metadata(layer_metadata)
+            started.add(id(flash))
 
     def forward(
         self,
@@ -998,6 +1160,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        # Launch the shared metadata build before embedding, attention-residual
+        # preparation, and MoE router/GMM/TopK work.  The builder owns a
+        # dedicated metadata stream; attention waits on its ready event at the
+        # consumer, so the MoE streams remain independent.
+        self._start_flash_mla_metadata()
         if self.config.attn_res_block_size is None:
             return super().forward(
                 input_ids=input_ids,
@@ -1055,6 +1222,12 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         residual = block_residual
 
         optimize_attn_res_prefill = _use_attn_res_prefill_cache()
+        attn_res_op = None
+        if self.attn_res_mode != "native":
+            if self.attn_res_query_plan is None:
+                # Dummy/model warmup may precede checkpoint loading.
+                self._prepare_attn_res_query_plan()
+            attn_res_op = AttnResBackend(self.attn_res_mode, self.attn_res_query_plan, self.attn_res_fused_ops)
         pending_mlp_output = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
@@ -1066,6 +1239,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 pending_mlp_output,
                 return_materialized=materialized_aux and layer_idx in self.aux_hidden_state_layers,
                 optimize_prefill=optimize_attn_res_prefill,
+                attn_res_op=attn_res_op,
             )
             if layer_idx > self.start_layer and not materialized_aux:
                 self._maybe_add_hidden_state(aux_hidden_states, layer_idx, prepared[1], None)
@@ -1078,10 +1252,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 prepared_attn_input=prepared,
                 defer_mlp_add=True,
                 optimize_prefill=optimize_attn_res_prefill,
+                attn_res_op=attn_res_op,
             )
 
         if not get_pp_group().is_last_rank and pending_mlp_output is not None:
-            hidden_states = hidden_states + pending_mlp_output
+            hidden_states = (
+                attn_res_op.finish_partial(hidden_states, pending_mlp_output)
+                if self.attn_res_mode == "fused"
+                else hidden_states + pending_mlp_output
+            )
             if not materialized_aux:
                 # Publish the completed raw prefix at the PP boundary once.
                 self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, hidden_states, None)
@@ -1099,7 +1278,8 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 aux_hidden_states,
             )
 
-        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
+        final_op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
+        hidden_states, final_prefix, _ = final_op(
             hidden_states,
             pending_mlp_output,
             residual,
@@ -1182,6 +1362,58 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
     """Causal-LM wrapper retaining vLLM 0.27 state/cache interfaces."""
 
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        """Return the Ascend MegaKDA page state dtypes.
+
+        The upstream Kimi class only describes conv/checkpoint (and its
+        CUDA RecoverSSM records). ReplaySSM is an Ascend-only ABI, so its
+        three page records must be included here before KV cache allocation.
+        """
+        base = MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        enabled = bool(additional.get("enable_mega_kda_replayssm", False))
+        if not enabled:
+            return base
+        return (*base, torch.float32, torch.float16, torch.float32)
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        hf_config = vllm_config.model_config.hf_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        base = MambaStateShapeCalculator.kda_state_shape(
+            tp_size,
+            hf_config.linear_attn_config["num_heads"],
+            hf_config.linear_attn_config["head_dim"],
+            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
+            num_spec=num_spec,
+        )
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        enabled = bool(additional.get("enable_mega_kda_replayssm", False))
+        if not enabled:
+            return base
+        local_heads = hf_config.linear_attn_config["num_heads"] // tp_size
+        record = (local_heads, 1 + num_spec, hf_config.linear_attn_config["head_dim"])
+        return (*base, record, record, record)
+
+    def process_weights_after_loading(self) -> None:
+        # vLLM invokes this model hook after every per-module quant finalizer,
+        # before memory profiling. Conv's callback alone is too early: F/OProj
+        # can still be awaiting processing when that callback runs.
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        for module in self.model.modules():
+            if isinstance(module, AscendKimiK3DeltaAttentionBase):
+                if get_ascend_config().enable_mega_kda_replayssm:
+                    module._prepare_mega_weights()
+                module._prepare_kda_prolog_weights()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1313,6 +1545,9 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["KimiLinearForCausalLM"],
             )
+        language_layouts = getattr(self.language_model.model_config, "_ascend_kimi_moe_quant_types", ())
+        for quant_type in language_layouts:
+            register_kimi_moe_quant_type(vllm_config, quant_type)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
@@ -1320,6 +1555,31 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def get_language_model(self) -> AscendKimiLinearForCausalLM:
         return self.language_model
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        """Delegate to the Ascend text model, not the upstream one.
+
+        ``Platform._align_mamba_and_attn_page_size`` resolves this hook on the
+        configured architecture (this VL class) to size the Mamba page before
+        the KV cache is allocated. The upstream delegator targets
+        ``vllm.models.kimi_k3.nvidia.model.KimiLinearForCausalLM``, which does
+        not know about the Ascend ReplaySSM states; the worker would then build
+        a larger MambaSpec than ``cache_config.mamba_page_size_padded`` and the
+        page-size assertion would fire.
+        """
+        text_config = vllm_config.model_config.hf_config.text_config
+        return AscendKimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config.with_hf_config(text_config))
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        """Delegate to the Ascend text model; see the dtype hook above."""
+        text_config = vllm_config.model_config.hf_config.text_config
+        return AscendKimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config.with_hf_config(text_config))
+
+    def process_weights_after_loading(self) -> None:
+        # The loader invokes only the outer model-level hook for VL models.
+        self.language_model.process_weights_after_loading()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)

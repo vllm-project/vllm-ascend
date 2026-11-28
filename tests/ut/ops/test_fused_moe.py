@@ -2023,6 +2023,8 @@ def test_early_all_gather_only_runs_for_sp_with_tp_sharded_weights(
     monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: auxiliary_stream)
     monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: stream_state["current"])
 
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+
     prepared = shared_experts.prepare_input_async(hidden_states)
 
     if starts_all_gather:
@@ -2191,7 +2193,7 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
     current_stream = MagicMock()
     current_stream.wait_event.side_effect = lambda event: operation_order.append("wait_all_gather")
 
-    def prepare_input(states):
+    def prepare_input(states, *, comm_stream=None):
         operation_order.append("all_gather")
         assert states is hidden_states
         return PreparedSharedExpertInput(gathered_states, is_gathered=True, ready_event=all_gather_done)

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, SchedulerConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -50,7 +50,7 @@ def _make_mlapo_reload_impl(native):
     impl.dcp_enabled = impl.pcp_enabled = impl.is_pcp_decode_sharded = False
     impl.is_draft_model = False
     impl._strided_kv_workspace = None
-    impl.vllm_config = SimpleNamespace()
+    impl.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     quant_method = (
         UnquantizedLinearMethod()
         if native
@@ -319,7 +319,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     config = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
-        cache_config=SimpleNamespace(cache_dtype="float16"),
+        cache_config=SimpleNamespace(cache_dtype="float16", block_size=128),
         speculative_config=None,
     )
     with (
@@ -425,6 +425,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    impl.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
@@ -453,6 +454,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
         patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
         patch.object(impl, "_process_weights_for_fused") as fused,
+        patch.object(impl, "_load_fa_quant_scales"),
         patch.object(impl, "_prepare_prolog_v3_weights_after_loading"),
     ):
         impl.process_weights_after_loading(torch.bfloat16)
@@ -472,6 +474,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
 def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    impl.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = True
@@ -1864,6 +1867,7 @@ class TestAscendMLAImpl(TestBase):
         vllm_config.parallel_config = parallel_config
         vllm_config.cache_config = MagicMock()
         vllm_config.cache_config.cache_dtype = "float16"
+        vllm_config.cache_config.block_size = 128
         init_ascend_config(vllm_config)
 
         num_heads = 256
@@ -2269,6 +2273,10 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(result_kv, kv_c_normed)
         self.assertIs(result_k_pe, k_pe)
 
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        new=lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_for_fused_fa_quant(self, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
@@ -2276,10 +2284,10 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fa_quant_layer = True
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
+        self.impl.q_proj.weight_scale.data = torch.randn(128)
         self.impl.fused_qkv_a_proj = MagicMock()
-        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
-        self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64)
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128)
+        self.impl.fused_qkv_a_proj.weight_scale = torch.randn(128)
 
         mock_layer = MagicMock()
         mock_layer.quant_kscale = torch.randn(128)
@@ -2290,24 +2298,31 @@ class TestAscendMLAImpl(TestBase):
         self.impl.layer_name = "layer_0"
 
         self.impl.enable_mlapo = False
+        self.impl.support_fp8_attention = False
         self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
         self.assertTrue(hasattr(self.impl, "weight_dq"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
 
     def _setup_mlapo_weight_prep_mocks(self):
+        # These legacy INT8 fixtures use A2 per-channel (1D) scales.
         self.impl.enable_mlapo = True
+        self.impl.support_fp8_attention = False
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
+        self.impl.q_proj.weight_scale.data = torch.randn(128)
         self.impl.fused_qkv_a_proj = MagicMock()
-        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
-        self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64)
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128)
+        self.impl.fused_qkv_a_proj.weight_scale = torch.randn(128)
         self.impl.q_lora_rank = 32
         self.impl.vllm_config.scheduler_config.max_num_batched_tokens = 4096
         self.impl.vllm_config.kv_transfer_config = MagicMock()
         self.impl.vllm_config.kv_transfer_config.is_kv_consumer = False
 
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        new=lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_for_fused_mlapo(self, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
@@ -2315,7 +2330,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fa_quant_layer = False
         self._setup_mlapo_weight_prep_mocks()
 
-        self.impl._process_weights_for_fused(torch.float16)
+        with set_current_vllm_config(self.impl.vllm_config):
+            self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
         self.assertTrue(hasattr(self.impl, "weight_dq"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
@@ -2324,6 +2340,10 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "dequant_scale_w_dkv_kr"))
         self.assertFalse(hasattr(self.impl, "quant_kscale"))
 
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        new=lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_for_fused_mlapo_with_fa_quant(self, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
@@ -2338,7 +2358,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.vllm_config.compilation_config.static_forward_context = {"layer_0": mock_layer}
         self.impl.layer_name = "layer_0"
 
-        self.impl._process_weights_for_fused(torch.float16)
+        with set_current_vllm_config(self.impl.vllm_config):
+            self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "dequant_scale_w_dq"))
         self.assertTrue(hasattr(self.impl, "dequant_scale_w_dkv_kr"))
         self.assertTrue(hasattr(self.impl, "quant_kscale"))

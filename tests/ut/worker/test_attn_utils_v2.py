@@ -554,7 +554,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
     component_profile = SimpleNamespace(supports=lambda capability: False)
 
-    def reshape():
+    def reshape(kernel_block_size=None):
         # Build both consumers from the current spec each time. The reshape
         # path reads the group directly and resolves layer specs through
         # KVCacheConfig, so mutating either object is not a reliable test
@@ -576,18 +576,24 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
             ],
             kv_cache_raw_tensors=raw_caches,
             cache_dtype="auto",
-            kernel_block_sizes=[128],
+            kernel_block_sizes=[
+                kernel_block_size
+                if kernel_block_size is not None
+                else (spec.block_size if attn_module.impl.use_flashmla else 128)
+            ],
             shared_kv_cache_layers={},
             kv_cache_config=current_config,
         )[layer_name]
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
+    with pytest.raises(ValueError, match="requires its native 384-token page"):
+        reshape(128)
     for q_heads in (8, 12, 64, 96):
         spec = replace(spec, num_heads=q_heads)
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
-        assert fused.shape == (6, 128, 1, 576)
-        assert fused.stride() == (81408, 576, 576, 1)
+        assert fused.shape == (2, 384, 1, 576)
+        assert fused.stride() == (244224, 576, 576, 1)
 
     # The resolved backend rejects unsupported query-head counts before cache
     # allocation, so FIA receives the component-major view even on A5.
@@ -617,8 +623,8 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     )
     unequal_pd_cache = reshape()
     assert isinstance(unequal_pd_cache, torch.Tensor)
-    assert unequal_pd_cache.shape == (6, 128, 1, 576)
-    assert unequal_pd_cache.stride() == (81408, 576, 576, 1)
+    assert unequal_pd_cache.shape == (2, 384, 1, 576)
+    assert unequal_pd_cache.stride() == (244224, 576, 576, 1)
 
     vllm_config.kv_transfer_config.kv_connector_extra_config["decode"]["tp_size"] = 2
     equal_pd_cache = reshape()

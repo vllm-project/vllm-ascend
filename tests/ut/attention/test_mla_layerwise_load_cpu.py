@@ -64,6 +64,7 @@ def make_forward(path, batch, wait):
         num_decodes=int(decode_tokens > 0),
         num_prefills=int(prefill_tokens > 0),
         external_flashmla=None,
+        get_external_flashmla=lambda layout=None: None,
         slot_mapping=torch.arange(tokens),
         decode=SimpleNamespace(cos=torch.zeros(tokens, 2), sin=torch.zeros(tokens, 2)),
         prefill=SimpleNamespace(cos=torch.zeros(prefill_tokens, 2), sin=torch.zeros(prefill_tokens, 2)),
@@ -142,6 +143,8 @@ def make_forward(path, batch, wait):
     }
     impl = SimpleNamespace(
         layer_name="language_model.model.layers.3.self_attn.attn",
+        flash_mla_layout="pa_bbnd",
+        use_flashmla_pa_nz=False,
         num_heads=1,
         num_kv_heads=1,
         v_head_dim=2,

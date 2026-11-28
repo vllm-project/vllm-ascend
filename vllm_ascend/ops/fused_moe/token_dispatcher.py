@@ -58,8 +58,9 @@ EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
     # grouped_matmul_swiglu_quant_v2 consumes per-expert counts; existing
-    # MC2 grouped-matmul paths consume prefix sums.
-    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu:
+    # MC2 grouped-matmul paths consume prefix sums unless the SiTU operator
+    # needs counts. Requesting counts at dispatch avoids diff + concat in MoE.
+    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu or token_dispatch_input.prefer_expert_token_counts:
         return EXPERT_TOKEN_NUMS_TYPE_COUNT
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 
@@ -623,7 +624,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
             .sum(axis=1)
             .to(torch.device("cpu"), non_blocking=True)
-            .numpy()
         )
 
         num_global_tokens_per_expert = gather_from_sequence_parallel_region(
@@ -635,9 +635,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if num_global_tokens_per_local_expert is None:
             raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
 
-        output_splits = (
-            num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
-        )
+        # AllToAllV needs host splits. This copy also orders the earlier
+        # nonblocking input-split copy on the same stream.
+        output_splits = num_global_tokens_per_local_expert.sum(axis=-1).cpu().numpy()
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
         global_input_tokens_local_experts_indices = None
@@ -645,14 +645,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             if num_global_tokens_per_local_expert is None:
                 raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
             global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel()
+                self.expert_ids_per_ep_rank,
+                num_global_tokens_per_local_expert.ravel(),
+                output_size=int(output_splits.sum()),
             )
-        else:
-            torch.npu.synchronize()
 
         return (
             num_tokens_per_local_expert,
-            input_splits,
+            input_splits.numpy(),
             output_splits,
             global_input_tokens_local_experts_indices,
             num_out_tokens,

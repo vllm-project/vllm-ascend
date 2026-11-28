@@ -17,6 +17,8 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    *,
+    static_c8: bool = False,
 ) -> None:
     """Copy logical cache blocks for Ascend's segmented cache layout.
 
@@ -30,13 +32,20 @@ def copy_kv_cache_blocks_inplace(
     if not kv_cache_block_copies:
         return
 
+    if static_c8:
+        from vllm_ascend.attention.kimi_c8_static import pa_nz_storage_view
+
     cache_tensors: list[torch.Tensor] = []
     seen_tensors: set[int] = set()
     for entry in kv_caches:
         if entry is None:
             continue
         if isinstance(entry, torch.Tensor):
-            tensors = entry.unbind(0) if entry.ndim == 5 and entry.shape[0] == 2 else (entry,)
+            tensors = (
+                entry.unbind(0)
+                if entry.ndim == 5 and entry.shape[0] == 2 and not (static_c8 and entry.shape[1:3] == (1, 18))
+                else (entry,)
+            )
         else:
             tensors = entry
         for tensor in tensors:
@@ -46,6 +55,8 @@ def copy_kv_cache_blocks_inplace(
             if data_ptr in seen_tensors:
                 continue
             seen_tensors.add(data_ptr)
+            if static_c8 and tensor.ndim == 5 and tensor.shape[1:3] == (1, 18) and tensor.shape[-1] == 32:
+                tensor = pa_nz_storage_view(tensor)
             cache_tensors.append(tensor)
 
     if not cache_tensors:

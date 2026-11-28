@@ -83,6 +83,50 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     return scheduler
 
 
+@pytest.mark.parametrize(
+    "compressed,mode,model_type,expected",
+    [
+        (False, "C8", "kimi_linear", True),
+        (False, "C16", "kimi_linear", True),
+        (True, "C8", "kimi_linear", True),
+        (False, "C8", "other", True),
+    ],
+)
+def test_stateful_handoff_preserves_penultimate_prompt_boundary(compressed, mode, model_type, expected):
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    scheduler.ascend_config.mla_cache_mode = mode
+    hf = SimpleNamespace(model_type=model_type)
+    if compressed:
+        hf.compress_ratios = [1, 4]
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf, hf_text_config=hf))
+    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
+    assert scheduler.need_truncate is expected
+    request = make_request(kv_transfer_params={"do_remote_decode": True})
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == (31 if expected else 32)
+    assert scheduler._state_prefill_token_count(32) == (31 if expected else 32)
+
+
+def test_remote_prefix_claim_cannot_exceed_producer_token_count():
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    request = make_request(kv_transfer_params={"do_remote_prefill": True, "remote_num_prompt_tokens": 29})
+    count, asynchronous = scheduler.get_num_new_matched_tokens(request, 16)
+    assert (count, asynchronous) == (13, True)
+    assert request.kv_transfer_params["num_computed_tokens"] == 16
+
+
+@pytest.mark.parametrize("remote_tokens", [-1, "29", 29.5])
+def test_remote_prefix_rejects_invalid_producer_token_count(remote_tokens):
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    request = make_request(kv_transfer_params={"do_remote_prefill": True, "remote_num_prompt_tokens": remote_tokens})
+    with pytest.raises(ValueError, match="non-negative integer"):
+        scheduler.get_num_new_matched_tokens(request, 0)
+
+
 def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     first = make_transfer_metadata(te_rpc_port=9000, local_ip="10.0.0.1", base_addrs=[[1000]])
     second = make_transfer_metadata(te_rpc_port=9001, local_ip="10.0.0.2", base_addrs=[[2000]])
@@ -412,7 +456,7 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -420,6 +464,26 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     )
 
     assert result == ([10, 11], [20, 21])
+
+
+def test_base_scheduler_normalizes_aligned_mamba_state_block() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler._kimi_c8_enabled = True
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    scheduler.num_speculative_tokens = 3
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [
+        [make_full_spec()],
+        [replace(make_mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=3)],
+    ]
+
+    result = scheduler._get_transfer_block_ids(
+        ([10, 11, 12], [20, 21, 22, 23, 24]),
+        prompt_len=33,
+    )
+
+    assert result == ([10, 11, 12], [22])
 
 
 def test_get_num_new_matched_tokens_records_local_prefix() -> None:

@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
+from vllm_ascend.ascend_config import is_kimi_c8_config
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     is_circular_kv_cache_spec,
@@ -82,6 +83,7 @@ class MooncakePullRecvingThread(threading.Thread):
         super().__init__(daemon=True, name="MooncakePullRecvingThread")
         self.engine = engine
         self.vllm_config = vllm_config
+        self._kimi_c8_enabled = is_kimi_c8_config(vllm_config)
         self.model_config = vllm_config.model_config
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
@@ -544,7 +546,7 @@ class MooncakePullRecvingThread(threading.Thread):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, tuple[tuple[int, ...], ...]],
+                tuple[Any, ...],
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
@@ -616,7 +618,7 @@ class MooncakePullRecvingThread(threading.Thread):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, tuple[tuple[int, ...], ...]],
+                tuple[Any, ...],
                 list[tuple[int, list[int], list[int]]],
             ],
         ],
@@ -651,13 +653,13 @@ class MooncakePullRecvingThread(threading.Thread):
                     )
                 else:
                     local_dcp_size, layer_remote_dcp_size = self.dcp_size, remote_dcp_size
-                cache_key = (
-                    spec_index,
-                    tuple(tuple(group) for group in remote_tp_rank_groups),
-                )
+                remote_group_index = remote_metadata.group_indices[remote_layer_index]
+                group_index = self.group_indices[local_layer_index]
+                cache_key = (spec_index, tuple(tuple(group) for group in remote_tp_rank_groups))
+                if getattr(self, "_kimi_c8_enabled", False):
+                    cache_key = (spec_index, group_index, remote_group_index, cache_key[1])
                 transfer_block_ids = request_block_ids_by_spec.get(cache_key)
                 if transfer_block_ids is None:
-                    group_index = self.group_indices[local_layer_index]
                     if not isinstance(spec, MambaSpec):
                         local_kernel_block_size = (
                             self.layer_block_sizes[local_layer_index] // self.block_size_scales[local_layer_index][0]
@@ -666,6 +668,9 @@ class MooncakePullRecvingThread(threading.Thread):
                             remote_metadata.layer_block_sizes[remote_layer_index]
                             // remote_metadata.block_size_scales[remote_layer_index][0]
                         )
+                        if getattr(spec, "static_fp8_pa_nz", False):
+                            # Physical scale includes page padding, not tokens.
+                            local_kernel_block_size = remote_kernel_block_size = 128
                         assert local_kernel_block_size == remote_kernel_block_size, (
                             "MooncakeConnector does not support different local and remote kernel block size %s | %s.",
                             local_kernel_block_size,
@@ -680,7 +685,9 @@ class MooncakePullRecvingThread(threading.Thread):
                         remote_metadata.layer_block_sizes[remote_layer_index],
                         request_metadata.local_block_ids[group_index],
                         request_metadata.local_full_block_ids[group_index],
-                        request_metadata.remote_block_ids[group_index],
+                        request_metadata.remote_block_ids[
+                            remote_group_index if getattr(self, "_kimi_c8_enabled", False) else group_index
+                        ],
                         request_metadata.local_num_prompt_tokens,
                         request_metadata.remote_num_prompt_tokens,
                         request_metadata.num_computed_tokens,
@@ -742,6 +749,11 @@ class MooncakePullRecvingThread(threading.Thread):
         if local_dcp_size is None:
             local_dcp_size = self.dcp_size
         local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
+        if getattr(spec, "static_fp8_pa_nz", False):
+            # Transfer planning retains 128-token fragments; byte emission
+            # below addresses each fragment within the native PA_NZ page.
+            local_block_size_scale = local_block_size // 128
+            remote_block_size_scale = remote_block_size // 128
         is_replicated_sfa_indexer = isinstance(spec, AscendSFAIndexerCacheSpec) and (
             local_block_size_scale > 1 or remote_block_size_scale > 1
         )
@@ -796,7 +808,15 @@ class MooncakePullRecvingThread(threading.Thread):
                 if local_block_size != remote_block_size:
                     kernel_block_size = local_kernel_block_size
                     transfer_start_token = num_computed_tokens
-                    transfer_end_token = min(local_num_prompt_tokens - 1, remote_num_prompt_tokens)
+                    # Token ranges use an exclusive end.  The previous
+                    # ``local_num_prompt_tokens - 1`` form dropped the first
+                    # kernel block of a partial tail (for example token 1536
+                    # in a 1537-token prompt), leaving D with an incomplete
+                    # prefix for the continuation step.
+                    transfer_end_token = min(
+                        local_num_prompt_tokens - (0 if getattr(self, "_kimi_c8_enabled", False) else 1),
+                        remote_num_prompt_tokens,
+                    )
                     if transfer_end_token <= transfer_start_token:
                         return []
 
@@ -896,7 +916,16 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_start_block_idx = num_computed_tokens // kernel_block_size
             remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
         elif isinstance(spec, MambaSpec):
-            local_kernel_block_ids = [local_group_block_ids[-self.num_speculative_tokens - 1]]
+            if not getattr(self, "_kimi_c8_enabled", False):
+                local_kernel_block_ids = [local_group_block_ids[-spec.num_speculative_blocks - 1]]
+            elif spec.mamba_cache_mode == "align":
+                # The producer publishes one normalized state block in aligned
+                # mode.  The local unhashed list is likewise a one-block
+                # destination when a prefix state is missing.
+                local_kernel_block_ids = [local_group_block_ids[0]]
+            else:
+                state_tail_blocks = spec.num_speculative_blocks
+                local_kernel_block_ids = [local_group_block_ids[-state_tail_blocks - 1]]
             remote_kernel_block_ids = [remote_group_block_ids[-1]]
         else:
             raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")
@@ -1121,6 +1150,45 @@ class MooncakePullRecvingThread(threading.Thread):
             dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
             length_list.append(transfer_len * len(local_block_group))
 
+    @staticmethod
+    def _plan_c8_transfer_spans(
+        block_groups: tuple[list[list[int]], list[list[int]]],
+        local_stride: int,
+        remote_stride: int,
+        local_size: int,
+        remote_size: int,
+    ) -> list[tuple[int, int, int]]:
+        """Plan relative byte offsets for native NZ pages and partial feature tiles."""
+        local_units, remote_units = local_size // 128, remote_size // 128
+        payload = local_size * 576
+        spans = []
+        local_groups, remote_groups = block_groups
+        for local_group, remote_group in zip(local_groups, remote_groups):
+            local_id, remote_id, remaining = local_group[0], remote_group[0], len(local_group)
+            while remaining:
+                local_page, local_offset = divmod(local_id, local_units)
+                remote_page, remote_offset = divmod(remote_id, remote_units)
+                count = min(remaining, local_units - local_offset, remote_units - remote_offset)
+                local_start = local_page * local_stride
+                remote_start = remote_page * remote_stride
+                if count == local_units == remote_units:
+                    pages = remaining // local_units if local_stride == remote_stride == payload else 1
+                    spans.append((local_start, remote_start, pages * payload))
+                    count *= pages
+                else:
+                    for tile in range(18):
+                        spans.append(
+                            (
+                                local_start + (tile * local_size + local_offset * 128) * 32,
+                                remote_start + (tile * remote_size + remote_offset * 128) * 32,
+                                count * 128 * 32,
+                            )
+                        )
+                local_id += count
+                remote_id += count
+                remaining -= count
+        return spans
+
     def _append_spec_transfer_addresses(
         self,
         spec_index: int,
@@ -1137,6 +1205,18 @@ class MooncakePullRecvingThread(threading.Thread):
     ) -> None:
         """Append all layers and requests belonging to one local spec."""
         spec = self.kv_cache_specs[spec_index]
+        is_c8 = bool(getattr(spec, "static_fp8_pa_nz", False))
+        for local_idx, remote_idx in transfer_entries_by_layer:
+            local_contracts = getattr(self.local_metadata, "kimi_c8_contracts", [])
+            remote_contracts = getattr(remote_metadata, "kimi_c8_contracts", [])
+            if (local_contracts and len(local_contracts) != len(self.layer_names)) or (
+                remote_contracts and len(remote_contracts) != len(remote_metadata.layer_names)
+            ):
+                raise ValueError("Mooncake kimi_c8_contracts must contain one contract per layer")
+            local_contract = local_contracts[local_idx] if local_contracts else None
+            remote_contract = remote_contracts[remote_idx] if remote_contracts else None
+            if local_contract != remote_contract or (is_c8 and local_contract is None):
+                raise ValueError("Mooncake Kimi C8 format/static KV descale mismatch between producer and consumer")
         if isinstance(spec, MambaSpec):
             self._append_mamba_transfer_addresses(
                 spec,
@@ -1168,13 +1248,17 @@ class MooncakePullRecvingThread(threading.Thread):
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return
 
-        single_block_ids_by_request = {
-            request_id: (
-                [[block_id] for block_id in local_block_ids],
-                [[block_id] for block_id in remote_block_ids],
-            )
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
+        single_block_ids_by_request = (
+            {}
+            if is_c8
+            else {
+                request_id: (
+                    [[block_id] for block_id in local_block_ids],
+                    [[block_id] for block_id in remote_block_ids],
+                )
+                for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
+            }
+        )
         contiguous_block_ids_by_request = {
             request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
@@ -1185,6 +1269,7 @@ class MooncakePullRecvingThread(threading.Thread):
             (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
         )
         if transfer_whole_block:
+            c8_spans_by_request_geometry: dict[tuple[str, int, int, int, int], list[tuple[int, int, int]]] = {}
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
                 local_base_addrs = self.kv_caches_base_addr[local_layer_index]
                 remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
@@ -1209,12 +1294,38 @@ class MooncakePullRecvingThread(threading.Thread):
                     remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
                     local_block_len = self.block_lens[local_layer_index][cache_index]
                     remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
-                    if local_block_len != remote_block_len:
+                    if local_block_len != remote_block_len and not is_c8:
                         raise ValueError(
                             f"Mooncake whole-block length mismatch for layer "
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
+                    if is_c8:
+                        local_size = self.layer_block_sizes[local_layer_index]
+                        remote_size = remote_metadata.layer_block_sizes[remote_layer_index]
+                        for request_id, _, _ in transfer_entries:
+                            key = (
+                                request_id,
+                                local_block_stride,
+                                remote_block_stride,
+                                local_size,
+                                remote_size,
+                            )
+                            spans = c8_spans_by_request_geometry.get(key)
+                            if spans is None:
+                                spans = self._plan_c8_transfer_spans(
+                                    contiguous_block_ids_by_request[request_id],
+                                    local_block_stride,
+                                    remote_block_stride,
+                                    local_size,
+                                    remote_size,
+                                )
+                                c8_spans_by_request_geometry[key] = spans
+                            for local_offset, remote_offset, length in spans:
+                                src_list.append(local_base_addr + local_offset)
+                                dst_list.append(remote_base_addr + remote_offset)
+                                length_list.append(length)
+                        continue
                     block_ids_to_transfer = (
                         contiguous_block_ids_by_request
                         if local_block_stride == remote_block_stride == local_block_len
@@ -1384,6 +1495,7 @@ class MooncakePullRecvingThread(threading.Thread):
         src_list: list[int] = []
         dst_list: list[int] = []
         length_list: list[int] = []
+        plan_start_time = time.perf_counter()
         for spec_index, transfer_entries_by_layer in transfer_entries_by_spec.items():
             self._append_spec_transfer_addresses(
                 spec_index=spec_index,
@@ -1401,6 +1513,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
         if not src_list:
             return
+        plan_elapsed_ms = (time.perf_counter() - plan_start_time) * 1000
         tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         session_id = f"{tp_metadata.local_ip}:{tp_metadata.te_rpc_port}"
         request_ids = sorted(
@@ -1421,7 +1534,7 @@ class MooncakePullRecvingThread(threading.Thread):
         transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
         logger.info(
             "KV cache transfer for requests %s took %.2f ms (%d ranges, %d bytes). "
-            "local_ip %s local_device_id %s remote_session_id %s",
+            "local_ip %s local_device_id %s remote_session_id %s. Address preparation %.2f ms",
             request_ids,
             transfer_elapsed_ms,
             len(length_list),
@@ -1429,6 +1542,7 @@ class MooncakePullRecvingThread(threading.Thread):
             self.local_metadata.local_ip,
             self.tp_rank,
             session_id,
+            plan_elapsed_ms,
         )
 
     @staticmethod

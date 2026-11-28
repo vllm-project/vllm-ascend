@@ -316,6 +316,7 @@ def test_expert_loading_initializes_every_replica(
         linear_attn_config={},
         q_lora_rank=None,
         is_linear_attn=False,
+        attn_res_block_size=None,
     )
     model.num_redundant_experts = model.n_redundant_experts = num_redundant_experts
     layer = nn.Module()
@@ -407,6 +408,9 @@ def test_eplb_expert_remapping_preserves_weight_metadata():
 
 @pytest.mark.parametrize("enable_eplb", [False, True])
 def test_moe_uses_factory_expert_counts(monkeypatch, enable_eplb):
+    monkeypatch.setattr(
+        k3_module, "get_ascend_config", lambda: SimpleNamespace(multistream_overlap_shared_expert=False)
+    )
     config = SimpleNamespace(
         hidden_size=4,
         moe_intermediate_size=8,

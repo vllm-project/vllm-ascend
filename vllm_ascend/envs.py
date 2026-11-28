@@ -79,6 +79,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable Kimi K3 two-phase transformer/DSL operators when available.
+    # Default: 1. Valid values: 0 (Torch two_phase) or 1 (prefer fused).
+    # This performance switch is not sensitive; native/original ignore it.
+    "VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED": lambda: _strict_binary_env(
+        "VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED", "1"
+    ),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
@@ -87,6 +93,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to enable the 0.27 BF16 MLA prolog + FlashMLA path over a merged
+    # PA_NZ latent cache. The default is disabled so Kimi K3 keeps the native
+    # PA_BBND external FlashMLA path. When enabled, only the 0.27 PA_NZ BF16
+    # operators are imported; the C8/FP8 path is not included.
+    # Valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_ENABLE_PA_NZ": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PA_NZ", "0"))),
 }
 
 # end-env-vars-definition

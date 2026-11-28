@@ -59,6 +59,7 @@ class MoEMlpComputeInput:
     topk_ids: torch.Tensor | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    shared_expert_schedule: Any = None
 
 
 def build_mlp_compute_input(
@@ -85,6 +86,7 @@ def build_mlp_compute_input(
 
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
+        shared_expert_schedule=fused_experts_input.shared_expert_schedule,
         group_list=token_dispatch_output.group_list,
         group_list_type=token_dispatch_output.group_list_type,
         dynamic_scale=token_dispatch_output.dynamic_scale,

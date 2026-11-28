@@ -69,6 +69,7 @@ _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _CP_DECODE_COMM_STREAM = None
+_MLA_GATE_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -671,6 +672,19 @@ def cp_decode_comm_stream() -> torch.npu.Stream:
     if _CP_DECODE_COMM_STREAM is None:
         _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_DECODE_COMM_STREAM
+
+
+def mla_gate_stream() -> torch.npu.Stream:
+    """Dedicated stream for the MLA output-gate projection.
+
+    Shared by every MLA layer so the gate GEMM can overlap FlashMLA, the DCP
+    LSE kernels and the O-projection AllToAll without queueing behind the
+    main-stream work of the previous layer.
+    """
+    global _MLA_GATE_STREAM
+    if _MLA_GATE_STREAM is None:
+        _MLA_GATE_STREAM = torch_npu.npu.Stream()
+    return _MLA_GATE_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:

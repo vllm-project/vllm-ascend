@@ -57,6 +57,25 @@ def _using_kv_store(vllm_config) -> bool:
     return False
 
 
+def _using_kimi_c8(vllm_config, model_config) -> bool:
+    """Select native Kimi C8 pages through the single MLA cache mode."""
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    if not isinstance(additional, dict) or str(additional.get("mla_cache_mode", "C16")).strip().upper() != "C8":
+        return False
+    hf = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf, "model_type", None)
+    kv_lora_rank = int(getattr(hf, "kv_lora_rank", 0))
+    qk_rope_head_dim = int(getattr(hf, "qk_rope_head_dim", 0))
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    enabled = (
+        cache_dtype in ("fp8", "int8", "auto")
+        and model_type in ("kimi_linear", "kimi_k3")
+        and kv_lora_rank == 512
+        and qk_rope_head_dim == 64
+    )
+    return enabled
+
+
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
@@ -152,6 +171,39 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
+    if _using_kimi_c8(vllm_config, model_config):
+        # Kimi C8 stores one 576-byte E4M3 latent per token (512 nope + 64
+        # rope); the static per-layer scale is outside the page.  Keep the
+        # scheduler block at 1664 (C8+DCP8 contract) and shrink the shared
+        # mamba page to the C8 payload instead of the bf16 geometry.  Draft
+        # stays bf16 at 1,916,928 and is handled as its own per-layer page by
+        # the mixed-page worker grouping.
+        if cache_config.block_size != 1664:
+            raise ValueError(f"Kimi C8 packed page requires block_size=1664, got {cache_config.block_size}")
+        kernel_block_size = 128
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+        mamba_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
+        mamba_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+        mamba_raw_page_size = sum(
+            math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba_shapes, mamba_dtypes)
+        )
+        kv_lora_rank = int(model_config.hf_text_config.kv_lora_rank)
+        qk_rope_head_dim = int(model_config.hf_text_config.qk_rope_head_dim)
+        packed_token_page = kv_lora_rank + qk_rope_head_dim
+        attn_page_size = cache_config.block_size * packed_token_page
+        align_bytes = kernel_block_size * packed_token_page
+        if attn_page_size % align_bytes:
+            raise ValueError(
+                "Kimi C8 packed page must be a multiple of the 128-token "
+                f"kernel page ({align_bytes}), got {attn_page_size}"
+            )
+        target_mamba_page_size = max(attn_page_size, mamba_raw_page_size)
+        if cache_config.mamba_page_size_padded != target_mamba_page_size:
+            cache_config.mamba_page_size_padded = target_mamba_page_size
+
     # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
     # manages the dedicated hidden-state cache-only layer; it does not migrate
     # mamba KV blocks across instances, so it does not require the block-aligned

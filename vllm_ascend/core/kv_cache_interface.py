@@ -137,6 +137,29 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    # Kimi K3 static E4M3 PA_NZ cache contract.
+    static_fp8_pa_nz: bool = False
+    static_fp8_width: int = 576
+    # V2/draft table granularity. The FA physical block is self.block_size.
+    static_fp8_kernel_block_size: int = 128
+
+    @property
+    def static_fp8_page_bytes(self) -> int:
+        if not self.static_fp8_pa_nz:
+            raise ValueError("static_fp8_page_bytes requires static_fp8_pa_nz")
+        if (
+            self.static_fp8_width != 576
+            or self.static_fp8_kernel_block_size != 128
+            or self.num_kv_heads != 1
+            or self.dtype != torch.float8_e4m3fn
+            or self.tokens_per_state != 1
+            or self.scale_dim != 0
+        ):
+            raise ValueError("Kimi static FP8 PA_NZ requires one 576-wide E4M3 latent and a 128-token V2 table unit")
+        if self.block_size % self.static_fp8_kernel_block_size:
+            raise ValueError("cache block must contain whole static FP8 kernel blocks")
+        return self.block_size * self.static_fp8_width
+
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -153,13 +176,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         """Whether this geometry can be exposed from one raw MLA backing."""
         return (
             get_kv_cache_compression_ratio(self) == 1
-            and self.model_version is None
+            and (self.model_version is None or self.static_fp8_pa_nz)
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
         )
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.static_fp8_pa_nz:
+            return self.static_fp8_page_bytes
         return (
             get_storage_block_size(self)
             * self.num_kv_heads
@@ -184,6 +209,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.static_fp8_pa_nz,
+                spec.static_fp8_width,
+                spec.static_fp8_kernel_block_size,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -208,6 +236,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            static_fp8_pa_nz=first_spec.static_fp8_pa_nz,
+            static_fp8_width=first_spec.static_fp8_width,
+            static_fp8_kernel_block_size=first_spec.static_fp8_kernel_block_size,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )

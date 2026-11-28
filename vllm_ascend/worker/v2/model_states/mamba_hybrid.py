@@ -36,6 +36,8 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ops.gdn_attn_builder import AscendMegaKDAHostMetadataBuilder
+from vllm_ascend.ops.kimi_mega_kda import MegaKDAFirstVerifyTracker
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -62,6 +64,19 @@ class _LayerwiseMambaCopyState:
     pending_layers: set[str]
 
 
+@dataclass
+class AscendMegaKDAMambaHybridAttnMetadata(MambaHybridAttnMetadata):
+    """V2 request history survives align-mode physical block migration."""
+
+    mega_first_verify: torch.Tensor | None = None
+
+    def get_extra_attn_kwargs(self, attn_metadata_builder, num_reqs):
+        kwargs = super().get_extra_attn_kwargs(attn_metadata_builder, num_reqs)
+        if isinstance(attn_metadata_builder, AscendMegaKDAHostMetadataBuilder):
+            kwargs["mega_first_verify"] = self.mega_first_verify
+        return kwargs
+
+
 class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     """Mamba state with Ascend-specific attention metadata construction.
 
@@ -81,6 +96,62 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+        self._mega_request_tracker = None
+        additional_config = getattr(self.vllm_config, "additional_config", None) or {}
+        if additional_config.get("enable_mega_kda_replayssm", False):
+            # Request index zero is real; shift it past the reserved null row.
+            self._mega_request_tracker = MegaKDAFirstVerifyTracker(self.max_num_reqs + 1, self.device)
+
+    def add_request(self, req_index, new_req_data):
+        super().add_request(req_index, new_req_data)
+        tracker = getattr(self, "_mega_request_tracker", None)
+        if tracker is not None:
+            tracker.context[req_index + 1 : req_index + 2].fill_(-1)
+            tracker.first[req_index + 1 : req_index + 2].fill_(1)
+
+    def _with_mega_request_history(self, input_batch, metadata, for_capture):
+        tracker = getattr(self, "_mega_request_tracker", None)
+        replay_enabled = bool(
+            (getattr(self.vllm_config, "additional_config", None) or {}).get(
+                "enable_mega_kda_replayssm", False
+            )
+        )
+        if (tracker is None and not replay_enabled) or for_capture:
+            return metadata
+        count = input_batch.num_reqs
+        device = input_batch.seq_lens.device
+        drafts = metadata.num_decode_draft_tokens_cpu
+        raw_indices = getattr(input_batch, "idx_mapping", None)
+        if raw_indices is None:
+            raw_indices = torch.arange(count, dtype=torch.int64, device=device)
+        else:
+            raw_indices = raw_indices[:count].to(torch.int64)
+        if getattr(input_batch, "is_dummy", False):
+            # Eager/PIECEWISE profiling and idle DP runs must not consume
+            # request history even when their dummy indices name live slots.
+            first = torch.zeros(count, dtype=torch.int32, device=device)
+        else:
+            query_lens = torch.diff(input_batch.query_start_loc[: count + 1])
+            if drafts is None:
+                spec_mask = torch.zeros(count, dtype=torch.bool, device=device)
+            else:
+                spec_mask_cpu = torch.empty(count, dtype=torch.bool, pin_memory=device.type == "npu")
+                torch.ge(drafts[:count], 0, out=spec_mask_cpu)
+                spec_mask = spec_mask_cpu.to(device=device, non_blocking=True)
+            is_prefilling_cpu = torch.empty(count, dtype=torch.bool, pin_memory=device.type == "npu")
+            is_prefilling_cpu.copy_(metadata.is_prefilling[:count])
+            first = tracker.update(
+                raw_indices + 1,
+                input_batch.seq_lens[:count] - query_lens,
+                is_prefilling_cpu.to(device=device, non_blocking=True),
+                spec_mask,
+            )
+        return AscendMegaKDAMambaHybridAttnMetadata(
+            is_prefilling=metadata.is_prefilling,
+            num_accepted_tokens=metadata.num_accepted_tokens,
+            num_decode_draft_tokens_cpu=drafts,
+            mega_first_verify=first,
+        )
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -89,7 +160,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``initialize_from_forward_context``)."""
         if self._layer_state_ranges is None:
             assert self._mamba_spec is not None
-            num_state_types = len(self.model.get_mamba_state_copy_func())
+            num_state_types = len(next(iter(self._mamba_state_copy_funcs.values())))
             ranges: dict[str, tuple[int, int]] = {}
             idx = 0
             for mamba_group_id in self._mamba_group_ids:
@@ -332,6 +403,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        if getattr(self, "_mega_request_tracker", None) is not None and not for_capture:
+            model_specific_metadata = self._with_mega_request_history(input_batch, model_specific_metadata, for_capture)
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

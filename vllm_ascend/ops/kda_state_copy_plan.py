@@ -379,8 +379,10 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
     plan_type: type[KDAStateCopyPlan] | type[StridedKDAFallbackPlan]
     for _, layer in bindings:
         kv_cache = getattr(layer, "kv_cache", None)
-        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) != 2:
+        if not isinstance(kv_cache, (tuple, list)):
             raise RuntimeError("Kimi KDA cache must be bound before strict state-copy preparation")
+        if len(kv_cache) not in (2, 5):
+            raise RuntimeError("Kimi KDA cache must contain two states unless ReplaySSM is enabled")
         state = kv_cache[1]
         if not isinstance(state, torch.Tensor):
             raise RuntimeError("Kimi KDA cache state must be a torch.Tensor")

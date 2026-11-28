@@ -72,6 +72,7 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoeRouterInput
     quant: MoEQuantParams
+    prefer_expert_token_counts: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,7 @@ class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
 def build_token_dispatch_input(
     *,
     fused_experts_input: MoEFusedExpertsInput,
+    prefer_expert_token_counts: bool = False,
 ) -> MoETokenDispatchInput:
     return MoETokenDispatchInput(
         hidden_states=fused_experts_input.hidden_states,
@@ -94,4 +96,5 @@ def build_token_dispatch_input(
         topk_ids=fused_experts_input.topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
+        prefer_expert_token_counts=prefer_expert_token_counts,
     )

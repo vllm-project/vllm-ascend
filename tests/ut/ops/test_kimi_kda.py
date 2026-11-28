@@ -219,6 +219,7 @@ def test_mixed_forward_uses_overlapped_projection():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
+    attention.use_mega_kda_replayssm = False
     attention.local_num_heads = 2
     attention.head_dim = 3
     hidden_states = torch.randn(4, 6)
@@ -470,7 +471,7 @@ def test_kda_empty_forward_context_clears_preallocated_output():
         "vllm_ascend.ops.kimi_kda.get_forward_context",
         return_value=SimpleNamespace(attn_metadata=None),
     ):
-        attention._forward(
+        attention._kda_forward_impl(
             mixed_qkv=torch.empty(4, 18),
             g1=torch.empty(1, 4, 2, 3),
             g2=torch.empty(4, 2, 3),
@@ -552,6 +553,8 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         _run_recurrent=recurrent,
         o_norm=SimpleNamespace(forward_oot=norm_into),
     )
+    attention._kimi_c8_metadata_prelaunch = MagicMock()
+    attention._get_kda_forward_metadata = lambda: AscendKimiK3DeltaAttention._get_kda_forward_metadata(attention)
     output = torch.full((1, 8, 1, 2), torch.nan)
     with (
         patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
@@ -560,7 +563,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
-        AscendKimiK3DeltaAttention._forward(
+        AscendKimiK3DeltaAttention._kda_forward_impl(
             attention,
             values,
             torch.zeros(1, 8, 1, 2),
@@ -568,6 +571,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
             torch.zeros(1, 8, 1),
             output,
         )
+    attention._kimi_c8_metadata_prelaunch.assert_called_once_with({"kda": metadata})
     torch.testing.assert_close(output[0, :4, 0], values[:4, :2] * 0.5)
     torch.testing.assert_close(output[:, 6:], torch.zeros_like(output[:, 6:]))
     torch.testing.assert_close(state, torch.tensor([2.0 if mode == "mixed" else 1.0]))

@@ -132,9 +132,12 @@ def _fused_dcp_lse_combine_batched_kernel(
     DCP_SIZE: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    HAS_LOCAL: tl.constexpr,
 ):
-    # The caller selects BF16, scatter-head, local-output, no-return-LSE cases.
+    # The caller selects BF16, scatter-head, no-return-LSE cases.
     # Each received row therefore ends with four packed LSE values.
+    # Fused FlashMLA has no extra local contribution: current KV is already
+    # included in the received shards. Compile away all local-pointer reads.
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
     d_offsets = tl.arange(0, BLOCK_D)[None, :]
@@ -147,11 +150,13 @@ def _fused_dcp_lse_combine_batched_kernel(
 
         # Keep LSE state per row and one [BLOCK_ROWS, BLOCK_D] accumulator.
         # Stream ranks to avoid a [DCP_SIZE, BLOCK_ROWS, BLOCK_D] live buffer.
-        local_lse = tl.load(
-            local_lse_ptr + token_idx * local_lse_stride_t + head_idx * local_lse_stride_h, mask=row_mask, other=0.0
-        ).to(tl.float32)
-        local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
-        lse_max = tl.where(local_valid, local_lse, -float("inf"))
+        lse_max = tl.full((BLOCK_ROWS, 1), -float("inf"), tl.float32)
+        if HAS_LOCAL:
+            local_lse = tl.load(
+                local_lse_ptr + token_idx * local_lse_stride_t + head_idx * local_lse_stride_h, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
+            lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.static_range(DCP_SIZE):
             recv_base = (
                 rank_idx * recv_stride_rank + head_idx * recv_stride_scatter + token_idx * recv_stride_replicated
@@ -217,13 +222,14 @@ def _fused_dcp_lse_combine_batched_kernel(
             merged += partial_output * weight
             weight_sum += weight
 
-        local_weight = tl.where(local_valid, tl.exp(local_lse - safe_lse_max), 0.0)
-        local_offsets = (
-            token_idx * local_output_stride_t + head_idx * local_output_stride_h + d_offsets * local_output_stride_d
-        )
-        local_output = tl.load(local_output_ptr + local_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        merged += tl.where(local_valid, local_output, 0.0) * local_weight
-        weight_sum += local_weight
+        if HAS_LOCAL:
+            local_weight = tl.where(local_valid, tl.exp(local_lse - safe_lse_max), 0.0)
+            local_offsets = (
+                token_idx * local_output_stride_t + head_idx * local_output_stride_h + d_offsets * local_output_stride_d
+            )
+            local_output = tl.load(local_output_ptr + local_offsets, mask=d_mask, other=0.0).to(tl.float32)
+            merged += tl.where(local_valid, local_output, 0.0) * local_weight
+            weight_sum += local_weight
 
         denominator = tl.where(weight_sum > 0.0, weight_sum, 1.0)
         merged /= denominator

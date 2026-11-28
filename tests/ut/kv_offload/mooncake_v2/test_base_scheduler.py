@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -247,3 +248,27 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
+
+
+@pytest.mark.parametrize("c8", [False, True])
+@pytest.mark.parametrize("global_tail,spec_tail", [(3, 0), (0, 3), (3, 3)])
+def test_mamba_publication_uses_actual_spec_tail(c8, global_tail, spec_tail):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler._kimi_c8_enabled = c8
+    scheduler.num_speculative_tokens = global_tail
+    scheduler.group_block_size = [16]
+    scheduler.group_unique_specs = [[replace(make_mamba_spec(), num_speculative_blocks=spec_tail)]]
+    # RecoverSSM has one live state even when speculative decoding is enabled.
+    blocks = [10] + list(range(11, 11 + spec_tail))
+    assert scheduler._get_transfer_block_ids((blocks,), prompt_len=8) == ([10],)
+
+
+@pytest.mark.parametrize("mode", ["none", "align"])
+@pytest.mark.parametrize("tail,expected", [(0, [10, 11, 12, 13, 14, 15]), (1, [10, 11, 12, 13, 14]), (3, [10, 11, 12])])
+def test_c16_mamba_publication_uses_spec_reservation(mode, tail, expected):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler._kimi_c8_enabled = False
+    scheduler.num_speculative_tokens = 3
+    scheduler.group_block_size = [16]
+    scheduler.group_unique_specs = [[replace(make_mamba_spec(), mamba_cache_mode=mode, num_speculative_blocks=tail)]]
+    assert scheduler._get_transfer_block_ids(([10, 11, 12, 13, 14, 15],), prompt_len=33) == (expected,)

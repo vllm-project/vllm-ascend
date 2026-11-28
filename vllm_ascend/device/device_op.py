@@ -1222,7 +1222,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
+        # recipes custom_ops overwrites the torch_npu alias with its Hash op.
+        # Use the native dispatcher entry to preserve the A5 routing path.
+        topk_weights, topk_ids, out = torch.ops.npu.npu_moe_gating_top_k(
             x,
             k=k,
             bias=bias_opt,

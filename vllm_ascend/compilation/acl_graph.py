@@ -22,6 +22,11 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.kimi_moe_superkernel import (
+    collect_moe_superkernel_scopes,
+    optimize_moe_superkernel,
+    use_kimi_moe_superkernel,
+)
 
 from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
@@ -109,6 +114,10 @@ class ACLGraphWrapper:
 
         self.compilation_config = vllm_config.compilation_config
         self.enable_super_kernel = get_ascend_config().ascend_compilation_config.enable_super_kernel
+        self.enable_moe_superkernel = use_kimi_moe_superkernel(vllm_config, get_ascend_config())
+        # Named scopes own optimization when requested, including on drafts
+        # that must not inherit the target's whole-model optimization fallback.
+        self.enable_super_kernel = self.enable_super_kernel and not self.enable_moe_superkernel
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
@@ -207,6 +216,11 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
+                    scopes = stack.enter_context(
+                        collect_moe_superkernel_scopes(
+                            forward_context, self.enable_moe_superkernel and not _EXTRA_CTX.is_draft_model
+                        )
+                    )
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
                         with super_kernel_scope("full_model", self.enable_super_kernel):
@@ -243,6 +257,7 @@ class ACLGraphWrapper:
                         ) from exc
                     raise
 
+            optimize_moe_superkernel(aclgraph, scopes)
             if self.enable_super_kernel:
                 aclgraph.super_kernel_optimize(
                     optimize_options={

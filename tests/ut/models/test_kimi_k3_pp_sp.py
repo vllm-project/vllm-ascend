@@ -6,6 +6,7 @@ import __future__
 
 import ast
 import logging
+import runpy
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from torch.fx.experimental.proxy_tensor import make_fx
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -215,7 +217,28 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
+        "ascend_envs": SimpleNamespace(VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED=True),
+        "logger": SimpleNamespace(info=lambda *args: None, warning_once=lambda *args: None),
+        "load_attn_res_fused_ops": lambda: None,
     }
+    attn_res = runpy.run_path(str(ROOT / "vllm_ascend/ops/kimi_attn_res.py"))
+    for name in ("AttnResBackend", "AttnResQueryPlan", "resolve_attn_res_mode"):
+        namespace[name] = attn_res[name]
+
+    def fused_prepare(values, count, queries, eps):
+        assert count.dtype == torch.uint64 and count.shape == (1,)
+        return attn_res["prepare_attn_res_phase1"](values, queries, eps)
+
+    def fused_update(partial, delta, query, numerator, maximum, exp_sum, eps):
+        partial.add_(delta.float())
+        stats = attn_res["AttnResPhase1Stats"](numerator, maximum, exp_sum)
+        return attn_res["merge_attn_res_partial"](partial, query, stats, eps).to(delta.dtype)
+
+    def fused_update_norm(partial, delta, query, numerator, maximum, exp_sum, gamma, eps, norm_eps):
+        value = fused_update(partial, delta, query, numerator, maximum, exp_sum, eps).float()
+        return (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + norm_eps) * gamma).to(delta.dtype)
+
+    namespace["fused_ops"] = attn_res["AttnResFusedOps"](fused_prepare, fused_update, fused_update_norm)
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
     transport = ast.parse((ROOT / "vllm_ascend/worker/v2/pp_transport.py").read_text())
@@ -274,6 +297,8 @@ def runtime(monkeypatch):
                 "forward",
                 "make_empty_intermediate_tensors",
                 "_cache_aux_pp_layout",
+                "_prepare_attn_res_query_plan",
+                "load_weights",
             },
             "AscendKimiDecoderLayer": {"forward", "prepare_attn_residual", "forward_attn_residual", "_run_self_attn"},
             "AscendKimiMLP": {"forward"},
@@ -291,6 +316,9 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model = namespace["AscendKimiLinearModel"].__new__(namespace["AscendKimiLinearModel"])
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=block_size, hidden_size=3)
+    model.attn_res_mode = "native"
+    model.attn_res_query_plan = None
+    model.attn_res_fused_ops = None
     model.start_layer, model.end_layer = start, end
     model.use_sequence_parallel = sp
     model.dspark_aux_capture_materialized = materialized
@@ -327,7 +355,8 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
 @pytest.mark.parametrize("sp", [False, True])
 @pytest.mark.parametrize("tp,num_tokens", [(2, 8), (2, 3), (16, 8)])
 @pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5), (0, 2, 2, 5), (0, 2, 5, 5)])
-def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_tokens, cuts):
+@pytest.mark.parametrize("attn_res_mode", ["native", "fused", "two_phase", "original"])
+def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_tokens, cuts, attn_res_mode):
     block_size = 2
     namespace, context = runtime
     dtype = torch.float32
@@ -356,6 +385,9 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
             context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2)
             context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
             model = make_model(namespace, context, start, end, block_size, sp, materialized)
+            model.attn_res_mode = attn_res_mode
+            model.attn_res_fused_ops = namespace["fused_ops"] if attn_res_mode == "fused" else None
+            model.attn_res_query_plan = None
             if intermediate is not None:
                 model._cache_aux_pp_layout()
                 capacity = max(12, num_tokens)
@@ -395,6 +427,129 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         assert len(aux) == len(expected_aux)
         for actual, reference_aux in zip(aux, expected_aux):
             torch.testing.assert_close(actual, reference_aux)
+
+
+@pytest.mark.parametrize("mode", ["two_phase", "original"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("block_size", [1, 2, 3])
+@pytest.mark.parametrize("tokens", [0, 4])
+def test_bf16_model_backends_match_native_across_forwards(runtime, mode, materialized, block_size, tokens):
+    namespace, context = runtime
+    context.tp = 1
+    reference = make_model(namespace, context, 0, 5, block_size, False, materialized)
+    candidate = make_model(namespace, context, 0, 5, block_size, False, materialized)
+    candidate.attn_res_mode = mode
+    candidate.attn_res_query_plan = None
+    positions = torch.arange(tokens)
+    for offset in (0.0, 1.0):
+        inputs = (torch.arange(tokens * 3).reshape(tokens, 3) / 7 + offset).bfloat16()
+        expected, expected_aux = reference(None, positions, None, inputs_embeds=inputs)
+        actual, actual_aux = candidate(None, positions, None, inputs_embeds=inputs)
+        torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.016)
+        assert len(actual_aux) == len(expected_aux)
+        for actual_state, expected_state in zip(actual_aux, expected_aux):
+            torch.testing.assert_close(actual_state, expected_state, atol=0.02, rtol=0.016)
+
+
+def test_weight_reload_updates_queries_in_captured_graph(runtime, monkeypatch):
+    namespace, context = runtime
+    context.tp = 1
+    # Isolate upstream checkpoint I/O while exercising the production reload hook.
+    monkeypatch.setattr(BaseModel, "load_weights", lambda self, weights: set(), raising=False)
+    namespace["load_eplb_expert_weights"] = lambda model, weights, count: weights
+    model = make_model(namespace, context, 1, 2, 1, False, False)
+    model.n_redundant_experts = 0
+    model.attn_res_mode = "two_phase"
+    model.attn_res_query_plan = None
+    layer = model.layers[1]
+    projection = layer.self_attention_res_proj
+    norm = layer.self_attention_res_norm
+    projection.weight.copy_(torch.tensor([[3.0, -2.0, 1.0]]))
+    model.load_weights(iter(()))
+    plan = model.attn_res_query_plan
+    queries = plan.queries
+    pointers = {key: query.data_ptr() for key, query in queries.items()}
+
+    def forward(raw, bank):
+        op = namespace["AttnResBackend"]("two_phase", model.attn_res_query_plan)
+        return op(raw, None, bank, projection.weight, norm.weight, norm.variance_epsilon, 1)[0]
+
+    raw = torch.tensor([[-2.0, 1.0, 0.5]])
+    bank = torch.tensor([[[3.0, -1.0, 2.0], [0.0, 0.0, 0.0]]])
+    # make_fx fixes tensor references at capture time, unlike Dynamo's
+    # guard-driven recompilation that could hide replacement of a query tensor.
+    captured = make_fx(forward)(raw, bank)
+    before = captured(raw, bank).clone()
+    for _ in range(2):
+        projection.weight.neg_()
+        model.load_weights(iter(()))
+        assert model.attn_res_query_plan is plan
+        for key, query in queries.items():
+            assert plan.queries[key] is query
+            assert query.data_ptr() == pointers[key]
+        expected = attn_res_fwd_cpu(raw, None, bank, projection.weight, norm.weight, norm.variance_epsilon, 1)[0]
+        assert not torch.allclose(before, expected)
+        torch.testing.assert_close(captured(raw, bank), expected)
+        torch.testing.assert_close(forward(raw, bank), expected)
+        before = expected
+
+    # Mirror level-2 sleep's named-buffer save and restore contract.
+    buffers = dict(model.named_buffers())
+    assert all(any(buffer is query for buffer in buffers.values()) for query in queries.values())
+    assert not any(name.startswith("attn_res_query_plan.") for name in model.state_dict())
+    saved = {name: buffer.clone() for name, buffer in buffers.items()}
+    for query in queries.values():
+        query.fill_(float("nan"))
+    for name, buffer in model.named_buffers():
+        buffer.copy_(saved[name])
+    torch.testing.assert_close(captured(raw, bank), before)
+
+
+@pytest.mark.parametrize(
+    "requested,enabled,available,expected",
+    [
+        (None, True, False, "two_phase"),
+        (None, True, True, "fused"),
+        (None, False, True, "two_phase"),
+        ("two_phase", True, True, "two_phase"),
+        ("original", True, True, "original"),
+        ("native", True, True, "native"),
+    ],
+)
+def test_default_backend_selection_at_model_initialization(runtime, requested, enabled, available, expected):
+    namespace, context = runtime
+    context.tp = 1
+    cfg = config(tp=1, pp=1)
+    cfg.model_config.hf_text_config = SimpleNamespace(
+        vocab_size=16,
+        hidden_size=3,
+        num_hidden_layers=0,
+        num_attention_heads=1,
+        attn_res_block_size=2,
+        rms_norm_eps=1e-5,
+    )
+    cfg.speculative_config = None
+    if requested is not None:
+        cfg.model_config.hf_text_config.attn_res_mode = requested
+    namespace["ascend_envs"].VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED = enabled
+    loads = []
+
+    def load_ops():
+        loads.append(True)
+        return namespace["fused_ops"] if available else None
+
+    namespace.update(
+        load_attn_res_fused_ops=load_ops,
+        VocabParallelEmbedding=lambda *args, **kwargs: nn.Identity(),
+        PPMissingLayer=nn.Identity,
+        RMSNorm=lambda *args, **kwargs: nn.Identity(),
+        ReplicatedLinear=lambda *args, **kwargs: nn.Identity(),
+        make_layers=lambda *args, **kwargs: (0, 0, nn.ModuleList()),
+    )
+    model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
+    assert model.attn_res_mode == expected
+    assert bool(loads) == (requested in (None, "fused") and enabled)
+    assert (model.attn_res_fused_ops is not None) == (expected == "fused")
 
 
 @pytest.mark.parametrize("stage", range(4))
