@@ -93,7 +93,7 @@ def _sparse_kv_ops():
     if missing_ops:
         raise RuntimeError(
             "Sparse KV offload requires _C_ascend sparse KV ops, "
-            f"missing={missing_ops}. Rebuild vllm_ascend_C with Atlas A3 support."
+            f"missing={missing_ops}. Rebuild vllm_ascend_C with sparse KV offload support."
         )
     _SPARSE_KV_OFFLOAD_OPS = torch.ops._C_ascend
     return _SPARSE_KV_OFFLOAD_OPS
@@ -189,7 +189,11 @@ def empty_aligned_int8_cpu_tensors(
     """
     chunk_nums = [cdiv(size, alignment) for size in sizes]
     total_chunk_num = 1 + sum(chunk_nums)
-    raw_tensor = offload.empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
+    size_bytes = total_chunk_num * alignment
+    if get_ascend_device_type() == AscendDeviceType.A2:
+        raw_tensor = get_sparse_kv_offload_manager().allocate_shared_bytes(size_bytes)
+    else:
+        raw_tensor = offload.empty([size_bytes], dtype=torch.int8, pin_memory=True)
     base_addr = raw_tensor.data_ptr()
     if base_addr % alignment:
         base_addr = (base_addr // alignment + 1) * alignment
@@ -540,10 +544,24 @@ class SparseKVOffloadManager:
             sparse_kv_offload_config.dram_size_per_dp_GB,
             kv_cache_config.num_blocks,
         )
+        self.shared_host_pool = None
+        if self.use_fused_copy_sfa and get_ascend_device_type() == AscendDeviceType.A2:
+            from vllm_ascend.models.deepseek_v41.engram.npu import SharedUvaBuffer
+
+            device = torch.device("npu", torch_npu.npu.current_device())
+            self.shared_host_pool = SharedUvaBuffer((1, actual_pool_size_bytes), torch.int8, device, self.tp_group)
+            self.shared_host_cursor = 0
+            ptrs = self.shared_host_pool.ptrs
+            if ptrs is None:
+                raise RuntimeError("Sparse KV offload shared host pool has no device mapping")
+            storage = torch_npu._C._construct_storage_from_data_pointer(ptrs.item(), device, actual_pool_size_bytes)
+            self.shared_device_view = torch.empty(0, dtype=torch.int8, device=device).set_(
+                storage, 0, (actual_pool_size_bytes,), (1,)
+            )
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
         config.reserve_size = actual_pool_size_bytes
-        config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
+        config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 and self.shared_host_pool is None else 0
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
@@ -551,6 +569,18 @@ class SparseKVOffloadManager:
         config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
+
+    def _shared_host_tensor(self) -> torch.Tensor:
+        pool = self.shared_host_pool
+        if pool is None or pool.tensor is None:
+            raise RuntimeError("Sparse KV offload shared host pool is unavailable")
+        return pool.tensor
+
+    def allocate_shared_bytes(self, size: int) -> torch.Tensor:
+        # Only TP0 assigns offsets. Every rank maps the same underlying bytes.
+        raw = self._shared_host_tensor().view(-1).narrow(0, self.shared_host_cursor, size)
+        self.shared_host_cursor += size
+        return raw
 
     def _warmup_external_lru_planner_threads(self) -> int:
         if not (self.use_fused_overlap and self.tp_rank == 0):
@@ -819,11 +849,18 @@ class SparseKVOffloadManager:
                 )
             shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
             shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
+        host_base = self._shared_host_tensor().data_ptr() if self.shared_host_pool is not None else None
+        if host_base is not None and self.tp_rank == 0:
+            gvas_k_tensor -= host_base
+            gvas_v_tensor -= host_base
         self.tp_group.broadcast(gvas_k_tensor, src=0)
         self.tp_group.broadcast(gvas_v_tensor, src=0)
         self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
         self.tp_group.broadcast(shape_k_tensor, src=0)
         self.tp_group.broadcast(shape_v_tensor, src=0)
+        if host_base is not None:
+            gvas_k_tensor += host_base
+            gvas_v_tensor += host_base
         for layer_id in range(self.num_layers):
             self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
             self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
@@ -848,11 +885,20 @@ class SparseKVOffloadManager:
                 cpu_k_shape,
                 cpu_v_shape,
             )
+        self.copy_sfa_k_views = self.k_caches_cpu
+        self.copy_sfa_v_views = self.v_caches_cpu
+        if self.shared_host_pool is not None:
+            self.copy_sfa_k_views = [self._device_view_of_host_kv(k) for k in self.k_caches_cpu]
+            self.copy_sfa_v_views = [self._device_view_of_host_kv(v) for v in self.v_caches_cpu]
         if self.use_fused_copy_sfa:
             self._bind_copy_sfa_bases()
 
         if self.use_fused_overlap:
             self._init_fused_overlap_planner()
+
+    def _device_view_of_host_kv(self, tensor: torch.Tensor) -> torch.Tensor:
+        offset = tensor.data_ptr() - self._shared_host_tensor().data_ptr()
+        return self.shared_device_view.narrow(0, offset, tensor.nbytes).view(tensor.dtype).view(tensor.shape)
 
     def _init_fused_overlap_planner(self) -> None:
         """Allocate the CPU LRU workspace used by the overlap operator."""
@@ -1021,7 +1067,7 @@ class SparseKVOffloadManager:
         for layer_id in range(len(self.topk_buffers_k)):
             self.copy_sfa_host_bases.append(
                 torch.tensor(
-                    [self.k_caches_cpu[layer_id].data_ptr(), self.v_caches_cpu[layer_id].data_ptr()],
+                    [self.copy_sfa_k_views[layer_id].data_ptr(), self.copy_sfa_v_views[layer_id].data_ptr()],
                     dtype=torch.int64,
                     device=device,
                 ).view(2, 1)
@@ -1481,8 +1527,11 @@ def init_sparse_kv_offload_manager(
 ):
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
-        if get_ascend_device_type() != AscendDeviceType.A3:
-            raise RuntimeError("Sparse KV offload is only support on A3")
+        device_type = get_ascend_device_type()
+        if device_type != AscendDeviceType.A3 and not (
+            device_type == AscendDeviceType.A2 and sparse_kv_offload_config.use_fused_copy_sfa
+        ):
+            raise RuntimeError("Sparse KV offload requires A3 or fused Copy-SFA on A2")
         _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,
             kv_cache_config,

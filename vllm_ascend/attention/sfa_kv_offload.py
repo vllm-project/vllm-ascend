@@ -608,7 +608,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_id = manager._get_offload_layer_id(layer_name)
         if manager.tp_rank != 0:
             return None, None
-        return manager.k_caches_cpu[layer_id], manager.v_caches_cpu[layer_id]
+        return manager.copy_sfa_k_views[layer_id], manager.copy_sfa_v_views[layer_id]
 
     def _offload_layer_name(self) -> str:
         layer_name = self.layer_name or self._current_layer_name
@@ -766,7 +766,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_id = manager._get_offload_layer_id(layer_name)
         device = manager.topk_buffers_k[layer_id].device
         self.copy_sfa_host_bases = torch.tensor(
-            [manager.k_caches_cpu[layer_id].data_ptr(), manager.v_caches_cpu[layer_id].data_ptr()],
+            [manager.copy_sfa_k_views[layer_id].data_ptr(), manager.copy_sfa_v_views[layer_id].data_ptr()],
             dtype=torch.int64,
             device=device,
         ).view(2, 1)
@@ -795,8 +795,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_id = manager._get_offload_layer_id(layer_name)
         hbm_k = manager.topk_buffers_k[layer_id].view(-1, 128, 1, self.kv_lora_rank)
         hbm_v = manager.topk_buffers_v[layer_id].view(-1, 128, 1, self.qk_rope_head_dim)
-        host_k = manager.k_caches_cpu[layer_id].view(-1, 128, self.kv_lora_rank)
-        host_v = manager.v_caches_cpu[layer_id].view(-1, 128, self.qk_rope_head_dim)
+        host_k = manager.copy_sfa_k_views[layer_id].view(-1, 128, self.kv_lora_rank)
+        host_v = manager.copy_sfa_v_views[layer_id].view(-1, 128, self.qk_rope_head_dim)
         if reuse_indices:
             # The proposer compacts the complete step-0 LIM result alongside
             # the shared logical TopK rows. All selected sources are resident

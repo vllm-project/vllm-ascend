@@ -64,7 +64,7 @@ Other sparse-attention models have not been validated.
 
 ### Decode Nodes
 
-There is no extra work to do on decode nodes.
+On Atlas A2, all Decode workers in a TP group must share the same POSIX shared memory namespace. Size the node's `/dev/shm` to hold the planned Host KV pools for all Decode DP instances on that node.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
@@ -125,6 +125,7 @@ Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... b
 Requirements and limitations:
 
 - Sparse Decode Offload is currently not supported on 950PR&950DT Products. We are actively working on it to support it in the near future.
+- On Atlas A2, use the default fused Copy-SFA path (`use_fused_overlap=false`).
 - Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
 - The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
   not supported. INT8 indexer KV is supported separately through
