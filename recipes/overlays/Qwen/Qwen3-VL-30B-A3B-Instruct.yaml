@@ -1,0 +1,96 @@
+# Ascend overlay for Qwen/Qwen3-VL-30B-A3B-Instruct.
+# Extends the upstream recipe with the verified Atlas 800 A3 BF16 variant.
+variants:
+  ascend_bf16:
+    model_id: Qwen/Qwen3-VL-30B-A3B-Instruct
+    label: BF16 (Ascend A3)
+    precision: bf16
+    vram_minimum_gb: 72
+    description: Full precision BF16 checkpoint for one Atlas 800 A3 node (16x Ascend 910C, 64 GB each), using TP2 + expert
+      parallelism.
+    supported_hardware:
+      - ascend_910c
+    tp: 2
+    min_vllm_version: 0.23.0
+    extra_args:
+      - --data-parallel-size
+      - '1'
+      - --enable-expert-parallel
+      - --seed
+      - '1024'
+      - --max-num-seqs
+      - '32'
+      - --max-model-len
+      - '32768'
+      - --max-num-batched-tokens
+      - '16384'
+      - --gpu-memory-utilization
+      - '0.9'
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - '0'
+      - --limit-mm-per-prompt
+      - '{"image":1,"video":0}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
+      - --additional-config
+      - '{"enable_fused_mc2":1}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+meta:
+  hardware:
+    ascend_910c: verified
+strategy_hardware:
+  single_node_tep:
+    ascend_910c: unsupported
+  single_node_dep:
+    ascend_910c: unsupported
+  multi_node_tp:
+    ascend_910c: unsupported
+  multi_node_tp_pp:
+    ascend_910c: unsupported
+  multi_node_dep:
+    ascend_910c: unsupported
+  multi_node_tep:
+    ascend_910c: unsupported
+hardware_opt_in_features:
+  ascend_910c:
+    - encoder_parallel
+guide_sections:
+  ascend: |
+    ## Huawei Ascend 910C / Atlas 800 A3
+
+    Verified on a single Atlas 800 A3 node (16x Ascend 910C, 64 GB each) with
+    vLLM Ascend v0.23.0 from `quay.io/ascend/vllm-ascend:v0.23.0-a3`.
+
+    Use the image-only command rendered above as the baseline. The builder and
+    Docker tab generate the validated TP2 + expert-parallel command, environment
+    settings, and pinned image from this overlay.
+
+    Video serving raises the context limit and lowers concurrency to leave HBM
+    headroom. Starting from the rendered image-only command, apply this delta:
+
+    - Set `--max-num-seqs 8`.
+    - Set `--max-model-len 128000`.
+    - Set `--max-num-batched-tokens 4096`.
+    - Set `--limit-mm-per-prompt.video 1`.
+    - Add `--allowed-local-media-path /media` and mount the video directory at
+      `/media`.
+
+    Notes:
+
+    - `enable_fused_mc2` is A3-specific; keep `HCCL_BUFFSIZE=1024` and
+      `--mm-processor-cache-gb 0` for these validated configurations.
+    - Image-only serving disables video inputs to reserve HBM for visual tokens
+      and KV cache.
+    - AISBench `mmmu_val` with `acc,none` in generation mode scored **66.22%**
+      overall on the full 900-question set (the tutorial reference `0.58` is
+      58%).
+      AISBench passes images as local `file://` paths, so add
+      `--allowed-local-media-path <MMMU_images directory>` for that run.
