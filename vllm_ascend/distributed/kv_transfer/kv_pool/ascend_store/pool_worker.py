@@ -435,6 +435,18 @@ class BaseKVPoolWorker(ABC):
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
 
+    def _start_and_wait_for_transfer_threads(self) -> None:
+        try:
+            for thread in (self.kv_send_thread, self.kv_recv_thread):
+                if thread is not None:
+                    thread.start()
+                    thread.ready_event.wait()
+                    thread.raise_if_failed()
+        except BaseException:
+            self._stop_transfer_threads()
+            raise
+        self._transfer_threads_started = True
+
     def _stop_transfer_threads(self) -> None:
         threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
         for thread in threads:
@@ -1532,16 +1544,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 record_operation=self._record_kv_connector_operation,
                 host_memory_group_ids=host_memory_group_ids,
             )
-        try:
-            for thread in (self.kv_send_thread, self.kv_recv_thread):
-                if thread is not None:
-                    thread.start()
-                    thread.ready_event.wait()
-                    thread.raise_if_failed()
-        except BaseException:
-            self._stop_transfer_threads()
-            raise
-        self._transfer_threads_started = True
+        self._start_and_wait_for_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0

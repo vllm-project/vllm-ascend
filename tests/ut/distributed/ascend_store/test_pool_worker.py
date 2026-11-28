@@ -1768,6 +1768,17 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_receive_startup_failure_releases_sender_and_allows_retry(self):
         worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
         worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        self._check_receive_startup_failure_and_retry(worker)
+
+    def test_layerwise_receive_startup_failure_releases_sender_and_allows_retry(self):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "memcache"}, use_layerwise=True)
+        cache = torch.empty((4, 16, 2, 8), dtype=torch.float16)
+        with patch.object(worker, "_start_kv_transfer_threads"):
+            worker.register_kv_caches({"layer.0": cache})
+        with patch("torch.npu.Event"):
+            self._check_receive_startup_failure_and_retry(worker)
+
+    def _check_receive_startup_failure_and_retry(self, worker):
         error = RuntimeError("cannot bind receiver to device")
         worker.m_store.set_device.side_effect = [None, error]
         errors = []
