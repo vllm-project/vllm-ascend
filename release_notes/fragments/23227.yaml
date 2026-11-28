@@ -1,0 +1,7 @@
+pr: 23227
+entries:
+  - category: performance
+    text: >-
+      Qwen3.5-family inference reuses rotary position lookups across layers
+      within each model invocation, reducing repeated lookup work without
+      configuration changes.

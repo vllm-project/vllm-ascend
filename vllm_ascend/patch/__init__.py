@@ -1530,3 +1530,15 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** File: worker/patch_qwen3_5.py -- forward-local MRoPE lookup reuse **
+# Targets: Qwen3_5Model.forward and Qwen3_5DecoderLayer.forward.
+# Why: repeated advanced indexing of identical positions launches IndexCheck,
+# Index and position materialization kernels once per full-attention layer.
+# How: a model-forward-local dictionary keyed by RoPE module identity supplies
+# a shared cos/sin tensor explicitly through decoder and attention arguments.
+# Different RoPE modules do not share results. Each model invocation creates a
+# new dictionary; MTP keeps its existing independent lookup per invocation.
+# The copied forward paths retain upstream PP, SP and auxiliary hidden states.
+# Related PR: https://github.com/vllm-project/vllm-ascend/pull/23227
+# Future Plan: remove once upstream accepts forward-local rotary inputs.
