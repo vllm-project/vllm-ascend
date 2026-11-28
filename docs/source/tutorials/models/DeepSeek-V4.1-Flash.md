@@ -2034,7 +2034,8 @@ Select the tab for the target hardware.
     Prefill DP4/PCP4/TP1 with EPLB, Decode DP16/TP1 with a 432-token budget and
     72 sequences, and `weight_nz_mode: 2` on both roles. Both containers must
     include `fastokens>=0.3.5`.
-    `MooncakeConnectorV2` uses its default non-layerwise pull mode; keep the
+    Enable layerwise P-to-D KV transfer by setting `use_layerwise: true` in the
+    `MooncakeConnectorV2` child on both Prefill and Decode nodes. Keep the
     `AscendStoreConnector` child for pool access. Check connector port allocations
     as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
@@ -2241,7 +2242,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_producer",
-                        "kv_port":"30000"
+                        "kv_port":"30000",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2339,7 +2343,10 @@ Select the tab for the target hardware.
                     {
                         "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_consumer",
-                        "kv_port":"30100"
+                        "kv_port":"30100",
+                        "kv_connector_extra_config": {
+                            "use_layerwise": true
+                        }
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
