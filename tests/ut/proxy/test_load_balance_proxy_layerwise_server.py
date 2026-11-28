@@ -85,7 +85,7 @@ class _FakeProxyState:
         pass
 
 
-async def _run_proxy(chunks_per_attempt: list[list[bytes]]) -> list[bytes]:
+async def _run_proxy(chunks_per_attempt: list[list[bytes]], stream: bool = True) -> list[bytes]:
     """Drive the layerwise proxy handler and return the forwarded chunks.
 
     ``chunks_per_attempt`` holds the chunks each decoder attempt emits; the
@@ -112,7 +112,7 @@ async def _run_proxy(chunks_per_attempt: list[list[bytes]]) -> list[bytes]:
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 20,
-            "stream": True,
+            "stream": stream,
         }
     )
 
@@ -144,7 +144,7 @@ def test_frame_split_across_chunks_is_reassembled():
 
     body = b"".join(chunks)
     assert b"retried" in body
-    assert b"recomputed" not in body
+    assert body == _frame("retried") + DONE
 
 
 def test_coalesced_frames_are_reassembled():
@@ -160,7 +160,7 @@ def test_coalesced_frames_are_reassembled():
 
     body = b"".join(chunks)
     assert b"retried" in body
-    assert b"recomputed" not in body
+    assert body == _frame("retried") + DONE
 
 
 def test_plain_stream_is_forwarded_unchanged():
@@ -168,4 +168,30 @@ def test_plain_stream_is_forwarded_unchanged():
     chunks = asyncio.run(_run_proxy([[_frame("plain-token"), DONE]]))
 
     body = b"".join(chunks)
-    assert b"plain-token" in body
+    assert body == _frame("plain-token") + DONE
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_multiple_frames_forwarded_exactly_once(split):
+    wire = _frame("one") + _frame("two") + DONE
+    chunks = [bytes([b]) for b in wire] if split else [wire]
+    assert b"".join(asyncio.run(_run_proxy([chunks]))) == wire
+
+
+def test_retry_discards_old_attempt_tail():
+    first = _frame("first")
+    wire = first + _frame("", "recomputed") + _frame("discard") + DONE
+    chunks = asyncio.run(_run_proxy([[wire], [_frame("retried") + DONE]]))
+    assert b"".join(chunks) == first + _frame("retried") + DONE
+
+
+def test_json_response_retry_at_eof():
+    def reply(content, stop=None):
+        return json.dumps(
+            {"choices": [{"message": {"content": content}, "stop_reason": stop}], "usage": {"completion_tokens": 1}}
+        ).encode()
+
+    raw = reply("first", "recomputed")
+    chunks = asyncio.run(_run_proxy([[raw[:9], raw[9:]], [reply("second")]], stream=False))
+    result = json.loads(b"".join(chunks))
+    assert result["choices"][0]["message"]["content"] == "firstsecond"

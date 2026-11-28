@@ -94,9 +94,12 @@ import json
 import os
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
+from contextlib import aclosing, asynccontextmanager
+from typing import NamedTuple
 
 import httpx
+import regex as re
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
@@ -105,12 +108,102 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
 )
 
-try:
-    # Imported as a package module (tests).
-    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
-except ImportError:
-    # Run as a standalone script: the script's own directory is on sys.path.
-    from sse_frame_parser import SSEFrameParser
+SSE_FRAME_SEPARATOR = re.compile(rb"\r?\n\r?\n")
+
+
+class SSEFrame(NamedTuple):
+    payload: dict | None
+    is_sse: bool
+    raw: bytes
+
+
+class SSEFrameParser:
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._is_sse: bool | None = None
+        self._done = False
+
+    @property
+    def pending(self) -> bytes:
+        return bytes(self._buffer)
+
+    def feed(self, chunk: bytes) -> list[SSEFrame]:
+        if self._done:
+            return []
+        self._buffer.extend(chunk)
+        if self._is_sse is None:
+            prefix = self._buffer.lstrip()
+            if not prefix:
+                return []
+            # JSON responses start with an object/array. All other prefixes
+            # may be partial SSE field names (data, event, id, or a comment).
+            self._is_sse = prefix[:1] not in (b"{", b"[")
+        if not self._is_sse:
+            return []
+
+        frames = []
+        start = 0
+        while match := SSE_FRAME_SEPARATOR.search(self._buffer, start):
+            raw = bytes(self._buffer[start : match.end()])
+            start = match.end()
+            frame = self._decode_frame(raw)
+            if frame is not None:
+                frames.append(frame)
+            if self._done:
+                self._buffer.clear()
+                return frames
+        # Compact once per network chunk, rather than copying the remaining
+        # buffer for every frame in a coalesced read.
+        if start:
+            del self._buffer[:start]
+        return frames
+
+    def flush(self) -> SSEFrame | None:
+        raw = bytes(self._buffer)
+        self._buffer.clear()
+        if not raw.strip():
+            return None
+        if not self._is_sse:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("Decoder response must be a JSON object")
+            return SSEFrame(payload, False, raw)
+        # Preserve the existing tolerance for a valid final event without a
+        # blank line, but never expose a partial JSON event to the client.
+        return self._decode_frame(raw.rstrip(b"\r\n") + b"\n\n")
+
+    def _decode_frame(self, raw: bytes) -> SSEFrame | None:
+        data = []
+        for line in raw.splitlines():
+            if line.startswith(b"data:"):
+                value = line[5:]
+                data.append(value[1:] if value.startswith(b" ") else value)
+        if not data:
+            return SSEFrame(None, True, raw)
+        value = b"\n".join(data).strip()
+        if value == b"[DONE]":
+            self._done = True
+            return SSEFrame(None, True, raw)
+        try:
+            payload = json.loads(value)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return SSEFrame(payload, True, raw)
+
+
+async def iter_response_frames(source: AsyncGenerator[bytes, None]) -> AsyncGenerator[SSEFrame, None]:
+    """Yield complete events, and flush non-streaming JSON at clean EOF only."""
+    parser = SSEFrameParser()
+    async with aclosing(source):
+        async for chunk in source:
+            for frame in parser.feed(chunk):
+                yield frame
+        frame = parser.flush()
+        if frame is not None:
+            yield frame
+
 
 logger = init_logger(__name__)
 
@@ -543,37 +636,25 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
-            frame_parser = SSEFrameParser()
-            # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
                     retry = False
-                    # Each decoder attempt emits a self-contained stream, so the
-                    # frame buffer must be reset at every attempt boundary.
-                    frame_parser = SSEFrameParser()
-                    async for chunk in stream_service_response_with_retry(
+                    gen = stream_service_response_with_retry(
                         decoder.client,
                         api,
                         req_data,
                         request_id=request_id,
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
-                    ):
-                        # The decode backend speaks SSE, but the network does
-                        # not respect frame boundaries: one frame can arrive
-                        # split across two chunks, and two frames can be
-                        # coalesced into one chunk. Reassemble frames before
-                        # decoding them, so no frame is dropped.
-                        frames = frame_parser.feed(chunk)
-                        if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
-                                yield chunk
-                            continue
-                        for frame in frames:
+                    )
+                    async with aclosing(iter_response_frames(gen)) as frames:
+                        async for frame in frames:
+                            if frame.payload is None:
+                                if stream_flag:
+                                    yield frame.raw
+                                continue
                             chunk_json = frame.payload
+                            chunk = frame.raw
                             choices = chunk_json.get("choices", [])
                             if not choices:
                                 yield chunk
@@ -590,7 +671,7 @@ async def _handle_completions(api: str, request: Request):
                             completion_tokens = (
                                 (completion_tokens + 1)
                                 if stream_flag
-                                else (completion_tokens + usage.get("completion_tokens"))
+                                else (completion_tokens + usage.get("completion_tokens", 0))
                             )
                             if stop_reason == "recomputed":
                                 retry = True
@@ -629,8 +710,6 @@ async def _handle_completions(api: str, request: Request):
                                     choice["text"] = generated_token
                                 chunk = json.dumps(chunk_json).encode("utf-8")
                             yield chunk
-                        if retry:
-                            break
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
