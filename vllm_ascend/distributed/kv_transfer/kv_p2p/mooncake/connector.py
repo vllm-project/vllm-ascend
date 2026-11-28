@@ -266,6 +266,12 @@ class MooncakePullConnector(MooncakeBaseConnector):
             return _MemFabricPullWorker(vllm_config, str(self.engine_id), kv_cache_config)
         return MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
+    def shutdown(self) -> None:
+        if self.connector_worker is not None:
+            assert isinstance(self.connector_worker, MooncakePullConnectorWorker)
+            self.connector_worker.shutdown()
+        super().shutdown()
+
 
 class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""

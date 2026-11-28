@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Health probes must complete locally without contacting a producer."""
 
-import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,10 +17,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakePullConnectorScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
-    MooncakePullConnectorWorker,
-    MooncakePullRecvingThread,
-)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullConnectorWorker
+
+from .test_pull_worker import make_thread
 
 
 def params(virtual=False):
@@ -110,9 +108,7 @@ def test_virtual_finish_never_acknowledges_producer(allocated):
 def test_mixed_worker_batch_and_once_only_completion():
     worker = MooncakePullConnectorWorker.__new__(MooncakePullConnectorWorker)
     worker.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
-    receiver = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
-    receiver.finished_requests = queue.SimpleQueue()
-    receiver.request_queue = queue.SimpleQueue()
+    receiver = make_thread()
     worker._recving_thread = receiver
     meta = MooncakeConnectorMetadata()
     for name, virtual in [("virtual", True), ("normal", False)]:
