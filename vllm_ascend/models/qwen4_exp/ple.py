@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import copy
 from functools import wraps
 from typing import Any, Literal
 
@@ -325,7 +326,32 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
-class AscendPCPPLEMetadataBuilder(PCPRecurrentMetadataBuilderMixin, PleShortConvAttentionMetadataBuilder):
+class AscendPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        if vllm_config.cache_config.use_replayssm:
+            # PLE keeps speculative convolution history inside its one state
+            # page. It has neither Mamba2 replay rings nor GDN replay records.
+            # Isolate metadata flags without changing the target/scheduler's
+            # cache geometry or speculative acceptance buffers.
+            vllm_config = copy(vllm_config)
+            vllm_config.cache_config = copy(vllm_config.cache_config)
+            vllm_config.cache_config.use_replayssm = False
+            vllm_config.cache_config.use_kda_recoverssm = False
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+
+class AscendPLEBackend(PleShortConvAttentionBackend):
+    @staticmethod
+    def get_builder_cls() -> type[AscendPLEMetadataBuilder]:
+        return AscendPLEMetadataBuilder
+
+
+class AscendPLELayer(Qwen4ExpPLELayer):
+    def get_attn_backend(self) -> type[AscendPLEBackend]:
+        return AscendPLEBackend
+
+
+class AscendPCPPLEMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendPLEMetadataBuilder):
     pass
 
 
@@ -339,7 +365,7 @@ class AscendPCPPLEBackend(PleShortConvAttentionBackend):
         return AscendPCPPLEMetadataBuilder
 
 
-class AscendPCPPLELayer(Qwen4ExpPLELayer):
+class AscendPCPPLELayer(AscendPLELayer):
     def get_attn_backend(self) -> type[AscendPCPPLEBackend]:
         return AscendPCPPLEBackend
 

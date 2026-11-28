@@ -45,6 +45,7 @@ from vllm_ascend.models.qwen_gdn_recoverssm import (
     gdn_mamba_state_shape_from_config,
 )
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.ops.gdn_recoverssm_backend import initialize_gdn_recoverssm_backend
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -418,6 +419,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
         self.use_gdn_recoverssm = _uses_gdn_recoverssm(self.vllm_config)
+        initialize_gdn_recoverssm_backend(self)
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
 

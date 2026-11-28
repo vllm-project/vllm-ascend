@@ -63,6 +63,7 @@ def test_build_forces_active_decodes_onto_recoverssm_path(monkeypatch):
     builder.use_spec_decode = True
     builder._capturing = False
     builder._ones = torch.ones(3, dtype=torch.int32)
+    builder._checkpoint_indices = torch.empty_like(builder._ones)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
     builder.kv_cache_spec = SimpleNamespace(block_size=16)
     builder._get_context = Mock(return_value=object())
@@ -165,6 +166,9 @@ def test_commit_uses_gdn_context_and_returns_align_postprocess_metadata():
 
 
 def test_context_factory_uses_gdn_pages_without_global_kda_patch(monkeypatch):
+    from vllm_ascend import ascend_config
+
+    monkeypatch.setattr(ascend_config, "get_ascend_config", lambda: SimpleNamespace(gdn_recoverssm_backend="triton"))
     builder = AscendGDNRecoverSSMMetadataBuilder.__new__(AscendGDNRecoverSSMMetadataBuilder)
     builder._context = None
     builder.layer_names = ["gdn.1", "gdn.2"]
@@ -178,4 +182,4 @@ def test_context_factory_uses_gdn_pages_without_global_kda_patch(monkeypatch):
     monkeypatch.setattr(metadata_module.GDNRecoverSSMCommitContext, "create", create)
     assert builder._get_context() is create.return_value
     assert builder._get_context() is create.return_value
-    create.assert_called_once_with(layers, spec_query_len=5, max_num_reqs=12)
+    create.assert_called_once_with(layers, spec_query_len=5, max_num_reqs=12, backend="triton", native_root=None)

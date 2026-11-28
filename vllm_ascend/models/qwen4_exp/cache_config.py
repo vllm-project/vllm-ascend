@@ -124,7 +124,7 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
     if layer_name.endswith(".attn") and isinstance(spec, FullAttentionSpec):
         return QSA_MAIN
     if isinstance(spec, MambaSpec):
-        if len(spec.shapes) == 2:
+        if len(spec.shapes) in (2, 3):
             return GDN
         if len(spec.shapes) == 1:
             return PLE
@@ -240,6 +240,7 @@ def build_qwen4_kv_cache_layout(
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
     max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
     conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
+    replay_bytes = max((_state_bytes(spec, 2) if len(spec.shapes) == 3 else 0) for spec in gdn_specs)
     for layer_name, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
         kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
@@ -284,12 +285,16 @@ def build_qwen4_kv_cache_layout(
             for size in (spec.head_size, spec.head_size_v)
         )
     )
-    state_stride = round_up(max(conv_bytes + max_ssm_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
+    state_stride = round_up(
+        max(conv_bytes + max_ssm_bytes + replay_bytes, *(k + v for k, v in main_pages)), subpage_alignment
+    )
     regions = [
         SlabRegion("r0", 0, state_stride, num_blocks),
         SlabRegion("r1", 0, conv_bytes, num_blocks, state_stride),
         SlabRegion("r2", conv_bytes, max_ssm_bytes, num_blocks, state_stride),
     ]
+    if replay_bytes:
+        regions.append(SlabRegion("r3", conv_bytes + max_ssm_bytes, replay_bytes, num_blocks, state_stride))
     cursor = state_stride * num_blocks
     for name, page_size in {
         "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
@@ -338,6 +343,9 @@ def build_qwen4_kv_cache_layout(
 
     assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
     assert layout.region("r2").offset + max_ssm_bytes <= state_stride
+    if replay_bytes:
+        assert layout.region("r2").offset + max_ssm_bytes <= layout.region("r3").offset
+        assert layout.region("r3").offset + replay_bytes <= state_stride
     assert layout.region("r4").offset >= state_stride * num_blocks
     assert layout.region("r5").offset >= layout.region("r4").end
     for region in layout.regions:
@@ -464,7 +472,7 @@ def _prepare_qsa_composite_groups(
         )
     main = {source: all_main[source] for source in raw}
     compressed = {source: all_compressed[source] for source in raw}
-    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) in (2, 3) for spec in kv_cache_spec.values()):
         raise ValueError("Qwen4 QSA cache layout requires GDN state specs")
 
     main_names: set[str] = set()

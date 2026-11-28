@@ -36,6 +36,7 @@ from vllm_ascend.models.qwen3_5_vl import (
     _AscendProcessorMixin,
     _AscendVLPreprocessMixin,
 )
+from vllm_ascend.ops.gdn_recoverssm_backend import prepare_gdn_recoverssm_constants
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -46,7 +47,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
-from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
+from .ple import AscendPCPPLELayer, AscendPLELayer, patch_upstream_ple_short_conv
 from .topk_buffer import share_target_topk_buffers
 
 if TYPE_CHECKING:
@@ -90,7 +91,7 @@ def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLEL
     # the layer in the static forward context.
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
-    return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
+    return AscendPLELayer(config, vllm_config=vllm_config, **kwargs)
 
 
 # The upstream decoder resolves this module global when it creates each PLE.
@@ -137,6 +138,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         if parent_hook is not None:
             parent_hook()
         prepare_model_textgr_weights(self)
+        prepare_gdn_recoverssm_constants(self)
 
     def _apply(self, fn: "Callable[[Tensor], Tensor]", recurse: bool = True) -> Self:
         if not recurse or not self._share_qsa_topk_buffers:
@@ -209,9 +211,17 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         if parent_hook is not None:
             parent_hook()
         prepare_model_textgr_weights(self)
+        prepare_gdn_recoverssm_constants(self)
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        from vllm_ascend.models.qwen_gdn_recoverssm import (
+            _uses_gdn_recoverssm,
+            gdn_mamba_state_shape_from_config,
+        )
+
+        if _uses_gdn_recoverssm(vllm_config):
+            return gdn_mamba_state_shape_from_config(vllm_config)
         upstream_shape = super().get_gdn_mamba_state_shape_from_config
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             return upstream_shape(vllm_config)
@@ -220,10 +230,16 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         return get_head_sharded_state_shape(vllm_config, upstream_shape)
 
     @classmethod
+    def get_gdn_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        from vllm_ascend.models.qwen_gdn_recoverssm import gdn_mamba_state_dtype_from_config
+
+        return gdn_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
-        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
+        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) in (2, 3))
 
     @staticmethod
     def get_model_state_cls():
@@ -257,6 +273,10 @@ class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         return AscendQwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return AscendQwen4ExpForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

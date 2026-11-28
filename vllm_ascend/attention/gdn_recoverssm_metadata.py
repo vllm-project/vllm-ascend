@@ -107,6 +107,7 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         )
         self._context: GDNRecoverSSMCommitContext | None = None
         self._capturing = False
+        self._checkpoint_indices = torch.empty_like(self._ones)
 
     def build(
         self,
@@ -150,7 +151,12 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             n = meta.num_spec_decodes
             assert meta.spec_state_indices_tensor is not None
             assert meta.spec_query_start_loc is not None
-            base["spec_state_indices_tensor"] = meta.spec_state_indices_tensor[:, :1]
+            # Materialize the checkpoint column once per group/step. A [:, 0]
+            # view of the original speculative table has a non-unit stride.
+            count = meta.spec_state_indices_tensor.shape[0]
+            checkpoint_indices = self._checkpoint_indices[:count]
+            checkpoint_indices.copy_(meta.spec_state_indices_tensor[:, 0])
+            base["spec_state_indices_tensor"] = checkpoint_indices.view(-1, 1)
             # The checkpoint already holds the accepted state. Size the
             # one-token counts to the potentially graph-padded indices.
             base["num_accepted_tokens"] = self._ones[: base["spec_state_indices_tensor"].shape[0]]
@@ -213,11 +219,15 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     # instantiate Ascend's GDNRecoverSSMCommitContext.
     def _get_context(self):
         if self._context is None:
+            from vllm_ascend.ascend_config import get_ascend_config
+
             layers = self.vllm_config.compilation_config.static_forward_context
             self._context = GDNRecoverSSMCommitContext.create(
                 [layers[name] for name in self.layer_names],
                 spec_query_len=self.num_spec + 1,
                 max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+                backend=get_ascend_config().gdn_recoverssm_backend,
+                native_root=getattr(get_ascend_config(), "gdn_recoverssm_native_root", None),
             )
         return self._context
 
