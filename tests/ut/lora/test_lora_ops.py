@@ -16,6 +16,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.lora import lora_ops
@@ -35,6 +36,44 @@ def test_bgmv_shrink_forwards_scale_in_kernel_order() -> None:
     with _patch_c_ascend(bgmv_shrink=shrink):
         assert lora_ops.bgmv_shrink(inputs, weights, output, indices, scaling=0.5) == "shrink"
     shrink.assert_called_once_with(inputs, weights, indices, output, 0.5)
+
+
+@pytest.mark.parametrize("operation", ["bgmv_shrink", "sgmv_shrink"])
+@pytest.mark.parametrize("contiguous", [False, True])
+def test_shrink_packs_input_only_when_needed(operation: str, contiguous: bool) -> None:
+    # KDA f_a is a view into the six-way projection, not a packed row matrix.
+    num_tokens, rank = (4 if operation == "sgmv_shrink" else 1), 8
+    projection_slices = (1536, 4, 128, 128)
+    projection_width = sum(projection_slices)
+    projected = torch.arange(num_tokens * projection_width, dtype=torch.float32).view(num_tokens, projection_width)
+    split_view = projected.split(projection_slices, dim=-1)[2]
+    if operation == "bgmv_shrink":
+        # One decode token; strided columns still exercise the packing contract.
+        split_view = split_view[:, ::2]
+    assert not split_view.is_contiguous()
+    inputs = split_view.contiguous() if contiguous else split_view
+    expected = inputs.clone()
+    weights = torch.ones(2, rank, inputs.shape[1])
+    output = torch.zeros(num_tokens, rank)
+    indices = torch.tensor([0])
+    shrink = Mock()
+
+    with _patch_c_ascend(**{operation: shrink}):
+        if operation == "bgmv_shrink":
+            lora_ops.bgmv_shrink(inputs, weights, output, indices)
+        else:
+            seq_lengths = torch.tensor([num_tokens], dtype=torch.long)
+            seq_starts = torch.tensor([0])
+            lora_ops.sgmv_shrink(
+                inputs, weights, output, seq_starts, seq_lengths, indices, 1, num_tokens, num_tokens, 1.0
+            )
+
+    shrink.assert_called_once()
+    native_inputs = shrink.call_args.args[0]
+    assert native_inputs.is_contiguous()
+    torch.testing.assert_close(native_inputs, expected, rtol=0, atol=0)
+    if contiguous:
+        assert native_inputs.data_ptr() == inputs.data_ptr()
 
 
 def test_bgmv_expand_uses_full_output_width_and_drops_add_inputs() -> None:

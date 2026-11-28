@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.ops.torch_ops import bgmv_expand_slice as torch_bgmv_expand_slice
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -33,11 +34,13 @@ def _make_wrapper(
     no_lora=False,
     device_type=AscendDeviceType.A2,
     capturing=False,
+    use_native_lora_ops=True,
 ) -> PunicaWrapperNPU:
     wrapper = object.__new__(PunicaWrapperNPU)
     wrapper.is_prefill = is_prefill
     wrapper.no_lora = no_lora
     wrapper.ascend_device_type = device_type
+    wrapper._use_native_lora_ops = use_native_lora_ops
     wrapper._in_graph_mode = Mock(return_value=capturing)
     wrapper.bgmv_shrink = Mock()
     wrapper.bgmv_expand = Mock()
@@ -89,6 +92,7 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             ),
         )
     refresh.assert_called_once()
+    assert wrapper._use_native_lora_ops is not expect_torch_ops
     if expect_torch_ops:
         from vllm.lora.ops.torch_ops import bgmv_shrink
 
@@ -106,6 +110,56 @@ def test_prefill_calls_sgmv_when_lora_active() -> None:
     wrapper._apply_expand(y, x, weights, 0, 8, True)
     wrapper.sgmv_shrink.assert_called_once()
     wrapper.sgmv_expand_slice.assert_called_once()
+
+
+@pytest.mark.parametrize("use_native_lora_ops", [False, True])
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("slice_size", [4, 8])
+def test_expand_fallback_only_handles_unsupported_native_slices(use_native_lora_ops, is_prefill, slice_size):
+    wrapper = _make_wrapper(is_prefill=is_prefill, use_native_lora_ops=use_native_lora_ops)
+    output = torch.zeros(1, 12)
+    inputs = torch.ones(1, 8)
+    weights = torch.ones(2, 1, slice_size, 8)
+    with patch("vllm_ascend.lora.punica_npu.expand_slice") as fallback:
+        wrapper._apply_expand(output, inputs, weights, 2, slice_size, False)
+
+    if use_native_lora_ops and slice_size < inputs.shape[-1]:
+        fallback.assert_called_once_with(output, inputs, weights, wrapper._token_lora_indices[:1], 2, slice_size, False)
+        wrapper.sgmv_expand_slice.assert_not_called()
+        wrapper.bgmv_expand_slice.assert_not_called()
+    else:
+        fallback.assert_not_called()
+        operation = wrapper.sgmv_expand_slice if is_prefill else wrapper.bgmv_expand_slice
+        operation.assert_called_once()
+
+
+def test_narrow_native_prefill_without_lora_skips_expand():
+    wrapper = _make_wrapper(is_prefill=True, no_lora=True)
+    output = torch.ones(1, 4)
+    with patch("vllm_ascend.lora.punica_npu.expand_slice") as fallback:
+        wrapper._apply_expand(output, torch.ones(1, 8), torch.ones(2, 1, 4, 8), 0, 4, False)
+    fallback.assert_not_called()
+    assert torch.equal(output, torch.ones_like(output))
+
+
+def test_narrow_torch_backend_preserves_upstream_precision_and_inactive_rows():
+    wrapper = _make_wrapper(use_native_lora_ops=False)
+    wrapper.bgmv_expand_slice = torch_bgmv_expand_slice
+    inputs = torch.tensor([[1.001, -1.0, 0, 0, 0, 0, 0, 0]], dtype=torch.float32)
+    weights = torch.ones(1, 1, 4, 8, dtype=torch.bfloat16)
+    for slot in (0, -1):
+        wrapper._token_lora_indices = torch.tensor([slot])
+        output = torch.ones(1, 6, dtype=torch.bfloat16)
+        expected = output.clone()
+        torch_bgmv_expand_slice(inputs, weights, expected, wrapper._token_lora_indices, 1, 4, False)
+
+        wrapper._apply_expand(output, inputs, weights, 1, 4, False)
+
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        if slot >= 0:
+            assert not output[0, 1:5].count_nonzero()
+        else:
+            assert torch.equal(output, torch.ones_like(output))
 
 
 def test_prefill_shrink_and_expand_skip_when_no_lora() -> None:
@@ -425,3 +479,12 @@ def test_lora_linear_raises_runtime_error_for_stale_wrapper_id() -> None:
     b = [torch.zeros(1, 1, 4, 2, dtype=torch.bfloat16)]
     with pytest.raises(RuntimeError, match=rf"wrapper id {wrapper_id} is no longer registered"):
         lora_ops.lora_linear(wrapper_id, y, x, a, b, 1.0, [4], None, None, True)
+
+
+def test_no_lora_flag_follows_adapter_to_base_transitions():
+    wrapper = _make_wrapper()
+    for adapter_id in (11, 0, 22, 0):
+        mapping = SimpleNamespace(index_mapping=(adapter_id,) * 3, is_prefill=False)
+        with patch("vllm_ascend.lora.punica_npu.PunicaWrapperBase.update_metadata"):
+            wrapper.update_metadata(mapping, [11, 22, None], 4, 128)
+        assert wrapper.no_lora == (adapter_id == 0)

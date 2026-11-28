@@ -10,6 +10,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.lora.layers.column_parallel_linear import MergedColumnParallelLinearVariableSliceWithLoRA
 from vllm.lora.layers.utils import _not_fully_sharded_can_replace
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
@@ -53,6 +54,10 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         super().create_lora_weights(max_loras, lora_config, model_config)
+        self.lora_a_packed = None
+        self.lora_b_packed = None
+        if lora_config.max_loras != 1:
+            return
         rank = self.lora_a_stacked[0].size(2)
         self.lora_a_packed = torch.zeros(
             max_loras,
@@ -73,6 +78,8 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
 
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
+        if self.lora_a_packed is None:
+            return
         self.lora_a_packed[index].zero_()
         self.lora_b_packed[index].zero_()
 
@@ -83,6 +90,8 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ) -> None:
         super().set_lora(index, lora_a, lora_b)
+        if self.lora_a_packed is None:
+            return
         rank = self.lora_a_stacked[0].size(2)
         for slice_index, slice_weight in enumerate(self.lora_a_stacked):
             packed_slice = self.lora_a_packed[index, 0].narrow(0, slice_index * rank, rank)
@@ -199,8 +208,20 @@ class AscendColumnParallelLinearWithLoRA(_SingleLinearLoRAWrapper, ColumnParalle
     base_layer_cls = ColumnParallelLinear
 
 
+class AscendVariableSliceWithLoRA(MergedColumnParallelLinearVariableSliceWithLoRA):
+    """Slice TP-sharded KDA outputs while retaining replicated shards in full."""
+
+    def __init__(self, base_layer):
+        super().__init__(base_layer)
+        # Paired vLLM c410543d9 lacks upstream 4c1ddc6d9f38. Remove this
+        # subclass and register the upstream class once that fix is paired.
+        replicated = getattr(base_layer, "replicated_shard_ids", ())
+        self.output_ids = tuple(0 if i in replicated else self.tp_rank for i in range(self.n_slices))
+
+
 def refresh_all_lora_classes():
     ascend_classes = (
+        AscendVariableSliceWithLoRA,
         AscendRowParallelLinearWithLoRA,
         AscendColumnParallelLinearWithLoRA,
         AscendMergedColumnParallelLinearWithLoRA,
