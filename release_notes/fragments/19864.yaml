@@ -1,0 +1,6 @@
+pr: 19864
+entries:
+  - category: bugfix
+    text: Fixed allocation-dependent attention rounding in the A2/A3 paged SparseAttnSharedkv path by preserving TopK order across compressed KV physical pages.
+    model: DeepSeek-V4
+    hardware: [A2, A3]
