@@ -132,6 +132,21 @@ def _mamba_block_aligned_split(
                     num_new_tokens = chunked_tokens
             elif num_computed_tokens < last_cache_position < scheduled_end:
                 num_new_tokens = last_cache_position - num_computed_tokens
+
+            # AscendStore looks up complete, verified prompt pages for a
+            # sparse-index hybrid. The speculative scheduler can stop one
+            # page earlier, then skip over the pool's replay boundary. End
+            # an ordinary prefill chunk there to materialize the actual
+            # recurrent checkpoint before its scratch slot is relocated.
+            if (
+                kv_transfer_config is not None
+                and getattr(kv_transfer_config, "kv_connector", None) == "AscendStoreConnector"
+                and getattr(kv_transfer_config, "kv_role", None) == "kv_both"
+                and kv_transfer_config.get_from_extra_config("backend", "mooncake") == "mooncake"
+            ):
+                replay_boundary = max(request.num_prompt_tokens - 1, 0) // block_size * block_size
+                if num_computed_tokens < replay_boundary < num_computed_tokens + num_new_tokens:
+                    num_new_tokens = replay_boundary - num_computed_tokens
         return num_new_tokens
 
     if not _skips_eagle_block_drop(kv_transfer_config):
