@@ -8,6 +8,21 @@
 #define QSFA_A5_ADDRESS_PRECOMPUTE_H
 #include <cstdint>
 namespace qsfa_a5 {
+inline constexpr uint32_t kNoRopePackedBytes = 528;
+
+#if defined(__CCE_AICORE__)
+__aicore__
+#endif
+inline constexpr bool SupportsAddressPrecomputeKv(bool isInt8, bool isFp8E4M3, bool noRope)
+{
+    return isInt8 || (isFp8E4M3 && noRope);
+}
+
+inline constexpr uint64_t PhysicalAddressTableBytes(uint64_t queryRows, uint64_t sparseBlockCount)
+{
+    return queryRows * sparseBlockCount * sizeof(int64_t);
+}
+
 #if defined(__CCE_AICORE__)
 __aicore__
 #endif

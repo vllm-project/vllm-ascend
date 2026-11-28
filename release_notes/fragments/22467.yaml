@@ -1,0 +1,5 @@
+pr: 22467
+entries:
+  - category: performance
+    text: Reduced sparse attention latency on Ascend A5 for eligible paged FP8 KV workloads without RoPE.
+    hardware: [A5]
