@@ -2894,6 +2894,13 @@ def execute_fix(
             elif remediation["type"] == "clear_a5_hugepages":
                 final_results[index], action = fix_a5_hugepages(rules[record["id"]], context, record)
                 actions.append(action)
+                memory_index = next(
+                    (idx for idx, item in enumerate(final_results) if item["id"] == "MEM-A5-001"),
+                    None,
+                )
+                if memory_index is not None:
+                    memory_probe = probe_a5_memory_capacity(context.managed_memory_mb)
+                    final_results[memory_index] = evaluate_a5_memory(rules["MEM-A5-001"], {"a5_memory": memory_probe})
             else:
                 actions.append(
                     {
