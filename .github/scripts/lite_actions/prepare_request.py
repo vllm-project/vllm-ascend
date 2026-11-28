@@ -13,6 +13,7 @@ REPO = "cann-framework/vllm-ascend"
 WORKFLOW = "lite-ci-dispatcher-smoke.yml"
 
 
+
 def selectors(event, payload, value):
     if event == "pull_request_target":
         pr = payload["pull_request"]

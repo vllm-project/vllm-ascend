@@ -1,18 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A3 correctness/graph checks; execute this file directly for a microbenchmark."""
+"""A3 correctness and graph replay checks for INT8 indexer cache writes."""
 
-import argparse
 import importlib
-import json
-import statistics
 
 import pytest
 import torch
 import torch_npu
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton import indexer_quant_cache_int8 as kernels
 from vllm_ascend.ops.triton.indexer_quant_cache_int8 import indexer_quant_cache_int8
@@ -243,62 +239,3 @@ def test_registry_warmup_prevents_runtime_compilation(paired, slot_dtype, monkey
     indexer_quant_cache_int8(cache[0], cache[1], x[:0], slots[:0])
     torch.testing.assert_close(snapshot(cache), initial, rtol=0, atol=0)
     assert not kernels.supports_indexer_quant_cache_int8(cache[0], cache[1], 129)
-
-
-@torch.inference_mode()
-def benchmark(tokens, trials):
-    """Measure separate graphs to exclude Python launch gaps and JIT warmup."""
-    assert get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
-    x, slots, host_slots = make_inputs(tokens, slot_dtype=torch.int32)
-    baseline, candidate = make_cache(), make_cache()
-    cache_scatter_indices = torch.stack((slots // baseline[0].shape[1], slots % baseline[0].shape[1]), dim=-1)
-
-    def split():
-        k, scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.int8)
-        scale = scale.half()
-        AscendSFAIndexerBackend._write_cache_tensor(baseline[0], k, slots, cache_scatter_indices)
-        AscendSFAIndexerBackend._write_cache_tensor(baseline[1], scale.unsqueeze(-1), slots, cache_scatter_indices)
-
-    def fused():
-        indexer_quant_cache_int8(candidate[0], candidate[1], x, slots)
-
-    initial = snapshot(candidate)
-    split()
-    fused()
-    assert_matches_native(candidate, x, host_slots, initial)
-    torch.testing.assert_close(candidate[2].cpu(), baseline[2].cpu(), rtol=0, atol=0)
-    repeats = 100
-    graphs = {}
-    for name, fn in (("split", split), ("fused", fused)):
-        for _ in range(5):
-            fn()
-        torch.npu.synchronize()
-        graph = torch.npu.NPUGraph()
-        with torch.npu.graph(graph):
-            for _ in range(repeats):
-                fn()
-        for _ in range(5):
-            graph.replay()
-        graphs[name] = graph
-    samples: dict[str, list[float]] = {name: [] for name in graphs}
-    for trial in range(trials):
-        names = ("split", "fused") if trial % 2 == 0 else ("fused", "split")
-        for name in names:
-            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
-            start.record()
-            graphs[name].replay()
-            end.record()
-            end.synchronize()
-            samples[name].append(start.elapsed_time(end) * 1000 / repeats)
-    medians = {name: statistics.median(values) for name, values in samples.items()}
-    print(json.dumps({"tokens": tokens, "trials": trials, "median_us": medians, "samples_us": samples}, indent=2))
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tokens", type=int, choices=(1, 3, 16, 48, 128), default=48)
-    parser.add_argument("--trials", type=int, default=30)
-    args = parser.parse_args()
-    if args.trials < 1:
-        parser.error("--trials must be positive")
-    benchmark(args.tokens, args.trials)

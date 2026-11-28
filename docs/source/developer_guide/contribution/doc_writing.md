@@ -4,30 +4,6 @@
 
 `docs/source/_templates/Model-Deployment-Tutorial-Template.md` is a template for writing model deployment tutorials. You can copy and modify it to create new docs.
 
-## Multi-row table headers
-
-Use the `pymdown_multimd_table` Markdown extension for grouped table headers
-instead of writing an HTML table. Put every header row before the separator:
-
-```markdown
-| Model | Graph Mode || CP ||
-| ^^ | Eager | Full | PCP | DCP |
-| --- | --- | --- | --- | --- |
-| Example | ✅ | ✅ | ❌ | ✅ |
-```
-
-Consecutive pipes (`||`) extend the preceding cell across columns. A `^^` cell
-merges with the cell above it, including in the header. Use a space (`| |`) for
-an ordinary empty cell; removing that space changes the table's structure.
-Inside a content tab, indent every table row by four spaces. These extensions
-render on the documentation site, but GitHub's Markdown preview does not support
-the merged cells.
-
-The translation extractor keeps all header rows together as one PO entry and
-omits data-only rows. Preserve pipes, blank cells, `^^`, and link targets in the
-translation. This keeps model matrices out of long translation requests while
-retaining their grouped headers.
-
 ## Testable doc code block generation (``model-code``)
 
 - For **documentation authors**: how to insert testable command blocks into docs

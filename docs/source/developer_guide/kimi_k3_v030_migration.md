@@ -120,8 +120,8 @@ The sequence is:
    and TopK run consecutively on the Router stream. The main stream quantizes
    latent input before waiting for Router GEMM, then runs latent down while
    TopK may execute. Both branches can overlap AllGather.
-2. On the shared compute stream, use the AllGather completion event to release
-   shared input preparation. This lets input quantization overlap latent down.
+2. Join shared AllGather before submitting routed EP communication, preserving
+   0.30's cross-process-group ordering.
 3. Join TopK after latent down and the original MC2 prepare. Submit shared
    Gate/Up against the event immediately before Dispatch, so Gate/Up and
    Dispatch share a release point. Gate/Up preparation/quantization remains
@@ -135,9 +135,10 @@ The sequence is:
    Combine. After latent up, the main stream waits for that invocation's RS
    completion event before Add.
 
-Outside this MC2 Decode schedule, the main stream joins the early shared
-AllGather before routed EP communication. Validate collective progress with
-multi-rank capture and replay.
+Early shared ReduceScatter applies only to the validated MC2 Decode ladder;
+all other paths retain 0.30's collective ordering. Shared input AllGather still
+joins before routed EP communication. Multi-rank capture/replay must validate
+the new overlap; CPU dependency tests do not establish HCCL deadlock freedom.
 
 ## Model Runner V2 validation
 

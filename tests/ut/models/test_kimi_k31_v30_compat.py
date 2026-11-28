@@ -65,9 +65,7 @@ def test_dsa_gate_registers_warmup_after_backend_construction(monkeypatch, gqa_d
     register.assert_called_once_with(torch.bfloat16, 8)
 
 
-@pytest.mark.skipif(
-    not (vllm_version_is("0.30.0") or vllm_version_is("0.30.0")), reason="v30's two-argument admission API"
-)
+@pytest.mark.skipif(not vllm_version_is("0.30.0"), reason="v30's two-argument admission API")
 def test_v30_k31_admission_calls_paired_accounting(monkeypatch):
     groups = [object()]
     runtime = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")))

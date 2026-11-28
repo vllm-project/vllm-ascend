@@ -10,7 +10,6 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumn
 from vllm.model_executor.models.utils import PPMissingLayer
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
-from vllm_ascend.utils import vllm_version_is
 
 
 def make_linear(cls, output_sizes, tp_size=1, tp_rank=0):
@@ -34,7 +33,7 @@ def add_parameter(layer, name, shape, dtype=torch.float32, output_dim=0):
     return param
 
 
-def make_model(tp_size=1, tp_rank=0, fused_gate=False):
+def make_model(tp_size=1, tp_rank=0):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
@@ -50,13 +49,12 @@ def make_model(tp_size=1, tp_rank=0, fused_gate=False):
     model.n_redundant_experts = 0
     layer = nn.Module()
     layer.self_attn = nn.Module()
-    sizes = [4, 2, 32] if fused_gate else [4, 2]
+    sizes = [4, 2]
     fused = make_linear(MergedColumnParallelLinear, sizes)
     add_parameter(fused, "weight", (sum(sizes), 4))
     add_parameter(fused, "weight_scale", (sum(sizes), 1))
     layer.self_attn.fused_qkv_a_proj = fused
-    if not fused_gate:
-        layer.self_attn.g_proj = make_linear(ColumnParallelLinear, [32], tp_size, tp_rank)
+    layer.self_attn.g_proj = make_linear(ColumnParallelLinear, [32], tp_size, tp_rank)
     model.layers = nn.ModuleList([layer, PPMissingLayer()])
     return model
 
@@ -143,16 +141,3 @@ def test_gate_loading_retains_pp_skipping_and_qkv_loading():
     torch.testing.assert_close(fused, torch.cat([torch.full((4, 4), 2.0), torch.full((2, 4), 3.0)]))
     assert torch.all(model.layers[0].self_attn.g_proj.weight == 4)
     assert loaded == {"layers.0.self_attn.fused_qkv_a_proj.weight", "layers.0.self_attn.g_proj.weight"}
-
-
-@pytest.mark.skipif(
-    (vllm_version_is("0.30.0") or vllm_version_is("0.32.0")),
-    reason="v32 uses a standalone MLA gate, not a third QKV shard",
-)
-def test_fused_mla_gate_keeps_upstream_shard_two_loading():
-    model = make_model(fused_gate=True)
-    loaded = model.load_weights(iter([("layers.0.self_attn.g_proj.weight", torch.full((32, 4), 5.0))]))
-    fused = model.layers[0].self_attn.fused_qkv_a_proj.weight
-    assert torch.all(fused[:6] == -1)
-    assert torch.all(fused[6:] == 5)
-    assert loaded == {"layers.0.self_attn.fused_qkv_a_proj.weight"}

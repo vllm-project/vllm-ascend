@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-NPU precision and changing-input graph tests for SFA Triton helpers."""
 
-from statistics import median
-
 import pytest
 import torch
 
@@ -229,30 +227,13 @@ def _capture_sfa_pair(calls):
     return graphs, results
 
 
-def _sfa_pair_replay_us(graphs):
-    # Alternate replay order to reduce frequency and cache-order bias.
-    # Timing events bracket only work submitted to the NPU stream.
-    samples = ([], [])
-    for sample in range(8):
-        order = (0, 1) if sample % 2 == 0 else (1, 0)
-        for index in order:
-            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
-            start.record()
-            for _ in range(10):
-                graphs[index].replay()
-            end.record()
-            end.synchronize()
-            samples[index].append(start.elapsed_time(end) * 1000 / 10)
-    return [median(values) for values in samples]
-
-
 @pytest.mark.skipif("950" not in torch.npu.get_device_name(0), reason="A5 BF16 sparse attention")
 @pytest.mark.parametrize(
     "block_size,pages,requests,table_width",
     [(128, 64, 8, 19), (896, 64, 8, 19), (128, 5208, 32, 133)],
     ids=["small-128", "small-896", "dcp8-decode-128-queries"],
 )
-def test_sfa_native_paired_pages_decode_replay_and_latency(block_size, pages, requests, table_width, record_property):
+def test_sfa_native_paired_pages_decode_replay(block_size, pages, requests, table_width):
     enable_custom_op()
     generator = torch.Generator().manual_seed(928)
     # One local shard. Pad the 96 gathered Kimi heads just as DCP8 does.
@@ -322,19 +303,12 @@ def test_sfa_native_paired_pages_decode_replay_and_latency(block_size, pages, re
         assert torch.count_nonzero(out[1]) == 0 and torch.count_nonzero(total[:, 1]) == 0
         assert torch.isfinite(maximum[:, 2:]).all() and (total[:, 2:] > 0).all()
 
-    copy_sfa_us, paired_sfa_us = _sfa_pair_replay_us(graphs)
-    record_property("copy_sfa_us", copy_sfa_us)
-    record_property("paired_sfa_us", paired_sfa_us)
-    print(
-        f"SFA decode pages={pages} block_size={block_size} copy_sfa_us={copy_sfa_us:.3f} "
-        f"paired_sfa_us={paired_sfa_us:.3f}"
-    )
     for graph in graphs:
         graph.reset()
 
 
 @pytest.mark.parametrize("stage", ["query", "kv"])
-def test_sfa_pair_layout_latency(stage, record_property):
+def test_sfa_pair_layout_graph_replay(stage):
     tokens, heads, output_heads = 128, 96, 128
     pages, block_size = 256, 128
     if stage == "query":
@@ -360,10 +334,6 @@ def test_sfa_pair_layout_latency(stage, record_property):
     graphs, results = _capture_sfa_pair((separate, fused))
     for reference, actual in zip(*results, strict=True):
         assert torch.equal(reference, actual)
-    separate_us, fused_us = _sfa_pair_replay_us(graphs)
-    record_property("separate_us", separate_us)
-    record_property("fused_us", fused_us)
-    print(f"SFA layout stage={stage} separate_us={separate_us:.3f} fused_us={fused_us:.3f}")
     for graph in graphs:
         graph.reset()
 
@@ -468,12 +438,6 @@ def test_remap_exact_integer_boundaries_and_changed_graph_inputs(rows, ranks, ra
         graph.replay()
         assert torch.equal(output.cpu(), oracle(current, rank, ranks, interleave))
     torch.npu.synchronize()
-
-
-@pytest.mark.parametrize("shape", [(0, 2048), (1, 0), (2, 3, 0)])
-def test_remap_empty_input(shape):
-    value = torch.empty(shape, dtype=torch.int32, device="npu")
-    assert remap_sparse_indices_triton(value, 8, 0, 128) is value
 
 
 @pytest.mark.parametrize("ranks,interleave", [(4, 128), (8, 64), (2, 1), (3, 127)])

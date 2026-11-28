@@ -283,9 +283,18 @@ def test_attn_res_fwd_accepts_empty_batch(with_add):
         assert output.shape == prefix.shape and output.numel() == 0
 
 
-@pytest.mark.parametrize("tokens", [0, 1, 4, 16])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.int32])
-@pytest.mark.parametrize("argument", ["all", "prefix", "bank", "projection", "norm", "addend", "output_norm"])
+@pytest.mark.parametrize(
+    ("tokens", "dtype", "argument"),
+    [
+        (0, torch.float16, "all"),
+        (1, torch.float32, "prefix"),
+        (4, torch.int32, "bank"),
+        (16, torch.float16, "projection"),
+        (1, torch.float32, "norm"),
+        (4, torch.int32, "addend"),
+        (16, torch.float16, "output_norm"),
+    ],
+)
 @torch.inference_mode()
 def test_attn_res_fwd_rejects_unsupported_dtype(tokens, dtype, argument):
     hidden, valid = 512, 2

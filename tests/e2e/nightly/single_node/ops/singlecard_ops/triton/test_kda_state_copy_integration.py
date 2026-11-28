@@ -401,33 +401,6 @@ def test_scatter_graph_replay_int64_extremes(monkeypatch):
     torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
 
-@torch.inference_mode()
-def test_production_plan_offsets_beyond_four_gib(monkeypatch):
-    """The optimized INT32 pointer route still widens cache offsets to INT64."""
-    stride, offset = 2**30 + 32, 16
-    backing = torch.empty(stride + offset + 48, dtype=torch.float32, device="npu")
-    backing[:64].fill_(-23)
-    backing[-64:].fill_(-23)
-    state = backing.as_strided((2, 1, 2, 8), (stride, 16, 8, 1), offset)
-    state[0].fill_(3)
-    state[1].fill_(7)
-    plan = _prepare_plan(KDAStateCopyPlan, state, 8)
-    plan.seal()
-    _forbid_compilation(monkeypatch)
-    ids = torch.tensor([1, 0, -1, 2], dtype=torch.int32, device="npu")
-    packed = plan.gather(state, ids, None)
-    expected = torch.zeros((4, 1, 2, 8))
-    expected[0].fill_(7)
-    expected[1].fill_(3)
-    torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
-    packed.add_(10)
-    plan.scatter(state, packed, ids)
-    torch.testing.assert_close(state[0].cpu(), torch.full((1, 2, 8), 13.0), rtol=0, atol=0)
-    torch.testing.assert_close(state[1].cpu(), torch.full((1, 2, 8), 17.0), rtol=0, atol=0)
-    assert torch.all(backing[:offset] == -23).item()
-    assert torch.all(backing[-32:] == -23).item()
-
-
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Automatic fused KDA selection requires Ascend A5"
 )

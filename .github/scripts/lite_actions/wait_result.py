@@ -46,7 +46,11 @@ def find_result(
     accepted = None
     invalid = False
     for c in reversed(comments):
-        if not author or c.get("user", {}).get("login") != author or not c.get("body", "").startswith(prefix):
+        if (
+            not author
+            or c.get("user", {}).get("login") != author
+            or not c.get("body", "").startswith(prefix)
+        ):
             continue
         try:
             r = json.loads(c["body"].split("\n", 1)[1])
@@ -83,18 +87,24 @@ def find_result(
             or r.get("status") not in STATUS
             or not isinstance(lines, list)
             or len(lines) > 20
-            or any(not isinstance(s, str) or len(s) > 180 or any(ord(c) < 32 for c in s) for s in lines)
+            or any(
+                not isinstance(s, str) or len(s) > 180 or any(ord(c) < 32 for c in s)
+                for s in lines
+            )
         ):
             invalid = True
             continue
         if r["status"] == "PASS" and (
-            type(r.get("exit_code")) is not int or r["exit_code"] != 0 or r.get("cleanup_verified") is not True
+            type(r.get("exit_code")) is not int
+            or r["exit_code"] != 0
+            or r.get("cleanup_verified") is not True
         ):
             invalid = True
             continue
         if (
             len(c["body"].encode()) > 6100
-            or len(json.dumps({"body": c["body"]}, separators=(",", ":")).encode()) > 7000
+            or len(json.dumps({"body": c["body"]}, separators=(",", ":")).encode())
+            > 7000
         ):
             invalid = True
             continue
@@ -108,7 +118,9 @@ def find_result(
 
 def find_progress(comments, run_id, attempt, item, digest, author):
     for c in reversed(comments):
-        if c.get("user", {}).get("login") != author or not c.get("body", "").startswith("Lite-CI-PROGRESS "):
+        if c.get("user", {}).get("login") != author or not c.get("body", "").startswith(
+            "Lite-CI-PROGRESS "
+        ):
             continue
         try:
             r = json.loads(c["body"][17:])
@@ -153,7 +165,9 @@ def get(path, token):
     previous = HTTP_CACHE.get(path)
     if previous and previous[0]:
         headers["If-None-Match"] = previous[0]
-    request = urllib.request.Request(f"https://api.github.com/repos/{REPO}" + path, headers=headers)
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}" + path, headers=headers
+    )
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
             data = json.load(response)
@@ -163,9 +177,15 @@ def get(path, token):
         if exc.code == 304 and previous:
             return previous[1]
         if exc.code in (429, 500, 502, 503, 504) or (
-            exc.code == 403 and (exc.headers.get("X-RateLimit-Remaining") == "0" or exc.headers.get("Retry-After"))
+            exc.code == 403
+            and (
+                exc.headers.get("X-RateLimit-Remaining") == "0"
+                or exc.headers.get("Retry-After")
+            )
         ):
-            raise RetryableAPIError(f"GitHub temporarily unavailable: HTTP {exc.code}") from exc
+            raise RetryableAPIError(
+                f"GitHub temporarily unavailable: HTTP {exc.code}"
+            ) from exc
         raise
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RetryableAPIError("GitHub temporarily unreachable") from exc
@@ -209,7 +229,8 @@ def main():
                 raise TimeoutError("GitHub artifact API unavailable") from None
             time.sleep(60)
     if not any(
-        a["name"] == f"lite-ci-request-{attempt}" and not a.get("expired") for a in artifacts.get("artifacts", [])
+        a["name"] == f"lite-ci-request-{attempt}" and not a.get("expired")
+        for a in artifacts.get("artifacts", [])
     ):
         raise ValueError("No plan for this attempt; re-run all jobs")
     while time.monotonic() - start < 16800:
@@ -224,7 +245,9 @@ def main():
                 raise ValueError("comment listing exceeds correlation budget")
         except RetryableAPIError:
             print(
-                heartbeat_line(status="WAITING_GITHUB_API", current_case=item["test_id"]),
+                heartbeat_line(
+                    status="WAITING_GITHUB_API", current_case=item["test_id"]
+                ),
                 flush=True,
             )
             time.sleep(60)
@@ -251,7 +274,9 @@ def main():
                 heartbeat_line(status=result["status"], current_case=item["test_id"]),
                 flush=True,
             )
-            print(f"CASE {item['test_id']}: {result['status']} rc={result['exit_code']}")
+            print(
+                f"CASE {item['test_id']}: {result['status']} rc={result['exit_code']}"
+            )
             for line in result["last_20_lines"]:
                 print(line)
             if os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -261,14 +286,24 @@ def main():
                         f.write(f"- {k}: `{item[k]}`\n")
                     f.write(f"- SHA: `{sha}`\n- Status: **{result['status']}**\n")
                     if native_source is not None:
-                        f.write("- Test source: `" + json.dumps(native_source, sort_keys=True) + "`\n")
-                        f.write("- Merge guarantee: versioned_only; no atomic merge permission.\n")
+                        f.write(
+                            "- Test source: `"
+                            + json.dumps(native_source, sort_keys=True)
+                            + "`\n"
+                        )
+                        f.write(
+                            "- Merge guarantee: versioned_only; no atomic merge permission.\n"
+                        )
             return 0 if result["status"] == "PASS" else 1
         if not accepted and time.monotonic() - start > 300:
-            raise TimeoutError("INFRA_ERROR: assigned worker did not acknowledge within 300 seconds")
+            raise TimeoutError(
+                "INFRA_ERROR: assigned worker did not acknowledge within 300 seconds"
+            )
         if time.monotonic() >= heartbeat:
             print(
-                heartbeat_line(status=phase or "WAITING_WORKER", current_case=item["test_id"]),
+                heartbeat_line(
+                    status=phase or "WAITING_WORKER", current_case=item["test_id"]
+                ),
                 flush=True,
             )
             heartbeat = time.monotonic() + 60

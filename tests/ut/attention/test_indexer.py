@@ -323,11 +323,6 @@ def test_nope_indexer_metadata_uses_dense_slots_and_persistent_tables(monkeypatc
             torch.testing.assert_close(metadata.slot_mapping, common.slot_mapping[:4])
 
 
-def _make_decode_pcp_context() -> SimpleNamespace:
-    # Only the global-prefill flag is read when no request is prefilling.
-    return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
-
-
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("rows", [8, 9, 10])
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")

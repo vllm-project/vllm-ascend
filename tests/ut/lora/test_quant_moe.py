@@ -189,29 +189,34 @@ def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, mlp_input, messa
             quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
 
-def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
+@pytest.mark.parametrize("comm_type", [MoECommType.ALLTOALL, MoECommType.ALLGATHER])
+def test_dynamic_int8_lora_handles_empty_rank(comm_type) -> None:
+    allgather = comm_type == MoECommType.ALLGATHER
     mlp_input = _make_input(
         hidden_states=torch.empty(0, 4, dtype=torch.bfloat16),
         group_list=torch.zeros(2, dtype=torch.int64),
-        expanded_row_idx=None,
-        topk_ids=None,
-        lora_context=SimpleNamespace(use_ep=True),
+        expanded_row_idx=torch.empty(0, dtype=torch.int32) if allgather else None,
+        topk_ids=torch.empty(0, 1, dtype=torch.int32) if allgather else None,
+        lora_context=SimpleNamespace(use_ep=not allgather),
     )
     event = object()
     stream = SimpleNamespace(record_event=Mock(return_value=event))
 
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dynamic_quant,
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(f"{QUANT_MOE}.DeviceOperator") as device_operator,
+        patch(f"{QUANT_MOE}.torch_npu") as npu_ops,
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream) as current_stream,
     ):
-        extra_ctx.moe_comm_type = MoECommType.ALLTOALL
+        extra_ctx.moe_comm_type = comm_type
         output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
     assert output is mlp_input.hidden_states
     assert output_event is event
+    current_stream.assert_called_once_with()
     stream.record_event.assert_called_once_with()
-    dynamic_quant.assert_not_called()
+    assert device_operator.mock_calls == []
+    assert npu_ops.mock_calls == []
 
 
 def test_registered_backend_requires_float_input() -> None:

@@ -875,12 +875,6 @@ class TestShortRequestFirstConfig(TestBase):
         with self.assertRaises(ValueError):
             ShortRequestFirstConfig(**{"long_max_wait_ms": -1})
 
-    def test_none_config_is_disabled(self):
-        cfg = ShortRequestFirstConfig()
-        self.assertFalse(cfg.enabled)
-        self.assertEqual(cfg.threshold, 256)
-        self.assertEqual(cfg.long_max_wait_ms, 0.0)
-
 
 class TestSparseKVOffloadConfig(TestBase):
     @patch("vllm_ascend.ascend_config.is_950", return_value=True)

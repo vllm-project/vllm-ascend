@@ -136,23 +136,6 @@ def _make_pcp_sfa_impl(dcp_enabled=False):
     return impl
 
 
-def _make_nope_pcp_impl(width, packed_cache=False):
-    impl = _make_pcp_sfa_impl()
-    impl.qk_rope_head_dim = 0
-    impl.use_rope = impl.qk_rope_head_dim > 0
-    impl.kv_lora_rank = width
-    impl.num_kv_heads = 1
-    impl.is_pcp_decode_sharded = False
-    impl.enable_sparse_sfa_c8 = packed_cache
-    impl.enable_sparse_sfa_turboquant = False
-    impl.c8_cache_dtype = torch.int8
-    impl.sfa_qsfa_tile_size = 32
-    impl.kv_a_layernorm = Mock(side_effect=lambda values: values)
-    impl.kv_a_layernorm.weight = torch.ones(width)
-    impl.kv_a_layernorm.variance_epsilon = 1e-6
-    return impl
-
-
 @pytest.mark.parametrize("first_block_id", [0, 3])
 def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)

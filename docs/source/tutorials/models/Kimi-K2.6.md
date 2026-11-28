@@ -12,7 +12,7 @@ Kimi K2.6 is an open-source, native multimodal agentic model built through conti
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend {{ vllm_ascend_version }}**. Kimi-K2.6 was first supported in vLLM-Ascend v0.20.0rc1.
+This document is validated and written based on **vLLM-Ascend v0.20.0rc1**. The current model (Kimi-K2.6) is first supported in this version.
 
 ## 2 Supported Features
 
@@ -126,6 +126,8 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
+To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
@@ -154,11 +156,10 @@ export HCCL_BUFFSIZE=600
 # Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
     --quantization ascend \
-    --enable-auto-tool-choice \
     --tool-call-parser kimi_k2 \
     --reasoning-parser kimi_k2 \
     --allowed-local-media-path /data/media \
-    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+    --served-model-name kimi_k26 \
     --trust-remote-code \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -277,7 +278,7 @@ Parameter descriptions:
             --enable-expert-parallel \
             --seed 1024 \
             --quantization ascend \
-            --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+            --served-model-name kimi_k26 \
             --trust-remote-code \
             --max-num-seqs 1 \
             --max-model-len 133120 \
@@ -355,7 +356,7 @@ Parameter descriptions:
             --enable-expert-parallel \
             --seed 1024 \
             --quantization ascend \
-            --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+            --served-model-name kimi_k26 \
             --trust-remote-code \
             --max-num-seqs 1 \
             --max-model-len 133120 \
@@ -432,7 +433,7 @@ Parameter descriptions:
             --enable-expert-parallel \
             --seed 1024 \
             --quantization ascend \
-            --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+            --served-model-name kimi_k26 \
             --trust-remote-code \
             --max-num-seqs 8 \
             --max-model-len 133720 \
@@ -509,7 +510,7 @@ Parameter descriptions:
             --enable-expert-parallel \
             --seed 1024 \
             --quantization ascend \
-            --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+            --served-model-name kimi_k26 \
             --trust-remote-code \
             --max-num-seqs 8 \
             --max-model-len 133720 \
@@ -562,8 +563,6 @@ Parameter descriptions:
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
-    Save the following script as `proxy.sh` in `vllm-ascend/examples/disaggregated_prefill_v1/`.
-
     === "proxy.sh script"
 
         ```shell
@@ -608,7 +607,7 @@ After the PD separation service is fully started, send a request through the pro
 curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Eco-Tech/Kimi-K2.6-w4a8",
+        "model": "kimi_k26",
         "messages": [{
             "role": "user",
             "content": [
@@ -631,7 +630,7 @@ The proxy returns HTTP 200 OK. If not, it means that the PD separation service h
 {
     "id": "chatcmpl-xxxxxxxxxxxxx",
     "object": "chat.completion",
-    "model": "Eco-Tech/Kimi-K2.6-w4a8",
+    "model": "kimi_k26",
     "choices": [
         {
             "index": 0,
@@ -662,7 +661,7 @@ For single-node deployment, set `<port>` to the service port `8000`. For PD disa
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Eco-Tech/Kimi-K2.6-w4a8",
+        "model": "kimi_k26",
         "messages": [{
             "role": "user",
             "content": [
@@ -686,7 +685,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
     "id": "chatcmpl-9df13fd5e539af93",
     "object": "chat.completion",
     "created": 1780971952,
-    "model": "Eco-Tech/Kimi-K2.6-w4a8",
+    "model": "kimi_k26",
     "choices": [
         {
             "index": 0,
@@ -714,13 +713,13 @@ Here is one accuracy evaluation method.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result. Here is the result of `Kimi-K2.6-w4a8` in `vllm-ascend:v0.23.0` for reference only.
+2. After execution, you can get the result. Here is the result of `Kimi-K2.6-w4a8` in `vllm-ascend:v0.20.0rc1` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| AIME2026 | - | accuracy | gen | 96.67 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
-| GPQA | - | accuracy | gen | 90.91 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
-| MMMU | - | accuracy | gen | 81.89 | 1 Atlas 800 A3 (8 Cards, 16 NPUs × 64GB) |
+| AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64GB × 16) |
+| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64GB × 16) |
+| MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64GB × 16) |
 
 ## 8 Performance Evaluation
 
@@ -743,7 +742,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --trust-remote-code --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -799,4 +798,4 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What transformer version is required for tool_calls feature?**
 
-  A: For vLLM-Ascend v0.20.0 and earlier versions, transformers must be version 4.57.6 or lower to use the tool_calls feature.
+  A: To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.

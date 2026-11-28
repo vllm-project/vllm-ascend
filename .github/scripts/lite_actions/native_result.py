@@ -18,7 +18,9 @@ def context(pr_number):
 
 
 def description(base_sha, test_ids, base_ref):
-    spec = hashlib.sha256(json.dumps([base_ref, test_ids], separators=(",", ":")).encode()).hexdigest()[:12]
+    spec = hashlib.sha256(
+        json.dumps([base_ref, test_ids], separators=(",", ":")).encode()
+    ).hexdigest()[:12]
     return f"Versioned test B={base_sha} S={spec}; not atomic merge permission"
 
 
@@ -41,7 +43,9 @@ def post(path, payload):
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
+    with urllib.request.build_opener(NoRedirect()).open(
+        request, timeout=25
+    ) as response:
         content = response.read(1024**2 + 1)
     if len(content) > 1024**2:
         raise ValueError("oversized status response")
@@ -57,8 +61,13 @@ def publish(source, state):
         return  # A single selected case must not publish a full-suite status.
     assert_current(source)
     run = api(f"/actions/runs/{source['run_id']}")
-    if run.get("run_attempt") != source["attempt"] or run.get("status") != "in_progress":
-        raise ValueError("superseded/cancelled invocation cannot publish current status")
+    if (
+        run.get("run_attempt") != source["attempt"]
+        or run.get("status") != "in_progress"
+    ):
+        raise ValueError(
+            "superseded/cancelled invocation cannot publish current status"
+        )
     post(
         "/statuses/" + source["head_sha"],
         {

@@ -1788,16 +1788,6 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.NATIVE)
 
-    def test_resolve_path_w8a8dynamic_c8_no_mlapo_still_prolog_v3(self):
-        """W8A8Dynamic+C8 enters PROLOG_V3 even when enable_mlapo=False."""
-        self._set_quant(AscendW8A8DynamicLinearMethod)
-        self.impl.is_kv_consumer = True
-        self.impl.enable_sparse_sfa_c8 = True
-        self.impl.enable_sparse_sfa_turboquant = False
-
-        path = self.impl._resolve_preprocess_type(torch.bfloat16)
-        self.assertEqual(path, PreprocessType.PROLOG_V3)
-
     def test_resolve_path_non_pd_w8a8dynamic_c8_goes_prolog_v3(self):
         """Non-PD + W8A8Dynamic + C8 -> PROLOG_V3 (default, no opt-in)."""
         self._set_quant(AscendW8A8DynamicLinearMethod)

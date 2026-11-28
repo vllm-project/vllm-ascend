@@ -69,14 +69,9 @@ def assert_current(source, get=api):
     if source["mode"] == "merge_result":
         pr, head, base = current_pr(source["pr_number"], get)
         if (head, base, pr["head"]["repo"]["id"], pr["base"]["ref"]) != (
-            source["head_sha"],
-            source["base_sha"],
-            source["head_repo_id"],
-            source["base_ref"],
+            source["head_sha"], source["base_sha"], source["head_repo_id"], source["base_ref"]
         ):
             raise ValueError("STALE: PR Head/Base advanced; rerun from the current PR")
-
-
 def build_source(plan, event, get=api):
     control = os.environ["GITHUB_WORKFLOW_SHA"]
     if not SHA.fullmatch(control):
