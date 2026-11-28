@@ -1,6 +1,9 @@
+from copy import deepcopy
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
+from compressed_tensors.quantization import QuantizationType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import RowParallelLinear, UnquantizedLinearMethod
@@ -28,6 +31,7 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         mock.dynamic = dynamic
         mock.symmetric = symmetric
         mock.group_size = group_size
+        mock.type = QuantizationType.INT
         return mock
 
     def _make_input_quant(self, num_bits=8, strategy="tensor", dynamic=False, symmetric=True):
@@ -36,6 +40,7 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         mock.strategy = strategy
         mock.dynamic = dynamic
         mock.symmetric = symmetric
+        mock.type = QuantizationType.INT
         return mock
 
     def _make_mx_quant(self, num_bits=4, dynamic=False):
@@ -78,6 +83,35 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         weight.type = QuantizationType.INT
         result = self.config._detect_quant_type(weight, None, None)
         self.assertEqual(result, "W4A16")
+
+    def test_metadata_type_combinations(self):
+        # Exercise parsing as well as detection with real QuantizationArgs.
+        for num_bits, dynamic in ((8, False), (8, True), (4, True)):
+            for weight_type in ("int", "float"):
+                for input_type in ("int", "float"):
+                    with self.subTest(
+                        num_bits=num_bits, dynamic=dynamic, weight_type=weight_type, input_type=input_type
+                    ):
+                        metadata: dict[str, Any] = deepcopy(COMPRESSED_TENSORS_W8A8_CONFIG)
+                        group = metadata["config_groups"]["group_0"]
+                        group["weights"].update(num_bits=num_bits, type=weight_type)
+                        group["input_activations"].update(
+                            type=input_type, dynamic=dynamic, strategy="token" if dynamic else "tensor"
+                        )
+                        metadata["format"] = group["format"] = (
+                            "float-quantized" if weight_type == input_type == "float" else "int-quantized"
+                        )
+                        config = AscendCompressedTensorsConfig.from_config(metadata)
+                        scheme = config.target_scheme_map["Linear"]
+                        args = (scheme["weights"], scheme["input_activations"], scheme["format"])
+                        if weight_type == input_type == "int":
+                            expected = "W4A8_DYNAMIC" if num_bits == 4 else ("W8A8_DYNAMIC" if dynamic else "W8A8")
+                            self.assertEqual(config._detect_quant_type(*args), expected)
+                        elif weight_type == input_type == "float" and num_bits == 8 and dynamic:
+                            self.assertEqual(config._detect_quant_type(*args), "W8A8FP8_DYNAMIC")
+                        else:
+                            with self.assertRaises(NotImplementedError):
+                                config._detect_quant_type(*args)
 
     def test_detect_mxfp4_dynamic(self):
         weight = self._make_mx_quant(num_bits=4, dynamic=False)
