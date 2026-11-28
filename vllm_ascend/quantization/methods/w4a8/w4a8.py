@@ -41,6 +41,7 @@ from vllm_ascend.utils import (
 from ..base import AscendLinearScheme, AscendMoEScheme, PreparedLinearInput, QuantType
 from ..registry import register_scheme
 
+ACL_FORMAT_FRACTAL_NZ_C0_16 = 50
 _MODELSLIM_SCALE_BIAS_PARTITIONS = 16
 _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
@@ -479,7 +480,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # Both native NZ storage tags (FRACTAL_NZ and FRACTAL_NZ_C0_16) use the NZ entry.
         op = (
             torch.ops._C_ascend.gmm1_situ_quant_weight_nz
-            if torch_npu.get_npu_format(first_weight) in (ACL_FORMAT_FRACTAL_NZ, 50)
+            if torch_npu.get_npu_format(first_weight) in (ACL_FORMAT_FRACTAL_NZ, ACL_FORMAT_FRACTAL_NZ_C0_16)
             else torch.ops._C_ascend.gmm1_situ_quant
         )
         if isinstance(weight, (list, tuple)):
