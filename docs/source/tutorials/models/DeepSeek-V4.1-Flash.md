@@ -2107,6 +2107,13 @@ Select the tab for the target hardware.
     ock.mmc.local_service.protocol = device_sdma
     ock.mmc.local_service.dram.size = 200GB
     ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.storage.enabled = false
+    ```
+
+    To additionally enable **SSD pooling**, update or add the following settings
+    in `mmc-local-standalone.conf`:
+
+    ```ini
     ock.mmc.local_service.storage.enabled = true
     ubsio.disk.path = /dev/loop0
     ubsio.mem.size_in_gb = 50
