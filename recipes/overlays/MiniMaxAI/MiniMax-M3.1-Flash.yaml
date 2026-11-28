@@ -143,6 +143,1079 @@ variants:
         install:
           pip: false
 presets:
+  ascend_a3_mooncake_pool:
+    label: A3 · Mooncake three-tier PD
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+      - ascend_w8a8
+    workload: Prefill/decode with external prefix reuse and SSD offload
+    description: One Prefill host and two Decode hosts in one global DP group. Follow the versioned deployment steps
+      to create a pool or reuse a running one.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: vllm-ascend/mooncake
+      frontend: python
+      features:
+        text_only: true
+        tool_calling: false
+    source:
+      label: MiniMax-M3.1-Flash, A3 pooled serving
+      href: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/MiniMax-M3.1-Flash.html#54-prefill-decode-disaggregation-with-kv-cache-pool
+      key: minimax-m3.1-flash-a3-pool
+      revision: 355fb06e9a616e563a7643fa8fa3db2b03dd69d3
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 4
+        pp: 4
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        pp: 1
+    deployment:
+      ascend_version: v0.32.0rc
+      tutorial: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/MiniMax-M3.1-Flash.html#54-prefill-decode-disaggregation-with-kv-cache-pool
+      hosts: [p, d1, d2]
+      containers:
+        p:
+          host: p
+          docker_args: &a3_mooncake_pool_docker [--network, host, --privileged, --shm-size=100g, --device, /dev/davinci_manager, --device,
+            /dev/devmm_svm, --device, /dev/hisi_hdc, --device, /dev/davinci0, --device, /dev/davinci1, --device, /dev/davinci2,
+            --device, /dev/davinci3, --device, /dev/davinci4, --device, /dev/davinci5, --device, /dev/davinci6, --device,
+            /dev/davinci7, --device, /dev/davinci8, --device, /dev/davinci9, --device, /dev/davinci10, --device, /dev/davinci11,
+            --device, /dev/davinci12, --device, /dev/davinci13, --device, /dev/davinci14, --device, /dev/davinci15,
+            -v, '/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro', -v, '/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro',
+            -v, '/usr/local/sbin:/usr/local/sbin:ro', -v, '/etc/hccn.conf:/etc/hccn.conf:ro', -v, '/usr/local/dcmi:/usr/local/dcmi:ro',
+            -v, '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro', -v, '/etc/ascend_install.info:/etc/ascend_install.info:ro']
+        d1:
+          host: d1
+          docker_args: *a3_mooncake_pool_docker
+        d2:
+          host: d2
+          docker_args: *a3_mooncake_pool_docker
+      placements:
+        - id: control
+          role: master
+          container: p
+          mode: new
+        - id: prefill
+          role: prefill
+          container: p
+          devices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '19100'
+              - --served-model-name
+              - minimax-m3.1-flash
+              - --trust-remote-code
+              - --hf-overrides
+              - '{"architectures":["MiniMaxM3SparseForCausalLM"]}'
+              - --language-model-only
+              - --quantization
+              - ascend
+              - --dtype
+              - bfloat16
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '4'
+              - --enable-expert-parallel
+              - --distributed-executor-backend
+              - mp
+              - --seed
+              - '1024'
+              - --max-model-len
+              - '133000'
+              - --max-num-seqs
+              - '8'
+              - --max-num-batched-tokens
+              - '8192'
+              - --gpu-memory-utilization
+              - '0.85'
+              - --block-size
+              - '128'
+              - --kv-cache-dtype
+              - bfloat16
+              - --enable-chunked-prefill
+              - --enable-prefix-caching
+              - --disable-hybrid-kv-cache-manager
+              - --speculative-config
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}'
+              - --reasoning-parser
+              - minimax_m3
+              - --data-parallel-size
+              - '1'
+              - --enforce-eager
+              - --long-prefill-token-threshold
+              - '2048'
+              - --additional-config
+              - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":1,"enable_flashcomm1":true,"enable_fused_mc2":0}'
+            env:
+              VLLM_PP_LAYER_PARTITION: 15,15,15,15
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              HCCL_BUFFSIZE: '512'
+              HCCL_IF_IP: '{{address}}'
+              HCCL_OP_EXPANSION_MODE: AIV
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+              VLLM_USE_FASTOKENS: '1'
+              MOONCAKE_CONFIG_PATH: '{{config_dir}}/mooncake.json'
+              ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+              PYTHONHASHSEED: '0'
+              MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES: '1073741824'
+              MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY: lru
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset HCCL_INTRA_ROCE_ENABLE
+              unset MOONCAKE_MASTER MOONCAKE_GLOBAL_SEGMENT_SIZE
+              if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then export LD_LIBRARY_PATH="$MOONCAKE_LIB_DIRS:${LD_LIBRARY_PATH:-}"; fi
+            transfer:
+              kv_connector: MooncakeConnectorV1
+              kv_buffer_device: npu
+              kv_role: kv_producer
+              kv_port: 24000
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 4
+                  pp_layer_partition: 15,15,15,15
+                decode:
+                  dp_size: 8
+                  tp_size: 4
+                  pp_size: 1
+            store:
+              lookup_rpc_port: 37000
+        - id: decode0
+          role: decode
+          container: d1
+          devices: [0, 1, 2, 3]
+          rank: 0
+          launch: &a3_mooncake_pool_decode
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '{{placement.port}}'
+              - --served-model-name
+              - minimax-m3.1-flash
+              - --trust-remote-code
+              - --hf-overrides
+              - '{"architectures":["MiniMaxM3SparseForCausalLM"]}'
+              - --language-model-only
+              - --quantization
+              - ascend
+              - --dtype
+              - bfloat16
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '1'
+              - --enable-expert-parallel
+              - --distributed-executor-backend
+              - mp
+              - --seed
+              - '1024'
+              - --max-model-len
+              - '133000'
+              - --max-num-seqs
+              - '128'
+              - --max-num-batched-tokens
+              - '2048'
+              - --gpu-memory-utilization
+              - '0.92'
+              - --block-size
+              - '128'
+              - --kv-cache-dtype
+              - bfloat16
+              - --enable-chunked-prefill
+              - --enable-prefix-caching
+              - --disable-hybrid-kv-cache-manager
+              - --speculative-config
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}'
+              - --reasoning-parser
+              - minimax_m3
+              - --data-parallel-size
+              - '8'
+              - --data-parallel-size-local
+              - '1'
+              - --data-parallel-rank
+              - '{{placement.rank}}'
+              - --data-parallel-address
+              - '{{hosts.d1.address}}'
+              - --data-parallel-rpc-port
+              - '16920'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+              - --additional-config
+              - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"weight_nz_mode":1}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              HCCL_BUFFSIZE: '1024'
+              HCCL_IF_IP: '{{address}}'
+              HCCL_OP_EXPANSION_MODE: AIV
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              ASCEND_RT_VISIBLE_DEVICES: '{{placement.visible}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+              MOONCAKE_CONFIG_PATH: '{{config_dir}}/mooncake.json'
+              ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+              PYTHONHASHSEED: '0'
+              MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES: '1073741824'
+              MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY: lru
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset HCCL_INTRA_ROCE_ENABLE
+              unset MOONCAKE_MASTER MOONCAKE_GLOBAL_SEGMENT_SIZE
+              if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then export LD_LIBRARY_PATH="$MOONCAKE_LIB_DIRS:${LD_LIBRARY_PATH:-}"; fi
+            transfer:
+              kv_connector: MooncakeConnectorV1
+              kv_buffer_device: npu
+              kv_role: kv_consumer
+              kv_port: '{{placement.kv_port}}'
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 4
+                  pp_layer_partition: 15,15,15,15
+                decode:
+                  dp_size: 8
+                  tp_size: 4
+                  pp_size: 1
+            store:
+              lookup_rpc_port: '{{placement.lookup}}'
+          vars:
+            visible: 0,1,2,3
+            port: 19200
+            kv_port: 25000
+            lookup: 37100
+        - id: decode1
+          role: decode
+          container: d1
+          devices: [4, 5, 6, 7]
+          rank: 1
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 4,5,6,7
+            port: 19201
+            kv_port: 25032
+            lookup: 37101
+        - id: decode2
+          role: decode
+          container: d1
+          devices: [8, 9, 10, 11]
+          rank: 2
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 8,9,10,11
+            port: 19202
+            kv_port: 25064
+            lookup: 37102
+        - id: decode3
+          role: decode
+          container: d1
+          devices: [12, 13, 14, 15]
+          rank: 3
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 12,13,14,15
+            port: 19203
+            kv_port: 25096
+            lookup: 37103
+        - id: decode4
+          role: decode
+          container: d2
+          devices: [0, 1, 2, 3]
+          rank: 4
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 0,1,2,3
+            port: 19300
+            kv_port: 26000
+            lookup: 37104
+        - id: decode5
+          role: decode
+          container: d2
+          devices: [4, 5, 6, 7]
+          rank: 5
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 4,5,6,7
+            port: 19301
+            kv_port: 26032
+            lookup: 37105
+        - id: decode6
+          role: decode
+          container: d2
+          devices: [8, 9, 10, 11]
+          rank: 6
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 8,9,10,11
+            port: 19302
+            kv_port: 26064
+            lookup: 37106
+        - id: decode7
+          role: decode
+          container: d2
+          devices: [12, 13, 14, 15]
+          rank: 7
+          launch: *a3_mooncake_pool_decode
+          vars:
+            visible: 12,13,14,15
+            port: 19303
+            kv_port: 26096
+            lookup: 37107
+        - id: proxy
+          role: proxy
+          container: p
+          launch:
+            argv:
+              - python3
+              - /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+              - --host
+              - 0.0.0.0
+              - --port
+              - '19080'
+              - --prefiller-hosts
+              - '{{hosts.p.address}}'
+              - --prefiller-ports
+              - '19100'
+              - --decoder-hosts
+              - '{{hosts.d1.address}}'
+              - '{{hosts.d1.address}}'
+              - '{{hosts.d1.address}}'
+              - '{{hosts.d1.address}}'
+              - '{{hosts.d2.address}}'
+              - '{{hosts.d2.address}}'
+              - '{{hosts.d2.address}}'
+              - '{{hosts.d2.address}}'
+              - --decoder-ports
+              - '19200'
+              - '19201'
+              - '19202'
+              - '19203'
+              - '19300'
+              - '19301'
+              - '19302'
+              - '19303'
+            env:
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d1.address}},{{hosts.d2.address}}
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d1.address}},{{hosts.d2.address}}
+            setup: |-
+              set -e
+              test -r /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+      defaults:
+        hosts.p.segment_gb: 4
+        hosts.p.preferred_segment: false
+        hosts.d1.segment_gb: 4
+        hosts.d1.preferred_segment: false
+        hosts.d2.segment_gb: 4
+        hosts.d2.preferred_segment: false
+      steps:
+        - id: hardware
+          title: Confirm the selected hardware and communication environment
+          stage: storage
+          target: hosts
+          command: npu-smi info
+          check: Check the A3 HCCS fabric, LingQu Computing Network 1.5 or later and the model-specific image. The
+            release compatibility table lists CANN 9.1.0 or later and HDK 26.0, or HDK 25.5 with Mooncake 0.3.11 or
+            later. Confirm the installed Store.setup supports SSD offload.
+        - id: start-d0
+          title: Start Decode global rank 0 on D1
+          stage: serve
+          target: placement:decode0
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - master-reachable
+        - id: start-d1
+          title: Start Decode global rank 1 on D1
+          stage: serve
+          target: placement:decode1
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - master-reachable
+        - id: start-d2
+          title: Start Decode global rank 2 on D1
+          stage: serve
+          target: placement:decode2
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - master-reachable
+        - id: start-d3
+          title: Start Decode global rank 3 on D1
+          stage: serve
+          target: placement:decode3
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - master-reachable
+        - id: d1-coordinator
+          title: Check that D1 started the DP coordinator
+          stage: serve
+          target: placement:decode0
+          depends_on:
+            - start-d0
+            - start-d1
+            - start-d2
+            - start-d3
+          check: Wait for rank 0 to report Started DP Coordinator process. Launch D2 before waiting for D1 model readiness.
+        - id: start-d4
+          title: Start Decode global rank 4 on D2
+          stage: serve
+          target: placement:decode4
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - d1-coordinator
+        - id: start-d5
+          title: Start Decode global rank 5 on D2
+          stage: serve
+          target: placement:decode5
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - d1-coordinator
+        - id: start-d6
+          title: Start Decode global rank 6 on D2
+          stage: serve
+          target: placement:decode6
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - d1-coordinator
+        - id: start-d7
+          title: Start Decode global rank 7 on D2
+          stage: serve
+          target: placement:decode7
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - d1-coordinator
+        - id: decode-ready
+          title: Check all distributed Decode endpoints
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.d1.address}}:19200/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d1.address}}:19201/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d1.address}}:19202/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d1.address}}:19203/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d2.address}}:19300/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d2.address}}:19301/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d2.address}}:19302/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d2.address}}:19303/v1/models
+          check: Every Decode endpoint lists minimax-m3.1-flash. Confirm every worker joined the distributed group.
+          depends_on:
+            - start-d0
+            - start-d1
+            - start-d2
+            - start-d3
+            - start-d4
+            - start-d5
+            - start-d6
+            - start-d7
+        - id: start-prefill
+          title: Start Prefill
+          stage: serve
+          target: placement:prefill
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - decode-ready
+        - id: role-apis
+          title: Check model API readiness
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:19100/v1/models
+          check: Every published P/D endpoint lists the selected served model; confirm the expected role, device and
+            rank layout in its log.
+          depends_on:
+            - start-prefill
+        - id: start-proxy
+          title: Start the Ascend HTTP proxy
+          stage: serve
+          target: placement:proxy
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - role-apis
+        - id: service
+          title: Send a request through the proxy
+          stage: serve
+          target: placement:proxy
+          command: 'curl --fail http://127.0.0.1:19080/v1/chat/completions -H ''Content-Type: application/json'' -d
+            ''{"model":"minimax-m3.1-flash","messages":[{"role":"user","content":"Hello!"}],"temperature":0,"max_tokens":32}'''
+          check: Confirm the response and P-to-D transfer in the model logs before checking external pool reuse.
+          depends_on:
+            - start-proxy
+        - id: shared-prefix
+          title: Warm the pool and replay a shared prefix
+          stage: serve
+          target: placement:proxy
+          command: |-
+            python - 19080 minimax-m3.1-flash <<'PY'
+            import json, sys, urllib.request
+            port, model = sys.argv[1:]
+            prefix = "The KV cache stores repeated prefixes so later inference can reuse model state. " * 256
+            for question in ("Summarize the passage.", "Give the purpose in one sentence."):
+                body = {"model":model, "messages":[{"role":"user","content":prefix + question}], "temperature":0,"max_tokens":32}
+                request = urllib.request.Request("http://127.0.0.1:"+port+"/v1/chat/completions",
+                                                 json.dumps(body).encode(), {"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    print(json.load(response)["choices"][0]["message"]["content"])
+            PY
+          check: Correlate the second request with backend lookup/get evidence on Prefill. Local prefix hits alone
+            do not establish external reuse.
+          depends_on:
+            - service
+  ascend_950dt_mooncake_pool:
+    label: 950DT · Mooncake three-tier PD
+    hardware: ascend_950dt_8x
+    strategy: pd_cluster
+    variants:
+      - ascend_w8a8_mxfp8
+    workload: Prefill/decode with external prefix reuse and SSD offload
+    description: One Prefill host and two Decode hosts in one global DP group. Follow the versioned deployment steps
+      to create a pool or reuse a running one.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: vllm-ascend/mooncake
+      frontend: python
+      features:
+        text_only: true
+        tool_calling: true
+    source:
+      label: MiniMax-M3.1-Flash, 950DT pooled serving
+      href: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/MiniMax-M3.1-Flash.html#54-prefill-decode-disaggregation-with-kv-cache-pool
+      key: minimax-m3.1-flash-950dt-pool
+      revision: 355fb06e9a616e563a7643fa8fa3db2b03dd69d3
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 4
+        pp: 2
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        pp: 1
+    deployment:
+      ascend_version: v0.32.0rc
+      tutorial: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/MiniMax-M3.1-Flash.html#54-prefill-decode-disaggregation-with-kv-cache-pool
+      hosts: [p, d1, d2]
+      containers:
+        p:
+          host: p
+          docker_args: &950dt_mooncake_pool_docker [--network, host, --ipc, host, --privileged, --shm-size=100g, --device, /dev/davinci_manager,
+            --device, /dev/hisi_hdc, --device, /dev/ummu, --device, /dev/uburma, --device, /dev/davinci0, --device,
+            /dev/davinci1, --device, /dev/davinci2, --device, /dev/davinci3, --device, /dev/davinci4, --device, /dev/davinci5,
+            --device, /dev/davinci6, --device, /dev/davinci7, -v, '/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro',
+            -v, '/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro', -v, '/usr/local/sbin:/usr/local/sbin:ro',
+            -v, '/usr/local/dcmi:/usr/local/dcmi:ro', -v, '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro', -v,
+            '/etc/ascend_install.info:/etc/ascend_install.info:ro', -v, '/etc/hixlep:/etc/hixlep:ro', -v, '/etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro']
+        d1:
+          host: d1
+          docker_args: *950dt_mooncake_pool_docker
+        d2:
+          host: d2
+          docker_args: *950dt_mooncake_pool_docker
+      placements:
+        - id: control
+          role: master
+          container: p
+          mode: new
+        - id: prefill
+          role: prefill
+          container: p
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '31050'
+              - --data-parallel-size
+              - '1'
+              - --data-parallel-size-local
+              - '1'
+              - --data-parallel-address
+              - '{{address}}'
+              - --data-parallel-rpc-port
+              - '6884'
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '2'
+              - --served-model-name
+              - minimax-m3.1-flash
+              - --trust-remote-code
+              - --dtype
+              - bfloat16
+              - --max-num-seqs
+              - '128'
+              - --max-num-batched-tokens
+              - '8000'
+              - --max-model-len
+              - '133000'
+              - --disable-hybrid-kv-cache-manager
+              - --enable-expert-parallel
+              - --quantization
+              - ascend
+              - --gpu-memory-utilization
+              - '0.85'
+              - --distributed-executor-backend
+              - mp
+              - --kv-cache-dtype
+              - fp8
+              - --reasoning-parser
+              - minimax_m3
+              - --enable-auto-tool-choice
+              - --tool-call-parser
+              - minimax_m3
+              - --language-model-only
+              - --safetensors-load-strategy
+              - prefetch
+              - --enforce-eager
+              - --enable-chunked-prefill
+              - --enable-prefix-caching
+              - --additional-config
+              - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_fused_mc2":0}'
+              - --speculative-config
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}'
+            env:
+              VLLM_USE_FASTOKENS: '1'
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+              HCCL_BUFFSIZE: '512'
+              HCCL_IF_IP: '{{address}}'
+              HCCL_OP_EXPANSION_MODE: CCU_SCHED
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+              MOONCAKE_CONFIG_PATH: '{{config_dir}}/mooncake.json'
+              PYTHONHASHSEED: '0'
+              MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES: '1073741824'
+              MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY: lru
+              ASCEND_LOCAL_COMM_RES_PATH: /etc/hixlep/
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset MOONCAKE_MASTER MOONCAKE_GLOBAL_SEGMENT_SIZE
+              unset ASCEND_GLOBAL_RESOURCE_CONFIG
+              if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then export LD_LIBRARY_PATH="$MOONCAKE_LIB_DIRS:${LD_LIBRARY_PATH:-}"; fi
+            transfer:
+              kv_connector: MooncakeConnectorV1
+              kv_buffer_device: npu
+              kv_role: kv_producer
+              kv_port: 30000
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                ascend_local_comm_res_path: /etc/hixlep
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 4
+                  pp_size: 1
+            store:
+              lookup_rpc_port: 37000
+        - id: decode1
+          role: decode
+          container: d1
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '31060'
+              - --data-parallel-size
+              - '4'
+              - --data-parallel-size-local
+              - '2'
+              - --data-parallel-start-rank
+              - '0'
+              - --data-parallel-address
+              - '{{address}}'
+              - --data-parallel-rpc-port
+              - '6885'
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '1'
+              - --served-model-name
+              - minimax-m3.1-flash
+              - --trust-remote-code
+              - --dtype
+              - bfloat16
+              - --max-num-seqs
+              - '128'
+              - --max-num-batched-tokens
+              - '8000'
+              - --max-model-len
+              - '133000'
+              - --disable-hybrid-kv-cache-manager
+              - --enable-expert-parallel
+              - --quantization
+              - ascend
+              - --gpu-memory-utilization
+              - '0.92'
+              - --distributed-executor-backend
+              - mp
+              - --kv-cache-dtype
+              - fp8
+              - --reasoning-parser
+              - minimax_m3
+              - --enable-auto-tool-choice
+              - --tool-call-parser
+              - minimax_m3
+              - --language-model-only
+              - --safetensors-load-strategy
+              - prefetch
+              - --enable-prefix-caching
+              - --seed
+              - '1024'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
+              - --additional-config
+              - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+              - --speculative-config
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+              HCCL_BUFFSIZE: '1024'
+              HCCL_IF_IP: '{{address}}'
+              HCCL_OP_EXPANSION_MODE: CCU_SCHED
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+              MOONCAKE_CONFIG_PATH: '{{config_dir}}/mooncake.json'
+              PYTHONHASHSEED: '0'
+              MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES: '1073741824'
+              MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY: lru
+              ASCEND_LOCAL_COMM_RES_PATH: /etc/hixlep/
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset MOONCAKE_MASTER MOONCAKE_GLOBAL_SEGMENT_SIZE
+              unset ASCEND_GLOBAL_RESOURCE_CONFIG
+              if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then export LD_LIBRARY_PATH="$MOONCAKE_LIB_DIRS:${LD_LIBRARY_PATH:-}"; fi
+            transfer:
+              kv_connector: MooncakeConnectorV1
+              kv_buffer_device: npu
+              kv_role: kv_consumer
+              kv_port: 26900
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                ascend_local_comm_res_path: /etc/hixlep
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 4
+                  pp_size: 1
+            store:
+              lookup_rpc_port: 37100
+        - id: decode2
+          role: decode
+          container: d2
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '31060'
+              - --data-parallel-size
+              - '4'
+              - --data-parallel-size-local
+              - '2'
+              - --data-parallel-start-rank
+              - '2'
+              - --data-parallel-address
+              - '{{hosts.d1.address}}'
+              - --data-parallel-rpc-port
+              - '6885'
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '1'
+              - --served-model-name
+              - minimax-m3.1-flash
+              - --trust-remote-code
+              - --dtype
+              - bfloat16
+              - --max-num-seqs
+              - '128'
+              - --max-num-batched-tokens
+              - '8000'
+              - --max-model-len
+              - '133000'
+              - --disable-hybrid-kv-cache-manager
+              - --enable-expert-parallel
+              - --quantization
+              - ascend
+              - --gpu-memory-utilization
+              - '0.92'
+              - --distributed-executor-backend
+              - mp
+              - --kv-cache-dtype
+              - fp8
+              - --reasoning-parser
+              - minimax_m3
+              - --enable-auto-tool-choice
+              - --tool-call-parser
+              - minimax_m3
+              - --language-model-only
+              - --safetensors-load-strategy
+              - prefetch
+              - --enable-prefix-caching
+              - --seed
+              - '1024'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
+              - --additional-config
+              - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+              - --speculative-config
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+              HCCL_BUFFSIZE: '1024'
+              HCCL_IF_IP: '{{address}}'
+              HCCL_OP_EXPANSION_MODE: CCU_SCHED
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+              MOONCAKE_CONFIG_PATH: '{{config_dir}}/mooncake.json'
+              PYTHONHASHSEED: '0'
+              MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES: '1073741824'
+              MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE: '10737418240'
+              MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY: lru
+              ASCEND_LOCAL_COMM_RES_PATH: /etc/hixlep/
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset MOONCAKE_MASTER MOONCAKE_GLOBAL_SEGMENT_SIZE
+              unset ASCEND_GLOBAL_RESOURCE_CONFIG
+              if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then export LD_LIBRARY_PATH="$MOONCAKE_LIB_DIRS:${LD_LIBRARY_PATH:-}"; fi
+            transfer:
+              kv_connector: MooncakeConnectorV1
+              kv_buffer_device: npu
+              kv_role: kv_consumer
+              kv_port: 26900
+              kv_connector_extra_config:
+                use_ascend_direct: true
+                ascend_local_comm_res_path: /etc/hixlep
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 4
+                  pp_size: 1
+            store:
+              lookup_rpc_port: 37102
+        - id: proxy
+          role: proxy
+          container: p
+          launch:
+            argv:
+              - python3
+              - /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+              - --host
+              - 0.0.0.0
+              - --port
+              - '19080'
+              - --prefiller-hosts
+              - '{{hosts.p.address}}'
+              - --prefiller-ports
+              - '31050'
+              - --decoder-hosts
+              - '{{hosts.d1.address}}'
+              - '{{hosts.d2.address}}'
+              - --decoder-ports
+              - '31060'
+              - '31060'
+              - --max-retries
+              - '0'
+              - --workers
+              - '4'
+            env:
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d1.address}},{{hosts.d2.address}}
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d1.address}},{{hosts.d2.address}}
+            setup: |-
+              set -e
+              test -r /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+      defaults:
+        hosts.p.segment_gb: 64
+        hosts.p.preferred_segment: false
+        hosts.d1.segment_gb: 64
+        hosts.d1.preferred_segment: true
+        hosts.d2.segment_gb: 64
+        hosts.d2.preferred_segment: true
+      steps:
+        - id: hardware
+          title: Confirm the selected hardware and communication environment
+          stage: storage
+          target: hosts
+          command: npu-smi info
+          check: Check HDK 25.6 or later with Mooncake 0.3.11 or later, CANN 9.1.0 or later, /etc/hixlep and Device
+            UB on all three hosts. Confirm the installed Store.setup supports SSD offload.
+        - id: start-d1
+          title: Start the D1 two-rank Decode process
+          stage: serve
+          target: placement:decode1
+          action: launch
+          check: Start both Decode hosts before waiting for either API.
+          depends_on:
+            - master-reachable
+        - id: start-d2
+          title: Start the D2 two-rank Decode process
+          stage: serve
+          target: placement:decode2
+          action: launch
+          check: Start both Decode hosts before waiting for either API.
+          depends_on:
+            - master-reachable
+        - id: decode-ready
+          title: Check all distributed Decode endpoints
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.d1.address}}:31060/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d2.address}}:31060/v1/models
+          check: Every Decode endpoint lists minimax-m3.1-flash. Confirm every worker joined the distributed group.
+          depends_on:
+            - start-d1
+            - start-d2
+        - id: start-prefill
+          title: Start Prefill
+          stage: serve
+          target: placement:prefill
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - decode-ready
+        - id: role-apis
+          title: Check model API readiness
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:31050/v1/models
+          check: Every published P/D endpoint lists the selected served model; confirm the expected role, device and
+            rank layout in its log.
+          depends_on:
+            - start-prefill
+        - id: start-proxy
+          title: Start the Ascend HTTP proxy
+          stage: serve
+          target: placement:proxy
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - role-apis
+        - id: service
+          title: Send a request through the proxy
+          stage: serve
+          target: placement:proxy
+          command: 'curl --fail http://127.0.0.1:19080/v1/chat/completions -H ''Content-Type: application/json'' -d
+            ''{"model":"minimax-m3.1-flash","messages":[{"role":"user","content":"Hello!"}],"temperature":0,"max_tokens":32}'''
+          check: Confirm the response and P-to-D transfer in the model logs before checking external pool reuse.
+          depends_on:
+            - start-proxy
+        - id: shared-prefix
+          title: Warm the pool and replay a shared prefix
+          stage: serve
+          target: placement:proxy
+          command: |-
+            python - 19080 minimax-m3.1-flash <<'PY'
+            import json, sys, urllib.request
+            port, model = sys.argv[1:]
+            prefix = "The KV cache stores repeated prefixes so later inference can reuse model state. " * 256
+            for question in ("Summarize the passage.", "Give the purpose in one sentence."):
+                body = {"model":model, "messages":[{"role":"user","content":prefix + question}], "temperature":0,"max_tokens":32}
+                request = urllib.request.Request("http://127.0.0.1:"+port+"/v1/chat/completions",
+                                                 json.dumps(body).encode(), {"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    print(json.load(response)["choices"][0]["message"]["content"])
+            PY
+          check: Correlate the second request with backend lookup/get evidence on Prefill. Local prefix hits alone
+            do not establish external reuse.
+          depends_on:
+            - service
   ascend_a3_w8a8_agg:
     label: A3 W8A8 single node (DP4 x TP4)
     hardware: ascend_910c
@@ -657,8 +1730,17 @@ guide_sections:
     `--hf-overrides` with the sparse architecture its scripts use; the 950DT PD
     scripts do not pass it, so that preset does not either.
 
-    **Not covered here.** The A2 two-node colocated layout (section 5.2), the KV
-    cache pool with `MultiConnector` (section 5.4), the 1M-token PD layout
+    **Mooncake three-tier pooling.** On [A3](?hardware=ascend_910c&variant=ascend_w8a8&strategy=pd_cluster&preset=ascend_a3_mooncake_pool)
+    or [950DT](?hardware=ascend_950dt_8x&variant=ascend_w8a8_mxfp8&strategy=pd_cluster&preset=ascend_950dt_mooncake_pool)
+    select Mooncake under **KV Offload**, then choose whether to create a pool or use an existing one.
+    Follow the steps in the command panel above to prepare storage and start the services.
+    These presets reproduce the versioned tutorial's
+    MooncakeConnectorV1 P-to-D transport with an AscendStoreConnector on both roles.
+    A3 has one independent Decode process per rank. The 950DT group has one
+    process per Decode host. Each worker host provides writable local SSD storage.
+    [v0.32.0rc pooled PD tutorial](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/MiniMax-M3.1-Flash.html#54-prefill-decode-disaggregation-with-kv-cache-pool).
+
+    The A2 two-node colocated layout (section 5.2), the 1M-token PD layout
     (section 5.5) and the 16K-input decode variant (64 sequences, default graph
     capture) stay in the tutorial. The per-rank `vllm serve` scripts of section
     5.3 are replaced by the supervisor; the Python load-balance proxy is now

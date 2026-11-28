@@ -1,0 +1,148 @@
+schema_version: 1
+label: Ascend Store · Mooncake
+backend: mooncake
+inputs:
+  address: {scope: host, type: host, label: Service address on the selected host}
+  nic: {scope: host, type: interface, label: Socket interface owning the service address}
+  weights_host_dir: {scope: host, type: path, label: Host directory containing this preset's checkpoint}
+  weights_dir: {scope: host, type: path, label: Checkpoint directory in the container, default: /models/checkpoint}
+  ssd_host_dir: {scope: host, type: path, label: Writable directory on the local SSD filesystem}
+  ssd_dir: {scope: host, type: path, label: Local SSD directory in the container, default: /kv-offload}
+  config_host_dir: {scope: host, type: path, label: Host directory for this deployment's Mooncake configuration}
+  config_dir: {scope: host, type: path, label: Configuration directory in the container, default: /opt/recipe-pool}
+  master_address: {scope: cluster, type: host, label: Reachable Mooncake Master address}
+  master_port: {scope: cluster, type: port, label: Master RPC port, default: 50088}
+  tenant: {scope: cluster, type: id, label: Tenant shared by all workers, default: default}
+  segment_gb: {scope: host, type: integer, label: Pool DRAM per NPU worker in whole GB, mode: new}
+  preferred_segment: {scope: host, type: boolean, label: Prefer this worker's memory segment, mode: new}
+capacity:
+  - {label: Pool DRAM, input: segment_gb, unit: GB, count: workers}
+  - {label: SSD quota, value: 10, unit: GiB, count: workers}
+  - {label: SSD I/O buffer, value: 1, unit: GiB, count: workers}
+mounts:
+  - {source: '{{weights_host_dir}}', target: '{{weights_dir}}', read_only: true}
+  - {source: '{{ssd_host_dir}}', target: '{{ssd_dir}}'}
+  - {source: '{{config_host_dir}}', target: '{{config_dir}}'}
+store:
+  prefill: {backend: mooncake}
+  decode: {backend: mooncake}
+steps:
+  - id: local-storage
+    title: Identify the local SSD and the checkpoint mount
+    stage: storage
+    target: hosts
+    command: |
+      set -e
+      test -d {{weights_host_dir}} && test -r {{weights_host_dir}}/config.json
+      test -d {{ssd_host_dir}} && test ! -L {{ssd_host_dir}}
+      lsblk -o NAME,TYPE,SIZE,ROTA,FSTYPE,MOUNTPOINTS,MODEL
+      findmnt -T {{weights_host_dir}}
+      findmnt -T {{ssd_host_dir}}
+      df -hT -- {{ssd_host_dir}}
+    check: Confirm the checkpoint matches the selected variant and the SSD path resolves to a writable local SSD filesystem. Network storage may hold weights. Budget 10 GiB of SSD and 1 GiB of I/O buffer per NPU worker in addition to its DRAM segment.
+  - id: prepare-config-directory
+    title: Prepare a personal host configuration directory
+    stage: storage
+    target: hosts
+    mode: new
+    command: mkdir -p -- {{config_host_dir}}
+    check: The directory belongs to this deployment and can be mounted read/write.
+  - id: reuse-config-directory
+    title: Locate the existing pool configuration
+    stage: storage
+    target: hosts
+    mode: reuse
+    command: test -r {{config_host_dir}}/mooncake.json
+    check: The selected file belongs to the running pool and this worker role.
+  - id: container
+    depends_on: [hardware, local-storage, prepare-config-directory, reuse-config-directory]
+    title: Create the model container
+    stage: container
+    target: containers
+    action: container
+    check: The model, local SSD and configuration paths are visible in the container.
+  - id: runtime
+    depends_on: [container]
+    title: Check the runtime and the container's SSD mapping
+    stage: config
+    target: containers
+    command: |
+      set -e
+      test -r {{weights_dir}}/config.json && test -w {{ssd_dir}} && test ! -L {{ssd_dir}}
+      findmnt -T {{ssd_dir}}
+      python -m pip show vllm vllm-ascend
+      python -c 'from mooncake.store import MooncakeDistributedStore; print(MooncakeDistributedStore.setup.__doc__)'
+      command -v mooncake_master
+      free -h
+    check: Confirm the model-specific image, host HDK/CANN, Mooncake version and transport from the selected tutorial. Store.setup must accept enable_ssd_offload and ssd_offload_path. Check usable host memory before reserving a segment per worker.
+  - id: write-config
+    title: Create the worker's Mooncake configuration
+    stage: config
+    target: containers
+    mode: new
+    depends_on: [runtime]
+    command: |
+      python - {{config_dir}} {{ssd_dir}} {{master_address}} {{master_port}} {{tenant}} {{segment_gb}} {{preferred_segment}} <<'PY'
+      import json, sys
+      from pathlib import Path
+      root, ssd, address, port, tenant, gb, preferred = sys.argv[1:]
+      if int(gb) <= 0:
+          raise SystemExit("Choose a positive whole-GB segment for this worker.")
+      config = dict(metadata_server="P2PHANDSHAKE", protocol="ascend", device_name="",
+                    master_server_address=f"{address}:{port}", global_segment_size=f"{gb}GB",
+                    preferred_segment=preferred.lower() == "true", prefer_alloc_in_same_node=True,
+                    enable_ssd_offload=True, ssd_offload_path=ssd, tenant_id=tenant)
+      path = Path(root, "mooncake.json")
+      if path.exists():
+          if json.loads(path.read_text()) != config:
+              raise SystemExit(f"Existing configuration differs: {path}. Choose a fresh directory or reuse the pool.")
+      else:
+          with path.open("x") as out:
+              json.dump(config, out, indent=2)
+              out.write("\n")
+      print(path)
+      PY
+    check: The Master and tenant match across hosts. The per-worker segment and preferred_segment match this hardware and role.
+  - id: validate-config
+    depends_on: [runtime, write-config]
+    title: Verify the effective client configuration
+    stage: config
+    target: containers
+    command: |
+      python - {{config_dir}}/mooncake.json {{ssd_dir}} {{master_address}} {{master_port}} {{tenant}} <<'PY'
+      import json, sys
+      c = json.load(open(sys.argv[1]))
+      expected = {"ssd_offload_path":sys.argv[2], "enable_ssd_offload":True, "master_server_address":sys.argv[3]+":"+sys.argv[4], "tenant_id":sys.argv[5]}
+      for key, value in expected.items():
+          if c.get(key) != value:
+              raise SystemExit(f"Mismatch in {key}: expected {value!r}, got {c.get(key)!r}")
+      print("Client configuration matches this deployment")
+      PY
+    check: Every worker reads its own matching configuration and all point to the same Master.
+  - id: start-master
+    depends_on: [validate-config]
+    title: Start one Mooncake Master and keep its terminal running
+    stage: control
+    mode: new
+    target: control
+    command: mooncake_master --port {{master_port}} --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --client_ttl=120
+    check: The expected Master is listening on the configured address and SSD offload is enabled.
+  - id: master-reachable
+    depends_on: [validate-config, start-master]
+    title: Check the running Master's endpoint
+    stage: control
+    target: containers
+    command: python -c 'import socket,sys; socket.create_connection((sys.argv[1],int(sys.argv[2])),5).close()' {{master_address}} {{master_port}}
+    check: Each P/D container reaches the configured Master. For an existing pool, check its running configuration for SSD offload and the approved tenant.
+  - id: cache-hit
+    depends_on: [shared-prefix]
+    title: Confirm a hit in the external Mooncake pool
+    stage: verify
+    target: prefill
+    check: Correlate the shared-prefix requests with external put followed by lookup/get on Prefill. Verify the worker registrations and live P-to-D transfer on Decode. Record request IDs, backend log timestamps and the generated answers.
+  - id: ssd-restore
+    title: Verify recovery of an evicted prefix from SSD
+    stage: verify
+    target: proxy
+    depends_on: [cache-hit]
+    check: Keep the stack running. In the test pool, replay the shared-prefix workload with additional distinct long prefixes until the configured DRAM eviction watermark is crossed. Record the original prefix's eviction to SSD using Mooncake Master and offload worker logs or metrics. Repeat the original prefix through the proxy and record an SSD read/restore and correct model output. Size the working set to this pool; two small requests only establish the external hit check. Reuse production pools only with an agreed workload.

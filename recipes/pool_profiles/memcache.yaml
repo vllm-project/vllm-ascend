@@ -1,0 +1,259 @@
+schema_version: 1
+label: Ascend Store · Memcache
+backend: memcache
+inputs:
+  address: {scope: host, type: host, label: Model service address}
+  nic: {scope: host, type: interface, label: Socket interface owning the service address}
+  weights_host_dir: {scope: host, type: path, label: Host directory containing the selected checkpoint}
+  weights_dir: {scope: host, type: path, label: Checkpoint directory in the container, default: /models/checkpoint}
+  device: {scope: host, type: device, label: Dedicated host cache block device}
+  cache_device: {scope: host, type: device, label: Block device inside the container, default: /dev/recipe-cache0}
+  config_host_dir: {scope: host, type: path, label: Personal host configuration directory}
+  config_dir: {scope: host, type: path, label: Configuration directory in the container, default: /opt/recipe-pool}
+  meta_address: {scope: cluster, type: host, label: MetaService address reachable from the model containers}
+  meta_port: {scope: cluster, type: port, label: MetaService port}
+  config_address: {scope: cluster, type: host, label: ConfigStore address}
+  config_port: {scope: cluster, type: port, label: ConfigStore port}
+  metrics_address: {scope: cluster, type: host, label: MetaService metrics address, mode: new}
+  metrics_port: {scope: cluster, type: port, label: MetaService metrics port, mode: new}
+  evict_high: {scope: cluster, type: integer, label: Upper eviction watermark (%), default: 70, mode: new}
+  evict_low: {scope: cluster, type: integer, label: Lower eviction watermark (%), default: 60, mode: new}
+  world_size: {scope: cluster, type: integer, label: Pool capacity in LocalServices, default: 256, mode: new}
+  dram_gb: {scope: host, type: integer, label: Pool DRAM per LocalService (GB), default: 10, mode: new}
+  max_dram_gb: {scope: host, type: integer, label: Maximum DRAM per LocalService (GB), default: 1024, mode: new}
+  ubs_gb: {scope: host, type: integer, label: UBS IO DRAM per LocalService (GB), default: 10, mode: new}
+  force_new_disk: {scope: cluster, type: boolean, label: Reinitialize the dedicated cache devices on stack startup (removes cached contents), mode: new}
+  protocol: {scope: host, type: id, label: LocalService transport}
+  local_services: {scope: host, type: integer, label: DRAM-contributing LocalServices on this host, mode: new}
+capacity:
+  - {label: Pool DRAM, input: dram_gb, unit: GB, count: local_services}
+  - {label: UBS IO DRAM, input: ubs_gb, unit: GB, count: local_services}
+mounts:
+  - {source: '{{weights_host_dir}}', target: '{{weights_dir}}', read_only: true}
+  - {source: '{{config_host_dir}}', target: '{{config_dir}}'}
+devices:
+  - {source: '{{device}}', target: '{{cache_device}}'}
+store:
+  prefill: {backend: memcache, use_layerwise: false}
+  decode: {backend: memcache, use_layerwise: false}
+steps:
+  - id: host-storage
+    title: Identify this host's checkpoint and cache device
+    stage: storage
+    target: hosts
+    command: |
+      set -e
+      test -r {{weights_host_dir}}/config.json
+      findmnt -T {{weights_host_dir}}
+      test -b {{device}}
+      lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL -- {{device}}
+      free -h
+      npu-smi info
+    check: Match the model checkpoint and the device serial or loop backing file to this host. A shared filesystem may distribute weights. Memcache uses dedicated local block devices.
+  - id: new-disk
+    title: Check the new pool's disk before mapping it
+    stage: storage
+    target: hosts
+    mode: new
+    command: |
+      set -e
+      device={{device}}
+      test "$(lsblk -nrpo NAME -- "$device" | wc -l)" -eq 1
+      test -z "$(lsblk -nrpo MOUNTPOINTS -- "$device" | tr -d '[:space:]')"
+      sudo blkid -p -- "$device" && { echo "Existing signature on $device"; exit 1; }
+      test "$?" -eq 2
+      mkdir -p -- {{config_host_dir}}
+    check: Confirm that the entire selected device is dedicated, blank and unmounted. For a test loop device use a new dedicated file on local SSD; after reboot verify its identity and capacity again.
+  - id: reusable-files
+    title: Locate the approved files and devices for the running pool
+    stage: storage
+    target: hosts
+    mode: reuse
+    command: ls -l -- {{config_host_dir}}
+    check: Match each file, device and endpoint to the existing pool. Use approved LocalService configurations that preserve cached data on startup.
+  - id: container
+    depends_on: [hardware, host-storage, new-disk, reusable-files]
+    title: Create the role container with its block device mappings
+    stage: container
+    target: containers
+    action: container
+    check: Check the mapped devices from within this container and compare their sizes with the host.
+  - id: runtime
+    depends_on: [container]
+    title: Verify the client packages and memory budget
+    stage: config
+    target: containers
+    command: |
+      set -e
+      python -m pip show vllm vllm-ascend memcache-hybrid memfabric-hybrid
+      python -c 'from importlib.metadata import version; from packaging.version import Version; import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid; assert all(Version(version(p)) >= Version("1.3.0") for p in ("memcache-hybrid","memfabric-hybrid"))'
+      test -r {{weights_dir}}/config.json
+      free -h
+      IFS=: read -r -a devices <<< {{pool_device_paths}}
+      for device in "${devices[@]}"; do test -b "$device" && blockdev --getsize64 "$device" || exit 1; done
+    check: Account for both pool DRAM and UBS IO DRAM per contributing LocalService, plus Engram, vLLM and operating-system memory. The shared-memory size passed to Docker is a separate budget.
+  - id: copy-templates
+    title: Copy the installed package templates into the new deployment
+    stage: config
+    target: containers
+    mode: new
+    depends_on: [runtime]
+    command: |
+      set -e
+      export RECIPE_CFG={{config_dir}}
+      python - {{prefill_config}} {{decode_config}} <<'PY'
+      import importlib.util, os, shutil, sys
+      from pathlib import Path
+      templates = Path(next(iter(importlib.util.find_spec("memcache_hybrid").submodule_search_locations))) / "config"
+      root = Path(os.environ["RECIPE_CFG"])
+      for name in dict.fromkeys(sys.argv[1:]):
+          if name not in {"mmc-local.conf","mmc-local-p.conf","mmc-local-d.conf"}:
+              raise SystemExit(f"Unexpected local configuration file: {name!r}")
+          if not (root / name).exists():
+              with (root / name).open("xb") as out, (templates / "mmc-local.conf").open("rb") as inp:
+                  shutil.copyfileobj(inp, out)
+      PY
+    check: Each local configuration file starts from the selected image's template. Use a dedicated configuration directory for a new pool.
+  - id: configure-storage
+    title: Apply the storage settings to each new LocalService configuration
+    stage: config
+    target: containers
+    mode: new
+    depends_on: [copy-templates]
+    command: |
+      python - {{config_dir}} {{prefill_config}} {{decode_config}} {{pool_device_paths}} {{meta_address}} {{meta_port}} {{config_address}} {{config_port}} {{world_size}} {{protocol}} {{dram_gb}} {{max_dram_gb}} {{ubs_gb}} {{local_services}} {{force_new_disk}} <<'PY'
+      import os, re, sys, tempfile
+      from pathlib import Path
+      root, prefill, decode, disks, meta, mp, store, cp, world, proto, dram, limit, ubs, count, force = sys.argv[1:]
+      if not (1 <= int(count) <= int(world) <= 1024 and 0 < int(dram) <= int(limit) <= 1024 and 5 <= int(ubs) <= 3072):
+          raise SystemExit("Check pool capacity, DRAM and UBS IO limits.")
+      if force.lower() not in {"true","false"} or proto not in {"device_rdma","device_sdma","device_urma"}:
+          raise SystemExit("Select an explicit disk initialization policy and a supported transport.")
+      if not all(Path(path).is_block_device() for path in disks.split(":")):
+          raise SystemExit("All mapped SSD paths must be block devices.")
+      values = {"ock.mmc.meta_service_url":f"tcp://{meta}:{mp}", "ock.mmc.local_service.config_store_url":f"tcp://{store}:{cp}",
+                "ock.mmc.log_level":"info", "ock.mmc.local_service.world_size":world, "ock.mmc.local_service.protocol":proto,
+                "ock.mmc.local_service.dram.size":dram+"GB", "ock.mmc.local_service.max.dram.size":limit+"GB",
+                "ock.mmc.local_service.storage.enabled":"true", "ubsio.disk.path":disks, "ubsio.mem.size_in_gb":ubs,
+                "ubsio.standalone.device_count":count, "ubsio.standalone.force_new_disk":force.lower()}
+      for name in dict.fromkeys((prefill, decode)):
+          if name not in {"mmc-local.conf","mmc-local-p.conf","mmc-local-d.conf"}:
+              raise SystemExit(f"Unexpected file name: {name!r}")
+          path = Path(root, name)
+          data = path.read_text()
+          for key, val in values.items():
+              pattern = rf"(?m)^\s*{re.escape(key)}\s*=.*$"
+              line = f"{key} = {val}"
+              data, n = re.subn(pattern, lambda _: line, data)
+              if n == 0: data += "\n"+line+"\n"
+          with tempfile.NamedTemporaryFile("w", dir=root, delete=False) as out:
+              out.write(data)
+          os.replace(out.name, path)
+      PY
+    check: Confirm the meta/config addresses, transport and mapped devices. device_count counts contributing LocalServices, whereas ubsio.disk.path enumerates the devices. force_new_disk=true clears cache data when the storage stack starts.
+  - id: configure-meta
+    depends_on: [runtime]
+    title: Prepare MetaService on its designated host
+    stage: config
+    mode: new
+    target: control
+    command: |
+      python - {{config_dir}} {{meta_address}} {{meta_port}} {{config_address}} {{config_port}} {{metrics_address}} {{metrics_port}} {{evict_high}} {{evict_low}} <<'PY'
+      import importlib.util, re, sys
+      from pathlib import Path
+      root, meta, mp, store, cp, metrics, http, high, low = sys.argv[1:]
+      if not 1 <= int(low) < int(high) <= 99:
+          raise SystemExit("Choose watermarks with 1 <= low < high <= 99.")
+      template = Path(next(iter(importlib.util.find_spec("memcache_hybrid").submodule_search_locations)), "config", "mmc-meta.conf")
+      target = Path(root, "mmc-meta.conf")
+      data = template.read_text()
+      values = {"ock.mmc.meta_service_url":f"tcp://{meta}:{mp}", "ock.mmc.meta_service.config_store_url":f"tcp://{store}:{cp}",
+                "ock.mmc.meta_service.metrics_url":f"http://{metrics}:{http}", "ock.mmc.log_level":"info",
+                "ock.mmc.evict_threshold_high":high,"ock.mmc.evict_threshold_low":low}
+      for key, val in values.items():
+          line = f"{key} = {val}"
+          data, n = re.subn(rf"(?m)^\s*{re.escape(key)}\s*=.*$", lambda _: line, data)
+          if n == 0: data += "\n"+line+"\n"
+      if target.exists():
+          if target.read_text() != data: raise SystemExit("Select an empty personal meta configuration directory or reuse the pool.")
+      else:
+          with target.open("x") as out: out.write(data)
+      print(target)
+      PY
+    check: Confirm the pool control and metrics listeners and the eviction watermarks in mmc-meta.conf.
+  - id: validate-local
+    depends_on: [runtime, configure-storage]
+    title: Check the effective LocalService endpoint and SSD settings
+    stage: config
+    target: containers
+    command: |
+      python - {{config_dir}} {{prefill_config}} {{decode_config}} {{meta_address}} {{meta_port}} {{config_address}} {{config_port}} {{pool_device_paths}} {{protocol}} <<'PY'
+      import sys
+      from pathlib import Path
+      root, prefill, decode, meta, mp, store, cp, disks, protocol = sys.argv[1:]
+      for name in dict.fromkeys((prefill, decode)):
+          if name not in {"mmc-local.conf","mmc-local-p.conf","mmc-local-d.conf"}: raise SystemExit(f"Unexpected file name: {name!r}")
+          content = Path(root, name).read_text()
+          values = dict((key.strip(), value.strip()) for line in content.splitlines() if not line.lstrip().startswith(("#",";")) and "=" in line for key, value in [line.split("=",1)])
+          expected = {"ock.mmc.meta_service_url":f"tcp://{meta}:{mp}", "ock.mmc.local_service.config_store_url":f"tcp://{store}:{cp}",
+                      "ock.mmc.local_service.protocol":protocol, "ock.mmc.local_service.storage.enabled":"true", "ubsio.disk.path":disks}
+          for key, value in expected.items():
+              if values.get(key) != value: raise SystemExit(f"{name}: check {key}")
+          print(name, "force_new_disk =", values.get("ubsio.standalone.force_new_disk", "(package default)"))
+      PY
+    check: Compare the reported paths, endpoints and initialization policy with the intended deployment.
+  - id: reuse-disk-policy
+    depends_on: [validate-local]
+    title: Verify that starting LocalServices will preserve the existing SSD cache
+    stage: config
+    target: containers
+    mode: reuse
+    command: |
+      python3 - {{config_dir}} {{prefill_config}} {{decode_config}} <<'PY'
+      import re, sys
+      from pathlib import Path
+      root, *names = sys.argv[1:]
+      key = "ubsio.standalone.force_new_disk"
+      setting = re.compile(rf"\s*{re.escape(key)}(?=[\s:=]|$)", re.IGNORECASE)
+      safe = re.compile(rf"\s*{re.escape(key)}\s*=\s*false\s*")
+      for name in dict.fromkeys(names):
+          path = Path(root, name)
+          with path.open() as config:
+              entries = [line for line in config if setting.match(line)]
+          if len(entries) != 1 or not safe.fullmatch(entries[0]):
+              raise SystemExit(f"{path}: pool reuse requires exactly one explicit '{key} = false'.")
+      PY
+    check: Continue only after this read-only check succeeds in every model container. If it fails, obtain an approved LocalService file with a single explicit false setting before starting Prefill or Decode.
+  - id: start-meta
+    depends_on: [configure-meta, validate-local]
+    title: Start one MetaService in a dedicated terminal
+    stage: control
+    target: control
+    mode: new
+    command: |
+      set -e
+      libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)),"lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR")]))')
+      export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+      export MMC_META_CONFIG_PATH={{config_dir}}/mmc-meta.conf
+      python -c 'from memcache_hybrid import MetaService; MetaService.main()'
+    check: Keep the service running. Check the configured control, ConfigStore and metrics listeners with ss -lntp.
+  - id: endpoints
+    depends_on: [validate-local, reuse-disk-policy, start-meta]
+    title: Check the running control endpoints from each model container
+    stage: control
+    target: containers
+    command: python -c 'import socket,sys; [socket.create_connection((h,int(p)),5).close() for h,p in zip(sys.argv[1::2],sys.argv[2::2])]' {{meta_address}} {{meta_port}} {{config_address}} {{config_port}}
+    check: MetaService and ConfigStore are reachable at their configured endpoints. LocalServices start inside the P/D workers.
+  - id: cache-hit
+    depends_on: [shared-prefix]
+    title: Confirm a hit in the external Memcache pool
+    stage: verify
+    target: proxy
+    check: Correlate the two shared-prefix request IDs with Prefill Memcache put/get/hit activity, correct model output, and live P-to-D transfer. The model's in-process prefix cache may also record hits.
+
+  - id: ssd-restore
+    title: Verify recovery of an evicted prefix from SSD
+    stage: verify
+    target: proxy
+    depends_on: [cache-hit]
+    check: Keep the stack running. In the test pool, replay the shared-prefix workload with additional distinct long prefixes until the configured DRAM eviction watermark is crossed. Record the original prefix's eviction to SSD using Memcache, MemFabric and UBS IO logs or metrics. Repeat the original prefix through the proxy and record an SSD read/restore and correct model output. Size the working set to this pool; two small requests only establish the external hit check. Reuse production pools only with an agreed workload.

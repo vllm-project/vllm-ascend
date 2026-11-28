@@ -13,7 +13,7 @@ import { assertInstallationAdapter, checkScenario, installationFor } from "./asc
 const DEFAULT_RECIPES = fileURLToPath(new URL("../", import.meta.url));
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const identity = (f) => JSON.stringify([f.model, f.hardware, f.variant, f.strategy, f.preset, f.point,
-  f.role, f.code, f.severity, f.message, f.evidence]);
+  f.role, f.placement, f.code, f.severity, f.message, f.evidence]);
 export function compareFindings(current, baseline = null, warningsAsErrors = false) {
   const previous = new Set((baseline || []).map(identity));
   const now = new Set(current.map(identity));
@@ -42,6 +42,10 @@ function indexedYaml(dir) {
   return files;
 }
 function workersFor(result) {
+  if (result.pool_deployment) {
+    return result.pool_deployment.launches.filter((launch) => ["prefill", "decode"].includes(launch.role))
+      .map(({ id, role, argv, env }) => ({ placement: id, role, argv, env }));
+  }
   if (result.deploy_type === "pd_cluster") return ["prefill", "decode"].map((role) => ({ role, ...result[role] }));
   if (result.deploy_type === "multi_node") return [{ role: "head", argv: result.head_argv, env: result.env },
     ...(result.worker_argvs || []).map((argv, i) => ({ role: `worker-${i + 1}`, argv, env: result.env }))];
@@ -55,7 +59,7 @@ function normalize(value) {
 }
 
 function inspectSource(recipes, content, tools, options, allowEmpty = false) {
-  const { readYaml, synth, taxonomy, strategies, rendering, presets } = tools;
+  const { readYaml, synth, taxonomy, strategies, rendering, presets, contentRoot } = tools;
   const expectationFile = options["pd-expectations"] || path.join(recipes, "validation/pd-expectations.json");
   const expectations = fs.existsSync(expectationFile) ? JSON.parse(fs.readFileSync(expectationFile, "utf8")) : {};
   if (options["pd-expectations"] && !fs.existsSync(expectationFile)) throw new Error("Explicit PD expectation file is missing");
@@ -75,11 +79,12 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
   const models = indexedYaml(path.join(recipes, "models"));
   const overlays = indexedYaml(path.join(recipes, "overlays"));
   const assembled = indexedYaml(path.join(content, "models"));
+  const poolProfiles = contentRoot.loadPoolProfiles(content);
   for (const hfId of new Set([...models.keys(), ...overlays.keys()])) {
     if (options.model && options.model !== hfId) continue;
     const assembledFile = assembled.get(hfId);
     if (!assembledFile) throw new Error(`No assembled recipe for ${hfId}`);
-    const recipe = readYaml(assembledFile);
+    const recipe = contentRoot.attachPoolProfiles(readYaml(assembledFile), poolProfiles);
     recipe.hf_id = hfId;
     snapshot.inputs.push({ model: hfId,
       ...(models.has(hfId) ? { recipe_sha256: hash(fs.readFileSync(models.get(hfId))) } : {}),
@@ -110,6 +115,9 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
           preset || undefined, point || undefined, true, { modes: selection.modes, frontend: selection.frontend,
             pdRouter: selection.pd_router, linked: new Set(query.keys()) });
         if (!result) throw new Error("No structured rendering");
+        if (configured?.deployment && result.pool_deployment?.profile !== configured.select.kv_offload) {
+          throw new Error("The declared pool preset did not render its assembled profile: " + configured.select.kv_offload);
+        }
         context.preset = result.preset || "baseline";
         context.point = result.preset_point || null;
         if (preset && context.preset !== preset || point && context.point !== point) {
@@ -127,12 +135,16 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
         const installation = installationFor(mounted, variantKey, hw,
           synth.computeDockerMeta(mounted, mounted.variants[variantKey], profile, hw), synth, profile);
         const router = ({ vllm: "vllm-router", ascend: "ascend-proxy" })[result.pd_router] || result.pd_router;
+        const poolProfile = recipe._poolProfiles?.[result.pool_deployment?.profile];
         const findings = checkScenario({ profile, deployType: result.deploy_type, installation, workers, router,
+          poolBackend: poolProfile?.backend,
           // Legacy expectations describe the previously checked baseline. A
           // tuned preset may deliberately choose a different router/connector.
           expectedPD: context.preset === "baseline" ? expectations[hfId]?.[hw]?.[variantKey] : undefined });
         snapshot.results.push({ ...context, frontend: selection.frontend, nodes: result.node_count,
           pdNodes: result.deploy_type === "pd_cluster" ? { prefill: result.prefill.nodes, decode: result.decode.nodes } : null,
+          ...(poolProfile && { pool: { profile: result.pool_deployment.profile, backend: poolProfile.backend,
+            proxy: { argv: result.router.argv, env: result.router.env } } }),
           router, installation, workers, findings,
           status: findings.some((f) => f.severity === "error") ? "fail" : findings.length ? "warning" : "pass" });
         snapshot.findings.push(...findings.map((f) => ({ ...context, ...f })));
@@ -232,7 +244,8 @@ export async function run(options) {
   const taxonomy = readYaml(path.join(renderer, "taxonomy.yaml"));
   const strategies = Object.fromEntries(["strategies", "kv_store"].flatMap((dir) =>
     yamlFiles(path.join(renderer, dir)).map((file) => { const spec = readYaml(file); return [spec.name, spec]; })));
-  const tools = { readYaml, synth, taxonomy, strategies, rendering, presets };
+  const contentRoot = await import(pathToFileURL(path.join(renderer, "src/lib/content-root.js")).href);
+  const tools = { readYaml, synth, taxonomy, strategies, rendering, presets, contentRoot };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ascend-recipe-check-"));
   const id = randomUUID();
   const channels = { [`ascend-head-${id}`]: recipes, ...(baseline ? { [`ascend-base-${id}`]: baseline } : {}) };
