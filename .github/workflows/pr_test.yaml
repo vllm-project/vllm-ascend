@@ -48,13 +48,11 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  # This workflow only sees pull_request events, so one group per PR is
-  # enough: a new run (opened / synchronize / labeled) cancels the stale one.
-  # The review-event retrigger lives in pr_refresh_ci_gate.yaml, which keeps
-  # its own concurrency group so it never cancels the in-flight CI run here
-  # (the review retrigger waits for that run to finish before re-running its
-  # gate jobs).
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only opening/reopening the PR or requesting CI may replace its current run.
+  group: >-
+    ${{ github.workflow }}-${{ (github.event.action != 'labeled' ||
+        contains(fromJSON('["ci-run","ready-precise","main2main","ready-a5"]'), github.event.label.name))
+        && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
