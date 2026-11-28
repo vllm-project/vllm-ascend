@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from vllm_ascend.core.kv_cache_compat import get_group_layout
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 from vllm_ascend.kv_trace.kv_trace_connector import record_output, record_plan
 from vllm_ascend.kv_trace.kv_trace_plan import AccessPlan, PlanSnapshotter, audit_access_plan
@@ -118,7 +119,7 @@ class KVTraceRuntime:
         )
         sizes = {}
         for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
-            spec = group.kv_cache_spec
+            spec = get_group_layout(group)
             sizes[group_id] = spec.block_size
             for name in group.layer_names:
                 self.layer_groups[name] = group_id

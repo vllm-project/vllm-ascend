@@ -48,16 +48,19 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -81,7 +84,9 @@ from vllm_ascend.utils import (
     enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    get_mamba_cache_mode,
     model_uses_sfa_sparse,
+    vllm_version_is,
 )
 
 # isort: off
@@ -527,7 +532,7 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
-        self.mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
+        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None
@@ -1813,8 +1818,8 @@ class MooncakeConnectorScheduler:
 
     def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
         specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
+        first_spec = specs[0] if specs else get_group_layout(group)
+        block_size = getattr(get_group_layout(group), "block_size", getattr(first_spec, "block_size", self.block_size))
         is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
         sliding_window = 0
         compress_ratio = 1
@@ -1832,12 +1837,12 @@ class MooncakeConnectorScheduler:
         )
 
     def _get_group_unique_specs(self, group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
+        if not isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
+            return [get_group_layout(group)]
 
         specs = []
         for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
+            layer_spec = get_group_layout(group).kv_cache_specs[layer_name]
             if layer_spec not in specs:
                 specs.append(layer_spec)
         return specs
@@ -1859,7 +1864,7 @@ class MooncakeConnectorScheduler:
         transfer_block_ids = []
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             is_aligned_state_group = group_info.is_state_group and (
-                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
+                get_mamba_cache_mode(self.vllm_config.cache_config) == "align"
             )
             if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)
@@ -2204,14 +2209,14 @@ class MooncakeConnectorWorker:
         self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
         _is_fullattn_group = []
         for g in self.kv_cache_config.kv_cache_groups:
-            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
+            if isinstance(get_group_layout(g), UniformTypeKVCacheSpecs):
                 is_fullattn_spec = []
                 for layer_name in g.layer_names:
-                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
+                    layer_spec = get_group_layout(g).kv_cache_specs[layer_name]
                     is_fullattn_spec.append(isinstance(layer_spec, FullAttentionSpec))
                 _is_fullattn_group.append(all(is_fullattn_spec))
             else:
-                _is_fullattn_group.append(isinstance(g.kv_cache_spec, FullAttentionSpec))
+                _is_fullattn_group.append(isinstance(get_group_layout(g), FullAttentionSpec))
         self.use_hybrid = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and not all(_is_fullattn_group)
@@ -2312,7 +2317,7 @@ class MooncakeConnectorWorker:
         if layer_names is None:
             layer_names = list(group_spec.layer_names)
         if kv_cache_spec is None:
-            kv_cache_spec = group_spec.kv_cache_spec
+            kv_cache_spec = get_group_layout(group_spec)
         spec = kv_cache_spec
         if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
             spec = {layer_name: kv_cache_spec.kv_cache_specs[layer_name] for layer_name in layer_names}
@@ -2359,7 +2364,7 @@ class MooncakeConnectorWorker:
         """Return the real per-layer specs retained by the KV cache config."""
         layer_specs: dict[str, Any] = {}
         for group in kv_cache_config.kv_cache_groups:
-            group_kv_spec = group.kv_cache_spec
+            group_kv_spec = get_group_layout(group)
             if isinstance(group_kv_spec, UniformTypeKVCacheSpecs):
                 for layer_name in group.layer_names:
                     layer_specs[layer_name] = group_kv_spec.kv_cache_specs[layer_name]
@@ -2712,7 +2717,9 @@ class MooncakeConnectorWorker:
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
-        if has_mamba_group:
+        if has_mamba_group or (self.use_hybrid and not vllm_version_is("0.34.0")):
+            # Native group descriptors can put a layer view at an offset from
+            # the aligned backing buffer, including hybrid groups without Mamba.
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         elif self.use_hybrid:

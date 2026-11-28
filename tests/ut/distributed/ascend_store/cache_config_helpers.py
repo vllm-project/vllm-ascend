@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import torch
 from vllm.v1.core.kv_cache_utils import resolve_cache_hit_alignment_tokens, resolve_kv_cache_block_sizes
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_resolved_cache_config(config, cache=None):
@@ -39,11 +40,12 @@ def make_resolved_cache_config(config, cache=None):
     # EngineCore resolves the scheduler representation, then publishes the same
     # metadata to worker plans (whose UniformType containers remain intact).
     scheduler_cache = copy(cache)
-    scheduler_cache.kv_cache_groups = [copy(group) for group in cache.kv_cache_groups]
-    for group in scheduler_cache.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            group.kv_cache_spec = next(iter(group.kv_cache_spec.kv_cache_specs.values()))
-    register_ascend_kv_cache_specs()
+    if vllm_version_is("0.34.0"):
+        scheduler_cache.kv_cache_groups = [copy(group) for group in cache.kv_cache_groups]
+        for group in scheduler_cache.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+                group.kv_cache_spec = group.kv_cache_spec.first_spec
+        register_ascend_kv_cache_specs()
     scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(scheduler_cache, config)
     if not isinstance(getattr(cache, "hash_block_size", None), int):
         cache.hash_block_size = hash_block_size

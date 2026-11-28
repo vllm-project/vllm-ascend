@@ -29,6 +29,8 @@ the MoE wrapper is mapped.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, fields
+
 import torch
 from torch import nn
 from vllm import envs
@@ -37,10 +39,12 @@ from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
+from vllm_ascend.utils import vllm_version_is
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
@@ -310,6 +314,14 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     reset_lora_indices(lora_context)
 
 
+@dataclass(slots=True)
+class AscendMoELoRAContext(MoELoRAContext):
+    use_ep: bool = False
+    split_lora_indices: torch.Tensor | None = None
+    permuted_lora_indices: torch.Tensor | None = None
+    exchanged_lora_indices: torch.Tensor | None = None
+
+
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     """Ascend-native MoE-LoRA wrapper.
 
@@ -357,8 +369,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
 
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
-        lora_context.use_ep = self.use_ep
-        return lora_context
+        if vllm_version_is("0.34.0"):
+            lora_context.use_ep = self.use_ep
+            return lora_context
+        upstream_fields = {field.name: getattr(lora_context, field.name) for field in fields(MoELoRAContext)}
+        return AscendMoELoRAContext(**upstream_fields, use_ep=self.use_ep)
 
     # ------------------------------------------------------------------
     # Mapping

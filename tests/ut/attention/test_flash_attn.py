@@ -11,11 +11,12 @@ from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.models.minimax_m3 import msa_m3
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -117,6 +118,7 @@ def test_flash_attn_192_preserves_scale_and_output_buffer(monkeypatch, causal):
 def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
+    layer.layer_name = "attention"
     layer.attn_type = AttentionType.DECODER
     layer.attn_backend = backend
     layer.is_draft_layer = True
@@ -518,6 +520,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
 ):
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
+    layer.layer_name = "attention"
     layer.attn_type = AttentionType.DECODER
     layer.attn_backend = backend
     layer.is_draft_layer = is_draft
@@ -533,17 +536,28 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
+        speculative_config=None,
     )
-    original = layer.get_kv_cache_spec(config)
+    release = vllm_version_is("0.34.0")
+    getter_name = "get_kv_cache_spec" if release else "get_kv_cache_config"
+    getter = getattr(layer, getter_name)
+    allocation = getter(config)
+    original = allocation if release else allocation.spec
     incompatible = window is not None and padding_kind == "undersized"
     if incompatible:
         with pytest.raises(AssertionError):
             _ = original.page_size_bytes
-    get_spec = Mock(wraps=layer.get_kv_cache_spec)
-    monkeypatch.setattr(layer, "get_kv_cache_spec", get_spec)
+    get_spec = Mock(wraps=getter)
+    monkeypatch.setattr(layer, getter_name, get_spec)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
 
-    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+    if release:
+        spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+        assert spec.is_draft is is_draft
+    else:
+        layer_cache = attn_utils.get_kv_cache_layer_configs(config)["draft.attn"]
+        spec = layer_cache.spec
+        assert layer_cache.is_draft is is_draft
 
     recover = incompatible and is_draft
     if incompatible and not is_draft:
@@ -553,9 +567,6 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         expected_padding = None if recover else original.page_size_padded
         assert spec.page_size_bytes == (expected_padding or natural_page)
         assert spec.page_size_padded == expected_padding
-    # Both supported versions propagate the draft marker.
-    if hasattr(original, "is_draft"):
-        assert spec.is_draft is is_draft
     assert config.cache_config.skip_page_size_padded == padding
     assert get_spec.call_count == (2 if recover else 1)
     assert get_spec.call_args_list[0].args[0] is config

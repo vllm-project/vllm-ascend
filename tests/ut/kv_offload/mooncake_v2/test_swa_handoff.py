@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeBaseConnectorScheduler
+from vllm_ascend.utils import vllm_version_is
 
 from .helpers import make_request, make_sliding_spec
 
@@ -21,6 +23,15 @@ def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
         model_config=SimpleNamespace(hf_config=SimpleNamespace()), num_hash_lookahead_tokens=0
     )
     scheduler.kv_cache_config = SimpleNamespace(hash_block_size=block_size)
+    if vllm_version_is("0.34.0"):
+        scheduler.kv_cache_groups = [KVCacheGroupSpec(["layer"], spec)]
+        manager_config = {"kv_cache_spec": spec}
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        group = KVCacheGroup.from_layers({"layer": SlidingWindowManager.layer_config(spec, sliding_window=window_size)})
+        scheduler.kv_cache_groups = [group]
+        manager_config = {"kv_cache_group": group}
     scheduler.group_unique_specs = [[spec]]
     scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
     tokens = list(range(prompt_len))
@@ -42,11 +53,11 @@ def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     assert scheduler.get_num_new_matched_tokens(consumer, 0) == (producer.num_prompt_tokens, True)
 
     manager = SlidingWindowManager(
-        kv_cache_spec=spec,
         block_pool=BlockPool(num_gpu_blocks=16, enable_caching=False, hash_block_size=block_size),
         enable_caching=False,
         kv_cache_group_id=0,
         scheduler_block_size=block_size,
+        **manager_config,
     )
     computed = producer.num_prompt_tokens
     manager.allocate_new_blocks("p", computed, computed)

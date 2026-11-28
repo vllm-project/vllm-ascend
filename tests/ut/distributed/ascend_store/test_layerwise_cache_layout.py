@@ -7,8 +7,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import KVTransferConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     LayerwiseCachePlanner,
@@ -217,7 +222,7 @@ def test_pp_stage_uses_global_independent_layers():
 @pytest.mark.parametrize("num_buffers", [None, 6])
 @pytest.mark.parametrize("model_type", ["glm5_next_text", "deepseek_v4"])
 def test_no_reuse_preserves_native_descriptors(num_buffers, model_type):
-    state = MambaSpec(block_size=2, shapes=((4,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    state = LegacyMambaSpec(block_size=2, shapes=((4,),), dtypes=(torch.int8,), mamba_cache_mode="align")
     names = [f"model.layers.{index}.state" for index in range(6)]
     config = _native_config([KVCacheGroupSpec(names, state)])
     original_tensors = tuple(config.kv_cache_tensors)

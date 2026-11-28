@@ -9,7 +9,14 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+)
+
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+)
+from vllm_ascend.utils import get_mamba_cache_mode
 
 
 @classmethod
@@ -65,7 +72,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     #  return directly
     if mamba_page_size == 0:
         return
-    if cache_config.mamba_cache_mode == "all":
+    if get_mamba_cache_mode(cache_config) == "all":
         base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
         attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
         chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
@@ -81,7 +88,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
             attn_block_size,
         )
-    if cache_config.mamba_cache_mode == "align":
+    if get_mamba_cache_mode(cache_config) == "align":
         cache_config.mamba_block_size = cache_config.block_size
     attn_page_size = cache_config.block_size * attn_page_size_1_token
     assert attn_page_size >= mamba_page_size

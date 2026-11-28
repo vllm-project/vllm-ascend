@@ -166,7 +166,8 @@ def test_pd_rejects_connectors_without_the_supported_state_transfer_contract(con
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("cache_mode,prefix_caching", [("none", True), ("align", False)])
-def test_pd_rejects_cache_mode_prefix_caching_mismatch(connector, role, cache_mode, prefix_caching):
+def test_pd_rejects_cache_mode_prefix_caching_mismatch(connector, role, cache_mode, prefix_caching, monkeypatch):
+    monkeypatch.setitem(helpers["validate_qwen_gdn_recoverssm"].__globals__, "vllm_version_is", lambda _: True)
     config = make_config()
     config.cache_config.mamba_cache_mode = cache_mode
     config.cache_config.enable_prefix_caching = prefix_caching
@@ -210,7 +211,8 @@ def test_align_with_prefix_caching_is_supported():
 
 
 @pytest.mark.parametrize("cache_mode,prefix_caching", [("none", True), ("align", False)])
-def test_non_pd_rejects_cache_mode_prefix_caching_mismatch(cache_mode, prefix_caching):
+def test_non_pd_rejects_cache_mode_prefix_caching_mismatch(cache_mode, prefix_caching, monkeypatch):
+    monkeypatch.setitem(helpers["validate_qwen_gdn_recoverssm"].__globals__, "vllm_version_is", lambda _: True)
     config = make_config()
     config.cache_config.mamba_cache_mode = cache_mode
     config.cache_config.enable_prefix_caching = prefix_caching

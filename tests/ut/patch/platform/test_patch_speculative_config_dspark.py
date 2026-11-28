@@ -14,6 +14,7 @@ from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import _normalize_deepseek_dspark_draft
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -88,6 +89,9 @@ class _DraftModelConfig(SimpleNamespace):
     # These fixtures model self-contained DSpark drafts, as declared by the
     # Kimi/Qwen model classes; None would select the DeepSeek target-config path.
     speculator_config_class = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
+
+    if not vllm_version_is("0.34.0"):
+        verify_eplb_config = ModelConfig.verify_eplb_config
 
     @property
     def architectures(self):

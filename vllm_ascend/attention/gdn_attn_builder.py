@@ -42,6 +42,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import get_mamba_cache_mode, vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 _GDN_CHUNK32_SIZE = 32
@@ -888,6 +889,21 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         padding = None if host_lengths is None else tuple(length == 0 for length in host_lengths[:graph_reqs].tolist())
         return (graph_reqs, actual_reqs, queries, drafts, padding, common.num_actual_tokens)
 
+    @property
+    def _num_mamba_speculative_blocks(self) -> int:
+        if vllm_version_is("0.34.0"):
+            return self.kv_cache_spec.num_speculative_blocks
+        return self.num_speculative_blocks
+
+    def _get_mamba_block_table(
+        self, block_table: torch.Tensor, seq_lens: torch.Tensor, cache_mode: str
+    ) -> torch.Tensor:
+        if vllm_version_is("0.34.0"):
+            return mamba_get_block_table_tensor(block_table, seq_lens, self.kv_cache_spec, cache_mode)
+        return mamba_get_block_table_tensor(
+            block_table, seq_lens, self.kv_cache_spec, cache_mode == "align", self.num_speculative_blocks
+        )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -928,11 +944,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             block_table = (
                 aligned[:num_reqs]
                 if aligned is not None
-                else mamba_get_block_table_tensor(
+                else self._get_mamba_block_table(
                     common_attn_metadata.block_table_tensor[:num_reqs],
                     metadata.gdn_seq_lens,
-                    self.kv_cache_spec,
-                    self.vllm_config.cache_config.mamba_cache_mode,
+                    get_mamba_cache_mode(self.vllm_config.cache_config),
                 )
             )
             metadata.spec_state_indices_tensor = block_table[:, : self.num_spec + 1]
@@ -1033,7 +1048,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
         mamba_block_table = m.block_table_tensor
         # Restrict recurrent state lookup to real request rows.
         if mamba_cache_mode != "none" and mamba_block_table.shape[0] != m.seq_lens.shape[0]:
@@ -1043,14 +1058,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             block_table_tensor = aligned_indices[: m.num_reqs]
         elif m.num_reqs == 0 and mamba_cache_mode == "align":
             # Match the helper's (0, state_slots) shape without device work.
-            block_table_tensor = mamba_block_table[:0, : 1 + self.kv_cache_spec.num_speculative_blocks]
+            block_table_tensor = mamba_block_table[:0, : 1 + self._num_mamba_speculative_blocks]
         else:
-            block_table_tensor = mamba_get_block_table_tensor(
-                mamba_block_table,
-                m.seq_lens,
-                self.kv_cache_spec,
-                mamba_cache_mode,
-            )
+            block_table_tensor = self._get_mamba_block_table(mamba_block_table, m.seq_lens, mamba_cache_mode)
 
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
         if spec_sequence_masks is not None:
@@ -1341,6 +1351,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         """
         assert self.supports_update_block_table
         m = metadata
+        cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
         if (
             graph_state_updates is not None
             and self.use_full_cuda_graph
@@ -1354,12 +1365,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             # Pass the full current table instead of rebuilding prefix views
             # for every cache group, and reuse only the captured output view.
             source = blk_table
-            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            if cache_mode == "align":
                 source = self.mamba_aligned_state_indices
                 if source is None:
                     # vLLM #58737 asserts block_table rows match seq_lens rows.
-                    source = mamba_get_block_table_tensor(
-                        blk_table[: m.gdn_seq_lens.shape[0]], m.gdn_seq_lens, self.kv_cache_spec, "align"
+                    source = self._get_mamba_block_table(
+                        blk_table[: m.gdn_seq_lens.shape[0]], m.gdn_seq_lens, cache_mode
                     )
             graph_rows = m.spec_query_start_loc.size(0) - 1
             view = self._spec_state_view
@@ -1401,16 +1412,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # seq_lens has the same number of rows. Ascend's unpadded() keeps the
         # padded block-table rows, so on vLLM main pass only the real request
         # rows (same rule as build()).
-        if self.vllm_config.cache_config.mamba_cache_mode != "none" and block_table.shape[0] != m.gdn_seq_lens.shape[0]:
+        if cache_mode != "none" and block_table.shape[0] != m.gdn_seq_lens.shape[0]:
             block_table = block_table[: m.gdn_seq_lens.shape[0]]
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if cache_mode == "align":
             aligned = self.mamba_aligned_state_indices
             if aligned is not None:
                 block_table = aligned[: m.gdn_num_reqs]
             elif m.gdn_num_reqs == 0:
-                block_table = block_table[:, : 1 + self.kv_cache_spec.num_speculative_blocks]
+                block_table = block_table[:, : 1 + self._num_mamba_speculative_blocks]
             else:
-                block_table = mamba_get_block_table_tensor(block_table, m.gdn_seq_lens, self.kv_cache_spec, "align")
+                block_table = self._get_mamba_block_table(block_table, m.gdn_seq_lens, cache_mode)
         spec_indices = non_spec_indices = prefill_indices = conv_cache_indices = None
         if m.spec_sequence_masks is None:
             non_spec_indices = block_table[:, 0]
@@ -1662,8 +1673,8 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         # Request validation and phase classification have already run in build.
         if (
             self._spec_conv_indices is None
-            or self.vllm_config.cache_config.mamba_cache_mode != "align"
-            or (num_spec_decodes > 0 and self.kv_cache_spec.num_speculative_blocks < self.num_spec)
+            or get_mamba_cache_mode(self.vllm_config.cache_config) != "align"
+            or (num_spec_decodes > 0 and self._num_mamba_speculative_blocks < self.num_spec)
         ):
             return None
 

@@ -17,8 +17,6 @@ from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_r
 
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -49,6 +47,13 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+else:
+    from vllm.v1.kv_cache_interface import HiSparseHotPageSpec as HiSparseHotSpec
+    from vllm.v1.kv_cache_interface import HiSparsePageSpec as HiSparseResidentSpec
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
@@ -648,7 +653,12 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
         specs.update(
             indexer=indexer_spec,
             resident=HiSparseResidentSpec(block_size=128, page_size=128 * 656, block_stride_alignment=128),
-            hot=HiSparseHotSpec(block_size=128, page_size=128 * 656, blocks_per_request=1, block_stride_alignment=128),
+            hot=HiSparseHotSpec(
+                block_size=128,
+                page_size=128 * 656,
+                block_stride_alignment=128,
+                **({"blocks_per_request": 1} if vllm_version_is("0.34.0") else {}),
+            ),
         )
     result = align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
     assert result["source"] is source

@@ -13,20 +13,16 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheTensor,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -65,6 +61,10 @@ class _FakeAttentionBackend:
     def get_supported_kernel_block_sizes(spec):
         # These layout tests use arbitrary block sizes without kernel alignment.
         return [MultipleOf(1)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(cls, spec, layer_names):
+        return cls.get_supported_kernel_block_sizes(spec)
 
 
 def _mock_vllm_config():
@@ -150,6 +150,7 @@ def _make_defer_state(kv_cache_config):
     state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     state.model = SimpleNamespace(get_mamba_state_copy_func=lambda: (MagicMock(), MagicMock()))
     state._align_mode = True
+    state.prefix_caching = True
     state._mamba_group_ids = [0]
     state._mamba_spec = _mamba_spec()
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
@@ -792,6 +793,7 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     state = object.__new__(AscendMambaHybridModelState)
     vars(state).update(
         _align_mode=True,
+        prefix_caching=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         _finish_previous_layerwise_mamba_copy=MagicMock(),
@@ -1066,6 +1068,9 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": spec})["linear_attn"]
     mock_get_layers.return_value = {"linear_attn": mamba_layer}
 
     assert get_kv_cache_spec(_mock_vllm_config()) == {"linear_attn": spec}
@@ -1095,12 +1100,20 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_kv_cache_config(self, _vllm_config):
+            return make_layer_cache_configs({"full_attn": attention_spec})["full_attn"]
+
         def get_attn_backend(self):
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": mamba_spec})[
+            "linear_attn"
+        ]
     mock_get_layers.return_value = {
         "linear_attn": mamba_layer,
         "full_attn": FakeAttention(),
@@ -1151,12 +1164,20 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
 
+        def get_kv_cache_config(self, _vllm_config):
+            return make_layer_cache_configs({"attn": self.spec})["attn"]
+
         def get_attn_backend(self):
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
+    if not vllm_version_is("0.34.0"):
+        mamba_layer.is_draft_layer = False
+        mamba_layer.get_kv_cache_config.return_value = make_layer_cache_configs({"linear_attn": mamba_spec})[
+            "linear_attn"
+        ]
     mock_get_layers.return_value = {
         "small_attn": FakeAttention(small_attention_spec),
         "linear_attn": mamba_layer,
@@ -1213,6 +1234,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         name: SimpleNamespace(
             is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_kv_cache_config=lambda _config, spec=spec: make_layer_cache_configs({"layer": spec})["layer"],
             get_attn_backend=lambda: _FakeAttentionBackend,
         )
         for name, spec in original_specs.items()

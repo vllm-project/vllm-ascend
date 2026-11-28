@@ -901,6 +901,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner = _make_runner(need_timing=False)
     runner.device = torch.device("cpu")
     runner.load_config = SimpleNamespace(load_format="auto")
+    runner.pp_handler = None
     runner.vllm_config.load_config = runner.load_config
     runner.model_config.dtype = torch.bfloat16
     runner.model_config.logits_processors = None
@@ -921,7 +922,11 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.use_aux_hidden_state_outputs = False
     runner.encoder_cache = None
     runner.num_speculative_steps = int(with_draft)
-    runner.speculative_config = SimpleNamespace(prefill_context_kv_only=False) if with_draft else None
+    runner.speculative_config = (
+        SimpleNamespace(prefill_context_kv_only=False, draft_model_config=SimpleNamespace(model="draft"))
+        if with_draft
+        else None
+    )
     runner.is_first_pp_rank = True
     runner._draft_workspace_lane = object()
     model = SimpleNamespace()
@@ -983,7 +988,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     if runner.speculator:
         # vLLM main reads the draft-logits cache while loading the model.
         runner.speculator.draft_logits = None
-    if runner.speculator:
+        runner.speculator.model = torch.nn.Module()
         runner.speculator.load_model.side_effect = lambda _target: load_attention("draft.attn")
 
     @contextmanager
@@ -1090,6 +1095,7 @@ def test_replicated_draft_profile_keeps_target_sampling_local(
     runner.device = torch.device("cpu")
     runner.is_first_pp_rank = runner.is_last_pp_rank = True
     runner.max_num_tokens, runner.max_num_reqs = 8, 2
+    runner.max_model_len = runner.max_num_tokens
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp
     runner.speculative_config = SimpleNamespace(max_num_new_slots_for_drafting=0)
     runner.input_buffers = InputBuffers(2, 32, runner.device)

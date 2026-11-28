@@ -6,14 +6,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheTensor,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 
 
@@ -31,6 +26,7 @@ def make_kvpp_config(tp=3, pcp=1):
         num_speculative_tokens_per_batch_size=None,
     )
     speculative_config.use_eagle = lambda: speculative_config.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+    speculative_config.uses_target_hidden_states = speculative_config.use_eagle()
     return SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={
@@ -96,6 +92,17 @@ def make_dspark_kvpp_case(tp=3, draft_names=None):
         }
     )
     return config, specs, drafts
+
+
+def make_layer_cache_configs(specs):
+    from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+    from vllm_ascend.core.kv_cache_compat import legacy_manager_config
+
+    return {
+        name: KVCacheLayerConfig(legacy_manager_config(spec), spec, is_draft=getattr(spec, "is_draft", False))
+        for name, spec in specs.items()
+    }
 
 
 def make_cache_config(specs, num_blocks=3):

@@ -10,7 +10,7 @@ no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
-from dataclasses import fields, replace
+from dataclasses import dataclass, field, fields, replace
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
@@ -23,18 +23,22 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
-    KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-    get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layer_layouts,
+    legacy_group_view,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -48,8 +52,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
+    group_layer_configs,
     is_deepseek_v41_cache,
     make_cache_groups,
+    place_deepseek_v41_cache,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -74,9 +80,20 @@ from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
     is_step5_groups,
+    is_step5_kv_cache_spec,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    @dataclass
+    class _DSparkKVCacheGroup(KVCacheGroup):
+        # Keep global ownership when Core projects the group onto a PP rank.
+        draft_prefix_only: bool = field(default=False, compare=False)
+        resident_context: bool = field(default=False, compare=False)
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
@@ -93,6 +110,12 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
+        if not vllm_version_is("0.34.0"):
+            groups = self._get_native_groups(vllm_config, kv_cache_spec)
+            speculative = getattr(vllm_config, "speculative_config", None)
+            if speculative is not None and speculative.method == "dspark":
+                return _annotate_dspark_groups(groups, kv_cache_spec)
+            return groups
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
@@ -124,40 +147,102 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return kimi_k3_groups
 
         groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
-        if vllm_config.attention_config.hisparse_config is None:
-            return groups
-        transfer_config = vllm_config.kv_transfer_config
-        if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
-            return groups
+        return _apply_hisparse_ascendstore_admission(vllm_config, groups)
 
-        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+    def _get_native_groups(self, vllm_config, configs):
+        attention = getattr(vllm_config, "attention_config", None)
+        if getattr(attention, "hisparse_config", None) is not None:
+            groups = super().get_kv_cache_groups(vllm_config, configs)
+            return _apply_hisparse_ascendstore_admission(vllm_config, groups)
+        specs = {name: config.spec for name, config in configs.items()}
+        if is_deepseek_v41_cache(specs):
+            return group_layer_configs(configs)
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
-            AscendStoreHiSparseResidentSpec,
-        )
-
-        for i, group in enumerate(groups):
-            spec = group.kv_cache_spec
-            if isinstance(spec, HiSparseResidentSpec):
-                resident_spec = AscendStoreHiSparseResidentSpec(
-                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
-                )
-                groups[i] = replace(group, kv_cache_spec=resident_spec)
-        return groups
-
-    def get_kv_cache_config_from_groups(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_groups: list[KVCacheGroupSpec],
-        num_blocks: int,
-    ) -> KVCacheConfig:
-        """Materialize Core's block count before planning layerwise reuse."""
-        if self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups) is None:
-            return _attach_transfer_and_speculation_metadata(
-                vllm_config,
-                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+        def default_groups(config, layouts):
+            native = super(AscendKVCacheConfigBuilder, self).get_kv_cache_groups(
+                config, {name: replace(configs[name], spec=spec) for name, spec in layouts.items()}
             )
-        return get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+            return [legacy_group_view(group) for group in native]
+
+        if is_step5_kv_cache_spec(specs):
+            groups = get_step5_kv_cache_groups(vllm_config, specs, default_groups)
+        elif vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            groups = paired_sfa_cache_groups(vllm_config, specs, layer_configs=configs)
+        elif any(is_glm5_next_cache_spec(spec) for spec in specs.values()):
+            groups = get_glm5_next_kv_cache_groups(vllm_config, specs)
+        else:
+            mixed_specs = group_and_unify_kv_cache_specs(specs)
+            if mixed_specs is not None and len(mixed_specs) >= 2:
+                groups = _get_kv_cache_groups_uniform_groups(mixed_specs)
+            else:
+                groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs, layer_configs=configs)
+                if groups is None:
+                    groups = get_qwen4_exp_kv_cache_groups(vllm_config, specs, default_groups)
+        if groups is None:
+            return super().get_kv_cache_groups(vllm_config, configs)
+        return [
+            KVCacheGroup.from_layers(
+                {name: replace(configs[name], spec=layout) for name, layout in get_group_layer_layouts(group).items()},
+                host_resident=group.host_resident,
+                enable_kv_transfer=group.enable_kv_transfer,
+                role=group.role,
+            )
+            for group in groups
+        ]
+
+    def get_kv_cache_config_from_groups(self, vllm_config, kv_cache_groups, num_blocks) -> KVCacheConfig:
+        if vllm_version_is("0.34.0"):
+            bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
+            if bytes_per_block is None:
+                return _attach_transfer_and_speculation_metadata(
+                    vllm_config,
+                    super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+                )
+            return get_ascend_kv_cache_config_from_groups(
+                vllm_config,
+                kv_cache_groups,
+                num_blocks,
+            )
+        legacy_groups = [legacy_group_view(group) for group in kv_cache_groups]
+        config = None
+        if is_deepseek_v41_cache(kv_cache_groups):
+            config = place_deepseek_v41_cache(vllm_config, kv_cache_groups, num_blocks)
+        elif vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            config = paired_sfa_cache_config(vllm_config, legacy_groups, num_blocks)
+        elif _get_glm5_next_cache_layout(legacy_groups) is not None:
+            config = get_glm5_next_kv_cache_config(vllm_config, legacy_groups, num_blocks)
+        elif is_step5_groups(legacy_groups):
+            config = get_step5_kv_cache_config_from_groups(vllm_config, legacy_groups, num_blocks)
+        elif (pools := _get_native_replicated_draft_pools(kv_cache_groups)) is not None:
+            config = self._place_native_replicated_draft_pools(vllm_config, kv_cache_groups, pools, num_blocks)
+        elif _has_deepseek_v4_layout(legacy_groups):
+            config = _place_deepseek_v4_cache(vllm_config, kv_cache_groups, legacy_groups, num_blocks)
+        else:
+            config = get_qwen4_exp_kv_cache_config(vllm_config, legacy_groups, 0, num_blocks=num_blocks)
+        if config is None:
+            config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+        config.kv_cache_groups = kv_cache_groups
+        return _attach_transfer_and_speculation_metadata(vllm_config, config)
+
+    def _place_native_replicated_draft_pools(self, vllm_config, groups, pools, num_blocks):
+        build_pool = super().get_kv_cache_config_from_groups
+        configs = [build_pool(vllm_config, pool, num_blocks) for pool in pools]
+        assert all(config.num_blocks == num_blocks for config in configs)
+        pool_sizes = [max(tensor.size for tensor in config.kv_cache_tensors) for config in configs]
+        size = sum(pool_sizes)
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for config, pool_size in zip(configs, pool_sizes):
+            tensors.extend(
+                replace(tensor, size=size, offset=offset + tensor.offset) for tensor in config.kv_cache_tensors
+            )
+            offset += pool_size
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
 
     def _get_pool_bytes_per_block(
         self,
@@ -176,16 +261,20 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     def _get_native_pool_bytes_per_block(
         self,
         vllm_config: VllmConfig,
-        kv_cache_groups: list[KVCacheGroupSpec],
+        kv_cache_groups,
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
+        native_groups = kv_cache_groups
+        kv_cache_groups = [legacy_group_view(group) for group in kv_cache_groups]
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
-        pools = _get_replicated_draft_pools(kv_cache_groups)
+        pools = _get_replicated_draft_pools(kv_cache_groups) if vllm_version_is("0.34.0") else None
         if pools is not None:
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
+        if not vllm_version_is("0.34.0") and (pools := _get_native_replicated_draft_pools(native_groups)) is not None:
+            return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -195,22 +284,100 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen_bytes
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.pool_bytes_per_block(kv_cache_groups)
-        if _is_deepseek_v4_groups(kv_cache_groups):
+        if _is_deepseek_v4_groups(kv_cache_groups) or (
+            not vllm_version_is("0.34.0") and _has_deepseek_v4_layout(kv_cache_groups)
+        ):
             return _deepseek_v4_pool_bytes_per_block(kv_cache_groups)
-        return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        return super()._get_pool_bytes_per_block(vllm_config, native_groups)
+
+
+def _apply_hisparse_ascendstore_admission(vllm_config, groups):
+    if vllm_config.attention_config.hisparse_config is None:
+        return groups
+    transfer_config = vllm_config.kv_transfer_config
+    if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
+        return groups
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
+        AscendStoreHiSparseResidentManager,
+        AscendStoreHiSparseResidentSpec,
+    )
+
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+
+        for i, group in enumerate(groups):
+            spec = group.kv_cache_spec
+            if isinstance(spec, HiSparseResidentSpec):
+                resident_spec = AscendStoreHiSparseResidentSpec(
+                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                )
+                groups[i] = replace(group, kv_cache_spec=resident_spec)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseResidentManager
+
+        for i, group in enumerate(groups):
+            if group.manager_cls is HiSparseResidentManager:
+                resident_specs = {
+                    name: AscendStoreHiSparseResidentSpec(
+                        **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                    )
+                    for name, spec in group.kv_cache_specs.items()
+                }
+                groups[i] = replace(
+                    group,
+                    kv_cache_specs=resident_specs,
+                    manager_config=AscendStoreHiSparseResidentManager.config(),
+                )
+    return groups
+
+
+def _annotate_dspark_groups(groups, layer_configs):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
+
+    resident_groups = set(resident_mla_context_group_ids(groups))
+    return [
+        _DSparkKVCacheGroup(
+            **{f.name: getattr(group, f.name) for f in fields(KVCacheGroup)},
+            draft_prefix_only=all(layer_configs[name].is_draft for name in group.layer_names),
+            resident_context=i in resident_groups,
+        )
+        for i, group in enumerate(groups)
+    ]
+
+
+def _get_native_replicated_draft_pools(groups):
+    """Reserve a disjoint backing region for each replicated dense draft group."""
+    if not any(issubclass(group.manager_cls, MambaManager) for group in groups):
+        return None
+    target_groups = []
+    draft_pools = []
+    for group in groups:
+        if (
+            not group.dcp_sharded
+            and issubclass(group.manager_cls, FullAttentionManager)
+            and all(not isinstance(spec, MLAAttentionSpec) for spec in group.distinct_specs)
+            and group.layer_names
+        ):
+            draft_pools.append([group])
+        else:
+            target_groups.append(group)
+    if draft_pools and any(group.layer_names for group in target_groups):
+        return [target_groups, *draft_pools]
+    return None
 
 
 def _get_replicated_draft_pools(
     groups: list[KVCacheGroupSpec],
 ) -> list[list[KVCacheGroupSpec]] | None:
     """Keep contiguous dense draft K/V outside the target/state alias pool."""
-    if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
-        return None
+    has_mamba = False
     target_groups = []
     draft_pools = []
     for group in groups:
         spec = group.kv_cache_spec
         specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        has_mamba |= any(isinstance(layout, (MambaSpec, LegacyMambaSpec)) for layout in specs)
         if all(
             isinstance(s, FullAttentionSpec) and not isinstance(s, MLAAttentionSpec) and not s.dcp_sharded
             for s in specs
@@ -218,7 +385,7 @@ def _get_replicated_draft_pools(
             draft_pools.append([group])
         else:
             target_groups.append(group)
-    if target_groups and draft_pools:
+    if has_mamba and target_groups and draft_pools:
         return [target_groups, *draft_pools]
     return None
 
@@ -369,9 +536,7 @@ def _get_deepseek_v4_cache_layout(
     For each group, bucket its layers by page_size_bytes and place each layer
     at tuple_idx = position-within-bucket.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(_page_sizes(full_mla_spec))
+    page_sizes = sorted({spec.page_size_bytes for spec in get_group_layer_layouts(kv_cache_groups[0]).values()})
 
     # Pre-bucket each group's layers by page_size (registration order within
     # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
@@ -379,8 +544,7 @@ def _get_deepseek_v4_cache_layout(
     mtp_page_size = 0
     bucketed: list[dict[int, list[str]]] = []
     for group in kv_cache_groups:
-        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        specs = group.kv_cache_spec.kv_cache_specs
+        specs = get_group_layer_layouts(group)
         b: dict[int, list[str]] = defaultdict(list)
         for name in group.layer_names:
             padded = getattr(specs[name], "page_size_padded", None)
@@ -584,16 +748,26 @@ def _attach_transfer_and_speculation_metadata(
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
-        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids
+        groups = kv_cache_config.kv_cache_groups
+        if vllm_version_is("0.34.0"):
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+                resident_mla_context_group_ids,
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import (
+                draft_only_group_ids,
+            )
 
-        # Upstream scheduler conversion keeps only the first spec in a uniform
-        # group, losing both residency and per-layer draft ownership. Keep the
-        # PD context and external prefix-store classifications separate: a
-        # mixed group needs draft block IDs AND ordinary target hit keys.
-        # Remove these snapshots once upstream preserves per-layer ownership.
-        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
-        kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+            # The release scheduler conversion does not preserve per-layer
+            # ownership. Snapshot the distinct PD and prefix-store roles.
+            kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(groups)
+            kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(groups)
+        else:
+            kv_cache_config.dspark_context_group_ids = tuple(
+                i for i, group in enumerate(groups) if group.resident_context
+            )
+            kv_cache_config.dspark_draft_only_group_ids = tuple(
+                i for i, group in enumerate(groups) if group.draft_prefix_only
+            )
     reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
     if reuse_layout is not None:
         assert kv_transfer_config is not None
@@ -606,3 +780,47 @@ def _attach_transfer_and_speculation_metadata(
             },
         )
     return kv_cache_config
+
+
+def _has_deepseek_v4_layout(groups: list[KVCacheGroupSpec]) -> bool:
+    return any(
+        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
+        for group in groups
+        for spec in get_group_layer_layouts(group).values()
+    )
+
+
+def _place_deepseek_v4_cache(vllm_config, groups, layouts, num_blocks: int) -> KVCacheConfig:
+    if tq_cache.uses_turboquant_groups(layouts):
+        _, tensors = tq_cache.cache_config(layouts, num_blocks)
+    else:
+        sizes, buckets, draft_names, draft_size, slots = _get_deepseek_v4_cache_layout(layouts)
+        stride = sum(sizes) * num_blocks
+        offsets = {}
+        offset = 0
+        for size in sizes:
+            offsets[size] = offset
+            offset += size * num_blocks
+        tensors = [
+            KVCacheTensor(
+                size=stride * slots, layers=list(names), offset=offsets[size], layer_stride=stride, block_stride=size
+            )
+            for group in buckets
+            for size, names in group.items()
+        ]
+        tensors.extend(
+            KVCacheTensor(
+                size=stride * slots,
+                layers=[name],
+                offset=(slots - len(draft_names) + idx) * stride + offsets[draft_size],
+                layer_stride=0,
+                block_stride=draft_size,
+            )
+            for idx, name in enumerate(draft_names)
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+    )

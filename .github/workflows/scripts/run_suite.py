@@ -336,6 +336,22 @@ def _save_timing_json(
     )
 
 
+def _guard_upstream_dynamo_cleanup() -> None:
+    # vLLM #68790 added this test-only cleanup hook from a newer PyTorch.
+    # Keep the fixture active when the API is available in the runner image.
+    conftest = Path("tests/conftest.py")
+    source = conftest.read_text(encoding="utf-8")
+    guarded = source.replace(
+        "    original = convert_frame.clear_compile_context_weakrefs\n",
+        '    original = getattr(convert_frame, "clear_compile_context_weakrefs", None)\n'
+        "    if original is None:\n"
+        "        yield\n"
+        "        return\n",
+    )
+    if guarded != source:
+        conftest.write_text(guarded, encoding="utf-8")
+
+
 def main() -> None:
     suites, upstream_files = load_suites()
 
@@ -393,6 +409,9 @@ timing data to improve estimates.",
         partition_info = "full"
 
     _print_plan(args.suite, files, skipped, partition_info)
+
+    if args.suite == "e2e-upstream_pr":
+        _guard_upstream_dynamo_cleanup()
 
     exit_code, records = run_tests(
         files,

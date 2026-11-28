@@ -177,7 +177,11 @@ def test_draft_decode_capture_respects_moe_comm_policy(
         decode_request_sizes=compatible_sizes,
         varlen_decode=False,
         lora_capture_cases=[0],
-        vllm_config=SimpleNamespace(uniform_decode_query_len=4, cache_config=SimpleNamespace(use_kda_recoverssm=False)),
+        vllm_config=SimpleNamespace(
+            uniform_decode_query_len=4,
+            model_config=SimpleNamespace(max_model_len=512),
+            cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        ),
         _capture_descs={},
         _decode_descs={},
         _candidates={},
@@ -381,7 +385,8 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     args = forward_fn.call_args.args
     assert args[0] == 3
     assert args[1] is False
-    assert args[2].cg_mode == CUDAGraphMode.FULL
+    # The full-graph capture invokes the draft steps without replaying a graph.
+    assert args[2].cg_mode == CUDAGraphMode.NONE
     assert args[2].num_tokens == 4
     assert args[2].num_reqs == 3
     assert torch.equal(args[3], torch.tensor([4, 4], dtype=torch.int32))

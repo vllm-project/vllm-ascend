@@ -61,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
     LayerBatchBuilder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.utils import vllm_version_is
 
 
 class FakeStore:
@@ -1553,6 +1554,9 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.connector = multi
         scheduler.requests = {"r1": request}
+        release = vllm_version_is("0.34.0")
+        if not release:
+            hisparse.connector_scheduler.requests = {"r1": request}
         scheduler._aborted_kv_loads = set()
         scheduler.deferred_loads = {}
         scheduler.finished_recving_kv_req_ids = set()
@@ -1650,6 +1654,8 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         if abort:
             with patch.object(scheduler, "_connector_finished", return_value=(False, None)):
                 scheduler.finish_requests("r1", RequestStatus.FINISHED_ABORTED)
+            if not release:
+                hisparse.request_finished_all_groups(request, ([2], [3]))
             assert scheduler._aborted_kv_loads == {"r1"}
             cache_manager.free.assert_not_called()
             assert pool._async_loading_req_ids == {"r1"}
@@ -1662,8 +1668,10 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             scheduler._update_from_kv_xfer_finished(result)
         if any(rank_failures):
             publish.assert_not_called()
-        else:
+        elif release:
             publish.assert_called_once_with("r1", 16)
+        else:
+            publish.assert_called_once_with("r1", 16, restore=not abort)
         assert not pool._async_loading_req_ids
         assert pool._failed_external_load_req_ids == ({"r1"} if any(rank_failures) and not abort else set())
         assert not coordinator._pending_imports

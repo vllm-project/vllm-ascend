@@ -8,17 +8,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import AttentionConfig
-from vllm.v1.core.single_type_kv_cache_manager import (
+from vllm.v1.kv_cache_interface import KVCacheTensor, MambaSpec, MLAAttentionSpec
+
+from vllm_ascend.core.kv_cache_compat import (
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    SlidingWindowSpec,
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    KVCacheTensor,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-)
-
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -27,7 +24,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -85,6 +82,7 @@ def make_config(*, retention_interval: int | None = 0):
             enable_prefix_caching=False,
             prefix_cache_retention_interval=retention_interval,
         ),
+        kv_transfer_config=None,
     )
 
 
@@ -128,7 +126,7 @@ def make_specs(pool: int = 16):
         ),
     }
     for layer_idx in range(3):
-        specs[f"model.layers.{layer_idx}.linear_attn"] = MambaSpec(
+        specs[f"model.layers.{layer_idx}.linear_attn"] = LegacyMambaSpec(
             block_size=512,
             shapes=((3, 16), (1, 16, 16)),
             dtypes=(torch.bfloat16, torch.float32),
@@ -367,6 +365,7 @@ def test_misaligned_logical_block_is_rejected():
 @pytest.mark.parametrize("packed_main", [False, True])
 def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
     planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from tests.ut.kvpp_utils import make_layer_cache_configs
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
     from vllm_ascend.worker.worker import NPUWorker
 
@@ -388,14 +387,19 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
         )
-    groups = get_glm5_next_kv_cache_groups(config, specs)
+    builder = AscendKVCacheConfigBuilder()
+    if vllm_version_is("0.34.0"):
+        groups = get_glm5_next_kv_cache_groups(config, specs)
+    else:
+        groups = builder.get_kv_cache_groups(config, make_layer_cache_configs(specs))
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
-    required = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups)
+    required = planning._max_memory_usage_bytes_from_groups(builder, config, groups)
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
     worker.get_kv_cache_spec = lambda: specs
+    worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(specs)
     worker.model_runner = SimpleNamespace(
         use_sparse=use_sparse,
         use_compress=False,
@@ -405,8 +409,10 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     budget = worker._scale_kv_cache_memory_for_multi_group(required)
 
     assert budget == required
-    plan = get_glm5_next_kv_cache_config(
-        config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
-    )
-    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
+    pool_bytes = builder._get_pool_bytes_per_block(config, groups)
+    if vllm_version_is("0.34.0"):
+        plan = get_glm5_next_kv_cache_config(config, groups, budget // pool_bytes)
+    else:
+        plan = builder.get_kv_cache_config_from_groups(config, groups, budget // pool_bytes)
+    assert plan.num_blocks * pool_bytes == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required

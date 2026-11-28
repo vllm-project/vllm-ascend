@@ -13,14 +13,16 @@ from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    RSWASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend.core.kv_cache_compat import (
+    RSWASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
@@ -44,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
@@ -52,6 +55,12 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
         return request.prefill_token_ids
     assert request.prompt_token_ids is not None
     return request.prompt_token_ids
+
+
+if vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+else:
+    from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 
 
 class BaseKVPoolScheduler(ABC):
@@ -100,27 +109,24 @@ class BaseKVPoolScheduler(ABC):
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
-        self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
-        use_eagle_block_drop_fn = getattr(speculative_config, "use_eagle_block_drop", None)
-        self.use_eagle_block_drop = use_eagle_block_drop_fn() is True if callable(use_eagle_block_drop_fn) else False
+        self.use_eagle = False
+        self.use_eagle_block_drop = False
+        if vllm_version_is("0.34.0"):
+            use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+            self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+            use_eagle_block_drop_fn = getattr(speculative_config, "use_eagle_block_drop", None)
+            self.use_eagle_block_drop = (
+                use_eagle_block_drop_fn() is True if callable(use_eagle_block_drop_fn) else False
+            )
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        self.swa_group_ids = {
-            group_id
-            for group_id in self.cacheable_group_ids
-            if kv_cache_groups is not None
-            and (
-                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
-                or (
-                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
-                    and any(
-                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
-                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
-                    )
-                )
-            )
-        }
+        self.swa_group_ids: set[int] = set()
+        if kv_cache_groups is not None:
+            for group_id in self.cacheable_group_ids:
+                layout = get_group_layout(kv_cache_groups[group_id])
+                specs = layout.kv_cache_specs.values() if isinstance(layout, UniformTypeKVCacheSpecs) else (layout,)
+                if any(isinstance(spec, (SlidingWindowSpec, RSWASpec)) for spec in specs):
+                    self.swa_group_ids.add(group_id)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         assert kv_cache_config is not None, "AscendStore requires Core's resolved KV cache configuration"
         self.hash_block_size = kv_cache_config.hash_block_size
@@ -225,6 +231,7 @@ class BaseKVPoolScheduler(ABC):
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            num_hash_lookahead_tokens=0 if vllm_version_is("0.34.0") else self.vllm_config.num_hash_lookahead_tokens,
         )
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
@@ -237,7 +244,7 @@ class BaseKVPoolScheduler(ABC):
 
         num_mamba_speculative_blocks_by_group: dict[int, int] = {}
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
+            kv_cache_spec = get_group_layout(kv_cache_group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
             if not isinstance(kv_cache_spec, MambaSpec):
@@ -249,6 +256,13 @@ class BaseKVPoolScheduler(ABC):
             if self.use_hybrid:
                 num_mamba_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
         return num_mamba_speculative_blocks_by_group
+
+    def _max_pool_prefix_tokens(self, num_prompt_tokens: int) -> int:
+        if vllm_version_is("0.34.0"):
+            return num_prompt_tokens
+        # The lookup may read the final complete stored page and reuse a
+        # partial prefix. Reserve the final logit token after the page is found.
+        return max(0, num_prompt_tokens - self.vllm_config.num_hash_lookahead_tokens)
 
     def get_num_new_matched_tokens(
         self,
@@ -965,7 +979,10 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         hash_block_size = coord.hash_block_size
         # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
         # whichever groups carry the eagle flag.
-        boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        if vllm_version_is("0.34.0"):
+            boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        else:
+            boundary = get_reusable_prefix_length(prompt_tokens, coord.num_hash_lookahead_tokens, hash_block_size)
         # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
         # attention KV, EAGLE proof included, ends on an attention block end no
         # later than this checkpoint's proof, so normal and prompt-tail saves
@@ -1050,13 +1067,13 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         # import failure. A key can still be visible to lookup while GET fails.
         if request.request_id in self._failed_external_load_req_ids:
             return None
-        prompt_token_len = len(request.prompt_token_ids)
-        if self.enable_partial_hash_hits:
-            # Preserve the prompt end so the worker can reserve the final token for recomputation.
-            token_len = prompt_token_len
-        elif len(self.cacheable_group_ids) != len(self.original_block_size):
+        num_prompt_tokens = len(request.prompt_token_ids)
+        prompt_token_len = self._max_pool_prefix_tokens(num_prompt_tokens)
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
-            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+            token_len = self._floor_to_cache_transfer_granularity(min(prompt_token_len, max(num_prompt_tokens - 1, 0)))
+        elif self.enable_partial_hash_hits:
+            token_len = prompt_token_len
         else:
             token_len = (
                 self._floor_to_cache_transfer_granularity(prompt_token_len)

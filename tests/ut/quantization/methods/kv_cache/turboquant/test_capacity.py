@@ -13,13 +13,9 @@ import pytest
 import torch
 from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, SlidingWindowMLASpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
 

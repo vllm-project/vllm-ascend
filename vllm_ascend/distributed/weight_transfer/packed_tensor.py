@@ -5,14 +5,16 @@
 import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm.distributed.weight_transfer import packed_tensor as upstream
-from vllm.distributed.weight_transfer.packed_tensor import PackedBufferImporter
 from vllm.logger import logger
+
+from vllm_ascend.utils import vllm_version_is
 
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = upstream.DEFAULT_PACKED_BUFFER_SIZE_BYTES
 DEFAULT_PACKED_NUM_BUFFERS = upstream.DEFAULT_PACKED_NUM_BUFFERS
@@ -99,6 +101,10 @@ class _HCCLPackedGroup:
         self.buffers = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in streams]
         self.is_producer = is_producer
         self.previous_broadcast_stream = None
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("npu", torch.npu.current_device())
 
     def broadcast(self, tensor, src):
         stream = torch.npu.current_stream()
@@ -262,7 +268,9 @@ def packed_broadcast_consumer(
             expected.append((shape, dtype))
             yield name, ([math.prod(shape) * dtype.itemsize], torch.uint8)
 
-    with _hccl_group(group, num_buffers) as transport:
+    release_packing = vllm_version_is("0.34.0")
+    stream_count = num_buffers if release_packing else num_buffers + 1
+    with _hccl_group(group, stream_count) as transport:
         reader_streams = [*transport.streams, torch.npu.current_stream()]
         upstream.packed_nccl_broadcast_consumer(
             metadata(),
@@ -273,6 +281,22 @@ def packed_broadcast_consumer(
             num_buffers,
             device=f"npu:{torch.npu.current_device()}",
         )
+        if not release_packing:
+            # Native vLLM drains the unpack stream. Drain the HCCL slots too
+            # before another transfer can reuse the cached receive streams.
+            for stream in transport.streams[:-1]:
+                stream.synchronize()
+
+
+@dataclass(slots=True)
+class NPUPackedIpcChunk:
+    """A packed NPU IPC buffer containing complete tensors."""
+
+    names: list[str]
+    shapes: list[list[int]]
+    dtype_names: list[str]
+    ipc_handle: dict[str, tuple]
+    tensor_sizes: list[int]
 
 
 def packed_npu_ipc_producer(
@@ -280,7 +304,7 @@ def packed_npu_ipc_producer(
     npu_uuid: str,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-) -> Iterator[upstream.PackedIpcChunk]:
+) -> Iterator[NPUPackedIpcChunk]:
     """Pack tensors into a reusable NPU IPC buffer and yield chunks.
 
     Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
@@ -326,7 +350,7 @@ def packed_npu_ipc_producer(
 
         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
             torch.npu.current_stream().synchronize()
-            yield upstream.PackedIpcChunk(
+            yield NPUPackedIpcChunk(
                 names=names,
                 shapes=shapes,
                 dtype_names=[str(d).split(".")[-1] for d in dtypes],
@@ -345,7 +369,7 @@ def packed_npu_ipc_producer(
 
     if names:
         torch.npu.current_stream().synchronize()
-        yield upstream.PackedIpcChunk(
+        yield NPUPackedIpcChunk(
             names=names,
             shapes=shapes,
             dtype_names=[str(d).split(".")[-1] for d in dtypes],
@@ -354,10 +378,15 @@ def packed_npu_ipc_producer(
         )
 
 
-class NPUPackedBufferImporter(PackedBufferImporter):
+class NPUPackedBufferImporter:
     """Cache one rebuilt NPU mapping per packed IPC export."""
 
-    _entry: tuple[tuple, torch.Tensor] | None
+    def __init__(self) -> None:
+        self._entry: tuple[tuple, torch.Tensor] | None = None
+
+    def close(self) -> None:
+        """Release the mapping held for the producer's IPC export."""
+        self._entry = None
 
     def rebuild(self, list_args: list) -> torch.Tensor:
         from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
@@ -378,7 +407,7 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
-    importer: PackedBufferImporter | None = None,
+    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 

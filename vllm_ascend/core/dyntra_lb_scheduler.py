@@ -31,7 +31,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
 from vllm_ascend.core.scheduler_output import make_cached_request_data
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import scheduler_collects_stats, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
@@ -324,7 +324,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
             )
             blocks = self.kv_cache_manager.create_kv_cache_blocks(computed)
             num_local = max(per_group_hits)
-            if self.kv_cache_manager.log_stats:
+            if scheduler_collects_stats(self.kv_cache_manager):
                 assert self.kv_cache_manager.prefix_cache_stats is not None
                 self.kv_cache_manager.prefix_cache_stats.record(
                     num_tokens=request.num_tokens,
@@ -378,7 +378,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         self._lb_paused_req_ids.add(request.request_id)
         if self._enable_diagnostics:
             logger.info("DYNTRA_LB_PAUSE request_id=%s", request.request_id)
-        if self.log_stats:
+        if scheduler_collects_stats(self):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
         self.kv_holding_waiting.prepend_request(request)
 
@@ -422,7 +422,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
         iteration_details = None
         if not vllm_version_is("0.34.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            (scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
@@ -534,7 +534,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                    shift_computed_tokens=(1 if self.use_eagle else 0)
+                    if vllm_version_is("0.34.0")
+                    else self.num_prefill_lookahead,
                 )
 
             if self.need_mamba_block_aligned_split:
@@ -926,7 +928,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                            shift_computed_tokens=(1 if self.use_eagle else 0)
+                            if vllm_version_is("0.34.0")
+                            else self.num_prefill_lookahead,
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
@@ -1042,7 +1046,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.log_stats:
+                if scheduler_collects_stats(self):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
@@ -1168,7 +1172,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
 
         if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
-            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+            if scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
             schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 

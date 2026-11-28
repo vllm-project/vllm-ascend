@@ -17,10 +17,10 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 # isort: split
 import numpy as np
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_worker
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,

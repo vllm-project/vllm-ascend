@@ -8,19 +8,18 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-
-# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main.
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
-from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    HiddenStateCacheSpec,
-    UniformTypeKVCacheSpecs,
-    compute_layout_strides,
-)
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    KVCacheGroupSpec,
+    KVCacheSpecRegistry,
+    UniformTypeKVCacheSpecs,
+    is_kv_cache_spec_uniform,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
     AscendMLAAttentionSpec,
@@ -33,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import (
     supports_bounded_replay,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _mla_spec():
@@ -178,7 +178,8 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     old_blocks = pool.get_new_blocks(pool.get_num_free_blocks())
     old_ids = {block.block_id for block in old_blocks}
     pool.free_blocks(old_blocks)
-    manager = manager_type(merged, pool, False, 0, scheduler_block_size=32, needs_kv_cache_zeroing=zeroing)
+    layout = merged if vllm_version_is("0.34.0") else KVCacheGroupSpec(["state"], merged)
+    manager = manager_type(layout, pool, False, 0, scheduler_block_size=32, needs_kv_cache_zeroing=zeroing)
     blocks = manager.allocate_new_blocks("request", 1, 1)
     assert len(blocks) == 1 and blocks[0].block_id in old_ids
     assert manager.new_block_ids == ([blocks[0].block_id] if ascend and zeroing else [])

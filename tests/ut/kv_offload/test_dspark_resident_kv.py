@@ -8,9 +8,11 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from vllm.config import CUDAGraphMode, KVTransferConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -22,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -66,6 +69,7 @@ def _prefill_runner(
     runner.debugger = None
     runner.model_state = SimpleNamespace()
     runner.prompt_logprobs_worker = None
+    runner.is_pooling_model = False
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(
@@ -252,6 +256,7 @@ def test_worker_reports_draft_specs_to_core_for_budget(pd_connector, method):
     worker.model_runner = SimpleNamespace(
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}),
         get_kv_cache_spec=Mock(return_value=specs),
+        get_kv_cache_layer_configs=lambda: make_layer_cache_configs(specs),
     )
     with (
         patch.object(module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
@@ -262,8 +267,20 @@ def test_worker_reports_draft_specs_to_core_for_budget(pd_connector, method):
         ),
     ):
         result = worker.get_kv_cache_spec()
-    assert result is specs
+    if vllm_version_is("0.34.0"):
+        assert result is specs
+    else:
+        assert all(result[name] is spec for name, spec in specs.items())
     assert set(result) == {"target.attn", "draft.attn"}
+
+
+def _mock_runner_cache_specs(specs):
+    if vllm_version_is("0.34.0"):
+        return patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=specs)
+
+    from vllm_ascend.worker.v2 import model_runner
+
+    return patch.object(model_runner, "get_kv_cache_layer_configs", return_value=make_layer_cache_configs(specs))
 
 
 def test_prefill_aux_config_delegates_to_backend_before_loading():
@@ -289,7 +306,7 @@ def test_draft_placement_changes_only_dspark_sparse(method, sparse):
     target = _mla_spec()
     draft = _mla_spec(non_causal=True)
     original = {"model.layers.0.attn": target, "draft.layers.0.attn": draft}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=original.copy()):
+    with _mock_runner_cache_specs(original.copy()):
         result = runner.get_kv_cache_spec()
     assert result["model.layers.0.attn"] is target
     resident = method == "dspark" and sparse
@@ -305,7 +322,7 @@ def test_dspark_ownership_is_exact_even_with_target_like_names(has_shared_layers
     if not has_shared_layers:
         del runner.shared_kv_cache_layers
     specs = {name: _mla_spec() for name in [*sorted(names), "draft.layers.0.attn"]}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=specs.copy()):
+    with _mock_runner_cache_specs(specs.copy()):
         result = runner.get_kv_cache_spec()
     assert all(not result[name].store_on_host for name in names)
     assert result["draft.layers.0.attn"].store_on_host
@@ -315,8 +332,13 @@ def test_dspark_non_last_pp_rank_has_no_resident_draft():
     runner = _runner(last_rank=False, names=set())
     runner.speculator = None
     specs = {"target.attn": _mla_spec()}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=specs):
-        assert runner.get_kv_cache_spec() is specs
+    with _mock_runner_cache_specs(specs):
+        result = runner.get_kv_cache_spec()
+        if vllm_version_is("0.34.0"):
+            assert result is specs
+        else:
+            assert result.keys() == specs.keys()
+            assert result["target.attn"] is specs["target.attn"]
     assert specs["target.attn"].store_on_host
 
 
@@ -325,7 +347,7 @@ def test_dspark_missing_loaded_ownership_fails_closed(names):
     runner = _runner()
     runner.speculator = SimpleNamespace(draft_attn_layer_names=names)
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={}),
+        _mock_runner_cache_specs({}),
         pytest.raises(ValueError, match="loaded draft model"),
     ):
         runner.get_kv_cache_spec()
@@ -335,7 +357,7 @@ def test_dspark_rejects_gqa_checkpoint_cache():
     runner = _runner()
     spec = FullAttentionSpec(block_size=128, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={"draft.layers.0.attn": spec}),
+        _mock_runner_cache_specs({"draft.layers.0.attn": spec}),
         pytest.raises(ValueError, match="MLA DSpark"),
     ):
         runner.get_kv_cache_spec()
@@ -351,7 +373,7 @@ def test_dspark_cannot_alias_target_kv(module_alias):
     else:
         runner.shared_kv_cache_layers = {"draft.layers.0.attn": "target.attn"}
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={}),
+        _mock_runner_cache_specs({}),
         pytest.raises(ValueError, match="share target-model"),
     ):
         runner.get_kv_cache_spec()
@@ -405,6 +427,7 @@ def test_resident_draft_is_counted_in_hbm_not_host_budget():
     indexer = AscendSFAIndexerCacheSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.int8)
     specs = {"target": target, "draft": draft, "indexer": indexer}
     runtime = SimpleNamespace(
+        max_in_flight_tokens=1024,
         model_config=SimpleNamespace(max_model_len=1024),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=4),

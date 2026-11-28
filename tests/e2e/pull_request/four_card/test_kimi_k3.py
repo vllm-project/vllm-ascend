@@ -25,6 +25,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import RemoteOpenAIServer, RemotePDServer, VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 NUM_LAYERS = 2
 NUM_EXPERTS = 16
@@ -343,7 +344,7 @@ def _engine_args(models: dict[str, str], variant: str, tp: int = 4) -> dict:
         "gpu_memory_utilization": 0.8,
         "enable_prefix_caching": True,
         "enable_chunked_prefill": True,
-        "mamba_cache_mode": "align",
+        **({"mamba_cache_mode": "align"} if vllm_version_is("0.34.0") else {}),
         "async_scheduling": True,
         "disable_log_stats": False,
         "seed": 0,

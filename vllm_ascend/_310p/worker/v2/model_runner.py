@@ -18,7 +18,6 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_s
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1 import kv_cache_interface
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -26,7 +25,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -53,11 +51,17 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
+from vllm_ascend.core.kv_cache_compat import (
+    get_group_layer_layouts,
+    get_group_layout,
+)
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     get_kv_cache_tensor_layers,
     shared_experts_calculation_stream,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -795,13 +799,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
-        circular_buffer_spec = kv_cache_interface.CircularBufferSpec
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
+            spec = get_group_layout(kv_cache_group)
             block_sizes.append(spec.block_size)
-            layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             slot_mapping_enabled.append(
-                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
+                not is_circular_kv_cache_spec(spec) if vllm_version_is("0.34.0") else kv_cache_group.uses_slot_mapping
             )
             max_num_blocks = cdiv(self.max_model_len, spec.block_size)
             if spec.block_size <= 128:
@@ -810,9 +812,11 @@ class NPUModelRunner310V2(NPUModelRunner):
             if isinstance(spec, MambaSpec):
                 # Without prefix caching, hybrid recurrent state uses one page
                 # per request plus speculative slots (same as 820_new).
-                max_num_blocks = (
-                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
-                ) + spec.num_speculative_blocks
+                max_num_blocks = (max_num_blocks if self.cache_config.enable_prefix_caching else 1) + (
+                    spec.num_speculative_blocks
+                    if vllm_version_is("0.34.0")
+                    else kv_cache_group.manager_config.params.num_speculative_blocks
+                )
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
@@ -858,13 +862,15 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.block_tables,
                 self.input_buffers,
                 self.attn_groups,
+                **({} if vllm_version_is("0.34.0") else {"kernel_block_sizes": self.kernel_block_sizes}),
             )
             metadata_groups.extend(self.speculator.attn_groups)
 
         # Skip remapping to preserve 310P's existing block table expansion.
         for groups in metadata_groups:
             for attn_group in groups:
-                attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+                for builder in attn_group.metadata_builders:
+                    builder.block_table_is_kernel_granular = True
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
@@ -891,18 +897,18 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec_config = self.speculative_config
         if spec_config is None:
             return False
-        uses_eagle_block_drop = spec_config.use_eagle_block_drop()
+        uses_eagle_speculator = (
+            spec_config.use_eagle_block_drop()
+            if vllm_version_is("0.34.0")
+            else spec_config.uses_target_hidden_states and spec_config.method not in ("dflash", "dspark")
+        )
         return bool(
-            kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
+            kv_cache_config.has_mamba_layers and uses_eagle_speculator and spec_config.num_speculative_tokens > 1
         )
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                specs = tuple(group_spec.kv_cache_specs.values())
-            else:
-                specs = (group_spec,)
+            specs = get_group_layer_layouts(kv_cache_group).values()
             attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
             # Hybrid groups may be pure MambaSpec; skip kernel-block sizing.
             if not attention_specs:
@@ -949,12 +955,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         layer_specs: dict[str, KVCacheSpec] = {}
         layer_group_ids: dict[str, int] = {}
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_specs[layer_name] = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_specs[layer_name] = group_spec
+            for layer_name, spec in get_group_layer_layouts(kv_cache_group).items():
+                layer_specs[layer_name] = spec
                 layer_group_ids[layer_name] = group_id
 
         layer_backends = {

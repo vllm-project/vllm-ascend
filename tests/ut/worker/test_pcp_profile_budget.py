@@ -19,6 +19,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 def make_runner(tokens=16384, pcp=16, requests=64, query=4, method="mtp", dcp=1):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_tokens = tokens
+    runner.max_model_len = tokens
     runner.max_num_reqs = requests
     runner.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),

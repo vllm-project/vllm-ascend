@@ -9,6 +9,8 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _get_sparse_index_kpool(model_config) -> int | None:
     """Return the active sparse index-kpool ratio, if configured."""
@@ -70,6 +72,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         vllm_config
     )
     logger.debug("Using kv store: %s", using_kv_store_with_hybrid)
+    explicit_mamba_block_size = vllm_config.cache_config.mamba_block_size
     MambaModelConfig.verify_and_update_config(vllm_config)
 
     cache_config = vllm_config.cache_config
@@ -152,6 +155,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
+    if not vllm_version_is("0.34.0"):
+        if cache_config.enable_prefix_caching and explicit_mamba_block_size is None:
+            cache_config.mamba_block_size = cache_config.block_size
+        return
+
     # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
     # manages the dedicated hidden-state cache-only layer; it does not migrate
     # mamba KV blocks across instances, so it does not require the block-aligned

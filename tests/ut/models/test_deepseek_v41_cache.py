@@ -21,7 +21,6 @@ from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 # vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core import kv_cache_planning, kv_cache_utils
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 from tests.deepseek_v41_utils import (
@@ -34,6 +33,7 @@ from tests.deepseek_v41_utils import (
     select_candidate_blocks,
     select_index_topk,
 )
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
@@ -43,7 +43,8 @@ from vllm_ascend.attention.dsa_v41 import (
     pad_sparse_indices,
     scatter_cache_sk,
 )
-from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec, get_group_layer_layouts
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder, get_ascend_kv_cache_config_from_groups
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -64,25 +65,39 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 
+def _planner_groups(groups):
+    if vllm_version_is("0.34.0"):
+        return groups
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    return [
+        group
+        if isinstance(group, KVCacheGroup)
+        else KVCacheGroup.from_layers(make_layer_cache_configs(get_group_layer_layouts(group)))
+        for group in groups
+    ]
+
+
 def _pool_bytes_per_block(runtime, groups):
-    """vLLM #57169 added a leading ``vllm_config`` argument on main."""
-    return kv_cache_config_builder.AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(runtime, groups)
+    if vllm_version_is("0.34.0"):
+        return AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(runtime, groups)
+    return kv_cache_planning._pool_bytes_per_block_from_builder(
+        AscendKVCacheConfigBuilder(), runtime, _planner_groups(groups)
+    )
+
+
+def _plan_from_bytes(runtime, groups, available_bytes):
+    blocks = available_bytes // _pool_bytes_per_block(runtime, groups)
+    return AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, _planner_groups(groups), blocks)
 
 
 def _max_memory_usage_bytes_from_groups(runtime, groups):
-    """Call the admission helper with the signature the live vLLM expects.
-
-    vLLM #42309 added a leading ``KVCacheConfigBuilder`` argument on main. The
-    live module attribute is Ascend's override, which delegates V4.1 groups to
-    the upstream formula; that formula sizes the pool through the builder hook,
-    so feed it the Ascend V4.1 per-block cost.
-    """
-    builder = MagicMock()
-    builder._get_pool_bytes_per_block.return_value = get_deepseek_v41_pool_bytes_per_block(groups)
-    return kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, groups)
+    builder = AscendKVCacheConfigBuilder()
+    return kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, _planner_groups(groups))
 
 
 @pytest.fixture(autouse=True)
@@ -210,15 +225,16 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
     assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values())
     assert is_deepseek_v41_cache(specs)
 
-    groups = (
-        make_cache_groups(group_cache_specs(specs))
-        if packed_groups
-        else kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
-    )
+    if packed_groups:
+        groups = make_cache_groups(group_cache_specs(specs))
+    elif vllm_version_is("0.34.0"):
+        groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
+    else:
+        groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, make_layer_cache_configs(specs))
     assert is_deepseek_v41_cache(groups)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
     assert _pool_bytes_per_block(runtime, groups) == page_bytes
-    cache_config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, num_blocks=10)
+    cache_config = _plan_from_bytes(runtime, groups, 10 * page_bytes + 1)
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
@@ -495,7 +511,7 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     runtime.max_in_flight_tokens = 128
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, num_blocks=100)
+    config = _plan_from_bytes(runtime, groups, 100 * page)
     assert config.num_blocks == 100
     assert {t.size for t in config.kv_cache_tensors} == {100 * page}
     demand = _max_memory_usage_bytes_from_groups(runtime, groups) // page
@@ -1366,7 +1382,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
 
 
 def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm_ascend.core.kv_cache_compat import CircularBufferSpec
 
     spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
     assert isinstance(spec, CircularBufferSpec)
@@ -1439,16 +1455,17 @@ def test_state_page_reuse_does_not_require_request_reset(config):
     torch.testing.assert_close(actual, expected)
 
 
-def test_state_registers_circular_manager():
+def test_state_registers_circular_manager(runtime):
     from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-    assert (
-        KVCacheSpecRegistry.get_manager_class(
-            CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
-        )
-        is CircularBufferManager
-    )
+    from vllm_ascend.core.kv_cache_compat import KVCacheSpecRegistry
+
+    spec = CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
+    if vllm_version_is("0.34.0"):
+        assert KVCacheSpecRegistry.get_manager_class(spec) is CircularBufferManager
+    else:
+        layer = DeepseekV41CacheLayer(runtime, "compressor.state_cache", spec)
+        assert layer.get_kv_cache_config(runtime).manager_cls is CircularBufferManager
 
 
 @torch.inference_mode()
@@ -1759,6 +1776,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
     # All five role backends inherit the bounded graph capability. Exercise the real
     # upstream checks; only construction of device-side manager buffers is mocked.
     config = SimpleNamespace(
+        max_concurrent_batches=2,
         speculative_config=SimpleNamespace(
             method=method,
             enable_adaptive_verification=True,
@@ -1774,6 +1792,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
                 backend=getattr(dsa_v41, f"DeepseekV41{role}Backend"),
                 layer_names=[role],
                 kv_cache_spec=object(),
+                metadata_builders=[getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder")],
                 get_metadata_builder=lambda index, role=role: getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder"),
             )
         ]

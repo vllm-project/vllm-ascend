@@ -38,6 +38,7 @@ Mark draft reconstruction so disabled drafts can inherit the target collection p
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
+from copy import copy
 from functools import wraps
 from typing import Any, cast
 from unittest.mock import patch
@@ -48,10 +49,11 @@ import vllm.v1.worker.gpu.spec_decode.dflash.speculator as dflash_speculator_mod
 import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
-from vllm.config import ParallelConfig, VllmConfig, replace
+from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 
 from vllm_ascend.ascend_config import draft_config_context
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 
 _original_dspark_init = speculator_module.DSparkSpeculator.__init__
@@ -125,6 +127,33 @@ def replace_dspark_config(config: Any, **changes: Any) -> Any:
             validated.parallel_config = query_parallel
             return validated
     return replace(config, **changes)
+
+
+if not vllm_version_is("0.34.0"):
+    _original_apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
+
+    @wraps(_original_apply_draft_overrides)
+    def _apply_dspark_draft_overrides(self: SpeculativeConfig, vllm_config: VllmConfig) -> VllmConfig:
+        physical = _DSPARK_PHYSICAL_PARALLEL_CONFIG.get()
+        query_parallel = vllm_config.parallel_config
+        if (
+            physical is None
+            or query_parallel.prefill_context_parallel_size != 1
+            or query_parallel.decode_context_parallel_size != physical.decode_context_parallel_size
+        ):
+            return _original_apply_draft_overrides(self, vllm_config)
+
+        # The upstream draft overrides revalidate EPLB's ParallelConfig. Use
+        # the physical group for validation, then restore the replicated query view.
+        draft_config = copy(vllm_config)
+        draft_config.parallel_config = replace(
+            query_parallel, prefill_context_parallel_size=physical.prefill_context_parallel_size
+        )
+        draft_config = _original_apply_draft_overrides(self, draft_config)
+        draft_config.parallel_config.prefill_context_parallel_size = 1
+        return draft_config
+
+    SpeculativeConfig.apply_draft_overrides = _apply_dspark_draft_overrides
 
 
 @wraps(_original_dspark_init)

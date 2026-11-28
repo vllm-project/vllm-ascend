@@ -29,6 +29,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_compat import get_group_layout
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     DSparkContextReceiver,
@@ -683,7 +684,7 @@ class SFAPDRD2HProducerWorker:
         self.last_layer_idx = self.total_layers - 1
         self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
         self.te_rpc_port = self.engine.get_rpc_port()
-        self.kv_cache_specs = [group_spec.kv_cache_spec for group_spec in self.kv_cache_config.kv_cache_groups]
+        self.kv_cache_specs = [get_group_layout(group) for group in self.kv_cache_config.kv_cache_groups]
         self.block_size = [spec.block_size for spec in self.kv_cache_specs]
         self.num_kv_cache_groups = len(self.kv_cache_specs)
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(self.kv_cache_config)

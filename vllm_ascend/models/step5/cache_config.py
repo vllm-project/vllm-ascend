@@ -40,16 +40,17 @@ layouts use.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
+
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
 _STEP5_RING_SUFFIX = ".csa_tail_ring"
 _STEP5_SUMMARY_SUFFIX = ".sparse_summary_cache"
@@ -57,6 +58,8 @@ _STEP5_AUX_SUFFIXES = (_STEP5_RING_SUFFIX, _STEP5_SUMMARY_SUFFIX)
 
 
 def _layer_specs(group: KVCacheGroupSpec) -> list[tuple[str, KVCacheSpec]]:
+    if not isinstance(group, KVCacheGroupSpec):
+        return list(group.kv_cache_specs.items())
     group_spec = group.kv_cache_spec
     if isinstance(group_spec, UniformTypeKVCacheSpecs):
         return list(group_spec.kv_cache_specs.items())
@@ -141,7 +144,7 @@ def get_step5_kv_cache_groups(
                 # keep the old isolated-group behaviour for these layers.
                 unmerged.update(extras)
             else:
-                groups[idx] = KVCacheGroupSpec(list(member.keys()), uniform)
+                groups[idx] = replace(groups[idx], layer_names=list(member), kv_cache_spec=uniform)
 
     ring_specs = {name: spec for name, spec in kv_cache_spec.items() if name.endswith(_STEP5_RING_SUFFIX)}
     for aux_specs in (unmerged, ring_specs):
@@ -209,6 +212,9 @@ def get_step5_max_memory_usage(
     total_pages = 0
     for group in kv_cache_groups:
         if getattr(group, "host_resident", False):
+            continue
+        if not isinstance(group, KVCacheGroupSpec):
+            total_pages += group.max_allocated_blocks_per_request(vllm_config)
             continue
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):

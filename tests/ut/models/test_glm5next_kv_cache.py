@@ -12,8 +12,6 @@ import pytest
 import torch
 from vllm.config import ParallelConfig
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.attention.attention_v1 import AscendCommonAttentionMetadata
@@ -23,6 +21,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolTailBackend,
     AscendIndexerKPoolTailMetadataBuilder,
 )
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, KVCacheSpecRegistry, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
@@ -37,6 +36,7 @@ from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
     get_kpool_tail_ring_capacity,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.usefixtures("keypool_kernels")
 
@@ -163,7 +163,8 @@ def test_tail_manager_retains_one_private_block_until_free():
         dtype=torch.float32,
     )
     pool = BlockPool(12, True, 4)
-    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
+    layout = spec if vllm_version_is("0.34.0") else KVCacheGroupSpec(["tail"], spec)
+    manager = KpoolTailManager(layout, pool, True, 1, scheduler_block_size=16)
     initially_free = pool.get_num_free_blocks()
     assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000, prefill_end=1000) == 1
     a = manager.allocate_new_blocks("a", 1000, 1000)
@@ -178,11 +179,18 @@ def test_tail_manager_retains_one_private_block_until_free():
             manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens, prefill_end=1000) == 0
         )
     request = SimpleNamespace(request_id="a")
-    manager.cache_blocks(request, 131072)
-    manager.cache_blocks(request, 131072, replay_boundary=16)
+    if vllm_version_is("0.34.0"):
+        manager.cache_blocks(request, 131072)
+        manager.cache_blocks(request, 131072, replay_boundary=16)
+    else:
+        manager.cache_blocks(request, 131072, replay_boundaries=())
     manager.cache_blocks(request, 131072, replay_boundaries=[16])
     assert a[0].block_hash is None
-    assert manager.get_num_common_prefix_blocks("a") == 0
+    if vllm_version_is("0.34.0"):
+        assert manager.get_num_common_prefix_blocks("a") == 0
+    else:
+        assert not manager.prefix_cacheable(manager.manager_config)
+        assert "a" not in manager.num_cached_block
     manager.free("a")
     assert pool.get_num_free_blocks() == initially_free - 1
     assert manager.req_to_blocks["b"] == b
@@ -201,8 +209,20 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
         dtype=torch.float32,
     )
     pool = BlockPool(8, True, 4)
-    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16, needs_kv_cache_zeroing=True)
-    blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, spec, False, 16)
+    layout = spec if vllm_version_is("0.34.0") else KVCacheGroupSpec(["tail"], spec)
+    manager = KpoolTailManager(layout, pool, True, 1, scheduler_block_size=16, needs_kv_cache_zeroing=True)
+    if vllm_version_is("0.34.0"):
+        blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, spec, False, 16)
+    else:
+        blocks, hit = manager.find_longest_cache_hit(
+            [],
+            4096,
+            [1, 3],
+            pool,
+            block_size=spec.block_size,
+            manager_config=KpoolTailManager.config(),
+            alignment_tokens=16,
+        )
     assert blocks == ([], []) and hit == 0
     manager.allocate_external_computed_blocks("hit", 1024, 0, record_for_zeroing=False)
     assert len(manager.req_to_blocks["hit"]) == 1

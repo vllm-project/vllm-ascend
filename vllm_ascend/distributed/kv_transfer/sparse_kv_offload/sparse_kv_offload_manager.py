@@ -25,11 +25,14 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
@@ -317,10 +320,10 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     """Return a safe upper bound for aligned host KV allocations."""
     layer_specs: dict[str, KVCacheSpec] = {}
     for group in kv_cache_config.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            layer_specs.update(group.kv_cache_spec.kv_cache_specs)
+        if isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
+            layer_specs.update(get_group_layout(group).kv_cache_specs)
         else:
-            layer_specs.update((layer_name, group.kv_cache_spec) for layer_name in group.layer_names)
+            layer_specs.update((layer_name, get_group_layout(group)) for layer_name in group.layer_names)
     host_specs = [spec for spec in layer_specs.values() if getattr(spec, "store_on_host", False)]
     if not host_specs:
         raise ValueError("Sparse KV offload requires host-resident KV cache specs")
@@ -616,7 +619,7 @@ class SparseKVOffloadManager:
         self,
         kv_cache_config: KVCacheConfig,
     ) -> int:
-        block_sizes = {group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups}
+        block_sizes = {get_group_layout(group).block_size for group in kv_cache_config.kv_cache_groups}
         if len(block_sizes) != 1:
             raise ValueError("Sparse KV offload requires one shared block size across target and draft groups.")
         return block_sizes.pop()
@@ -631,7 +634,7 @@ class SparseKVOffloadManager:
         host_layer_names = set()
         for group in self.kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
-                spec = group.kv_cache_spec
+                spec = get_group_layout(group)
                 if isinstance(spec, UniformTypeKVCacheSpecs):
                     spec = spec.kv_cache_specs[layer_name]
                 if getattr(spec, "store_on_host", False):
@@ -1563,7 +1566,7 @@ class SparseKVOffloadManager:
     def _infer_host_kv_cache_group_id(kv_cache_config: KVCacheConfig) -> int:
         host_group_ids = []
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
+            group_spec = get_group_layout(group)
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )

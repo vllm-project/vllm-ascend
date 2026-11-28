@@ -116,6 +116,8 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         SimpleNamespace(
             num_speculative_tokens=num_spec_tokens,
             use_eagle_block_drop=lambda: uses_eagle_block_drop,
+            uses_target_hidden_states=uses_eagle_block_drop,
+            method="eagle",
         )
         if num_spec_tokens
         else None
@@ -177,6 +179,7 @@ def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
     state._num_accepted_tokens_cpu = np.zeros(4, dtype=np.int32)
     state._align_mode = False
+    state.prefix_caching = False
     state.recoverssm = None
     idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int32)
 
@@ -192,6 +195,7 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.max_num_reqs = 4
     state._align_mode = False
+    state.prefix_caching = False
     recover_state = object()
     config = object()
     model = object()
@@ -1240,7 +1244,7 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
         kernel_block_size=64,
         metadata_builders=[builder],
     )
-    group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+    builder.block_table_is_kernel_granular = True
 
     if for_capture:
         group.build_metadata_for_cudagraph_capture(common_metadata)
@@ -1254,26 +1258,26 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
 
 
 def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
-    target_group = SimpleNamespace()
-    draft_group = SimpleNamespace()
+    target_group = SimpleNamespace(metadata_builders=[SimpleNamespace()])
+    draft_group = SimpleNamespace(metadata_builders=[SimpleNamespace()])
     target_groups = [[target_group]]
     runner = MagicMock()
     runner.device = torch.device("cpu")
     runner.max_model_len = 512
     runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256), uses_slot_mapping=True)],
         needs_kv_cache_zeroing=False,
     )
 
-    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups):
+    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups, *, kernel_block_sizes=None):
         assert block_tables is runner.block_tables
         assert attn_groups is target_groups
         runner.speculator.attn_groups = [[draft_group]]
 
     def init_draft_graph(cudagraph_mode):
-        assert target_group.block_table_is_kernel_granular
-        assert draft_group.block_table_is_kernel_granular
+        assert target_group.metadata_builders[0].block_table_is_kernel_granular
+        assert draft_group.metadata_builders[0].block_table_is_kernel_granular
 
     runner.speculator.set_attn.side_effect = set_draft_attn
     runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph
@@ -1516,6 +1520,8 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
             self.block_size = block_size
             self.head_size = head_size
 
+    from vllm_ascend.core import kv_cache_compat
+
     class FakeUniformTypeKVCacheSpecs:
         def __init__(self, specs):
             self.kv_cache_specs = dict(enumerate(specs))
@@ -1527,10 +1533,12 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
+    config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec, layer_names=list(range(len(specs))))]
+    )
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
+        patch.object(kv_cache_compat, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
     ):
         runner._adjust_kernel_block_sizes(config)
     assert runner.kernel_block_sizes == [expected_kernel_size]
@@ -1547,7 +1555,9 @@ def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
+    config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec(), layer_names=["layer"])]
+    )
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
         pytest.raises(NotImplementedError, match="divides every attention cache block size"),

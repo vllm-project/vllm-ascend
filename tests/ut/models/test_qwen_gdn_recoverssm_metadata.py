@@ -63,7 +63,9 @@ def test_build_forces_active_decodes_onto_recoverssm_path(monkeypatch):
     builder.use_spec_decode = True
     builder._capturing = False
     builder._ones = torch.ones(3, dtype=torch.int32)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=False, mamba_cache_mode="none")
+    )
     builder.kv_cache_spec = SimpleNamespace(block_size=16)
     builder._get_context = Mock(return_value=object())
 

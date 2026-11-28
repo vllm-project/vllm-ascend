@@ -28,6 +28,10 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.methods.kv_cache.turboquant import SLOT_BYTES, is_turboquant
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 
 def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
@@ -208,6 +212,14 @@ class DSAAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            if spec is None:
+                return None
+            return FullAttentionManager.layer_config(spec)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.

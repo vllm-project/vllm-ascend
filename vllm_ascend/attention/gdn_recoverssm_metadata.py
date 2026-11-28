@@ -24,6 +24,7 @@ from vllm_ascend.attention.recoverssm_metadata import (
     recoverssm_spec_rows,
 )
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+from vllm_ascend.utils import get_mamba_cache_mode
 
 
 # TODO: Once the pinned vLLM revision includes #61309, might replace this class
@@ -157,7 +158,7 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             if rows is None:
                 raise ValueError("GDN RecoverSSM: spec rows without draft counts")
             request_indices = recoverssm_request_indices(rows, n, m.query_start_loc.device)
-            align = self.vllm_config.cache_config.mamba_cache_mode == "align"
+            align = get_mamba_cache_mode(self.vllm_config.cache_config) == "align"
             commit = AscendGDNRecoverSSMCommitMetadata(
                 state_indices=base["spec_state_indices_tensor"],
                 query_start_loc=meta.spec_query_start_loc,

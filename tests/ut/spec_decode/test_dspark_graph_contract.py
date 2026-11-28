@@ -251,7 +251,11 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
         decode_cudagraph_capture_request_sizes=list(range(1, 17)),
         max_decode_cudagraph_capture_tokens=None,
     )
-    manager.vllm_config = SimpleNamespace(speculative_config=None, uniform_decode_query_len=query_count)
+    manager.vllm_config = SimpleNamespace(
+        speculative_config=None,
+        uniform_decode_query_len=query_count,
+        model_config=SimpleNamespace(max_model_len=128),
+    )
     manager.decode_request_sizes = None
     manager.decode_max_reqs = {query_count: 16}
     manager._decode_descs = {}

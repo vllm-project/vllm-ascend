@@ -13,6 +13,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm_ascend.utils import get_mamba_cache_mode
+
 
 @pytest.fixture
 def mamba_state_cls():
@@ -69,6 +71,7 @@ def runner_cls(mamba_state_cls):
     namespace = {
         "Parent": Parent,
         "MambaHybridModelState": mamba_state_cls,
+        "get_mamba_cache_mode": get_mamba_cache_mode,
         "QWEN_FA3_TARGETS": {"Qwen3_5ForConditionalGeneration"},
     }
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
@@ -158,7 +161,7 @@ def test_deferred_mamba_postprocess_restores_batch_rows(
     runner.use_pp = use_pp
     runner.is_last_pp_rank = last_rank
     runner.model_state = mamba_state_cls() if hybrid else object()
-    runner.cache_config = SimpleNamespace(mamba_cache_mode=cache_mode)
+    runner.cache_config = SimpleNamespace(mamba_cache_mode=cache_mode, enable_prefix_caching=cache_mode == "align")
     runner.speculator = None
     runner.sync_spec_pp_cpu_counts = False
     runner.events = []

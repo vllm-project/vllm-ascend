@@ -85,7 +85,9 @@ def test_unrelated_model_is_not_selected():
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
     ],
 )
-def test_unsupported_configuration_is_rejected_before_enabling(section, field, value, message):
+def test_unsupported_configuration_is_rejected_before_enabling(section, field, value, message, monkeypatch):
+    if field in ("mamba_cache_mode", "enable_prefix_caching"):
+        monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.vllm_version_is", lambda _: True)
     config = make_config()
     setattr(getattr(config, section) if section else config, field, value)
     with pytest.raises(ValueError, match=message):

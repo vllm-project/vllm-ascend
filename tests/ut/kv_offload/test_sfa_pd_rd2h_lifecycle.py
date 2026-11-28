@@ -111,7 +111,7 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
         patch("vllm.v1.worker.gpu.kv_connector.is_forward_context_available", return_value=True),
         patch("vllm.v1.worker.gpu.kv_connector.get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
     ):
-        runner = ActiveKVConnector(None, {})
+        runner = ActiveKVConnector(SimpleNamespace(kv_transfer_config=None), {})
         for step in range(2):
             metadata = SfaPDProducerMetadata()
             req_id = f"request-{step}"
@@ -190,7 +190,7 @@ def test_consumer_destinations_still_follow_ordered_load_hook(has_sync_loads, mu
         patch("vllm.v1.worker.gpu.kv_connector.is_forward_context_available", return_value=True),
         patch("vllm.v1.worker.gpu.kv_connector.get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
     ):
-        runner = ActiveKVConnector(None, {})
+        runner = ActiveKVConnector(SimpleNamespace(kv_transfer_config=None), {})
         runner.pre_forward(output)
         assert start_load.call_count == int(has_sync_loads)
         assert child.get_copy_sfa_slot_bindings() == ({req_id: 3} if has_sync_loads else {})

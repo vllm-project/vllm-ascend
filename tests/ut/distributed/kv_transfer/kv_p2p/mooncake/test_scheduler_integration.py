@@ -16,7 +16,6 @@ from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.utils.hashing import sha256
-from vllm.v1 import kv_cache_spec_registry
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
@@ -24,14 +23,20 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    KVCacheGroupSpec,
+    KVCacheSpecRegistry,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.utils import vllm_version_is
 
 # Factory registration names -> registered class, mirroring
 # vllm_ascend/distributed/kv_transfer/__init__.py: both load the same V2
@@ -49,18 +54,19 @@ HIT_BOUNDARY_BLOCKS = 4
 @pytest.fixture(autouse=True)
 def _preserve_global_kv_state():
     """Restore the KVCacheSpec registry and prefix-cache hash state on exit."""
-    spec_registry = dict(kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST)
-    role_managers = dict(kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1 import kv_cache_spec_registry
+
+        registries = (kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST, kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS)
+    else:
+        registries = (KVCacheSpecRegistry._managers, KVCacheSpecRegistry._uniform_types)
+    saved_registries = [registry.copy() for registry in registries]
     none_hash_seed = kv_cache_utils._NONE_HASH_SEED
     none_hash = getattr(kv_cache_utils, "NONE_HASH", None)
     yield
-    # In-place clear+update also covers code holding a direct reference to
-    # the dicts (the registry class methods resolve them through the module
-    # globals, so rebinding the attributes would work for them as well).
-    kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST.clear()
-    kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST.update(spec_registry)
-    kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS.clear()
-    kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS.update(role_managers)
+    for registry, saved in zip(registries, saved_registries, strict=True):
+        registry.clear()
+        registry.update(saved)
     kv_cache_utils._NONE_HASH_SEED = none_hash_seed
     if none_hash is not None:
         kv_cache_utils.NONE_HASH = none_hash

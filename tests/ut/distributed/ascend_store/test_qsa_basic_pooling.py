@@ -14,10 +14,9 @@ import pytest
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
-
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
@@ -246,8 +245,9 @@ def test_mooncake_preserves_partial_get_errors():
 def test_packed_qsa_gdn_pages_restore_disjoint_live_block_ids(backend_name):
     """Restore actual shared-page views without touching another live owner."""
     import torch
-    from vllm.v1.kv_cache_interface import CircularBufferSpec, MambaSpec, MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
+    from vllm_ascend.core.kv_cache_compat import CircularBufferSpec
     from vllm_ascend.models.qwen4_exp.cache_config import build_qwen4_kv_cache_layout, make_slab_view
 
     main = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, head_size_v=8, dtype=torch.float16)

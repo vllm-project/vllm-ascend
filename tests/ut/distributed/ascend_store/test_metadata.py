@@ -24,8 +24,13 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerPoolKey,
     masked_block_runs,
@@ -68,7 +73,7 @@ class TestCacheLayoutHelpers(unittest.TestCase):
             self.assertIs(get_engine_transfer_config(config, None), child)
 
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
-        mamba_spec = MambaSpec(
+        mamba_spec = LegacyMambaSpec(
             shapes=((4,),),
             dtypes=(torch.float32,),
             block_size=16,

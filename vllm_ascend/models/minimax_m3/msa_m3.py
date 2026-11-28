@@ -68,6 +68,10 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_union import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
@@ -318,6 +322,12 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            return FullAttentionManager.layer_config(spec)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return AscendSFAIndexerCacheSpec(

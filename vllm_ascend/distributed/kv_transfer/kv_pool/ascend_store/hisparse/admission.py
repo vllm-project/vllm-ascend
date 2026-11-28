@@ -10,16 +10,29 @@ from typing import TYPE_CHECKING, ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import HiSparseResidentManager
-from vllm.v1.kv_cache_interface import HiSparseResidentSpec
-from vllm.v1.kv_cache_spec_registry import register_kv_cache_spec
+
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
+    from vllm.v1.kv_cache_interface import ManagerConfig
 
 
 class AscendStoreHiSparseResidentManager(HiSparseResidentManager):
     """Use bounded Resident admission when AscendStore imports a prefix."""
+
+    @classmethod
+    def max_allocated_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: VllmConfig,
+    ) -> int:
+        # Core main sizes the pool through the manager policy.
+        window = super().max_allocated_blocks_per_request(config, block_size, dcp_sharded, vllm_config)
+        return min(window + 1, cdiv(vllm_config.model_config.max_model_len, block_size))
 
     def get_num_blocks_to_allocate(
         self,
@@ -53,18 +66,30 @@ class AscendStoreHiSparseResidentManager(HiSparseResidentManager):
         )
 
 
-@register_kv_cache_spec(
-    manager_class=AscendStoreHiSparseResidentManager,
-    uniform_type_base_spec=HiSparseResidentSpec,
-)
-@dataclass(frozen=True, kw_only=True)
-class AscendStoreHiSparseResidentSpec(HiSparseResidentSpec):
-    """Keep Core's Resident geometry and prefill-window cap."""
+if TYPE_CHECKING or not vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparsePageSpec
 
-    requires_aligned_device_slab: ClassVar[bool] = True
+    @dataclass(frozen=True, kw_only=True)
+    class AscendStoreHiSparseResidentSpec(HiSparsePageSpec):
+        """Retain the native Resident page geometry and require slab alignment."""
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        window_bytes = super().max_memory_usage_bytes(vllm_config)
-        max_context_pages = cdiv(vllm_config.model_config.max_model_len, self.block_size)
-        # The writable import tail can coexist with a full prefill window.
-        return min(window_bytes + self.page_size_bytes, max_context_pages * self.page_size_bytes)
+        requires_aligned_device_slab: ClassVar[bool] = True
+else:
+    from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+    from vllm.v1.kv_cache_spec_registry import register_kv_cache_spec
+
+    @register_kv_cache_spec(
+        manager_class=AscendStoreHiSparseResidentManager,
+        uniform_type_base_spec=HiSparseResidentSpec,
+    )
+    @dataclass(frozen=True, kw_only=True)
+    class AscendStoreHiSparseResidentSpec(HiSparseResidentSpec):
+        """Keep Core's Resident geometry and prefill-window cap."""
+
+        requires_aligned_device_slab: ClassVar[bool] = True
+
+        def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+            window_bytes = super().max_memory_usage_bytes(vllm_config)
+            max_context_pages = cdiv(vllm_config.model_config.max_model_len, self.block_size)
+            # The writable import tail can coexist with a full prefill window.
+            return min(window_bytes + self.page_size_bytes, max_context_pages * self.page_size_bytes)

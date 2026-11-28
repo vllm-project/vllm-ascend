@@ -7,9 +7,11 @@ from typing import cast
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+)
 from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
 

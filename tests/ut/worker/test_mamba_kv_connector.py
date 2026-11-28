@@ -30,6 +30,7 @@ def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load, non_agg
     state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     state.__dict__.update(
         _align_mode=True,
+        prefix_caching=True,
         _pending_bulk_copy=None,
         _mamba_state_idx_gpu=None,
         _mamba_src_col_gpu=None,

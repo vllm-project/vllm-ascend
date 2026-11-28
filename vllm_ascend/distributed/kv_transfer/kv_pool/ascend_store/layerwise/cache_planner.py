@@ -12,6 +12,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor, MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, LegacyMambaSpec
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
 
@@ -94,7 +95,8 @@ class LayerwiseCachePlanner:
     @staticmethod
     def can_reuse_spec(spec: KVCacheSpec, rules: SpecReuseRules | None) -> bool:
         """Apply the rule for the concrete spec type, defaulting to false."""
-        rule = False if rules is None else rules.get(type(spec), False)
+        spec_type = MambaSpec if type(spec) is LegacyMambaSpec else type(spec)
+        rule = False if rules is None else rules.get(spec_type, False)
         result = rule(spec) if callable(rule) else rule
         if not isinstance(result, bool):
             raise TypeError("Spec reuse rules must return bool")
@@ -148,7 +150,11 @@ class LayerwiseCachePlanner:
             reusable_entry_names = {
                 entry_name
                 for group in self.config.kv_cache_groups
-                if is_prefix_cacheable(group.kv_cache_spec)
+                if (
+                    is_prefix_cacheable(group.kv_cache_spec)
+                    if isinstance(group, KVCacheGroupSpec)
+                    else group.prefix_cacheable
+                )
                 for entry_name in group.layer_names
                 if entry_name not in self.draft_names
                 and self.layer_id_by_entry[entry_name] not in independent

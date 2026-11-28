@@ -48,6 +48,7 @@ def runner(buffers):
 def _make_graph_manager(buffers, mode, uniform, capture_size):
     manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
     manager.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=buffers.input_ids.numel()),
         speculative_config=None,
         cache_config=SimpleNamespace(use_kda_recoverssm=False),
         uniform_decode_query_len=uniform,

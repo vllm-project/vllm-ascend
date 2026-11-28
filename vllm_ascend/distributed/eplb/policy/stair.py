@@ -3,6 +3,8 @@
 
 """CPU building blocks for the STAIR EPLB policy."""
 
+from __future__ import annotations
+
 import os
 import socket
 import subprocess
@@ -11,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from heapq import heapify, heappop, heappush
 from multiprocessing.connection import Connection
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -20,6 +23,10 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_response, send_planner_request
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING or not vllm_version_is("0.34.0"):
+    from vllm.distributed.eplb.policy import EplbStats
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 _PLANNER_THREAD_ENV = {
@@ -207,17 +214,32 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     def rebalance_experts(
         self,
-        weight: torch.Tensor | PreparedLoadStats,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
+        stats: torch.Tensor | PreparedLoadStats | EplbStats,
+        num_replicas: int | torch.Tensor | None = None,
+        num_groups: int | None = None,
+        num_nodes: int | None = None,
+        num_ranks: int | None = None,
         old_global_expert_indices: torch.Tensor | None = None,
         *,
         last_committed_mean_ratios: np.ndarray | None = None,
         rank_node_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
-        """Plan a placement through the upstream policy entry point."""
+        """Plan from upstream EPLB stats or Ascend's prepared load samples."""
+        if not vllm_version_is("0.34.0") and isinstance(stats, EplbStats):
+            if old_global_expert_indices is None:
+                assert num_replicas is None or isinstance(num_replicas, torch.Tensor)
+                old_global_expert_indices = num_replicas
+            num_replicas, num_groups, num_nodes, num_ranks = (
+                stats.num_replicas,
+                stats.num_groups,
+                stats.num_nodes,
+                stats.num_gpus,
+            )
+            stats = stats.global_expert_load_window
+        assert (
+            isinstance(num_replicas, int) and num_nodes is not None and num_ranks is not None and num_groups is not None
+        )
+        assert isinstance(stats, (torch.Tensor, PreparedLoadStats))
         if num_ranks < 1 or num_replicas < 1 or num_replicas % num_ranks:
             raise ValueError("STAIR requires equal rank capacity")
         if old_global_expert_indices is None:
@@ -226,13 +248,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_map = old_global_expert_indices.cpu()
         if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
             raise ValueError("current expert placement must be [layers, num_replicas]")
-        if isinstance(weight, PreparedLoadStats):
-            if weight.values.device.type != "cpu" or weight.sample_counts is None:
+        if isinstance(stats, PreparedLoadStats):
+            if stats.values.device.type != "cpu" or stats.sample_counts is None:
                 raise ValueError("prepared STAIR statistics require CPU values and sample counts")
-            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
-            sample_counts = weight.sample_counts
+            logical_load_values = stats.values.to(dtype=torch.float64).numpy()
+            sample_counts = stats.sample_counts
         else:
-            logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
+            logical_load_values = stats.to(device="cpu", dtype=torch.float64).numpy()
             if logical_load_values.ndim == 2:
                 logical_load_values = logical_load_values[None, ...]
             sample_counts = None

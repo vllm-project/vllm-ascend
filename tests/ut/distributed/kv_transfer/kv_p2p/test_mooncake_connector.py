@@ -18,23 +18,18 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on main.
-from vllm.v1.core.kv_cache_planning import (
-    get_kv_cache_config_from_groups,
-    is_kv_cache_spec_uniform,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.request import RequestStatus
 from zmq.constants import ROUTER
 from zmq.sugar.socket import Socket
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    is_kv_cache_spec_uniform,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -3022,6 +3017,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
+        self.scheduler.vllm_config.cache_config.enable_prefix_caching = False
         self.scheduler.group_transfer_info = [
             GroupTransferInfo(
                 tokens_per_block=16,
