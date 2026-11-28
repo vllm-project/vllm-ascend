@@ -31,6 +31,7 @@ unsupported. The SDK is loaded lazily when the backend is used.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 from collections.abc import Iterator
@@ -281,6 +282,48 @@ def _warmup_aicpu_custom_scheduler() -> bool:
     return True
 
 
+def _bootstrap_shmem(shmem_runtime, group, *, use_udma: bool, prefetch_overlap: bool) -> None:
+    """Bootstrap SHMEM through the rank-zero config store or a UID broadcast."""
+    bootstrap = envs.MOONEP_SHMEM_BOOTSTRAP_TYPE
+    logger.info(
+        "[moonep-init r%s] stage=shmem-init-enter bootstrap_type=%s",
+        get_ep_group().rank_in_group,
+        bootstrap,
+    )
+    if bootstrap == "ipport":
+        from ascend_moonep.buffer_c import symmetric_descriptors
+        from vllm.config import get_current_vllm_config
+
+        port = envs.MOONEP_SHMEM_BOOTSTRAP_PORT
+        parallel = get_current_vllm_config().parallel_config
+        bootstrap_ip = parallel.data_parallel_master_ip
+        local_dp = parallel.data_parallel_size_local or parallel.data_parallel_size
+        if not bootstrap_ip:
+            raise RuntimeError("MoonEP ipport bootstrap requires a DP master address")
+        # Every node must be able to reach the same rank-zero store.
+        if parallel.data_parallel_size > local_dp:
+            try:
+                loopback = ipaddress.ip_address(bootstrap_ip).is_loopback
+            except ValueError:
+                loopback = bootstrap_ip.lower() == "localhost"
+            if loopback:
+                raise RuntimeError(
+                    "Multi-node MoonEP requires --data-parallel-address "
+                    "to be reachable from every node, not loopback"
+                )
+        shmem_runtime.init_with_ip_port(
+            group=group,
+            ip_port=f"tcp://{bootstrap_ip}:{port}",
+            descriptors=symmetric_descriptors(),
+            enable_udma=use_udma,
+            qp_count=0,
+            prefetch_overlap=prefetch_overlap,
+        )
+    else:
+        shmem_runtime.init_with_buffer(group=group, enable_udma=use_udma, prefetch_overlap=prefetch_overlap)
+    logger.info("[moonep-init r%s] stage=shmem-init-done", get_ep_group().rank_in_group)
+
+
 # ---------------------------------------------------------------------------
 # Runtime pool: capacity-specific Buffers per unique (E, K, H) layer shape.
 # Construction registers CANN VMM descriptors only; ShmemRuntime is initialized
@@ -410,58 +453,7 @@ class _MoonEPRuntime:
             # VA，之后就再也起不了 AICPU custom 调度器了（见上方
             # _warmup_aicpu_custom_scheduler 的驱动约束注释）。
             _warmup_aicpu_custom_scheduler()
-            # Engine 环境默认走 ipport/config-store bootstrap：uid 路径要在
-            # 每个 worker 的 HCCL 组上做 UID 广播（dist.broadcast over HCCL），
-            # 在引擎里与刚创建的 UDMA-flagged VMM 上下文及模型加载后的设备态
-            # 冲突（实测 UB_INLINE_WRITE/HD Put 任务异常 → 全体自旋）。ipport
-            # 只在本机 rank0 起 config-store，无 HCCL 广播，引擎内实测通过
-            # （2026-09-09：uid 卡 init_with_buffer:182，ipport 可到首层 MoE
-            # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP_TYPE=uid 覆盖。
-            bootstrap = envs.MOONEP_SHMEM_BOOTSTRAP_TYPE
-            logger.info(
-                "[moonep-init r%s] stage=shmem-init-enter bootstrap_type=%s",
-                get_ep_group().rank_in_group,
-                bootstrap,
-            )
-            if bootstrap == "ipport":
-                # Config-store bootstrap (the path ascend-moonep's own multi-rank
-                # tests validated) instead of the UID-over-HCCL broadcast.
-                from ascend_moonep.buffer_c import symmetric_descriptors
-
-                port = envs.MOONEP_SHMEM_BOOTSTRAP_PORT
-                # All nodes must connect to the same rank-0 config store.
-                # Use vLLM's existing cluster address; keep loopback valid for
-                # single-node deployments, but reject it for a multi-node group.
-                import ipaddress
-
-                from vllm.config import get_current_vllm_config
-
-                parallel = get_current_vllm_config().parallel_config
-                bootstrap_ip = parallel.data_parallel_master_ip
-                local_dp = parallel.data_parallel_size_local or parallel.data_parallel_size
-                if not bootstrap_ip:
-                    raise RuntimeError("MoonEP ipport bootstrap requires a DP master address")
-                if parallel.data_parallel_size > local_dp:
-                    try:
-                        loopback = ipaddress.ip_address(bootstrap_ip).is_loopback
-                    except ValueError:
-                        loopback = bootstrap_ip.lower() == "localhost"
-                    if loopback:
-                        raise RuntimeError(
-                            "Multi-node MoonEP requires --data-parallel-address "
-                            "to be reachable from every node, not loopback"
-                        )
-                ShmemRuntime.init_with_ip_port(
-                    group=group,
-                    ip_port=f"tcp://{bootstrap_ip}:{port}",
-                    descriptors=symmetric_descriptors(),
-                    enable_udma=use_udma,
-                    qp_count=0,
-                    prefetch_overlap=prefetch_overlap,
-                )
-            else:
-                ShmemRuntime.init_with_buffer(group=group, enable_udma=use_udma, prefetch_overlap=prefetch_overlap)
-            logger.info("[moonep-init r%s] stage=shmem-init-done", get_ep_group().rank_in_group)
+            _bootstrap_shmem(ShmemRuntime, group, use_udma=use_udma, prefetch_overlap=prefetch_overlap)
         qp_layout = ShmemRuntime.require_udma_prefetch_overlap() if prefetch_overlap else None
         if qp_layout is not None:
             logger.info(
