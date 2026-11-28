@@ -728,6 +728,7 @@ Each key under `benchmarks` names one AISBench job. Common fields include:
 | Field | Description |
 | --- | --- |
 | `case_type` | `accuracy` or `performance` |
+| `response_anomaly` | Boolean, default `true`. For accuracy cases, enable AISBench response anomaly detection and require zero anomalies other than rare characters, and zero incomplete detections. Rare-character counts and aggregate anomaly count/rate are reported without zero-value validation. Set `false` to run accuracy evaluation without anomaly detection or anomaly metric validation. |
 | `dataset_path` | Dataset repository or local path |
 | `request_conf` | AISBench request configuration |
 | `dataset_conf` | AISBench dataset configuration |

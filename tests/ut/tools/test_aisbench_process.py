@@ -80,6 +80,7 @@ def runner(mode="success"):
     instance = aisbench.AisbenchRunner.__new__(aisbench.AisbenchRunner)
     instance.__dict__.update(
         task_type="accuracy",
+        response_anomaly=True,
         dataset_conf="gsm8k/test",
         request_conf=mode,
         num_prompts=100,
