@@ -183,7 +183,6 @@ class FlashWorker:
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
 def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
     for name, value in {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "400",
@@ -315,7 +314,6 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
     acceptance test -- real weights stay in Nightly.
     """
     for name, value in {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "400",
