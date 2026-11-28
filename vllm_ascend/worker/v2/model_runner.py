@@ -72,6 +72,8 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -103,6 +105,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+from vllm_ascend.worker.metadata_async import create_async_target_metadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -496,6 +499,17 @@ class NPUModelRunner(GPUModelRunner):
             if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
             else None
         )
+
+        candidate = create_async_target_metadata(
+            self.ascend_config.dsv41_metadata_async_config,
+            self.vllm_config,
+            packed_cache=uses_a5_packed_cache(),
+            pcp_enabled=self.pcp_manager is not None,
+            is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+        )
+        if candidate is not None:
+            self.model_state.device_metadata = candidate
+            logger.info("A3 target metadata async enabled: mode=%s", candidate.mode)
 
         # Upstream has bound every local cache; publish sealed plans before
         # the worker can warm up, capture graphs or execute prefill requests.
