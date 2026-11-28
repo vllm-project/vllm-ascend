@@ -42,8 +42,10 @@ class CaMemBackend(CuMemBackend):
 
     def resume(self, tags: list[str] | None = None) -> None:
         self._state = "RESUMING"
-        self._allocator().wake_up(tags)
-        self._state = "RUNNING"
+        allocator = self._allocator()
+        allocator.wake_up(tags)
+        if tags is None or not any(data.is_asleep for data in allocator.pointer_to_data.values()):
+            self._state = "RUNNING"
 
     def discard(self, tags: tuple[str, ...]) -> None:
         self._allocator().discard(tags)

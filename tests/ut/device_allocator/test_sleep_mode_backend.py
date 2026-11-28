@@ -51,6 +51,28 @@ def test_backend_resume_and_discard(allocator):
     assert backend.state() == "SUSPENDED"
 
 
+@pytest.mark.parametrize("last_tags", [None, ["kv_cache"]])
+def test_partial_resume_waits_for_live_allocations(allocator, last_tags):
+    weights = SimpleNamespace(tag="weights", is_asleep=True)
+    kv = SimpleNamespace(tag="kv_cache", is_asleep=True)
+    allocator.pointer_to_data = {1: weights, 2: kv}
+
+    def wake_matching(tags):
+        for data in allocator.pointer_to_data.values():
+            if tags is None or data.tag in tags:
+                data.is_asleep = False
+
+    allocator.wake_up.side_effect = wake_matching
+    backend = CaMemBackend()
+    backend.suspend()
+    backend.resume(["weights"])
+    assert not weights.is_asleep and kv.is_asleep
+    assert backend.state() == "RESUMING"
+
+    backend.resume(last_tags)
+    assert backend.state() == "RUNNING"
+
+
 def test_backend_accepts_allocator_factory(allocator):
     backend = CaMemBackend(lambda: allocator)
 

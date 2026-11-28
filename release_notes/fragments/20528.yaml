@@ -1,0 +1,7 @@
+pr: 20528
+entries:
+  - category: bugfix
+    text: >-
+      Keep the Ascend sleep backend in RESUMING after a tagged wake while
+      another live allocation is still asleep. The wake path now clears the NPU
+      cache through torch.npu to support the Ascend pluggable allocator.
