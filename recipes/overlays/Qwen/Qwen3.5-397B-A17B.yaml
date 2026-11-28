@@ -157,6 +157,32 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-950DT
+  ascend_w4a4_mxfp4_tutorial:
+    model_id: Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4
+    precision: mxfp4
+    label: W4A4 (Ascend tutorial)
+    vram_minimum_gb: 239
+    supported_hardware:
+      - ascend_950dt
+    tp: 8
+    min_vllm_version: '0.32.0rc1'
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--enable-expert-parallel'
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+        docker_shm_size: '64g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
 meta:
   hardware:
     ascend_950dt: verified
@@ -193,6 +219,61 @@ strategy_overrides:
           - '--data-parallel-size'
           - '1'
 presets:
+  ascend_950dt_w4a4_mxfp4_tutorial:
+    label: 950DT tutorial, W4A4 TP8 with expert parallelism
+    hardware: ascend_950dt
+    strategy: single_node_tp
+    variants: [ascend_w4a4_mxfp4_tutorial]
+    source:
+      label: vLLM Ascend Qwen3.5-397B-A17B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.5-397B-A17B.md#L182-L223
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+        long_context: false
+    runbook: >-
+      Add `--ulimit memlock=-1` to the generated Docker command as in tutorial section 4.1.
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--distributed-executor-backend'
+      - 'mp'
+      - '--data-parallel-size'
+      - '1'
+      - '--seed'
+      - '1024'
+      - '--served-model-name'
+      - 'qwen3.5'
+      - '--max-num-seqs'
+      - '128'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--trust-remote-code'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--async-scheduling'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+    env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '400'
+      HCCL_INTRA_ROCE_ENABLE: '0'
+      HCCL_OP_EXPANSION_MODE: 'AIV'
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: '1'
+      VLLM_USE_V2_MODEL_RUNNER: '0'
   ascend_a2_w4a8_mtp_pd:
     label: A2 W4A8-MTP PD Separation (1P1D)
     hardware: ascend_910b
@@ -208,17 +289,21 @@ presets:
       endpoint per pool. Prefill runs eager, decode captures FULL_DECODE_ONLY.
     source:
       label: vLLM Ascend Qwen3.5-397B-A17B tutorial (5.6 A2 PD)
-      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3.5-397B-A17B.html
-      revision: '2026-11-24'
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.5-397B-A17B.md#L956-L1140
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
     select:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
       features:
-        # Both pools serve OpenAI tool calls and Qwen3 thinking; the parsers are
-        # emitted identically on the prefill and decode commands.
-        tool_calling: true
-        reasoning: true
+        tool_calling: false
+        reasoning: false
+    runbook: >-
+      Add `--ulimit memlock=-1` to the generated Docker command as in tutorial section 4.1.
+      Run the proxy after both workers are ready. To reproduce section 5.6.3, bind the
+      proxy to the Prefill node IP on port 8000.
+    args:
+      - '--no-disable-hybrid-kv-cache-manager'
     roles:
       prefill:
         nodes: 1
@@ -229,6 +314,8 @@ presets:
         args:
           - '--host'
           - $PREFILL_NODE_1
+          - '--port'
+          - '30060'
           - '--data-parallel-size'
           - '1'
           - '--data-parallel-size-local'
@@ -259,11 +346,23 @@ presets:
       decode:
         nodes: 1
         parallelism: tep
+        # The independent DP1 engine uses the tutorial's explicit rank 0 and
+        # its own DP control address. The router has one HTTP endpoint per role.
         args:
           - '--host'
           - $DECODE_NODE_1
+          - '--port'
+          - '30050'
           - '--data-parallel-size'
           - '1'
+          - '--data-parallel-size-local'
+          - '1'
+          - '--data-parallel-rank'
+          - '0'
+          - '--data-parallel-address'
+          - $DECODE_NODE_1
+          - '--data-parallel-rpc-port'
+          - '6884'
           - '--max-num-batched-tokens'
           - '300'
           - '--max-num-seqs'
@@ -291,6 +390,17 @@ presets:
               decode: { dp_size: 1, tp_size: 8, pp_size: null }
 guide_sections:
   ascend: |
+    ### Ascend tutorial deployments
+
+    - [Single-node A3 and 950DT](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-397B-A17B.html#51-single-node-online-deployment)
+    - [A2 multi-node multiprocessing](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-397B-A17B.html#52-multi-node-deployment-with-mp-recommended)
+    - [A3 PD on one host](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-397B-A17B.html#54-prefill-decode-disaggregation-a3)
+    - [950DT W4A8C8 PD](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-397B-A17B.html#55-prefill-decode-disaggregation-950dt-products)
+
+    Follow the [tutorial's Docker setup](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-397B-A17B.html#41-docker-image-installation)
+    with 64 GiB of shared memory and an unlimited memlock limit. For A2 PD, use
+    the preset's two role commands with the documented container setup.
+
     ### Ascend deployment (A2 PD, W4A8-MTP, 1P1D)
 
     This lane serves `Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp` as 1P1D prefill/decode
@@ -318,9 +428,9 @@ guide_sections:
 
     **Prefill** uses the self-contained DP1/TP8 mode and runs `--enforce-eager`
     without `--compilation-config`. **Decode** keeps the same DP1/TP8 engine
-    (no DP rank/address/RPC-port flags either) and captures
-    `{"cudagraph_mode":"FULL_DECODE_ONLY"}`. Both pools pass
-    `--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`.
+    (rank 0, using the Decode host IP and TCP port 6884 for DP control traffic)
+    and captures `{"cudagraph_mode":"FULL_DECODE_ONLY"}`.
+    For tool calling, enable the parser options on both pools as in section 6.1.
 
     Start both pools, then run the pull proxy
     (`examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py`)
@@ -329,8 +439,8 @@ guide_sections:
 
     ```shell
     python3 load_balance_proxy_server_example.py \
-      --prefiller-hosts "$PREFILL_NODE_1" --prefiller-ports 8001 \
-      --decoder-hosts "$DECODE_NODE_1" --decoder-ports 8002 \
+      --prefiller-hosts "$PREFILL_NODE_1" --prefiller-ports 30060 \
+      --decoder-hosts "$DECODE_NODE_1" --decoder-ports 30050 \
       --host "$PREFILL_NODE_1" --port 8000
     ```
 
