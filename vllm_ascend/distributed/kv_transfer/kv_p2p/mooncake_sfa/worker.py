@@ -643,7 +643,6 @@ class MooncakeSFAConnectorWorker(MooncakePullConnectorWorker):
             self.engine,
             host_kv,
             metadata.block_lens,
-            staging_config=self.ascend_config.mooncake_staging_config,
         )
         self._sfa_pd_state = MooncakeSFAPDState(host_kv.main_group_id)
         return self._build_recving_thread(MooncakeSFAPullRecvingThread, ready_event, staging_reader=reader)

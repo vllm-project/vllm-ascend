@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging import MooncakeSFAStagingReader
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.transfer_targets import MooncakeKVRegistry
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
@@ -39,7 +38,7 @@ def _make_fake_recv_thread(staging_chunk_bytes: int) -> MooncakeSFAStagingReader
     thread._dsa_pd_mooncake_staging_lock = threading.Lock()
     thread._landing_stream = MagicMock()
     thread._landing_streams = [thread._landing_stream, MagicMock()]
-    thread._staging_config = MooncakeStagingConfig(bank_count=1)
+    thread._staging_bank_count = 1
     return thread
 
 
@@ -143,9 +142,8 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.assertEqual(ret, 0)
         self.assertFalse(self.thread._dsa_pd_mooncake_staging_lock.locked())
 
-    def test_staging_window_uses_typed_startup_config(self):
-        self.thread._staging_config = MooncakeStagingConfig(window_chunks=3, bank_count=1)
-        self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 3)
+    def test_staging_window_uses_internal_policy(self):
+        self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 16)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.stream")
@@ -167,7 +165,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
-        self.thread._staging_config = MooncakeStagingConfig(window_chunks=4, bank_count=4)
+        self.thread._staging_bank_count = 4
         streams = [MagicMock() for _ in range(4)]
         self.thread._landing_streams = streams
 
@@ -302,7 +300,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
-        self.thread._staging_config = MooncakeStagingConfig(bank_count=2)
+        self.thread._staging_bank_count = 2
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
         ret = self.thread.batch_transfer_sync_read(
@@ -333,7 +331,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
-        self.thread._staging_config = MooncakeStagingConfig(window_chunks=2, bank_count=1)
+        self.thread._staging_bank_count = 1
         self.thread._landing_streams = [self.thread._landing_stream]
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
@@ -421,7 +419,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
-        self.thread._staging_config = MooncakeStagingConfig(bank_count=2)
+        self.thread._staging_bank_count = 2
 
         copied: list[tuple[int, int, int]] = []
 

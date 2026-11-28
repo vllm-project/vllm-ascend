@@ -42,7 +42,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `sparse_kv_offload_config` | dict | `{}` (offload disabled) | Sparse Decode KV offload. Enable only on D; 950 DT&950PR products are not supported. See [Mooncake V2 with SFA KV Offload](../feature_guide/mooncake_sfa_v2.md#sparse-kv-offload-settings) for the Mooncake configuration and parameter defaults. |
-| `mooncake_staging_config` | dict | `{"window_chunks":16,"bank_count":4}` | Decode-side Mooncake Host-KV staging capacity and bank count. See [staging settings](../feature_guide/mooncake_sfa_v2.md#staging-settings) for types, bounds and bank behavior. |
 | `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |

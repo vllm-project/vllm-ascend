@@ -47,7 +47,12 @@ def test_single_stream_per_bank_preserves_bytes_events_and_repeated_receives(mon
             submissions = [row for row in case.runtime.copy_submissions if row[0] == index]
             assert {row[1] for row in submissions} == {index}
             assert len({thread for bank_id, thread in case.runtime.batch_threads if bank_id == index}) == 1
-        assert len(case.runtime.threads) == workers
+        # Only the first receive's barrier forces every worker to start.
+        # Later receives may reuse idle threads for multiple bank tasks.
+        if value == 1:
+            assert len(case.runtime.threads) == workers
+        else:
+            assert (1 if workers else 0) <= len(case.runtime.threads) <= workers
         case.runtime.threads.clear()
         case.runtime.batch_threads.clear()
     batches_per_receive = (case.count + WINDOW // BANKS - 1) // (WINDOW // BANKS)

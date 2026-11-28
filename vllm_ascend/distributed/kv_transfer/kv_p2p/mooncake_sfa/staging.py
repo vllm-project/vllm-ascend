@@ -11,12 +11,14 @@ from typing import Any, NamedTuple
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.transfer_targets import (
     DSAPDMooncakeTransferTarget,
     MooncakeKVRegistry,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+
+_STAGING_WINDOW_CHUNKS = 16
+_STAGING_BANK_COUNT = 4
 
 
 @dataclass
@@ -78,15 +80,12 @@ class MooncakeSFAStagingReader:
         engine: Any,
         host_kv: Any,
         block_lens: list[list[int]],
-        *,
-        staging_config: MooncakeStagingConfig | None = None,
     ) -> None:
         self.engine = engine
         self.host_kv = host_kv
         self.kv_registry = host_kv.registry
         self.kv_caches = host_kv.transfer_caches
         self.block_len_per_addr = block_lens
-        self._staging_config = staging_config if staging_config is not None else MooncakeStagingConfig()
         self._init_dsa_pd_mooncake_staging()
 
     def _init_dsa_pd_mooncake_staging(self) -> None:
@@ -95,7 +94,8 @@ class MooncakeSFAStagingReader:
         self._dsa_pd_mooncake_staging_bytes = 0
         self._dsa_pd_mooncake_staging_lock = threading.Lock()
         self._dsa_pd_mooncake_staging_banks: tuple[_DSAPDMooncakeStagingBank, ...] = ()
-        bank_count = min(self._staging_config.bank_count, self._staging_config.window_chunks)
+        self._staging_bank_count = _STAGING_BANK_COUNT
+        bank_count = min(self._staging_bank_count, self._get_dsa_pd_mooncake_staging_window())
         self._landing_streams = [torch.npu.Stream() for _ in range(bank_count)]
         self._landing_stream = self._landing_streams[0]
         # Host-only KV still needs a registered HBM region before ADXL connects.
@@ -130,7 +130,7 @@ class MooncakeSFAStagingReader:
         return ((chunk_bytes + alignment - 1) // alignment) * alignment
 
     def _get_dsa_pd_mooncake_staging_window(self) -> int:
-        return self._staging_config.window_chunks
+        return _STAGING_WINDOW_CHUNKS
 
     def _ensure_dsa_pd_mooncake_staging_tensor(self) -> torch.Tensor:
         chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
@@ -562,15 +562,7 @@ class MooncakeSFAStagingReader:
         # BANKS reads later is guarded by a just-in-time bank-event wait. The
         # final drain keeps the external contract: returning 0 means every
         # window has landed and is visible.
-        banks = self._staging_config.bank_count
-        if banks > staging_window:
-            logger.warning(
-                "mooncake_staging_config.bank_count=%s exceeds window_chunks (%s); using %s banks.",
-                banks,
-                staging_window,
-                staging_window,
-            )
-            banks = staging_window
+        banks = min(self._staging_bank_count, staging_window)
         pipeline_active = banks > 1
         # Trailing slots stay idle when the window is not divisible by the
         # bank count; every bank keeps bank_window contiguous slots.

@@ -67,10 +67,6 @@ option twice.
     "topk_buffer_size": -1,
     "dram_size_per_dp_GB": 16,
     "use_fused_overlap": false
-  },
-  "mooncake_staging_config": {
-    "window_chunks": 16,
-    "bank_count": 4
   }
 }'
 ```
@@ -94,8 +90,8 @@ grep -F "Staged DSA PD mooncake receive timing:" /path/to/decode.log
 ```
 
 After a Host-bound transfer completes, the log reports `mode`, `bank_workers`
-and `banks`. The default staging configuration uses `mode=pipeline` and
-`banks=4`; `bank_count=1` selects `mode=sync`. Confirm that the proxy returns
+and `banks`. The internal staging policy uses `mode=pipeline` and `banks=4`.
+Confirm that the proxy returns
 the generated response without a KV-load failure.
 
 ## Configuration Parameters
@@ -127,20 +123,4 @@ Set these fields under `sparse_kv_offload_config` in `--additional-config` on D.
 | `keep_device_kv_cache` | boolean | `false` | No | Keep `false` for normal offload. `true` retains device KV for debugging and does not provide the HBM capacity benefit. |
 | `store_port_base` | integer | `8500` | No | Host-store TCP base port, from `1` to `65535`. DP group `i` binds `store_port_base + i`; reserve that range and avoid conflicts with other instances. |
 
-### Staging Settings
-
-Set these fields under `mooncake_staging_config` in `--additional-config` on D.
-They accept JSON integers, not strings, booleans or fractional numbers.
-
-| Parameter | Type | Default | Required | Range / behavior |
-| --- | --- | --- | --- | --- |
-| `window_chunks` | integer | `16` | No | Total reusable HBM staging chunks. Values below `1` become `1`. Each chunk is sized for the KV layout and aligned to 2 MiB. |
-| `bank_count` | integer | `4` | No | Values below `1` become `1`; the effective count is capped by `window_chunks`. One bank uses serial READ/landing; multiple banks pipeline the work. |
-
-The default window has four banks of four chunks. Increasing `bank_count`
-does not increase total staging capacity. Each bank receives
-`floor(window_chunks / effective_bank_count)` chunks; any remainder is unused.
-
-For older experimental configurations, remove `dsa_sparse_attention_config`;
-nonempty values are rejected. Configure staging through the two fields above
-instead of the retired staging environment variables.
+Staging is managed internally and requires no user configuration.

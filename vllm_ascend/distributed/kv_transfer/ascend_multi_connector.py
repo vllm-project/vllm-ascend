@@ -42,12 +42,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
         transfer = vllm_config.kv_transfer_config
         assert transfer is not None
+        # Reject unsupported SFA wrapping before expanding child configurations.
+        if any(transfer.has_connector(name) for name in ("MooncakeConnectorV2", "MooncakePullConnector")):
+            MooncakeSFACompatibleConnector._uses_sparse_offload(vllm_config)
         has_hisparse = transfer.has_connector("HiSparseConnector")
         children = super()._get_connector_classes_and_configs(vllm_config)
         for index, (connector_cls, config) in enumerate(children):
             if connector_cls in (MooncakeConnectorV2, MooncakeSFACompatibleConnector):
                 assert config.kv_transfer_config is not None
                 child_transfer = config.kv_transfer_config
+                # An explicit Pull entry must retain ordinary Pull selection.
+                if child_transfer.kv_connector == "MooncakePullConnector":
+                    continue
                 use_hisparse = (
                     has_hisparse and child_transfer.kv_connector_extra_config.get("transfer_backend") == "memfabric"
                 )

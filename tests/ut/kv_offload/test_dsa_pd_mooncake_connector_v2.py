@@ -13,7 +13,6 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging as staging_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import transfer_targets as registry_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.adapter import MooncakeSFAHostKV
@@ -66,7 +65,7 @@ def make_reader(engine, *, pipeline=False, window=2, bank_workers=0, kv_registry
     reader._get_dsa_pd_mooncake_staging_window = lambda: window
     reader._dsa_pd_mooncake_staging_tensor = torch.empty(window * 2 * 1024 * 1024, dtype=torch.int8)
     reader._dsa_pd_mooncake_staging_bytes = reader._dsa_pd_mooncake_staging_tensor.nbytes
-    reader._staging_config = MooncakeStagingConfig(window_chunks=window, bank_count=2 if pipeline else 1)
+    reader._staging_bank_count = 2 if pipeline else 1
     reader._landing_streams = [MagicMock(), MagicMock()]
     reader._landing_stream = reader._landing_streams[0]
     if bank_workers is not None:

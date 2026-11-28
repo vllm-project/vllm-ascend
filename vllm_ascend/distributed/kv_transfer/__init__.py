@@ -101,8 +101,8 @@ def register_connector():
 
     KVConnectorFactory.register_connector(
         "MooncakePullConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
-        "MooncakePullConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector",
+        "MooncakeSFACompatibleConnector",
     )
 
     KVConnectorFactory.register_connector(

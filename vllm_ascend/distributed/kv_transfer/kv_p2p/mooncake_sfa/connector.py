@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import MooncakePullConnectorScheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullConnectorWorker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.config import validate_mooncake_sfa_config
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -28,10 +29,13 @@ class MooncakeSFACompatibleConnector(MooncakePullConnector):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ) -> MooncakeBaseConnector:
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
         if not cls._uses_sparse_offload(vllm_config):
+            if transfer.kv_connector == "MooncakePullConnector":
+                return MooncakePullConnector(vllm_config, role, kv_cache_config)
             return MooncakeConnectorV2(vllm_config, role, kv_cache_config)
-        assert vllm_config.kv_transfer_config is not None
-        if vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False):
+        if transfer.kv_connector_extra_config.get("use_layerwise", False):
             raise ValueError("Mooncake SFA KV offload requires pull mode (use_layerwise=false)")
         return super().__new__(cls)
 
@@ -54,6 +58,8 @@ class MooncakeSFACompatibleConnector(MooncakePullConnector):
     @staticmethod
     def _uses_sparse_offload(vllm_config: VllmConfig) -> bool:
         config = init_ascend_config(vllm_config).sparse_kv_offload_config
+        if config is not None:
+            validate_mooncake_sfa_config(vllm_config, config)
         return config is not None and config.enabled
 
     def get_copy_sfa_slot_bindings(self) -> dict[str, int]:

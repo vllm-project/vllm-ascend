@@ -1,33 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Mooncake/SFA startup policy without connector or worker imports.
 
-Central config validation imports these helpers lazily, after configuration
-types are available. Keep runtime imports independent of AscendConfig to avoid
-re-entering its initialization through the KV-transfer package.
+Connector entry points call this policy after parsing Ascend configuration.
+Keep runtime imports independent of AscendConfig to avoid re-entering its
+initialization through the KV-transfer package.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     from vllm_ascend.ascend_config import SparseKVOffloadConfig
-
-
-def validate_legacy_host_config(additional_config: dict[str, Any]) -> None:
-    """Reject retired Host settings before allocation or config-cache reuse."""
-    legacy = additional_config.get("dsa_sparse_attention_config")
-    if legacy is None:
-        return
-    if not isinstance(legacy, dict):
-        raise TypeError("dsa_sparse_attention_config must be a dict")
-    if legacy:
-        raise ValueError(
-            "dsa_sparse_attention_config has been removed. Use MooncakeConnectorV2 with ModelRunner V2 "
-            "and sparse_kv_offload_config for SparseKVOffloadManager-owned Host KV (LIM + Copy-SFA)."
-        )
 
 
 def validate_mooncake_sfa_config(vllm_config: VllmConfig, sparse_config: SparseKVOffloadConfig) -> None:

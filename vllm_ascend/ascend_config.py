@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, StrictInt, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -489,19 +489,6 @@ class ExpertOffloadConfig:
         return self
 
 
-@config(config=ConfigDict(frozen=True))
-class MooncakeStagingConfig:
-    """Startup settings for the Mooncake Host-KV staging window."""
-
-    window_chunks: StrictInt = 16
-    bank_count: StrictInt = 4
-
-    @field_validator("window_chunks", "bank_count")
-    @classmethod
-    def _normalize_counts(cls, value: int) -> int:
-        return max(1, value)
-
-
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -732,7 +719,6 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
-    mooncake_staging_config: MooncakeStagingConfig = dataclasses.field(default_factory=MooncakeStagingConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -1879,12 +1865,6 @@ class SparseKVOffloadConfig:
 
     @classmethod
     def from_additional_config(cls, vllm_config: VllmConfig, user_config: Any) -> SparseKVOffloadConfig:
-        additional_config = getattr(vllm_config, "additional_config", None) or {}
-        if additional_config.get("dsa_sparse_attention_config") is not None:
-            # Avoid importing the KV-transfer package for ordinary startup.
-            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.config import validate_legacy_host_config
-
-            validate_legacy_host_config(additional_config)
         if not isinstance(user_config, dict):
             raise ValueError(
                 f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
@@ -1905,11 +1885,6 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
 
         kv_transfer_config = vllm_config.kv_transfer_config
-        kv_connector = getattr(kv_transfer_config, "kv_connector", None)
-        if kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector", "MultiConnector"):
-            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.config import validate_mooncake_sfa_config
-
-            validate_mooncake_sfa_config(vllm_config, self)
         if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
             raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
 
@@ -2004,11 +1979,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
                 _prefill_value,
             )
 
-    if additional_config.get("dsa_sparse_attention_config") is not None:
-        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.config import validate_legacy_host_config
-
-        validate_legacy_host_config(additional_config)
-
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -2068,7 +2038,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
-        "dsa_sparse_attention_config",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
         "kvpp_config",

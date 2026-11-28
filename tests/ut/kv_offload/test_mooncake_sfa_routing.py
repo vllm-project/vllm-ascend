@@ -18,6 +18,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import scheduler as
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import worker as sparse_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.metadata import MooncakeSFAConnectorMetadata
 
+from .test_mooncake_sfa_config import config as make_config
+
 
 @pytest.mark.parametrize("enabled", [None, False, True])
 @pytest.mark.parametrize("consumer", [False, True])
@@ -75,9 +77,8 @@ def test_unified_entry_selects_exactly_one_implementation_before_initialization(
 @pytest.mark.parametrize("use_layerwise", [False, True])
 @pytest.mark.parametrize("role", [KVConnectorRole.WORKER, KVConnectorRole.SCHEDULER])
 def test_v2_without_sparse_offload_preserves_upstream_pull_push_selection(monkeypatch, enabled, use_layerwise, role):
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"use_layerwise": use_layerwise})
-    )
+    config = make_config()
+    config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": use_layerwise}
     sparse_config = None if enabled is None else SimpleNamespace(enabled=enabled)
     monkeypatch.setattr(
         compatible, "init_ascend_config", lambda _config: SimpleNamespace(sparse_kv_offload_config=sparse_config)
@@ -95,11 +96,14 @@ def test_v2_without_sparse_offload_preserves_upstream_pull_push_selection(monkey
 
 @pytest.mark.parametrize("role", [KVConnectorRole.WORKER, KVConnectorRole.SCHEDULER])
 def test_v2_sparse_layerwise_mode_is_rejected_before_component_construction(monkeypatch, role):
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"use_layerwise": True}))
+    config = make_config()
+    config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
     monkeypatch.setattr(
         compatible,
         "init_ascend_config",
-        lambda _config: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True)),
+        lambda _config: SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=True, use_fused_overlap=False)
+        ),
     )
     ordinary_constructor = MagicMock()
     worker, scheduler = MagicMock(), MagicMock()
@@ -117,11 +121,14 @@ def test_v2_sparse_layerwise_mode_is_rejected_before_component_construction(monk
 @pytest.mark.parametrize("mode", [None, "batch", "request"])
 def test_v2_sparse_pull_constructs_only_the_specialized_component(monkeypatch, role, mode):
     extra = {} if mode is None else {"pull_transfer_mode": mode}
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
+    config = make_config()
+    config.kv_transfer_config.kv_connector_extra_config = extra
     monkeypatch.setattr(
         compatible,
         "init_ascend_config",
-        lambda _config: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True)),
+        lambda _config: SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=True, use_fused_overlap=False)
+        ),
     )
     monkeypatch.setattr(
         ordinary.MooncakeBaseConnector, "__init__", lambda self, *_args: setattr(self, "engine_id", "engine")
@@ -138,6 +145,91 @@ def test_v2_sparse_pull_constructs_only_the_specialized_component(monkeypatch, r
     selected.assert_called_once_with(config, "engine", caches)
     unused.assert_not_called()
     ordinary_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.WORKER, KVConnectorRole.SCHEDULER])
+@pytest.mark.parametrize(
+    "invalid,match",
+    [("runner", "ModelRunner V2"), ("overlap", "LIM"), ("dspark", "DSpark"), ("recompute", "failure_policy")],
+)
+def test_invalid_sparse_combination_fails_before_component_construction(monkeypatch, role, invalid, match):
+    config = make_config()
+    config.use_v2_model_runner = invalid != "runner"
+    config.speculative_config = SimpleNamespace(method="dspark") if invalid == "dspark" else None
+    config.kv_transfer_config.kv_load_failure_policy = "recompute" if invalid == "recompute" else "fail"
+    sparse = SimpleNamespace(enabled=True, use_fused_overlap=invalid == "overlap")
+    monkeypatch.setattr(
+        compatible, "init_ascend_config", lambda _config: SimpleNamespace(sparse_kv_offload_config=sparse)
+    )
+    worker, scheduler = MagicMock(), MagicMock()
+    monkeypatch.setattr(sparse_worker, "MooncakeSFAConnectorWorker", worker)
+    monkeypatch.setattr(sparse_scheduler, "MooncakeSFAConnectorScheduler", scheduler)
+    with pytest.raises(ValueError, match=match):
+        compatible.MooncakeSFACompatibleConnector(config, role, object())
+    worker.assert_not_called()
+    scheduler.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+@pytest.mark.parametrize("use_layerwise", [False, True])
+@pytest.mark.parametrize("role", [KVConnectorRole.WORKER, KVConnectorRole.SCHEDULER])
+def test_registered_pull_alias_preserves_ordinary_type_or_rejects_sparse(monkeypatch, enabled, use_layerwise, role):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+    from vllm_ascend.distributed.kv_transfer import register_connector
+
+    config = make_config()
+    config.kv_transfer_config.kv_connector = "MooncakePullConnector"
+    config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": use_layerwise}
+    sparse = None if enabled is None else SimpleNamespace(enabled=enabled)
+    monkeypatch.setattr(
+        compatible, "init_ascend_config", lambda _config: SimpleNamespace(sparse_kv_offload_config=sparse)
+    )
+    monkeypatch.setattr(
+        ordinary.MooncakeBaseConnector, "__init__", lambda self, *_: setattr(self, "engine_id", "engine")
+    )
+    worker, scheduler = MagicMock(), MagicMock()
+    monkeypatch.setattr(ordinary, "MooncakePullConnectorWorker", worker)
+    monkeypatch.setattr(ordinary, "MooncakePullConnectorScheduler", scheduler)
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    entry = KVConnectorFactory.get_connector_class_by_name("MooncakePullConnector")
+    caches = object()
+    if enabled:
+        with pytest.raises(ValueError, match="kv_connector='MooncakeConnectorV2'"):
+            entry(config, role, caches)
+        worker.assert_not_called()
+        scheduler.assert_not_called()
+    else:
+        connector = entry(config, role, caches)
+        assert type(connector) is ordinary.MooncakePullConnector
+        selected, unused = (worker, scheduler) if role == KVConnectorRole.WORKER else (scheduler, worker)
+        selected.assert_called_once_with(config, "engine", caches)
+        unused.assert_not_called()
+
+
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector", None])
+def test_multi_validates_outer_config_before_expanding_mooncake_children(monkeypatch, connector):
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+
+    from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
+
+    config = make_config()
+    config.kv_transfer_config.kv_connector = "MultiConnector"
+    config.kv_transfer_config.has_connector = lambda name: name == connector
+    sparse = SimpleNamespace(enabled=True)
+    init = MagicMock(return_value=SimpleNamespace(sparse_kv_offload_config=sparse))
+    expand = MagicMock(return_value=[])
+    monkeypatch.setattr(compatible, "init_ascend_config", init)
+    monkeypatch.setattr(MultiConnector, "_get_connector_classes_and_configs", expand)
+    if connector is not None:
+        with pytest.raises(ValueError, match="direct connector"):
+            AscendMultiConnector._get_connector_classes_and_configs(config)
+        expand.assert_not_called()
+    else:
+        assert AscendMultiConnector._get_connector_classes_and_configs(config) == []
+        init.assert_not_called()
+        expand.assert_called_once_with(config)
 
 
 def test_sparse_local_metadata_roundtrips_without_extending_the_wire_handshake():
@@ -207,5 +299,8 @@ def test_v2_factory_and_stats_class_alias_resolve_the_compatible_entry(monkeypat
     register_connector()
     for name in ["MooncakeConnectorV2", "MooncakeSFACompatibleConnector"]:
         assert KVConnectorFactory.get_connector_class_by_name(name) is compatible.MooncakeSFACompatibleConnector
-    assert KVConnectorFactory.get_connector_class_by_name("MooncakePullConnector") is ordinary.MooncakePullConnector
+    assert (
+        KVConnectorFactory.get_connector_class_by_name("MooncakePullConnector")
+        is compatible.MooncakeSFACompatibleConnector
+    )
     assert KVConnectorFactory.get_connector_class_by_name("MooncakePushConnector") is ordinary.MooncakePushConnector

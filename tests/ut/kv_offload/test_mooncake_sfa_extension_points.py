@@ -163,7 +163,6 @@ def test_thread_factory_injects_reader_and_leaves_startup_to_public_worker(monke
     worker._sfa_host_kv = SimpleNamespace(main_group_id=0)
     worker.xfer_handshake_metadata = make_transfer_metadata()
     worker.engine = object()
-    worker.ascend_config = SimpleNamespace(mooncake_staging_config=object())
     reader = MagicMock()
     monkeypatch.setattr(worker_module, "MooncakeSFAStagingReader", MagicMock(return_value=reader))
     worker._build_recving_thread = MagicMock()
@@ -174,7 +173,6 @@ def test_thread_factory_injects_reader_and_leaves_startup_to_public_worker(monke
         worker.engine,
         worker._sfa_host_kv,
         worker.xfer_handshake_metadata.block_lens,
-        staging_config=worker.ascend_config.mooncake_staging_config,
     )
     thread.start.assert_not_called()
 

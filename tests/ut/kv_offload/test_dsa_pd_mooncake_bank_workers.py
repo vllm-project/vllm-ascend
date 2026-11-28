@@ -14,7 +14,6 @@ import pytest
 import torch
 
 from vllm_ascend import envs
-from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging as staging_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import transfer_targets as registry_module
 
@@ -211,7 +210,7 @@ def build(monkeypatch, workers=None, count=37, metadata=True, banks=BANKS, windo
     host = torch.zeros(count * HOST_STRIDE, dtype=torch.uint8)
     registry.register_offloaded_tensor(host)
     reader = make_reader(MagicMock(), pipeline=True, window=window, bank_workers=workers, kv_registry=registry)
-    reader._staging_config = MooncakeStagingConfig(window_chunks=window, bank_count=banks)
+    reader._staging_bank_count = banks
     active_banks = min(banks, window) if window >= 2 else 1
     expected_workers = active_banks if active_banks > 1 else 0
     if workers is not None and active_banks > 1:

@@ -29,12 +29,11 @@ CLASS_NAME_ALIASES = {
 
 def test_mooncake_entries_resolve_to_ordinary_and_compatible_implementations(monkeypatch):
     from vllm_ascend.distributed.kv_transfer import register_connector
-    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
 
     monkeypatch.setattr(KVConnectorFactory, "_registry", {})
     register_connector()
-    assert KVConnectorFactory._registry["MooncakePullConnector"]() is MooncakePullConnector
+    assert KVConnectorFactory._registry["MooncakePullConnector"]() is MooncakeSFACompatibleConnector
     assert KVConnectorFactory._registry["MooncakeConnectorV2"]() is MooncakeSFACompatibleConnector
     assert "MooncakeSFAConnector" not in KVConnectorFactory._registry
 
@@ -44,14 +43,12 @@ def test_mooncake_class_name_roundtrips_metrics(monkeypatch, connector_name):
     from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
     from vllm_ascend.distributed.kv_transfer import register_connector
-    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
 
     monkeypatch.setattr(KVConnectorFactory, "_registry", {})
     register_connector()
-    classes = {cls.__name__: cls for cls in (MooncakePullConnector, MooncakeSFACompatibleConnector)}
     name = connector_name
-    assert KVConnectorFactory.get_connector_class_by_name(name) is classes[name]
+    assert KVConnectorFactory.get_connector_class_by_name(name) is MooncakeSFACompatibleConnector
     values = {"transfer_duration": [0.25], "bytes_transferred": [128], "num_failed_transfers": []}
     stats = MultiConnector.build_kv_connector_stats(data={name: values})
     assert stats is not None and stats.data[name].data == values

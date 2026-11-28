@@ -222,10 +222,15 @@ def test_multi_connector_uses_public_stats_key_for_hisparse(monkeypatch):
             },
         ),
     )
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import connector as compatible
+
+    monkeypatch.setattr(
+        compatible, "init_ascend_config", lambda _config: SimpleNamespace(sparse_kv_offload_config=None)
+    )
     children = AscendMultiConnector._get_connector_classes_and_configs(config)  # type: ignore[arg-type]
     assert [connector_cls for connector_cls, _ in children] == [
         MooncakeBaseConnector,
-        MooncakePullConnector,
+        compatible.MooncakeSFACompatibleConnector,
         hisparse_pd._HiSparseMooncakePullConnector,
         MooncakePushConnector,
     ]
@@ -240,7 +245,7 @@ def test_multi_connector_uses_public_stats_key_for_hisparse(monkeypatch):
     )
     children_without_hisparse = AscendMultiConnector._get_connector_classes_and_configs(config_without_hisparse)  # type: ignore[arg-type]
     assert [connector_cls for connector_cls, _ in children_without_hisparse] == [
-        MooncakePullConnector,
+        compatible.MooncakeSFACompatibleConnector,
         MooncakePullConnector,
         MooncakePushConnector,
     ]
