@@ -103,6 +103,16 @@ class RecomputeScheduler(Scheduler):
 
     prefill_capacity_bound: bool
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Under DP > 1, skip_dp_coordination() clones this rank's skip_drafts
+        # into DPSyncState without cross-rank agreement, which deadlocks EP/MC2
+        # collectives when peer ranks execute different numbers of drafter
+        # steps. Keep skip_drafts disabled on DP > 1 until skip_dp_coordination()
+        # clears it centrally (matching pre-sync behavior).
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            self.can_skip_drafts = False
+
     def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
         allocate = getattr(super(), "_allocate_encoder_inputs", None)
         if allocate is not None:

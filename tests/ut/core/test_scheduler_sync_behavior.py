@@ -30,6 +30,7 @@ from tests.ut.kv_offload.utils import (
     assert_scheduler_empty,
     create_model_runner_output,
     create_request,
+    create_vllm_config,
 )
 from vllm_ascend.ascend_config import FinegrainedTPConfig, clear_ascend_config
 from vllm_ascend.core.batch_job_aware_scheduler import BatchJobAwareScheduler
@@ -1202,3 +1203,80 @@ def test_async_kv_load_caps_combinations_across_copied_schedulers(
     scheduler.update_from_output(out4, create_model_runner_output([remotes[2]], use_eos=True))
     scheduler.schedule()
     _assert_no_kv_load_leaks(scheduler)
+
+
+@pytest.mark.parametrize(
+    ("scheduler_cls", "balance_enabled"),
+    [
+        (RecomputeScheduler, False),
+        (AsyncRecomputeScheduler, False),
+        (DyntraLBRecomputeScheduler, False),
+        (AsyncDyntraLBRecomputeScheduler, False),
+        (DyntraLBScheduler, False),
+        (AsyncDyntraLBScheduler, False),
+        (BalanceScheduler, True),
+    ],
+)
+def test_copied_schedulers_disable_skip_drafts_on_dp_gt_1(
+    scheduler_cls: type[Any],
+    balance_enabled: bool,
+):
+    """DP > 1 copied schedulers must keep skip_drafts=False to avoid EP/MC2 deadlocks under skip_dp_coordination."""
+    clear_ascend_config()
+    cfg = create_vllm_config(
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        block_size=16,
+        speculative_method="mtp",
+        num_speculative_tokens=3,
+    )
+    cfg.kv_transfer_config = None
+    cfg.parallel_config.data_parallel_size = 2
+    if balance_enabled:
+        cfg.additional_config = {"scheduler_config": {"enable_balance_scheduling": True}}
+
+    scheduler = create_dyntra_lb_scheduler(cfg, scheduler_cls=scheduler_cls, num_blocks=64)
+    assert scheduler.num_lookahead_tokens > 0
+    assert scheduler.can_skip_drafts is False
+
+    # A single-output-token request finishes after this step; upstream would emit skip_drafts=True.
+    req = create_request(1, num_tokens=4, max_tokens=1, block_size=16)
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    assert output.skip_drafts is False
+
+
+def test_single_dp_and_disabled_balance_keep_can_skip_drafts():
+    """DP == 1 RecomputeScheduler and disabled BalanceScheduler preserve upstream can_skip_drafts."""
+    clear_ascend_config()
+    cfg_dp1 = create_vllm_config(
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        block_size=16,
+        speculative_method="mtp",
+        num_speculative_tokens=3,
+    )
+    cfg_dp1.kv_transfer_config = None
+    cfg_dp1.parallel_config.data_parallel_size = 1
+
+    recompute_dp1 = create_dyntra_lb_scheduler(cfg_dp1, scheduler_cls=RecomputeScheduler, num_blocks=64)
+    assert recompute_dp1.can_skip_drafts is True
+    req = create_request(1, num_tokens=4, max_tokens=1, block_size=16)
+    recompute_dp1.add_request(req)
+    assert recompute_dp1.schedule().skip_drafts is True
+
+    clear_ascend_config()
+    cfg_bal_off = create_vllm_config(
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        block_size=16,
+        speculative_method="mtp",
+        num_speculative_tokens=3,
+    )
+    cfg_bal_off.kv_transfer_config = None
+    cfg_bal_off.parallel_config.data_parallel_size = 2
+    cfg_bal_off.additional_config = {"scheduler_config": {"enable_balance_scheduling": False}}
+
+    bal_off = create_dyntra_lb_scheduler(cfg_bal_off, scheduler_cls=BalanceScheduler, num_blocks=64)
+    assert bal_off._balance_enabled is False
+    assert bal_off.can_skip_drafts is True

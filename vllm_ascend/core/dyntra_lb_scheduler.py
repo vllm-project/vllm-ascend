@@ -144,6 +144,10 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         **kwargs,
     ) -> None:
         super().__init__(*args, vllm_config=vllm_config, **kwargs)
+        # Keep skip_drafts disabled under DP > 1 until skip_dp_coordination()
+        # clears rank-local skip_drafts centrally (matching pre-sync behavior).
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            self.can_skip_drafts = False
 
         additional_config = vllm_config.additional_config or {}
         scheduler_extension_config = additional_config.get("scheduler_config") or {}

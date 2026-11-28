@@ -150,6 +150,10 @@ class BalanceScheduler(Scheduler):
                 torch.tensor([0], dtype=torch.int, device="cpu")
                 for _ in range(self.vllm_config.parallel_config.data_parallel_size)
             ]
+            # Keep skip_drafts disabled under DP > 1 until skip_dp_coordination()
+            # clears rank-local skip_drafts centrally (matching pre-sync behavior).
+            if self.vllm_config.parallel_config.data_parallel_size > 1:
+                self.can_skip_drafts = False
 
     def balance_gather(self):
         """All-gather per-rank running counts into ``self.balance_queue``.
