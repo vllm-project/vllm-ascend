@@ -1,214 +1,146 @@
-# Mooncake V2 with SFA KV offload
+# Mooncake V2 with SFA KV Offload
 
-On a supported Atlas A3 sparse-attention deployment, the decode node can use
-`MooncakeConnectorV2` with ModelRunner V2 while sharing the existing
-`SparseKVOffloadManager` and LIM + Copy-SFA attention backend.
+## Feature Introduction
 
-The implementation lives in `kv_p2p/mooncake_sfa/` and inherits the common
-Mooncake Pull connector, scheduler, worker and receiving-thread lifecycle.
-Host cache projection, row reservations, staging and first-decode handoff
-belong to the specialization. `MooncakeConnectorV2` resolves to the compatibility
-entry in `mooncake_sfa/connector.py`, which lazily selects the SFA scheduler and
-worker when sparse KV offload is enabled, and the ordinary Mooncake implementations
-otherwise. The common `kv_p2p/mooncake/` package keeps the shared address planning,
-registration and thread lifecycle without importing the SFA specialization.
-SFA overrides cache registration, bucket execution and receive completion handling;
-its receiver drains pending Host copies before returning to the common completion
-loop, including on failure. `MooncakeConnectorV2` remains the only Mooncake
-configuration entry for sparse KV offload. `MooncakePullConnector` continues to
-select ordinary transfers; enabling sparse KV offload with that name is rejected
-with a message to use `MooncakeConnectorV2`.
-Selection happens before components are constructed or background threads start.
+This feature uses `MooncakeConnectorV2` to transfer sparse-attention KV from
+Prefill (P) into the Decode (D) node's Host KV cache in a PD-disaggregated deployment.
+It lets Mooncake PD deployments use SFA Decode offload: a bounded HBM buffer
+stages transfers into the existing Host pool, reducing persistent Decode HBM use.
 
-When sparse KV offload is disabled, the compatibility entry delegates to the
-upstream V2 factory: `kv_connector_extra_config.use_layerwise=true` selects
-Mooncake Push, while the default selects Mooncake Pull. SFA KV offload supports
-Pull only. Leave `use_layerwise` unset or set it to `false` on both nodes;
-combining enabled sparse KV offload with `use_layerwise=true` fails at startup.
+Use a vLLM-Ascend build containing this feature and its matching vLLM version;
+see [Installation](../../getting_started/installation.md). Both nodes require
+ModelRunner V2. The integration has been validated with vLLM v0.34.0.
 
-Use ModelRunner V2 on both nodes:
+### Constraints and Limitations
 
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-```
+| Category | Requirement |
+| --- | --- |
+| Hardware | Atlas A3. **950 DT&950PR products are not supported**; enabling sparse KV offload on these products fails at startup. |
+| Deployment | PD disaggregation; enable sparse KV offload only on D. Use a direct `MooncakeConnectorV2` on both nodes. |
+| Model | Sparse-attention models with `index_topk`; compressed-cache models with `compress_ratios` are not supported. Validated model: GLM-5.2 W4A8. |
+| KV format | BF16 main KV; packed main KV formats such as C8, TQ4 and HIF8 are not supported. Device-resident INT8 indexer KV is supported separately. |
+| Parallelism | Decode supports TP and DP. Context parallelism and pipeline parallelism are not supported for sparse offload. |
+| Transport | Pull mode only: keep `use_layerwise=false`. `MooncakePullConnector`, `MooncakeLayerwiseConnector` and wrapping this feature in `MultiConnector` are not supported. |
+| Attention | Use LIM + Copy-SFA with `use_fused_overlap=false`. DSpark and `PreemptOffloadConnector` cannot be combined with this feature. |
+| Transfer failure | D requires `kv_load_failure_policy="fail"`. Recovery by recomputing failed transfers locally is not supported. |
 
-The prefill node uses `MooncakeConnectorV2` with `kv_role="kv_producer"` and
-device-resident KV. On the decode node, use the following configuration in
-addition to the deployment's model, tensor parallel and serving options:
+## Feature Usage
 
-```bash
---kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":27300}' \
---additional-config '{"sparse_kv_offload_config":{"enabled":true,"topk_buffer_size":2048,"dram_size_per_dp_GB":16,"use_fused_overlap":false}}'
-```
+### Environment Preparation
 
-Choose the Host capacity and hot-row budget for the deployment. The hot-row
-budget must satisfy the existing LIM + Copy-SFA configuration requirements.
-The independent DSA Host allocator and TP-shared pool have been removed.
-Remove the retired `dsa_sparse_attention_config` section; nonempty values
-fail at startup with a migration message, including configurations that do
-not enable Manager offload. The Manager configuration above is the only
-serving Host KV owner for this path. Ordinary device-resident Mooncake and
-the existing SFA connector keep their configuration.
+- Prepare the Mooncake transfer dependencies and networking using the
+  [Mooncake PD deployment guide](../../tutorials/features/pd_disaggregation_mooncake_single_node.md).
+- Use matching model weights, tokenizer and compatible KV layouts on P and D.
+  Keep the model, quantization and parallelism options from the model's deployment guide.
+- Reserve the connector control ports and D's Host memory before starting services.
 
-The V2 connector publishes persistent Host main KV and HBM indexer/scale
-components. SFA device placeholders are not PD payload. Main blocks are
-partitioned across decode TP ranks into one shared Host pool; the indexer
-remains device-resident and replicated as configured.
+### Usage Example
 
-After manager cache registration, the adapter directly borrows the manager's
-existing Host and hot/tail tensors once during connector registration, including
-the restored Host aliases on non-owner TP ranks. It validates LIM + Copy-SFA,
-complete registration, the main KV group and layer-name/index correspondence.
-This allocates no KV storage and performs no device copy or synchronization.
-The manager owns the borrowed tensors for the worker lifetime; callers must
-not resize them.
+Append the following options to the corresponding `vllm serve` commands.
+Merge the JSON into any existing `--additional-config` instead of passing the
+option twice.
 
-The D worker also registers its existing rank-private HBM hot/tail buffers.
-For each request, V2 appends direct producer-to-HBM READs: a short prefix is
-placed densely in the reserved hot row; a long prefix's incomplete last block
-is placed at `hot_tokens + (logical_block % 2) * block_size` in the existing
-two-block circular tail. An aligned long prefix requires no tail READ. These
-HBM reads are replicated on every D TP rank, independently of shared Host block
-ownership. Like the existing SFA scheduler, placement uses the entire received
-KV extent (`computed + external`, bounded by the producer's valid KV count),
-without subtracting a replayed prompt token.
-
-P and D must receive the same original prompt. Discard P's first output token;
-D replays the final prompt token and generates the complete output, as with the
-existing SFA connector. Appending P's first output token to D's prompt is rejected
-before receiving KV. Ordinary Mooncake transfers retain their existing
-first-token behavior.
-
-SFA inherits Mooncake V2's default per-request completion. Set
-`kv_connector_extra_config.pull_transfer_mode="batch"` to use the upstream
-batch barrier instead. Each transfer task retains its own request metadata;
-its Future completes only after its READ and Host landing have stopped.
-The upstream completion tracker then reports each request independently.
-
-The existing V2 READ and bounded staging pipeline still land Host main
-KV through the SFA manager's local-copy API. Receive completion includes both
-direct HBM reads and the final Host staging drain. After all TP workers complete
-PD, the first real decode validates the reservation and expected execution
-prefix. The scheduler replays the last prompt token; this does not change
-PD placement. If a long received extent is block-aligned,
-PD has no incomplete tail but that forward needs the preceding
-partial block. The V2 adapter restores that history once through the existing
-manager tail-copy API before eager execution or graph replay. Other remote
-receives do not repeat Host-to-hot initialization. Complete local prefix hits
-with no remote PD and prefix rollback retain the existing local recovery path.
-
-The adapter binds transport metadata before attention preparation and ignores
-the ordered load hook's repeated bind of that same metadata object. Successful
-initialization retires its one-time PD state only after required copies and tail
-metadata checks succeed. Failed receives cannot commit initialization. Existing
-SFA request-state tracking continues to own decode prefix history and LIM reset;
-the connector owns transport completion, ACK and in-flight cancellation.
-The model-state preparation calls a connector hook and its completion callback;
-the adapter keeps PD state, main-group selection and merged dense-row fills
-internal. The original SFA connector and shared request-state rules are unchanged.
-
-The existing SFA connector retains its protocol, scheduling, allocation and
-attention operators. It continues to use MemFabric; this Mooncake V2 integration
-does not add a Mooncake backend to that connector.
-
-Request admission and stable hot-row reservations reuse the SFA slot allocator.
-Finished requests release their reservations. A cancelled in-flight PD retains
-its row until all D workers finish their reads, preventing late HBM writes from
-corrupting a reused row. A failed receive cannot
-publish a ready hot row. Subsequent decode uses the existing SFA metadata,
-LIM, Copy-SFA, hot-cache management and delayed full-block D2H writeback.
-After PD initialization and any required tail restoration succeed, attention
-preparation invokes the runner's existing D2H planner. Newly bound rows adopt
-the aligned computed prefix and their request generation; metadata consumes
-the manager's settled Host prefix. The runner retains upstream's source-ready
-event and previous-batch retirement order.
-
-This combination retains existing SFA offload restrictions, including BF16 main
-KV, supported device-resident indexer formats, and no context/pipeline parallel
-offload. It selects LIM + Copy-SFA; `use_fused_overlap=true` is rejected for this
-V2 combination. SFA offload uses native preprocessing; this path retains
-the existing hot-buffer memory and direct HBM hot/tail PD reads.
-
-Configure this combination as `MooncakeConnectorV2` plus sparse offload. Wrapping it in
-`MultiConnector` is rejected until sparse slot and first-decode hooks are
-forwarded. DSpark's remote prompt/draft-KV protocol is also rejected for this
-combination. Decode consumers require `kv_load_failure_policy="fail"` (the
-default) for both Host-only and `keep_device_kv_cache=true` colocate debugging
-modes. Recovery from a failed remote PD transfer to local prefill has not been
-adapted. These checks do not change the existing SFA connector's configuration
-or flow.
-
-## Staging settings
-
-Set `mooncake_staging_config` through `--additional-config` on the decode node.
-The two typed integer settings are parsed once at startup; they do not use
-environment variables. Existing sparse-offload options remain in the same JSON:
+**1. Configure Prefill.** Keep sparse KV offload disabled on P:
 
 ```bash
---additional-config '{"sparse_kv_offload_config":{"enabled":true,"topk_buffer_size":2048,"dram_size_per_dp_GB":16,"use_fused_overlap":false},"mooncake_staging_config":{"window_chunks":16,"bank_count":4}}'
+--kv-transfer-config '{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_producer",
+  "kv_port": 27300,
+  "kv_connector_extra_config": {"use_layerwise": false}
+}'
 ```
 
-| Setting | Default | Meaning and bounds |
-| --- | --- | --- |
-| `window_chunks` | `16` | Total reusable 2 MiB-aligned staging chunks. Integer values below 1 become 1. Chunk byte size depends on the KV layout. |
-| `bank_count` | `4` | Number of banks sharing the window. Integer values below 1 become 1; the effective count is capped by `window_chunks`. One effective bank uses serial READ/landing; multiple banks enable pipelining. |
+**2. Configure Decode.** Enable sparse offload and set its Host memory budget:
 
-Defaults use 16 chunks split into four banks of four chunks. Each bank uses one
-copy stream and, when there are multiple banks, one Host worker. Set
-`bank_count=1` to use the entire window on the caller thread with synchronous
-landing. No separate pipeline switch, per-bank copy-stream setting or READ probe
-is exposed. Previously used staging environment variables are ignored; replace
-them with the two additional-config fields when updating deployment scripts.
+```bash
+--kv-transfer-config '{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_consumer",
+  "kv_port": 27400,
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {"use_layerwise": false}
+}' \
+--additional-config '{
+  "sparse_kv_offload_config": {
+    "enabled": true,
+    "topk_buffer_size": -1,
+    "dram_size_per_dp_GB": 16,
+    "use_fused_overlap": false
+  },
+  "mooncake_staging_config": {
+    "window_chunks": 16,
+    "bank_count": 4
+  }
+}'
+```
 
-Banks share the existing allocation without increasing total staging capacity.
-Each bank has `floor(window_chunks / effective_banks)` contiguous slots; any
-remainder is unused. Consecutive READ batches rotate between banks, reducing
-maximum chunks per batch to that bank's slot count. A completion event must finish
-before a bank's slots can be reused. Workers join and all pending landing copies
-drain before receive completion and release of the shared staging lock.
+`dram_size_per_dp_GB=16` is an example budget, not the default. Size it for the
+available Host memory and workload. Leave `topk_buffer_size=-1` to calculate
+the hot-buffer capacity from the speculative-token count.
 
-Overlapping Host destination ranges are rejected during planning before any READ
-in that receive, including direct HBM READs in a mixed receive. Failed waits retain
-the pending buffer owners until draining succeeds. Removing the READ diagnostic
-probe does not remove these completion and failure-lifetime guarantees.
+**3. Configure request routing.** The proxy must follow this feature's prompt protocol:
 
-## Common extension boundaries
+- Send the same original prompt and tokenization to P and D.
+- Discard P's first output token; do not append it to D's prompt.
+- Return D's complete output. D replays the final prompt token before decoding.
 
-The common Pull receiver retains its ordinary address planner and submits
-ranges directly to the transfer engine. The SFA receiver inherits the request
-queue, remote metadata handling, block mapping, failure reporting and completion
-loop. It overrides the existing `_submit_transfer_group()` to bind request
-context to each executor task, retaining partial-submission bookkeeping. It
-specializes address planning and bucket execution to partition shared Host
-destinations, retain target identities, append hot/tail reads and execute through
-the staging reader.
+### Verifying the Feature
 
-The remaining shared interfaces have the following responsibilities:
+Send a request through the PD proxy, then check D's log:
 
-| Interface | Shared responsibility | SFA responsibility |
-| --- | --- | --- |
-| `_create_scheduler()` / `_create_worker()` | Construct the selected component before it starts background work. | Select the SFA scheduler and worker. |
-| `_get_transfer_engine()` | Initialize the default Ascend engine; allow a specialization to select another transport. | Use the default engine. |
-| `_register_transfer_buffers()` | Register physical storage independently of published cache addresses. | Exclude Host destinations and include existing device hot/tail storage. |
-| `_create_recving_thread()` / `_build_recving_thread()` | Construct the selected receiver with common arguments; retain startup and readiness checks in the public worker. | Create the staging reader and pass it to the SFA receiver. |
+```bash
+grep -F "Staged DSA PD mooncake receive timing:" /path/to/decode.log
+```
 
-The SFA scheduler initializes its slot policy before entering the parent
-constructor. It overrides the existing `build_connector_meta()` method, validates
-slot reservations before the parent consumes its pending queue, and converts
-the public result into SFA metadata. Conversion preserves public fields and
-adds `copy_sfa_slot`, including slot zero. No metadata factory or policy
-initialization hook is needed in the public scheduler.
+After a Host-bound transfer completes, the log reports `mode`, `bank_workers`
+and `banks`. The default staging configuration uses `mode=pipeline` and
+`banks=4`; `bank_count=1` selects `mode=sync`. Confirm that the proxy returns
+the generated response without a KV-load failure.
 
-Target identities and hot/tail request context are local SFA planning data,
-not additions to the P/D wire handshake or public bucket signature. The receiver
-snapshots the request mapping into each submitted task, so queued transfers keep
-their own metadata while the receive loop advances. Each task's Future completes
-only after its READ and Host landing have stopped. The inherited request/batch
-queue processors and Future tracking continue to report completion.
+## Configuration Parameters
 
-The common receiver has no task-context binding, SFA block-group, target-view,
-additional-read or landing hooks. The SFA submission method, address planner and
-bucket therefore contain some ordinary planning and execution code that must be
-reviewed when the public implementation changes. Physical registration rules,
-shared Host ownership, device destinations and landing-before-completion ordering
-are retained.
+### KV Transfer Settings
+
+Set these fields in `--kv-transfer-config`. The last two fields belong inside
+`kv_connector_extra_config`.
+
+| Parameter | Type | Default | Required | Values for this feature |
+| --- | --- | --- | --- | --- |
+| `kv_connector` | string | `null` | Yes, P and D | `"MooncakeConnectorV2"`. |
+| `kv_role` | string | `null` | Yes, P and D | `"kv_producer"` on P; `"kv_consumer"` on D. |
+| `kv_port` | integer | `14579` | No | Connector control-port base (`1` to `65535`). Reserve available TCP ports for the instance and its TP workers; use distinct bases for instances sharing a network namespace. |
+| `kv_load_failure_policy` | string | `"fail"` | No | Keep `"fail"` on D; `"recompute"` is rejected. |
+| `use_layerwise` | boolean | `false` | No | Keep `false` on both nodes to select Pull. |
+| `pull_transfer_mode` | string | `"request"` | No | `"request"` reports completion per request; `"batch"` uses a batch barrier. |
+
+### Sparse KV Offload Settings
+
+Set these fields under `sparse_kv_offload_config` in `--additional-config` on D.
+
+| Parameter | Type | Default | Required | Range / behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | `false` | Yes, D | Set `true` on D; leave disabled on P. |
+| `topk_buffer_size` | integer | `-1` | No | Hot-buffer token capacity. `-1` resolves to `(1 + num_speculative_tokens) * 2048`; otherwise use a positive value. The resolved value must be at least the model's `index_topk`. |
+| `dram_size_per_dp_GB` | integer | `110` | No | Positive Host KV memory budget in GiB per DP group. This is separate from the HBM staging window. |
+| `use_fused_overlap` | boolean | `false` | No | Keep `false` to use LIM + Copy-SFA; `true` is rejected for this integration. |
+| `keep_device_kv_cache` | boolean | `false` | No | Keep `false` for normal offload. `true` retains device KV for debugging and does not provide the HBM capacity benefit. |
+| `store_port_base` | integer | `8500` | No | Host-store TCP base port, from `1` to `65535`. DP group `i` binds `store_port_base + i`; reserve that range and avoid conflicts with other instances. |
+
+### Staging Settings
+
+Set these fields under `mooncake_staging_config` in `--additional-config` on D.
+They accept JSON integers, not strings, booleans or fractional numbers.
+
+| Parameter | Type | Default | Required | Range / behavior |
+| --- | --- | --- | --- | --- |
+| `window_chunks` | integer | `16` | No | Total reusable HBM staging chunks. Values below `1` become `1`. Each chunk is sized for the KV layout and aligned to 2 MiB. |
+| `bank_count` | integer | `4` | No | Values below `1` become `1`; the effective count is capped by `window_chunks`. One bank uses serial READ/landing; multiple banks pipeline the work. |
+
+The default window has four banks of four chunks. Increasing `bank_count`
+does not increase total staging capacity. Each bank receives
+`floor(window_chunks / effective_bank_count)` chunks; any remainder is unused.
+
+For older experimental configurations, remove `dsa_sparse_attention_config`;
+nonempty values are rejected. Configure staging through the two fields above
+instead of the retired staging environment variables.

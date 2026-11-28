@@ -12,9 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.requests import Request
-
 from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as proxy
+from starlette.requests import Request
 
 
 def make_scheduler(endpoints=None):
