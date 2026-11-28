@@ -106,7 +106,8 @@ def test_paged_indexer_replays_short_long_reused_and_updated_pages(batch):
         write_pages(updated, pages, tables[0], first, end, 64)
         graph.replay()
         for i in range(batch):
-            scores = write_pool_scores(
+            scores = torch.empty((6, groups), device="npu", dtype=torch.float32)
+            write_pool_scores(
                 query[i * 6 : (i + 1) * 6],
                 weights[i * 6 : (i + 1) * 6],
                 cache,
@@ -115,6 +116,8 @@ def test_paged_indexer_replays_short_long_reused_and_updated_pages(batch):
                 64,
                 groups,
                 4,
+                511,
+                scores,
             )
-            expected = select_pool_candidates(scores, visible[i], 4, 511)
+            expected = select_pool_candidates(scores, visible[i], groups, 4, 511)
             assert torch.equal(actual[i].sort(-1).values, expected.sort(-1).values)
