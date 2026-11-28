@@ -1,0 +1,8 @@
+pr: 22560
+entries:
+  - category: bugfix
+    text: >-
+      Fixed min_tokens being ignored by the Anthropic Messages API on older
+      vLLM releases. Requests to /v1/messages now delay EOS and stop sequences
+      until the requested minimum output length; SDK users can pass min_tokens
+      through extra_body.

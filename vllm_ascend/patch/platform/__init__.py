@@ -15,6 +15,7 @@
 # limitations under the License.
 
 
+import vllm_ascend.patch.platform.patch_anthropic_min_tokens  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_dp_supervisor  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
