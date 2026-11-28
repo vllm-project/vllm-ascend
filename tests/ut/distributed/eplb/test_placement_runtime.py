@@ -57,7 +57,13 @@ class TestPlacementRuntime(unittest.TestCase):
             output[:] = [None, None] if value is None else [value, "different"]  # type: ignore[list-item]
 
         with (
-            patch.object(runtime.dist, "all_gather_object", side_effect=gather),
+            patch.object(
+                runtime.dist,
+                "all_gather_object",
+                side_effect=lambda out, val, *, group: out.__setitem__(
+                    slice(None), [val, "other"] if val is not None else [None, None]
+                ),
+            ),
             self.assertRaisesRegex(ValueError, "differs across"),
         ):
             runtime.verify_placement_consensus(self.placement, self.group)
