@@ -18,7 +18,7 @@
 | `corpus_ptr`, `corpus_len`, `table_ptr` | Input / Output / Attribute | Token ring, capacity and hash indexes | int32, integer, int64 | `[C]`, scalar, `[2, NUM_BUCKETS, SLOTS]` |
 | `head_ptr`, `doc_seq_ptr`, `head_out_ptr`, `doc_seq_out_ptr` | Input / Output | Current and next ring cursor / document sequence | int64 | `[1]` each |
 | `HASH_MUL`, `NUM_BUCKETS`, `SLOTS`, `BLOCK`, `launch_options` | Attribute | Upstream hash and tile configuration | Integers / mapping | Host values |
-| `row`, `seq_len`, `MAX_DEPTH`, `DEPTH_PO2`, `K`, `K_PO2` | Input / Attribute | Lookup history, valid length and padded match/draft limits | int32 pointer, integers | History row, scalars |
+| `row_ptr`, `seq_len`, `MAX_DEPTH`, `DEPTH_PO2`, `K`, `K_PO2` | Input / Attribute | Lookup history, valid length and padded match/draft limits | int32 pointer, integers | History row, scalars |
 
 ## Constraints
 

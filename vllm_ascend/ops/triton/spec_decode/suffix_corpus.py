@@ -12,27 +12,17 @@ from vllm.triton_utils import tl, triton
 _SHORT_KEY_TOKENS = tl.constexpr(2)
 _LONG_KEY_TOKENS = tl.constexpr(4)
 _NUM_KEY_TABLES = tl.constexpr(2)
-_HASH_MIX_SHIFT = tl.constexpr(29)
-# Each int64 entry packs the document sequence above a 32-bit ring position.
-_CORPUS_POSITION_BITS = tl.constexpr(32)
-_CORPUS_POSITION_MASK = (1 << _CORPUS_POSITION_BITS) - 1
-# Finished-document rows contain (request slot, history start).
-_DOC_FIELDS = tl.constexpr(2)
-_DOC_START_OFFSET = tl.constexpr(1)
-_DOCUMENT_SEPARATOR = tl.constexpr(-1)
-_INVALID_INDEX_ENTRY = tl.constexpr(-1)
-# Distinct negative load values prevent masked history/corpus tokens matching.
-_MASKED_TAIL_TOKEN = tl.constexpr(-2)
 
 
 @triton.jit
 def _bucket(hv, NUM_BUCKETS: tl.constexpr):
-    return ((hv >> _HASH_MIX_SHIFT) ^ hv) & (NUM_BUCKETS - 1)
+    HASH_MIX_SHIFT = 29  # Match the upstream index hash mixing.
+    return ((hv >> HASH_MIX_SHIFT) ^ hv) & (NUM_BUCKETS - 1)
 
 
 @triton.jit
 def _corpus_draft(
-    row,
+    row_ptr,
     seq_len,
     table_ptr,
     corpus_ptr,
@@ -46,17 +36,24 @@ def _corpus_draft(
     K_PO2: tl.constexpr,
 ):
     """Return (match length, draft tokens, valid count) for one request."""
-    C: tl.constexpr = _NUM_KEY_TABLES * SLOTS
-    c_iota = tl.arange(0, C).to(tl.int64)
+    CORPUS_POSITION_BITS = 32  # Low half of the packed int64 index entry.
+    CORPUS_POSITION_MASK = (1 << CORPUS_POSITION_BITS) - 1
+    DOCUMENT_SEPARATOR = -1
+    INVALID_INDEX_ENTRY = -1
+    MASKED_TAIL_TOKEN = -2  # Must differ from masked corpus tokens.
+    NUM_CANDIDATES: tl.constexpr = _NUM_KEY_TABLES * SLOTS
+    c_iota = tl.arange(0, NUM_CANDIDATES).to(tl.int64)
     d_iota = tl.arange(0, DEPTH_PO2).to(tl.int64)
     k_iota = tl.arange(0, K_PO2).to(tl.int64)
 
     tail_pos = seq_len - 1 - d_iota
-    tail = tl.load(row + tl.maximum(tail_pos, 0), mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=_MASKED_TAIL_TOKEN)
+    tail = tl.load(
+        row_ptr + tl.maximum(tail_pos, 0), mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=MASKED_TAIL_TOKEN
+    )
     # Hash the trailing tokens newest-first, as ingestion does.
     hv = tl.zeros((), tl.int64)
     for d in tl.static_range(_LONG_KEY_TOKENS):
-        tok = tl.load(row + tl.maximum(seq_len - 1 - d, 0), mask=seq_len - 1 - d >= 0, other=0)
+        tok = tl.load(row_ptr + tl.maximum(seq_len - 1 - d, 0), mask=seq_len - 1 - d >= 0, other=0)
         hv = (hv ^ tok.to(tl.int64)) * HASH_MUL
         if d == _SHORT_KEY_TOKENS - 1:
             bucket2 = _bucket(hv, NUM_BUCKETS)
@@ -65,18 +62,18 @@ def _corpus_draft(
     key_len = tl.where(is4, _LONG_KEY_TOKENS, _SHORT_KEY_TOKENS)
     slot = tl.where(is4, bucket4 * SLOTS + c_iota, (NUM_BUCKETS + bucket2) * SLOTS + c_iota - SLOTS)
     vals = tl.load(table_ptr + slot)
-    cpos = vals & _CORPUS_POSITION_MASK
+    cpos = vals & CORPUS_POSITION_MASK
 
     src_pos = cpos[:, None] - 1 - d_iota[None, :]
     src = tl.load(
         corpus_ptr + tl.minimum(tl.maximum(src_pos, 0), corpus_len - 1),
         mask=(vals[:, None] >= 0) & (src_pos >= 0) & (src_pos < corpus_len) & (d_iota[None, :] < MAX_DEPTH),
-        other=_DOCUMENT_SEPARATOR,
+        other=DOCUMENT_SEPARATOR,
     )
     miss = (src != tail[None, :]).to(tl.int32)
     c_len = tl.sum((tl.cumsum(miss, axis=1) == 0).to(tl.int64), axis=1)
     nxt = tl.load(
-        corpus_ptr + tl.minimum(cpos, corpus_len - 1), mask=(vals >= 0) & (cpos < corpus_len), other=_DOCUMENT_SEPARATOR
+        corpus_ptr + tl.minimum(cpos, corpus_len - 1), mask=(vals >= 0) & (cpos < corpus_len), other=DOCUMENT_SEPARATOR
     )
     ok = (vals >= 0) & (nxt >= 0) & (c_len >= key_len) & (seq_len >= key_len)
     # Count each position once, keeping its newest valid index entry after wraparound.
@@ -91,12 +88,12 @@ def _corpus_draft(
     cont = tl.load(
         corpus_ptr + tl.minimum(cont_pos, corpus_len - 1),
         mask=ok[:, None] & (k_iota[None, :] < K) & (cont_pos < corpus_len),
-        other=_DOCUMENT_SEPARATOR,
+        other=DOCUMENT_SEPARATOR,
     ).to(tl.int64)
     # A5 can miscompile the compare/cumsum/select path for narrow rows
     # (K_PO2=2 or 4). Find the first separator instead of scanning its mask.
     stop = tl.min(tl.where(cont < 0, k_iota[None, :], K), axis=1)
-    cont = tl.where(k_iota[None, :] < stop[:, None], cont, _DOCUMENT_SEPARATOR)
+    cont = tl.where(k_iota[None, :] < stop[:, None], cont, DOCUMENT_SEPARATOR)
 
     # Candidates sharing a match length draft identical chains; score each
     # distinct length once.
@@ -109,13 +106,13 @@ def _corpus_draft(
     best_len = tl.zeros((), tl.int64)
     best_n = tl.zeros((), tl.int64)
     best_chain = tl.zeros([K_PO2], tl.int64)
-    for i in range(C):
+    for i in range(NUM_CANDIDATES):
         sel = c_iota == i
         if tl.sum(tl.where(sel, first.to(tl.int32), 0), axis=0) > 0:
-            L = tl.sum(tl.where(sel, c_len, 0), axis=0)
-            alive = ok & (c_len >= L)
+            match_len = tl.sum(tl.where(sel, c_len, 0), axis=0)
+            alive = ok & (c_len >= match_len)
             den = tl.maximum(tl.sum(alive.to(tl.int64), axis=0), 1)
-            go = L > 0
+            go = match_len > 0
             num = tl.zeros((), tl.int64)
             n_emit = tl.zeros((), tl.int64)
             chain = tl.zeros([K_PO2], tl.int64)
@@ -126,7 +123,7 @@ def _corpus_draft(
                 cnt = tl.where(has, cnt, 0)
                 cmax = tl.max(cnt, axis=0)
                 # Most frequent next token; ties go to the newest candidate.
-                newest = tl.max(tl.where(has & (cnt == cmax), vals, _INVALID_INDEX_ENTRY), axis=0)
+                newest = tl.max(tl.where(has & (cnt == cmax), vals, INVALID_INDEX_ENTRY), axis=0)
                 next_tok = tl.sum(tl.where(has & (vals == newest), col, 0), axis=0)
                 go = go & (cmax > 0)
                 num = tl.where(go, num + cmax.to(tl.int64), num)
@@ -135,10 +132,10 @@ def _corpus_draft(
                 alive = alive & has & (col == next_tok)
             lhs = num * best_den
             rhs = best_num * den
-            take = (lhs > rhs) | ((lhs == rhs) & (best_len < L))
+            take = (lhs > rhs) | ((lhs == rhs) & (best_len < match_len))
             best_num = tl.where(take, num, best_num)
             best_den = tl.where(take, den, best_den)
-            best_len = tl.where(take, L, best_len)
+            best_len = tl.where(take, match_len, best_len)
             best_n = tl.where(take, n_emit, best_n)
             best_chain = tl.where(take, chain, best_chain)
     return best_len, best_chain, best_n
@@ -164,22 +161,26 @@ def _suffix_ingest_kernel(
     BLOCK: tl.constexpr,
 ):
     """Append and index one document block, skipping later overwrites."""
+    DOC_FIELDS = 2  # Finished-document rows contain (request slot, history start).
+    DOC_START_OFFSET = 1
+    DOCUMENT_SEPARATOR = -1
+    CORPUS_POSITION_BITS = 32  # Store the document sequence above the ring position.
     f = tl.program_id(0).to(tl.int64)
     blk = tl.program_id(1).to(tl.int64)
     cap = tl.cast(corpus_len, tl.int64)
-    req = tl.load(docs_ptr + _DOC_FIELDS * f).to(tl.int64)
+    req = tl.load(docs_ptr + DOC_FIELDS * f).to(tl.int64)
     end = tl.load(total_len_ptr + req).to(tl.int64)
     # Keep the newest cap - 1 tokens of an over-long response.
-    start = tl.maximum(tl.load(docs_ptr + _DOC_FIELDS * f + _DOC_START_OFFSET).to(tl.int64), end - (cap - 1))
+    start = tl.maximum(tl.load(docs_ptr + DOC_FIELDS * f + DOC_START_OFFSET).to(tl.int64), end - (cap - 1))
     n = tl.maximum(end - start, 0)
     # Block 0 also writes the separator.
     if (blk > 0) & (blk * BLOCK >= n):
         return
     head = tl.load(head_ptr)
     for i in range(f):
-        req_i = tl.load(docs_ptr + _DOC_FIELDS * i).to(tl.int64)
+        req_i = tl.load(docs_ptr + DOC_FIELDS * i).to(tl.int64)
         end_i = tl.load(total_len_ptr + req_i).to(tl.int64)
-        start_i = tl.maximum(tl.load(docs_ptr + _DOC_FIELDS * i + _DOC_START_OFFSET).to(tl.int64), end_i - (cap - 1))
+        start_i = tl.maximum(tl.load(docs_ptr + DOC_FIELDS * i + DOC_START_OFFSET).to(tl.int64), end_i - (cap - 1))
         n_i = tl.maximum(end_i - start_i, 0)
         head = tl.where(head + n_i + 1 > cap, 0, head) + n_i + 1
     head = tl.where(head + n + 1 > cap, 0, head)
@@ -195,9 +196,9 @@ def _suffix_ingest_kernel(
     sep_overwritten = tl.zeros((), tl.int32)
     later = head + n + 1
     for g in range(f + 1, num_docs):
-        req_g = tl.load(docs_ptr + _DOC_FIELDS * g).to(tl.int64)
+        req_g = tl.load(docs_ptr + DOC_FIELDS * g).to(tl.int64)
         end_g = tl.load(total_len_ptr + req_g).to(tl.int64)
-        start_g = tl.maximum(tl.load(docs_ptr + _DOC_FIELDS * g + _DOC_START_OFFSET).to(tl.int64), end_g - (cap - 1))
+        start_g = tl.maximum(tl.load(docs_ptr + DOC_FIELDS * g + DOC_START_OFFSET).to(tl.int64), end_g - (cap - 1))
         n_g = tl.maximum(end_g - start_g, 0)
         later = tl.where(later + n_g + 1 > cap, 0, later)
         # Document g and its separator occupy [later, later + n_g].
@@ -207,23 +208,23 @@ def _suffix_ingest_kernel(
     keep = m & (overwritten == 0)
     keep_sep = sep_overwritten == 0
     if blk == 0:
-        tl.store(corpus_ptr + sep, _DOCUMENT_SEPARATOR, mask=keep_sep)
+        tl.store(corpus_ptr + sep, DOCUMENT_SEPARATOR, mask=keep_sep)
         if f == num_docs - 1:
             tl.store(head_out_ptr, sep + 1)
             tl.store(doc_seq_out_ptr, doc_seq + 1)
 
-    row = token_ids_ptr + req * token_ids_stride + start
-    tokens = tl.load(row + tl.minimum(j, token_ids_stride - start - 1), mask=m, other=0)
+    row_ptr = token_ids_ptr + req * token_ids_stride + start
+    tokens = tl.load(row_ptr + tl.minimum(j, token_ids_stride - start - 1), mask=m, other=0)
     tl.store(corpus_ptr + tl.minimum(pos, cap - 1), tokens, mask=keep)
     # Index each position j under its preceding 2 and 4 tokens, when they lie
     # in the document. Entries order by (document, position), so atomic_max
     # keeps the newest occurrence regardless of execution order.
     slot = doc_seq % SLOTS
-    val = (doc_seq << _CORPUS_POSITION_BITS) | pos
+    val = (doc_seq << CORPUS_POSITION_BITS) | pos
     hv = tl.zeros([BLOCK], tl.int64)
     for d in tl.static_range(_LONG_KEY_TOKENS):
         t = tl.load(
-            row + tl.minimum(tl.maximum(j - 1 - d, 0), token_ids_stride - start - 1),
+            row_ptr + tl.minimum(tl.maximum(j - 1 - d, 0), token_ids_stride - start - 1),
             mask=m & (j - 1 - d >= 0),
             other=0,
         )

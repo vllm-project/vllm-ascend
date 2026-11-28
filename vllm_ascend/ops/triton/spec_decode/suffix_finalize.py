@@ -9,17 +9,8 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.spec_decode.suffix_corpus import _corpus_draft
-from vllm_ascend.ops.triton.spec_decode.suffix_observe import (
-    _INVALID_BUCKET,
-    _NUM_LEN_BUCKETS,
-    _OBSERVED_OFFSET,
-    _STAT_FIELDS,
-    _len_bucket,
-)
+from vllm_ascend.ops.triton.spec_decode.suffix_observe import _len_bucket
 
-# Beta(1, 1) smoothing starts valid slots at confidence 1/2.
-_ACCEPTED_PRIOR = tl.constexpr(1.0)
-_OBSERVED_PRIOR = tl.constexpr(2.0)
 # A5 cannot lower the corpus boolean gather with a single internal draft lane.
 _MIN_VOTING_WIDTH = 2
 
@@ -35,13 +26,13 @@ def _suffix_finalize_kernel(
     scratch_ptr,  # *int64  [B, scratch_stride]
     scratch_stride,
     num_blocks,
-    Lp1,
+    position_radix,
     corpus_ptr,  # *int32  [corpus_len]
     corpus_len,
     table_ptr,  # *int64  [2, NUM_BUCKETS, SLOTS]
     drafts_ptr,  # *int64  [B, K]  (output)
     num_valid_ptr,  # *int32  [B]  (output)
-    stats_ptr,  # *int64  [2 * _NUM_LEN_BUCKETS, K, 2]  (accepted, observed)
+    stats_ptr,  # *int64  [18, K, 2]  (accepted, observed)
     last_bucket_ptr,  # *int32  [max_num_reqs]  (output)
     last_valid_ptr,  # *int32  [max_num_reqs]  (output)
     conf_ptr,  # *fp32  [B, K]  (output)
@@ -56,12 +47,19 @@ def _suffix_finalize_kernel(
     K_PO2: tl.constexpr,
     NB_PO2: tl.constexpr,
 ):
+    NUM_LEN_BUCKETS = 9  # Six exact-length and three coarse buckets, matching upstream.
+    STAT_FIELDS = 2  # Statistics entries contain (accepted, observed).
+    OBSERVED_OFFSET = 1
+    INVALID_BUCKET = -1
+    # Beta(1, 1) smoothing starts valid slots at confidence 1/2.
+    ACCEPTED_PRIOR = 1.0
+    OBSERVED_PRIOR = 2.0
     b = tl.program_id(0).to(tl.int64)
     req = tl.load(idx_mapping_ptr + b).to(tl.int64)
     seq_len = tl.load(total_len_ptr + req).to(tl.int64)
     num_sampled = tl.load(num_sampled_ptr + b)
     last_tok = tl.load(last_sampled_ptr + req)
-    row = token_ids_ptr + req * token_ids_stride
+    row_ptr = token_ids_ptr + req * token_ids_stride
 
     # Best match in the request's own history.
     nb = tl.arange(0, NB_PO2).to(tl.int64)
@@ -69,18 +67,18 @@ def _suffix_finalize_kernel(
         tl.load(scratch_ptr + b * scratch_stride + nb, mask=nb < num_blocks, other=0),
         axis=0,
     )
-    l_len = l_score // Lp1
-    l_pos = l_score - l_len * Lp1
+    l_len = l_score // position_radix
+    l_pos = l_score - l_len * position_radix
 
     k_iota = tl.arange(0, K_PO2).to(tl.int64)
     k_mask = k_iota < K
     idx = l_pos + k_iota
     draft_ok = k_mask & (idx < seq_len) & (l_len > 0)
-    draft = tl.load(row + tl.minimum(idx, token_ids_stride - 1), mask=draft_ok, other=0).to(tl.int64)
+    draft = tl.load(row_ptr + tl.minimum(idx, token_ids_stride - 1), mask=draft_ok, other=0).to(tl.int64)
 
     if HAS_CORPUS:
         g_len, g_draft, g_n = _corpus_draft(
-            row,
+            row_ptr,
             seq_len,
             table_ptr,
             corpus_ptr,
@@ -112,24 +110,24 @@ def _suffix_finalize_kernel(
 
     if ADAPTIVE:
         # Filler slots receive zero confidence.
-        bucket = source * _NUM_LEN_BUCKETS + _len_bucket(tl.maximum(match_len, 1))
+        bucket = source * NUM_LEN_BUCKETS + _len_bucket(tl.maximum(match_len, 1))
         if K != K_PO2:
             # As in the observer, avoid padded strided statistics accesses
             # for non-power-of-two draft lengths on the current backend.
             for d in tl.static_range(K):
-                stat = stats_ptr + (bucket * K + d) * _STAT_FIELDS
+                stat = stats_ptr + (bucket * K + d) * STAT_FIELDS
                 accepted = tl.load(stat).to(tl.float32)
-                observed = tl.load(stat + _OBSERVED_OFFSET).to(tl.float32)
+                observed = tl.load(stat + OBSERVED_OFFSET).to(tl.float32)
                 is_valid = tl.sum(tl.where(k_iota == d, draft_ok.to(tl.int32), 0), axis=0) > 0
-                conf = tl.where(is_valid, (accepted + _ACCEPTED_PRIOR) / (observed + _OBSERVED_PRIOR), 0.0)
+                conf = tl.where(is_valid, (accepted + ACCEPTED_PRIOR) / (observed + OBSERVED_PRIOR), 0.0)
                 tl.store(conf_ptr + b * K + d, conf)
         else:
-            stat = stats_ptr + (bucket * K + k_iota) * _STAT_FIELDS
+            stat = stats_ptr + (bucket * K + k_iota) * STAT_FIELDS
             accepted = tl.load(stat, mask=k_mask, other=0).to(tl.float32)
-            observed = tl.load(stat + _OBSERVED_OFFSET, mask=k_mask, other=0).to(tl.float32)
-            conf = tl.where(draft_ok, (accepted + _ACCEPTED_PRIOR) / (observed + _OBSERVED_PRIOR), 0.0)
+            observed = tl.load(stat + OBSERVED_OFFSET, mask=k_mask, other=0).to(tl.float32)
+            conf = tl.where(draft_ok, (accepted + ACCEPTED_PRIOR) / (observed + OBSERVED_PRIOR), 0.0)
             tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
-        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, _INVALID_BUCKET).to(tl.int32))
+        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, INVALID_BUCKET).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
 
@@ -143,7 +141,7 @@ def launch_suffix_finalize(
     scratch_ptr: torch.Tensor,
     scratch_stride: int,
     num_blocks: int,
-    Lp1: int,
+    Lp1: int,  # Upstream dispatcher ABI name for position_radix.
     corpus_ptr: torch.Tensor,
     corpus_len: int,
     table_ptr: torch.Tensor,
