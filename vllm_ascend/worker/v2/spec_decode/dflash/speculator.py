@@ -24,7 +24,7 @@ from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import is_context_kv_only_speculator, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
@@ -81,7 +81,7 @@ def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool, 
             group.get_metadata_builder(0)
             for groups in attn_groups
             for group in groups
-            if issubclass(group.backend, AscendMLABackend)
+            if issubclass(group.backend, AscendMLABackend) and getattr(group, "metadata_builders", True)
         ]
         use_a3 = all(getattr(builder, "use_a3_mla_sink", False) for builder in builders)
         use_flashmla = all(
@@ -338,7 +338,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         self._lmhead_tp_validate_draft_sampling()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        if self.speculative_config.enforce_eager:
+        if self.speculative_config.enforce_eager or is_context_kv_only_speculator(self):
             cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
@@ -406,7 +406,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             group.get_metadata_builder(0).flashmla_state
             for groups in self.attn_groups
             for group in groups
-            if not windowed_flashmla_layers.isdisjoint(group.layer_names)
+            if getattr(group, "metadata_builders", True) and not windowed_flashmla_layers.isdisjoint(group.layer_names)
         )
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla, self.use_a3_mla_sink = detect_draft_attn_architecture(

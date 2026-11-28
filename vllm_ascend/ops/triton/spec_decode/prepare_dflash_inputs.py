@@ -219,9 +219,10 @@ def _prepare_dflash_inputs_kernel(
         PAD_SLOT_ID,
     )
 
-    tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
-    tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
-    tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
+    query_store_mask = query_mask & (query_idx < max_num_tokens)
+    tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_store_mask)
+    tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_store_mask)
+    tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_store_mask)
 
     # Sample
     sample_begin, sample_count = _partition_work(num_speculative_steps, worker_idx, workers_per_req)
@@ -287,7 +288,8 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_sample_idx_mapping_ptr + sp_off, -1, mask=sp_mask)
 
     # query_slot_mapping: [num_reqs * query_per_req, max_num_tokens)
-    q_pad_start = num_reqs * num_query_per_req
+    # Clamp when prefill_context_kv_only allows num_reqs * query_per_req > max_num_tokens.
+    q_pad_start = tl.minimum(num_reqs * num_query_per_req, max_num_tokens)
     q_pad_count = max_num_tokens - q_pad_start
     qp_begin, qp_count = _partition_work(q_pad_count, global_worker_idx, total_workers)
     qp_begin += q_pad_start
@@ -420,6 +422,6 @@ def prepare_dflash_inputs_triton(
     # Upstream's prepare kernel also writes is_padding: the query rows above are
     # real and the rest up to max_num_tokens is padding. MoE layers in the draft
     # read it to skip padding rows, and graph capture leaves it all True.
-    num_query_tokens = num_reqs * num_query_per_req
+    num_query_tokens = min(num_reqs * num_query_per_req, max_num_tokens)
     input_buffers.is_padding[:num_query_tokens].fill_(False)
     input_buffers.is_padding[num_query_tokens:max_num_tokens].fill_(True)

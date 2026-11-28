@@ -217,6 +217,26 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
             prefix=maybe_prefix(prefix, "markov_head"),
         )
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """Return modules needed to compute and write context KV on prefill."""
+        modules: list[nn.Module] = [self.context_proj, self.context_norm]
+        for layer in self.layers:
+            attn = layer.self_attn
+            impl = getattr(attn, "impl", None)
+            attn_layer = getattr(getattr(attn, "mla_attn", None), "mla_attn", None)
+            candidates = [getattr(attn, "fused_qkv_a_proj", None), getattr(impl, "kv_a_layernorm", None), attn_layer]
+            prolog_fn = getattr(impl, "supports_prolog_v3_writer", None)
+            if callable(prolog_fn) and prolog_fn():
+                candidates.extend(
+                    (
+                        getattr(impl, "q_proj", None),
+                        getattr(impl, "q_a_layernorm", None),
+                        getattr(impl, "kv_b_proj", None),
+                    )
+                )
+            modules.extend(mod for mod in candidates if isinstance(mod, nn.Module))
+        return modules
+
     @torch.inference_mode()
     def precompute_and_store_context_kv(
         self,
@@ -278,6 +298,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         align_draft_weights(self, self.model.context_proj, vllm_config)
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        """Delegate context-KV module selection to the underlying K3 draft model."""
+        return self.model.context_kv_modules()
 
     def configure_target_aux_hidden_capture(self, target_model: nn.Module) -> None:
         """Select the raw-prefix-sum inputs required by this MLA checkpoint."""

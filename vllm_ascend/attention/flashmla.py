@@ -61,6 +61,7 @@ def target_attn_groups_without_draft_flashmla(
             if not (
                 group.layer_names
                 and all(name in draft_layer_names for name in group.layer_names)
+                and bool(getattr(group, "metadata_builders", True))
                 and getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
             )
         ]

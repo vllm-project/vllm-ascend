@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.utils import is_prefill_context_kv_only
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
 
@@ -71,7 +73,10 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     rather than from the metadata builder's ``__init__``.
     """
     runner = worker.model_runner
-    if not hasattr(runner, "jit_warmup_registry"):
+    speculative_config = getattr(runner, "speculative_config", None) or getattr(
+        getattr(runner, "vllm_config", None), "speculative_config", None
+    )
+    if not hasattr(runner, "jit_warmup_registry") or is_prefill_context_kv_only(speculative_config):
         return 0
 
     from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -82,6 +87,8 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     registered = 0
     with runner.jit_warmup_registry.activate():
         for adapter, attn_group in _iter_dspark_draft_groups(runner):
+            if not getattr(attn_group, "metadata_builders", True):
+                continue
             builder = attn_group.get_metadata_builder()
             if not isinstance(builder, AscendDSAMetadataBuilder):
                 continue

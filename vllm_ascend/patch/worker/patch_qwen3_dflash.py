@@ -102,6 +102,35 @@ def precompute_and_store_context_kv(
         )
 
 
+def context_kv_modules(self) -> list[torch.nn.Module]:
+    """Keep modules read by Ascend's patched precompute_and_store_context_kv."""
+    if not hasattr(self, "_num_attn_layers"):
+        self._build_fused_kv_buffers()
+    if not hasattr(self, "_attn_layers"):
+        # Subclasses that skip _build_fused_kv_buffers (e.g. quantized custom
+        # adapters without their own override) keep all weights safely.
+        return [self]
+    modules: list[torch.nn.Module] = [self.hidden_norm, *self._attn_layers]
+    if getattr(self, "use_aux_hidden_state", False) and hasattr(self, "fc"):
+        modules.append(self.fc)
+    modules.extend(layer.self_attn.k_norm for layer in self.layers)
+    if getattr(self, "_fused_kv_weight", None) is None:
+        if not hasattr(self, "_context_qkv_projs"):
+            return [self]
+        modules.extend(self._context_qkv_projs)
+    return modules
+
+
+def _for_causal_lm_context_kv_modules(self) -> list[torch.nn.Module]:
+    """Delegate context_kv_modules when the wrapped draft model implements it."""
+    inner_fn = getattr(self.model, "context_kv_modules", None)
+    if callable(inner_fn):
+        return inner_fn()
+    return [self]
+
+
+DFlashQwen3ForCausalLM.context_kv_modules = _for_causal_lm_context_kv_modules
+DFlashQwen3Model.context_kv_modules = context_kv_modules
 DFlashQwen3Model._project_context_kv = _project_context_kv
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 

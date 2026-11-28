@@ -1,0 +1,12 @@
+pr: 22892
+entries:
+  - category: feature
+    text: >-
+      Added Ascend Model Runner V2 support for
+      `speculative_config.prefill_context_kv_only` (disabled by default) on
+      DFlash-family speculative decoding in P/D disaggregation. Prefill
+      workers configured with `--kv-transfer-config` (`kv_producer` or
+      `kv_both`) can skip draft ACLGraph capture and redundant per-step
+      length syncs, and free draft-only weights on models implementing
+      `context_kv_modules()` (0.94 GiB freed on Atlas A3 with
+      Qwen3-4B-DFlash) while writing context KV for decode workers.
