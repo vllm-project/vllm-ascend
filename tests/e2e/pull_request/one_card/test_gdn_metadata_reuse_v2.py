@@ -122,7 +122,6 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
     graph_reqs, width = 4, 4
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         num_speculative_tokens=3,
         additional_config=None,
         model_config=SimpleNamespace(

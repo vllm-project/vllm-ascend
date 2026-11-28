@@ -57,7 +57,6 @@ def make_layout(model="flash", *, block_size=32, cache_format="a3", buffers=2, i
             kv_connector="AscendStoreConnector", kv_role="kv_producer", kv_connector_extra_config=extra
         ),
         speculative_config=None,
-        use_v2_model_runner=True,
     )
     a5 = cache_format != "a3"
     packed = cache_format == "a5_packed"

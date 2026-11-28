@@ -546,35 +546,6 @@
 #    Future Plan:
 #       Remove this patch after the NPU branch is available upstream.
 #
-# ** 23. File: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       Ascend always uses the V2 runner; Model Runner V1 has been removed, so
-#       nothing selects a runner at runtime any more.
-#    How:
-#       Call apply_v2_model_runner_config_patch() to install a
-#       use_v2_model_runner property that always selects V2. An explicit
-#       VLLM_USE_V2_MODEL_RUNNER=0 raises instead of being ignored.
-#       worker/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
-#    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
-#    Future Plan:
-#       Remove this patch once upstream exposes a platform-specific default
-#       runner-selection hook.
-#
-#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
-#    Why:
-#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
-#    How:
-#       Removed with the v0.31.0 boundary: the release-only validator override
-#       is no longer applied.
-#    Related PR: https://github.com/vllm-project/vllm/pull/54523
-#    Future Plan:
-#       Re-add only if a supported pin rejects PCP+DP.
-#
 # * Worker Patch:
 # ========#
 # Entries are listed in alphabetical order by file name.
@@ -1328,23 +1299,6 @@
 #       https://github.com/vllm-project/vllm/pull/64435
 #    Future Plan:
 #       Remove the wrapper once the paired vLLM includes the upstream guard.
-#
-# ** 28. File: worker/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       EngineCore subprocesses only load global/platform patches, while workers
-#       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (V2-only selection plus the
-#       Ascend unsupported-feature check).
-#    How：
-#       Reuse the platform patch so EngineCore and worker processes share the
-#       same `use_v2_model_runner` behavior.
-#    Related PR (if no, explain why):
-#       See platform/patch_use_v2_model_runner.py.
-#    Future Plan:
-#       Remove this module together with the platform patch once vllm-ascend
-#       fully supports the v2 model runner.
 #
 # ** 29. File: worker/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

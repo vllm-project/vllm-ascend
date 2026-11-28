@@ -191,14 +191,8 @@ class NPUWorker(GPUWorker):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # Worker processes receive a pickled VllmConfig, so the platform config
-        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
-        # Ascend V2 model runner overrides so the worker resolves the same
-        # runner version as the engine. Idempotent.
-        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
-        apply_v2_model_runner_config_patch()
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
@@ -249,7 +243,6 @@ class NPUWorker(GPUWorker):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
-        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
@@ -398,6 +391,21 @@ class NPUWorker(GPUWorker):
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
+
+    def disconnect_kv_transfer_peers(self) -> None:
+        self._drain_store_send_queues()
+        global_te.disconnect_all_peers()
+
+    def _drain_store_send_queues(self) -> None:
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "_connectors", None)
+        targets = children if children is not None else (connector,)
+        for target in targets:
+            drain = getattr(target, "drain_queued_saves", None)
+            if drain is not None:
+                drain()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
