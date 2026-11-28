@@ -31,6 +31,7 @@
 | JianPing He | [@winson-00178005](https://github.com/winson-00178005) | 2026/11 |
 | XinYue Zhang | [@zhangxinyuehfad](https://github.com/zhangxinyuehfad) | 2026/11 |
 | ShyRa1n | [@ShyRa1n](https://github.com/ShyRa1n) | 2026/11 |
+| freyfwt | [@freyfwt](https://github.com/freyfwt) | 2026/11 |
 
 ## Emeritus Committers
 
