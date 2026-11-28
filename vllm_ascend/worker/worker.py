@@ -427,7 +427,6 @@ class NPUWorker(GPUWorker):
             )
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
-        self._check_weight_transfer_engine()
         self._check_nz_disabled()
         super()._start_weight_update(is_draft=is_draft)
 
