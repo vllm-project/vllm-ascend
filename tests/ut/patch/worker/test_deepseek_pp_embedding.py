@@ -126,7 +126,8 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
     monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "get_tp_group", lambda: SimpleNamespace(rank_in_group=tp_rank, world_size=2))
     target, _ = _make_target(monkeypatch, 2, 1, "dflash")
-    assert isinstance(target.embed_tokens, vocab_parallel_embedding.VocabParallelEmbedding)
+    target_embed = target.embed_tokens
+    assert isinstance(target_embed, vocab_parallel_embedding.VocabParallelEmbedding)
     checkpoint_weight = torch.arange(130, dtype=torch.float32).reshape(65, 2)
     loaded = target.load_weights([("embed_tokens.weight", checkpoint_weight)])
     assert "embed_tokens.weight" in loaded
@@ -159,7 +160,8 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
         {"model.embed_tokens.weight": checkpoint_weight, "lm_head.weight": head_weight}, tmp_path / "model.safetensors"
     )
     config = SimpleNamespace(
-        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=65, hidden_size=2))
+        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=65, hidden_size=2)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
     )
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda _: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda _: "/rotation" if rotated else None)
@@ -169,11 +171,13 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
     monkeypatch.setattr(
         vocab_parallel_embedding.UnquantizedEmbeddingMethod, "process_weights_after_loading", process_weights
     )
-    draft.post_process(config)
-    torch.testing.assert_close(target.embed_tokens.weight, expected)
+    monkeypatch.setattr(quarot_utils, "get_pp_group", parallel_state.get_pp_group)
+    draft.post_process(config, target_model=SimpleNamespace(model=target, lm_head=target_head))
+    torch.testing.assert_close(target_embed.weight, expected)
     torch.testing.assert_close(target_head.weight, expected_head)
     if rotated:
-        assert draft.model.embed_tokens is not target.embed_tokens
+        assert isinstance(target.embed_tokens, PPMissingLayer)
+        assert draft.model.embed_tokens is not target_embed
         assert draft.lm_head is not target_head
         assert draft.has_own_embed_tokens and draft.has_own_lm_head
         torch.testing.assert_close(draft.model.embed_tokens.weight, expected @ rotation.T)
@@ -181,7 +185,7 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
         torch.testing.assert_close(draft.model.fc.weight, (original_fc.reshape(2, 2, 2) @ rotation).reshape(2, 4))
         assert process_weights.call_count == 2
     else:
-        assert draft.model.embed_tokens is target.embed_tokens
+        assert draft.model.embed_tokens is target.embed_tokens is target_embed
         assert draft.lm_head is target_head
         torch.testing.assert_close(draft.model.fc.weight, original_fc)
         process_weights.assert_not_called()

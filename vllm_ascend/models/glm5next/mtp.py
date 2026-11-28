@@ -154,7 +154,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
                 )
             }
         )
-        self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens: VocabParallelEmbedding | None = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
@@ -183,6 +183,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -194,7 +195,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
         return self._mtp_layers[current_step_idx](
             input_ids,
@@ -234,6 +235,12 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 
 @support_torch_compile
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
+    # Declare target-embedding sharing support at class level so upstream
+    # ModelRegistry._ModelInfo.may_use_target_embed enables last-stage
+    # target provisioning under PP. load_weights() overrides this on the
+    # instance when the checkpoint ships an MTP-specific embedding.
+    has_own_embed_tokens: bool = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_text_config
@@ -369,15 +376,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # prefix to match.
             if name.startswith("model.language_model."):
                 name = name.replace("model.language_model.", "model.", 1)
-            # The target embedding is absent on the last PP stage. Load a
-            # local copy before filtering for MTP layers, while allowing an
-            # MTP-specific embedding to take precedence in either file order.
+            # The target loader provisions the global embedding on every PP
+            # stage where speculative decoding needs it. Leave that checkpoint
+            # copy to the target model and share the loaded module after draft
+            # loading. An MTP-specific embedding is rewritten below and loaded
+            # into this draft, taking precedence regardless of file order.
             if name == "model.embed_tokens.weight":
-                if name not in loaded_params:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
@@ -459,5 +463,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         if self.is_rot_weight_used and "rot.weight" not in loaded_params:
             raise ValueError("GLM5-Next MTP requires rot.weight when the quantization config sets is_rot_used.")
         self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded_params
+        if not self.has_own_embed_tokens and hasattr(self.model, "embed_tokens"):
+            # No MTP-specific embedding was loaded; drop the uninitialized
+            # placeholder before strict weight tracking so maybe_share_target_embed
+            # binds the target's module cleanly.
+            self.model.embed_tokens = None
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params

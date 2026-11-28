@@ -61,7 +61,7 @@ class TestQwen3DSparkWeightLoading:
             patch.object(quarot_utils, "get_rotation_path", return_value="quarot.safetensors"),
             patch.object(quarot_utils, "get_rotation_matrix", return_value=rotation_matrix) as rotation_loader,
         ):
-            model.post_process(config)
+            model.post_process(config, target_model=nn.Module())
         rotation_loader.assert_called_once_with("quarot.safetensors")
         torch.testing.assert_close(model.model.fc.weight, fc_weight @ rotation_matrix)
         torch.testing.assert_close(model.model.embed_tokens.weight, embed_before)
@@ -114,7 +114,8 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls, embed_nam
         return layer
 
     config = SimpleNamespace(
-        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
+        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
     with (
         patch.object(quarot_utils, "lmhead_tp_enable", return_value=lmhead_tp),
@@ -123,7 +124,7 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls, embed_nam
         patch.object(quarot_utils, "VocabParallelEmbedding", side_effect=vocab_layer),
         patch.object(quarot_utils, "ParallelLMHead", side_effect=vocab_layer),
     ):
-        model.post_process(config)
+        model.post_process(config, target_model=nn.Module())
     expected_head_prefix = "lm_head" if lmhead_tp else ""
     assert prefixes == ["", expected_head_prefix]
     assert model.model.embed_tokens is not original_embed
@@ -183,7 +184,7 @@ def test_quarot_draft_rebuild_preserves_vocab_layout(tmp_path, monkeypatch, mode
             setattr(draft.model, projection_name, nn.Linear(2, 2, bias=False))
             draft.has_own_embed_tokens = True
             draft.has_own_lm_head = False
-            draft.post_process(config)
+            draft.post_process(config, target_model=nn.Module())
             head = draft.lm_head
             assert head.parallel_mode is expected_mode
             assert head.weight.shape == (64 // expected_size, 2)

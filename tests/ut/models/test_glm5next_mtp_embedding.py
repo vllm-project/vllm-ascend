@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""MTP must load a local embedding when the target's PP stage has none."""
+"""GLM5Next MTP shares target embeddings unless the checkpoint is MTP-specific."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,20 +41,6 @@ def mtp():
 
 def _mtp_weight():
     return "model.layers.45.enorm.weight", torch.ones(4)
-
-
-@pytest.mark.parametrize("prefix", ["model.", "model.language_model."])
-def test_loads_checkpoint_embedding_on_last_pp_stage(mtp, prefix):
-    embedding = torch.arange(32, dtype=torch.float32).reshape(8, 4)
-    loaded = mtp.load_weights([(prefix + "embed_tokens.weight", embedding), _mtp_weight()])
-    assert "model.embed_tokens.weight" in loaded
-    assert mtp.has_own_embed_tokens
-    torch.testing.assert_close(mtp.model.embed_tokens.weight, embedding)
-    local_embedding = mtp.model.embed_tokens
-    target = SimpleNamespace(embed_tokens=PPMissingLayer())
-    with _draft_pp_context(2):
-        eagle_utils.maybe_share_target_embed(mtp, mtp.model, target)
-    assert mtp.model.embed_tokens is local_embedding
 
 
 def test_no_pp_reuses_equal_target_embedding(mtp):

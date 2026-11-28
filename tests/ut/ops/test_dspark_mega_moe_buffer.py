@@ -399,7 +399,7 @@ def test_only_channel_v41_dspark_attempts_sharing_after_native_load(
         assert model is target
         return draft
 
-    def post_process(config):
+    def post_process(config, *, target_model):
         assert config is spec.vllm_config
         entrypoint.assert_called_once_with(
             target, draft, spec.vllm_config, spec.draft_model_config, context_kv_only=kv_only
@@ -412,7 +412,7 @@ def test_only_channel_v41_dspark_attempts_sharing_after_native_load(
     draft.post_process = Mock(side_effect=post_process)
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert spec.load_draft_model(target, set()) is draft
-    draft.post_process.assert_called_once_with(spec.vllm_config)
+    draft.post_process.assert_called_once_with(spec.vllm_config, target_model=target)
     entrypoint.assert_called_once_with(
         target, draft, spec.vllm_config, spec.draft_model_config, context_kv_only=kv_only
     )

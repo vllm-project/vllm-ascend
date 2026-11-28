@@ -65,7 +65,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
+class AscendTargetDependentARSpeculator(
+    LmheadTPDraftSamplingMixin,
+    TargetDependentARSpeculator,
+):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path

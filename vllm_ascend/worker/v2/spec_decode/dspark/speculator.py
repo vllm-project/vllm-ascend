@@ -107,12 +107,11 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             context_kv_only=getattr(self, "context_kv_only", False),
         )
         if hasattr(model, "post_process"):
-            model.post_process(self.vllm_config)
+            model.post_process(self.vllm_config, target_model=target_model)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
         self._lmhead_tp_wrap_draft_logits(model)
-
         return model
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:

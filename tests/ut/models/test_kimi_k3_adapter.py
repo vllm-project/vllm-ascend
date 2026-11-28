@@ -870,11 +870,12 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
     monkeypatch.setattr("vllm_ascend.models.quarot_utils.ParallelLMHead", vocab_layer)
     config = SimpleNamespace(
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=3, hidden_size=2)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         quant_config=SimpleNamespace(
             quant_description={"optional": {"quarot": {"rotation_map": {"global_rotation": "rotation.safetensors"}}}}
         ),
     )
-    model.post_process(config)
+    model.post_process(config, target_model=nn.Module())
     assert prefixes == ["", "lm_head" if lmhead_tp else ""]
 
     torch.testing.assert_close(

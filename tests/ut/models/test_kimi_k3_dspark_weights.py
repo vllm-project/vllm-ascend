@@ -216,7 +216,7 @@ def test_checkpoint_head_survives_quarot_alignment(draft, monkeypatch, lmhead_tp
     monkeypatch.setattr(quarot_utils, "load_quarot_target_layer", target_loader)
     config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
 
-    model.post_process(config)
+    model.post_process(config, target_model=nn.Module())
 
     assert model.lm_head is original_head
     torch.testing.assert_close(model.lm_head.weight, checkpoint_head)

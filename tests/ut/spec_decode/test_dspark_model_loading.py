@@ -30,7 +30,7 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
     spec.vllm_config = config
     target = object()
     draft = SimpleNamespace(
-        post_process=lambda received: events.append(("post_process", received)),
+        post_process=lambda received, *, target_model: events.append(("post_process", (received, target_model))),
         configure_target_aux_hidden_capture=lambda received: events.append(("capture", received)),
     )
 
@@ -47,7 +47,7 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
         assert spec.load_draft_model(target, set()) is draft
     expected: list[tuple[str, object]] = [("load", config)]
     if not fail:
-        expected.extend([("post_process", config), ("capture", target)])
+        expected.extend([("post_process", (config, target)), ("capture", target)])
     assert events == expected
 
 
@@ -63,7 +63,7 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
 @pytest.mark.parametrize("rotated", [False, True])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("lmhead_tp", [False, True])
-def test_post_process_aligns_weights_without_modifying_target(
+def test_post_process_aligns_weights_without_modifying_target_weights(
     monkeypatch, model_cls, projection_name, num_aux_layers, own_embed, own_head, rotated, pp_size, lmhead_tp
 ):
     monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
@@ -89,12 +89,13 @@ def test_post_process_aligns_weights_without_modifying_target(
     original_parameter = projection.weight
     original_projection = projection.weight.detach().clone()
     config = SimpleNamespace(
-        model_config=SimpleNamespace(model="/target", hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
+        model_config=SimpleNamespace(model="/target", hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
     )
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda received: "/rotation" if rotated else None)
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda received: "/rotation" if rotated else None)
-    monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
+    monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size, is_last_rank=True))
     loader = MagicMock(return_value=rotation)
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", loader)
     created = []
@@ -113,7 +114,8 @@ def test_post_process_aligns_weights_without_modifying_target(
     monkeypatch.setattr(quarot_utils, "VocabParallelEmbedding", make_layer)
     monkeypatch.setattr(quarot_utils, "ParallelLMHead", make_layer)
     monkeypatch.setattr(quarot_utils, "load_quarot_target_layer", load_layer)
-    draft.post_process(config)
+    target = SimpleNamespace(model=SimpleNamespace(embed_tokens=target_embed), lm_head=target_head)
+    draft.post_process(config, target_model=target)
     assert projection.weight is original_parameter
 
     torch.testing.assert_close(target_embed.weight, target_embed_before)
@@ -161,7 +163,7 @@ def test_dflash2_without_aux_hidden_states_requires_unrotated_target(monkeypatch
 
     expected_error = "DFlash2 with a QuaRot target requires auxiliary hidden states."
     with pytest.raises(ValueError, match=expected_error) if rotated else nullcontext():
-        draft.post_process(config)
+        draft.post_process(config, target_model=torch.nn.Module())
     align.assert_not_called()
 
 

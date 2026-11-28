@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Shared QuaRot weight-alignment helpers for draft models.
+"""Shared weight-alignment and embedding helpers for draft models.
 
 This module must stay importable independently of any DSpark/DFlash
 model module; do not import model classes here.
@@ -15,7 +15,10 @@ import torch
 from safetensors import safe_open
 from torch import nn
 from vllm.distributed import get_pp_group
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -131,8 +134,36 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
+def _shares_embedding(candidate, embedding):
+    candidate = candidate.base_layer if isinstance(candidate, BaseLayerWithLoRA) else candidate
+    embedding = embedding.base_layer if isinstance(embedding, BaseLayerWithLoRA) else embedding
+    weight = getattr(embedding, "weight", None)
+    return candidate is embedding or (weight is not None and getattr(candidate, "weight", None) is weight)
+
+
+def _target_uses_embedding(target_model, language_model, embedding, text_config):
+    return getattr(text_config, "tie_word_embeddings", False) or _shares_embedding(
+        get_target_lm_head(target_model, language_model), embedding
+    )
+
+
+def _release_target_embedding_after_rotation(target_model, vllm_config):
+    # The target config keeps the real PP size when the draft runs as a single stage.
+    if vllm_config.parallel_config.pipeline_parallel_size <= 1 or not get_pp_group().is_last_rank:
+        return
+
+    language_model = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
+    target_inner = getattr(language_model, "model", language_model)
+    embedding = getattr(target_inner, "embed_tokens", None)
+    if embedding is None or isinstance(embedding, PPMissingLayer):
+        return
+    if _target_uses_embedding(target_model, language_model, embedding, vllm_config.model_config.hf_text_config):
+        return
+    target_inner.embed_tokens = PPMissingLayer()
+
+
 @torch.no_grad()
-def align_draft_weights(model, projection, vllm_config):
+def align_draft_weights(model, projection, vllm_config, *, target_model):
     """Align draft inputs with the rotated target without modifying shared weights."""
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is not None:
@@ -174,3 +205,5 @@ def align_draft_weights(model, projection, vllm_config):
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
+        if name == "embed_tokens" and rotation is not None:
+            _release_target_embedding_after_rotation(target_model, vllm_config)

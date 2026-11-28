@@ -172,7 +172,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # QuaRot targets require draft weights to be aligned after sharing
         # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
-            model.post_process(self.vllm_config)
+            model.post_process(self.vllm_config, target_model=target_model)
         return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):

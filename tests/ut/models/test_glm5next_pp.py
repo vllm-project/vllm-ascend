@@ -86,7 +86,7 @@ def test_spec_decode_pp_embedding_is_loaded_by_target(monkeypatch, pp_rank, draf
     group = SimpleNamespace(is_first_rank=pp_rank == 0, is_last_rank=pp_rank == 2, world_size=3)
     monkeypatch.setattr(glm5next_model, "get_pp_group", lambda: group)
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
-    # v0.33.0 imports this helper directly; newer vLLM uses in_single_pp_stage.
+    # Older vLLM pins import this helper directly; main uses in_single_pp_stage.
     if hasattr(eagle_utils, "get_pp_group"):
         monkeypatch.setattr(eagle_utils, "get_pp_group", lambda: group)
     monkeypatch.setattr(glm5next_model, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -111,7 +111,7 @@ def test_spec_decode_pp_embedding_is_loaded_by_target(monkeypatch, pp_rank, draf
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
         speculative_config=(
-            # v0.33.0 checks the method; the main pin checks these capabilities.
+            # vLLM checks draft_model_config.may_use_target_embed (and uses_target_hidden_states).
             SimpleNamespace(
                 method="dflash",
                 uses_target_hidden_states=True,
