@@ -28,6 +28,10 @@ vLLM Ascend follows upstream vLLM's **speculator-verifier** architecture for spe
 
 See [DFlash](#dflash) for draft checkpoint and graph requirements, [Sampling Configuration](#sampling-configuration) for verification constraints, and [Other Speculative Decoding Settings](#other-speculative-decoding-settings) for deployment limits.
 
+!!! warning
+
+    If decode uses FIA with the TND layout, set `num_speculative_tokens` to at most `15`.
+
 ## Feature Usage
 
 ### Configuration Examples
