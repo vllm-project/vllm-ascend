@@ -47,6 +47,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
+from .ple_embedding import ExternalPLEWeightsMixin, shared_ple_config
 from .topk_buffer import share_target_topk_buffers
 
 if TYPE_CHECKING:
@@ -199,10 +200,14 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 
-class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
+class AscendQwen4ExpForCausalLM(ExternalPLEWeightsMixin, upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        shared_ple_config(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def process_weights_after_loading(self) -> None:
         parent_hook = getattr(super(), "process_weights_after_loading", None)
@@ -243,10 +248,16 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
     info=AscendQwen4ExpProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
+class AscendQwen4ExpForConditionalGeneration(
+    ExternalPLEWeightsMixin, _AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration
+):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
+        shared_ple_config(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def process_weights_after_loading(self) -> None:
         parent_hook = getattr(super(), "process_weights_after_loading", None)

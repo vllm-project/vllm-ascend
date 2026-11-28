@@ -52,6 +52,43 @@ def test_host_lookup(graph):
         table.close()
 
 
+@pytest.mark.parametrize("graph", [False, True])
+def test_host_lookup_global_rows(graph):
+    torch.npu.set_device(0)
+    rows, width, start = 512, 160, 37
+    table = HostUvaBuffer((rows, width), torch.bfloat16, "npu:0", "_host_table", torch.nn.Module())
+    try:
+        values = torch.arange(rows * width).reshape(rows, width).remainder(127).bfloat16()
+        assert table.tensor is not None
+        assert table.ptrs is not None
+        table.tensor.copy_(values)
+        ids = torch.tensor([[start - 1, start, 200, rows - 1, rows, -1]], device="npu")
+        output = torch.empty((1, 6, width), dtype=torch.bfloat16, device="npu")
+
+        def run():
+            lookup(table.ptrs, ids, output, start, rows, 1 << 22, global_rows=True)
+
+        for _ in range(3):
+            run()
+        torch.npu.synchronize()
+        capture = torch.npu.NPUGraph() if graph else None
+        if graph:
+            with torch.npu.graph(capture):
+                run()
+        for shift in (0, 3, -2):
+            host_ids = torch.tensor([[start - 1, start, 200, rows - 1, rows, -1]]) + shift
+            ids.copy_(host_ids)
+            output.fill_(float("nan"))
+            capture.replay() if graph else run()
+            owned = (host_ids >= start) & (host_ids < rows)
+            expected = torch.where(owned.unsqueeze(-1), values[host_ids.clamp(0, rows - 1)], 0)
+            torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+        if capture:
+            capture.reset()
+    finally:
+        table.close()
+
+
 def test_embedding_close_after_graph_releases_host_owner():
     torch.npu.set_device(0)
     embedding = object.__new__(AscendPLEHostEmbedding)

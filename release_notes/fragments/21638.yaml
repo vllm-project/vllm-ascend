@@ -1,0 +1,6 @@
+pr: 21638
+entries:
+  - category: feature
+    text: Added opt-in sharing of a BF16 Qwen PLE table across independent Ascend service instances.
+  - category: bugfix
+    text: Bounded HIXL communication resource file reads before enforcing the 1 MiB limit.

@@ -63,7 +63,7 @@ def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results
     obj.tp_size = 4
     obj.reduce_results = reduce_results
     obj.parallel_group = SimpleNamespace(all_reduce=Mock(side_effect=lambda x: x + 1))
-    monkeypatch.setattr(ple_lookup, "lookup", lambda ptrs, ids, out, *args: out.fill_(2))
+    monkeypatch.setattr(ple_lookup, "lookup", lambda ptrs, ids, out, *args, **kwargs: out.fill_(2))
     monkeypatch.setattr(
         ple_lookup_quantized, "lookup_quantized", lambda ptrs, scales, ids, out, *args, **kwargs: out.fill_(2)
     )
@@ -228,7 +228,7 @@ def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch):
     obj._host_table = SimpleNamespace(ptrs=None)
     ids = torch.zeros((3, 16), dtype=torch.int64)
     output = torch.empty((3, 16, 160), dtype=torch.bfloat16)
-    lookup = Mock(side_effect=lambda ptrs, ids, out, *args: out.fill_(2))
+    lookup = Mock(side_effect=lambda ptrs, ids, out, *args, **kwargs: out.fill_(2))
     monkeypatch.setattr(ple_lookup, "lookup", lookup)
     result = obj._lookup(input_ids=ids, output=output)
     assert result.shape == (3, 16, 160) and result.dtype == torch.bfloat16

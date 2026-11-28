@@ -16,7 +16,7 @@ import torch
 from .shared_host import MappedHostBuffer, MappingCleanupError, MemfabricRuntime
 
 SCHEMA = 2
-DTYPES = {"int8": torch.int8, "float32": torch.float32}
+DTYPES = {"int8": torch.int8, "float32": torch.float32, "bfloat16": torch.bfloat16}
 MAX_CONTROL_BYTES = 1 << 20
 # Keep failed startup rollbacks alive until process exit; EOF is not a safe release.
 _failed_startup_cleanups: list[Callable[[], None]] = []
@@ -44,13 +44,40 @@ def _close_all(items):
         raise first_error
 
 
+_PLE_INDEX_NAMES = (
+    "model.safetensors.index.json",
+    "quant_model_weights.safetensors.index.json",
+)
+
+
+def ple_checkpoint_index(root):
+    """Return the index file that describes the PLE table, if one exists."""
+    root = Path(root)
+    candidates = [root / name for name in _PLE_INDEX_NAMES if (root / name).is_file()]
+    for path in candidates:
+        mapping = json.loads(path.read_text()).get("weight_map", {})
+        if any(".ple.ple_embedding.ngram_embedding.shard_" in name for name in mapping):
+            return path
+    return candidates[0] if candidates else None
+
+
+def has_ple_checkpoint(root):
+    index = ple_checkpoint_index(root)
+    if index is None:
+        return False
+    mapping = json.loads(index.read_text()).get("weight_map", {})
+    return any(".ple.ple_embedding.ngram_embedding.shard_" in name for name in mapping)
+
+
 def checkpoint_identity(root):
     """Hash config and index, not tensor payloads; use with an immutable model ref."""
     root = Path(root)
     digest = hashlib.sha256()
-    for name in ("config.json", "quant_model_weights.safetensors.index.json"):
-        digest.update(name.encode())
-        digest.update((root / name).read_bytes())
+    for name in ("config.json", *_PLE_INDEX_NAMES):
+        path = root / name
+        if path.is_file():
+            digest.update(name.encode())
+            digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
@@ -171,7 +198,7 @@ class SharedPoolOwner:
             raise ValueError("Cannot add to a published pool or duplicate a tensor")
         name = str(dtype).removeprefix("torch.")
         if name not in DTYPES:
-            raise ValueError("Only INT8 codes and FP32 scales are supported")
+            raise ValueError("Only INT8, FP32 and BF16 tensors are supported")
         if self.runtime is None:
             settings = self.manifest["memfabric"]
             self.runtime = MemfabricRuntime.acquire(

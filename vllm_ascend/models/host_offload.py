@@ -18,10 +18,12 @@ _ACTIVE_HOST_OFFLOAD_OWNERS: ContextVar[list[HostOffloadOwner] | None] = Context
 )
 
 
-def register_host_offload_owner(owner: HostOffloadOwner) -> None:
+def register_host_offload_owner(owner: HostOffloadOwner) -> bool:
     owners = _ACTIVE_HOST_OFFLOAD_OWNERS.get()
     if owners is not None:
         owners.append(owner)
+        return True
+    return False
 
 
 @contextmanager

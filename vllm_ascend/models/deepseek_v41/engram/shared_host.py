@@ -94,8 +94,8 @@ class MappedHostBuffer:
     """
 
     def __init__(self, runtime, object_id, rows, width, dtype, *, owner, owner_rank=None):
-        if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32):
-            raise ValueError("Shared Engram requires positive INT8/FP32 dimensions")
+        if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32, torch.bfloat16):
+            raise ValueError("Shared Engram requires positive INT8/FP32/BF16 dimensions")
         if not 0 <= object_id < 64 or object_id in runtime.objects:
             raise ValueError("Duplicate or invalid MemFabric Engram object id")
         self.runtime, self.object_id = runtime, object_id
