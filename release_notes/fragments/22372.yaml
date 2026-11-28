@@ -1,0 +1,7 @@
+pr: 22372
+entries:
+  - category: performance
+    text: >-
+      Reduced Qwen MoE gating overhead on Ascend by using the native FP32
+      top-k renormalization path instead of separate reduction and division
+      operators.
