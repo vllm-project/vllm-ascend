@@ -285,3 +285,6 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
+
+# CPU tokenizer regression tests (moved from model E2E coverage)
+/tests/ut/test_tokenizers.py @wenjun91
