@@ -105,10 +105,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         # Keep expert-aware loaders attached for later online weight updates.
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w13_weight", w13_data)
+        replace_parameter(layer, "w13_weight", w13_data, prefer_copy=True)
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w2_weight", w2_data)
+        replace_parameter(layer, "w2_weight", w2_data, prefer_copy=True)
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
