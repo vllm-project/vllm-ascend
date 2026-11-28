@@ -246,8 +246,6 @@ class AscendSFAIndexerMetadata:
 class AscendSFAIndexerCache(DeepseekV32IndexerCache):
     """Cache owner whose storage spec is supplied by its indexer backend."""
 
-    align_kv_cache_with_mamba = False
-
     def __init__(self, source: nn.Module, spec: AscendSFAIndexerCacheSpec, backend_cls: type[AttentionBackend]) -> None:
         nn.Module.__init__(self)
         self.prefix = source.prefix

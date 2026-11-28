@@ -1146,7 +1146,6 @@ def test_gqa_pcp_cache_keeps_tp_local_kv_heads(monkeypatch):
     )
     layer = SimpleNamespace(
         kv_sharing_target_layer_name=None,
-        align_kv_cache_with_mamba=True,
         is_draft_layer=False,
         get_kv_cache_spec=lambda _config: source_spec,
         get_attn_backend=lambda: AscendAttentionBackend,
@@ -1193,7 +1192,6 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
     )
     layer = SimpleNamespace(
         kv_sharing_target_layer_name=None,
-        align_kv_cache_with_mamba=True,
         is_draft_layer=is_draft_layer,
         get_kv_cache_spec=lambda _config: source_spec,
         get_attn_backend=lambda: AscendAttentionBackend,
@@ -2616,10 +2614,14 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
 
 
 @pytest.mark.parametrize("indexer_dtype,indexer_scale_dim", [(torch.bfloat16, 0), (torch.int8, 1)])
-def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_dtype, indexer_scale_dim):
+def test_sparse_hybrid_planner_preserves_native_component_pages(indexer_dtype, indexer_scale_dim):
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
     specs = {
-        "main": AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16),
-        "indexer": AscendSFAIndexerCacheSpec(
+        "model.layers.0.self_attn.attn": AscendMLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        ),
+        "model.layers.0.self_attn.indexer.k_cache": AscendSFAIndexerCacheSpec(
             block_size=128,
             num_kv_heads=1,
             head_size=128,
@@ -2627,14 +2629,29 @@ def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_d
             scale_dim=indexer_scale_dim,
             scale_dtype=torch.float16,
         ),
+        "model.layers.1.linear_attn": MambaSpec(
+            block_size=128,
+            shapes=((32,), (147456 // 8,)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=147456,
+        ),
     }
-    original = dict(specs)
-    attn_utils._align_hybrid_attention_page_sizes(specs, minimum_page_size=800000)
-    # PR4's paired planner aligns recurrent states to main pages separately.
-    # Enlarging token blocks to equalize MLA/indexer bytes changes ownership.
-    assert specs == original
-    assert specs["main"].page_size_bytes == 147456
-    assert specs["indexer"].page_size_bytes == (32768 if indexer_scale_dim == 0 else 16640)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=4096,
+            supports_kv_cache_grouping=False,
+            hf_config=SimpleNamespace(model_type="kimi_k31"),
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+    member_specs = groups[0].kv_cache_spec.kv_cache_specs
+    assert member_specs["model.layers.0.self_attn.attn"].page_size_bytes == 147456
+    assert member_specs["model.layers.0.self_attn.indexer.k_cache"].page_size_bytes == (
+        32768 if indexer_scale_dim == 0 else 16640
+    )
 
 
 def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
@@ -3528,42 +3545,26 @@ def _step5_ring_spec() -> CircularBufferSpec:
     )
 
 
-def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers() -> None:
+def test_step5_planner_preserves_sparse_summary_pages() -> None:
+    from vllm_ascend.models.step5.cache_config import get_step5_kv_cache_groups
+
     specs = {
         STEP5_L0: _step5_main_spec(),
         "model.layers.1.self_attn": _step5_sw_spec(),
-        # 3840-byte fp8 page: indivisible against the 96 KiB main page and a
-        # different K/V size ratio, so alignment would refuse this layer.
         STEP5_SUMMARY: FullAttentionSpec(
             block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
         ),
     }
-    summary_before = specs[STEP5_SUMMARY]
-
-    attn_utils._align_hybrid_attention_page_sizes(specs)
-
-    # Dense layers still align: the sliding-window page doubles its block
-    # to reach the main page.
-    assert specs["model.layers.1.self_attn"].block_size == 2 * STEP5_BLOCK
-    assert specs["model.layers.1.self_attn"].real_page_size_bytes == STEP5_MAIN_PAGE
-    assert specs[STEP5_L0].block_size == STEP5_BLOCK
-    # The auxiliary summary page is left exactly as the planner wrote it.
-    assert specs[STEP5_SUMMARY] is summary_before
-    assert specs[STEP5_SUMMARY].block_size == STEP5_BLOCK
-    assert specs[STEP5_SUMMARY].real_page_size_bytes == 3840
-
-
-def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page() -> None:
-    """Without the aux-name exclusion the same geometry must fail, pinning
-    that the suffix filter (not the geometry) spares the summary layers."""
-    specs = {
-        STEP5_L0: _step5_main_spec(),
-        "model.layers.3.self_attn": FullAttentionSpec(
-            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
-        ),
-    }
-    with pytest.raises(ValueError, match="Cannot align"):
-        attn_utils._align_hybrid_attention_page_sizes(specs)
+    groups = get_step5_kv_cache_groups(
+        SimpleNamespace(),
+        specs,
+        lambda _cfg, main: [KVCacheGroupSpec([n], s) for n, s in main.items()],
+    )
+    assert groups is not None
+    summary_group_specs = groups[0].kv_cache_spec.kv_cache_specs
+    assert summary_group_specs[STEP5_SUMMARY].block_size == STEP5_BLOCK
+    assert summary_group_specs[STEP5_SUMMARY].real_page_size_bytes == 3840
+    assert groups[1].kv_cache_spec.page_size_bytes == STEP5_MAIN_PAGE // 2
 
 
 def _step5_tensors_and_groups():

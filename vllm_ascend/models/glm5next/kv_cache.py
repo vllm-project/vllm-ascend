@@ -68,10 +68,6 @@ def format_indexer_kpool_slot_mapping(
 class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
     """Independently allocated compressed-K cache for the GLM-Next indexer."""
 
-    # Auxiliary caches use the GLM-specific small-page class instead of the
-    # generic attention/Mamba page-size class.
-    align_kv_cache_with_mamba = False
-
     def __init__(
         self,
         *,
@@ -131,8 +127,6 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
 
 class Glm5NextTailCache(nn.Module, AttentionLayerBase):
     """Fixed per-request FP32 ring containing raw keys and gate scores."""
-
-    align_kv_cache_with_mamba = False
 
     def __init__(
         self,

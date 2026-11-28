@@ -1142,20 +1142,25 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
 #    Why:
-#       The current v2 worker still goes through the shared upstream v1 helper
-#       to build KV cache specs. For Ascend MLA layers that helper returns the
-#       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
-#       logic expects `AscendMLAAttentionSpec`.
-#    How：
-#       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
-#       upstream behavior while MLA layers are rewritten to
-#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
+#       Spec customization, HiSparse owner state, MXFP layout selection,
+#       model planner alignment, and dense K/V split validation now live with
+#       their respective owners/planners/reshape paths rather than in the
+#       collector. Only two narrow Ascend deltas remain relative to upstream
+#       `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`: (a) dispatching
+#       HiSparse post-processing through `resolve_ascend_hisparse_specs`, and
+#       (b) the temporary draft SWA `skip_page_size_padded` guard until
+#       upstream U2 lands.
+#    How:
+#       Monkey-patch `get_kv_cache_spec` with the upstream loop plus the
+#       HiSparse resolver and temporary draft SWA fallback, without any
+#       cross-layer Mamba alignment or owner flag sniffing.
 #    Related PR (if no, explain why):
-#       No. This is a plugin-side compatibility patch for the current upstream
-#       helper path.
+#       Follows the upstream `get_kv_cache_spec` parity series (PR-A1/A2/B/C/E/D);
+#       pending upstream U2 (draft SWA `skip_page_size_padded`) and U3
+#       (`resolve_kv_cache_layout` hybrid check).
 #    Future Plan:
-#       Remove this patch once upstream adds a backend hook for KV cache spec
-#       construction or v2 worker no longer depends on the shared v1 helper.
+#       Remove the `get_kv_cache_spec` patch in PR-F once upstream U2 lands and
+#       HiSparse exposes an upstream binding hook.
 #
 #   2. `DeepseekV32IndexerCache.get_attn_backend`
 #    Why:
