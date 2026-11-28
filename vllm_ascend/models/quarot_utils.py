@@ -143,11 +143,15 @@ def _shares_embedding(candidate, embedding):
     return candidate is embedding or (weight is not None and getattr(candidate, "weight", None) is weight)
 
 
+def _target_uses_embedding(target_model, language_model, embedding, text_config):
+    return getattr(text_config, "tie_word_embeddings", False) or _shares_embedding(
+        get_target_lm_head(target_model, language_model), embedding
+    )
+
+
 def _unused_target_embed_owner(target_model, vllm_config):
     # The target config keeps the real PP size when the draft runs as a single stage.
     if vllm_config.parallel_config.pipeline_parallel_size <= 1 or not get_pp_group().is_last_rank:
-        return None
-    if getattr(vllm_config.model_config.hf_text_config, "tie_word_embeddings", False):
         return None
 
     language_model = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
@@ -155,7 +159,7 @@ def _unused_target_embed_owner(target_model, vllm_config):
     embedding = getattr(target_inner, "embed_tokens", None)
     if embedding is None or isinstance(embedding, PPMissingLayer):
         return None
-    if _shares_embedding(get_target_lm_head(target_model, language_model), embedding):
+    if _target_uses_embedding(target_model, language_model, embedding, vllm_config.model_config.hf_text_config):
         return None
     return target_inner
 
