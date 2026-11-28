@@ -35,6 +35,54 @@ def mock_scatter_nd_update(monkeypatch):
     monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
 
 
+def test_fused_decode_publishes_indices_and_preserves_connector_order(monkeypatch):
+    hidden = torch.ones(2, 4)
+    output = torch.empty_like(hidden)
+    cache = (torch.zeros(1),)
+    slots = torch.tensor([0, -1], dtype=torch.int32)
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly, slot_mapping=slots, cos=None, sin=None)
+    calls: list[str | tuple[str, str]] = []
+    indices = torch.arange(2 * 2176, dtype=torch.int32).reshape(2, 2176)
+    shared_indices = torch.full((3, 2051), -1, dtype=torch.int32)
+
+    def kernel():
+        calls.append("kernel")
+        output.copy_(hidden)
+
+    binding = MagicMock(return_value=(kernel, (), indices))
+    impl = SimpleNamespace(
+        _parallel_o_proj=None,
+        o_proj=None,
+        enable_sparse_sfa_turboquant=False,
+        qk_rope_head_dim=0,
+        g_proj=None,
+        _compose_sfa_kv_cache=lambda caches: caches,
+        _get_sfa_kv_slot_mapping=lambda md: md.slot_mapping,
+        _get_indexer_attn_metadata=lambda: None,
+        _tilelang_decode=SimpleNamespace(bind=binding),
+        layerwise_kv_cache_hook=None,
+        indexer=SimpleNamespace(impl=SimpleNamespace(topk_indices_buffer=shared_indices)),
+        topk_indices_buffer=shared_indices,
+        use_index_cache=True,
+        layer_name="layer",
+    )
+    impl._forward_impl = AscendSFAImpl._forward_impl.__get__(impl)
+    monkeypatch.setattr(
+        sparse_mla, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL)
+    )
+    monkeypatch.setattr(sparse_mla, "wait_for_kv_layer_from_connector", lambda name: calls.append(("wait", name)))
+    monkeypatch.setattr(sparse_mla, "attention_transfer_window", nullcontext)
+    monkeypatch.setattr(sparse_mla, "notify_kv_cache_written", lambda name: calls.append(("written", name)))
+    monkeypatch.setattr(
+        sparse_mla, "maybe_save_kv_layer_to_connector", lambda name, values: calls.append(("save", name))
+    )
+    assert AscendSFAImpl.forward(impl, "layer", hidden, cache, metadata, output) is output
+    assert calls == [("wait", "layer"), "kernel", ("written", "layer"), ("save", "layer")]
+    assert torch.equal(output, hidden)
+    assert torch.equal(shared_indices[:2], indices[:, :2051])
+    assert (shared_indices[2] == -1).all()
+
+
 @pytest.mark.parametrize("block_size", [128, 640])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])

@@ -840,6 +840,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    _use_tilelang_decode = False
+    _tilelang_decode = None
+
     # SFA consumes top-k indices itself and has no native dense-MHA entrypoint.
     is_sparse: ClassVar[bool] = True
     supports_dense_mha_prefill: bool = False
@@ -984,6 +987,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
         # The draft cache dtype can differ from the target config.
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
+        self._use_tilelang_decode = (
+            type(self) is AscendSFAImpl
+            and self.kv_cache_dtype == "fp8"
+            and ascend_config.ascend_fusion_config.fusion_ops_sfa_decode
+        )
         self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
         self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
         if self.enable_sparse_sfa_c8:
@@ -1134,6 +1142,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.has_indexer:
             self.indexer.process_weights_after_loading()
+
+        if self._use_tilelang_decode:
+            from vllm_ascend.ops.tilelang.sfa_decode.runtime import prepare_decode_layer
+
+            self._tilelang_decode = prepare_decode_layer(self)
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
@@ -2280,6 +2293,29 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
         indexer_attn_metadata = self._get_indexer_attn_metadata()
+
+        if self._tilelang_decode is not None and attn_metadata.attn_state in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        ):
+            bound = self._tilelang_decode.bind(
+                hidden_states, output, kv_cache[0], slot_mapping_sfa, attn_metadata, indexer_attn_metadata
+            )
+            if bound is not None:
+                kernel, args, indices = bound
+                wait_for_kv_layer_from_connector(layer_name)
+                if self.layerwise_kv_cache_hook is not None:
+                    self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+                with attention_transfer_window():
+                    kernel(*args)
+                dest = self.indexer.impl.topk_indices_buffer
+                if dest is not None and dest.data_ptr() != indices.data_ptr():
+                    dest[: len(indices)].copy_(indices[:, : dest.shape[1]])
+                if self.use_index_cache and self.topk_indices_buffer is not dest:
+                    self._update_indexcache_topk_indices(indices[:, :2051])
+                notify_kv_cache_written(self.layer_name or "")
+                maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+                return output
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens

@@ -1,0 +1,5 @@
+pr: 23145
+entries:
+  - category: feature
+    text: >-
+      The experimental `ascend_fusion_config.fusion_ops_sfa_decode` switch enables fused SFA decode for GLM-5.3-Flash MTP5 target verification on Ascend 950. It defaults to false. It requires a separately supplied Ascend TileLang toolchain and is unsupported by the current official vLLM Ascend software stack.
