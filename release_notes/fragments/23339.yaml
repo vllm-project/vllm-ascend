@@ -1,0 +1,8 @@
+pr: 00000
+entries:
+  - category: documentation
+    text: >-
+      Added an experimental MiniCPM-2B-dpo-bf16 deployment guide for Atlas A2,
+      covering single-node serving with TP=1 and TP=2, functional verification,
+      offline inference, and lm-eval accuracy evaluation (GSM8K and C-Eval).
+      TP=8 is not available because the model has 36 attention heads.

@@ -135,6 +135,7 @@ TITLES = {
         "en": "MiniMax-M3.1-Flash",
         "zh": "MiniMax-M3.1-Flash",
     },
+    "tutorials/models/MiniCPM-2B-dpo-bf16.md": {"en": "MiniCPM-2B-dpo-bf16", "zh": "MiniCPM-2B-dpo-bf16"},
     "tutorials/models/Minitron-8B-Base.md": {"en": "Minitron-8B-Base", "zh": "Minitron-8B-Base"},
     "tutorials/models/Mixtral-8x7B-Instruct-v0.1.md": {
         "en": "Mixtral-8x7B-Instruct-v0.1",
