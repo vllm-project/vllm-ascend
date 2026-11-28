@@ -2109,6 +2109,14 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 9 Performance Tuning
 
+On Ascend A5, HiSparse can replay cold-page Decode in a separate FULL ACLGraph for a
+single-request GLM-5.3-Flash service. The existing options for this path are
+`--max-num-seqs 1`, MTP5, `FULL_DECODE_ONLY`, FP8 KV and indexer caches, and
+HiSparseConnector. Disable prefix caching and async scheduling for this path.
+A uniform six-token Decode step with nonresident context uses the refill graph
+when that graph has been captured. A resident step uses the existing paged
+attention graph. Other batch shapes follow the existing dispatch rules.
+
 ### 9.1 Recommended Configurations {: #91-atlas-800i-a3-pd-optimizations }
 
 The following settings are used in the A3 series reference

@@ -449,6 +449,11 @@ class NPUWorker(GPUWorker):
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
+        graph_manager = getattr(getattr(self, "model_runner", None), "cudagraph_manager", None)
+        if getattr(graph_manager, "has_hisparse_refill_graph", False) is True:
+            # Retire captured kernels before invalidating their mapped Host pointer.
+            self.synchronize_device()
+            graph_manager.release_graphs()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
         if ensure_ec_transfer_shutdown is not None:

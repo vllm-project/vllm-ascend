@@ -11,6 +11,8 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.worker.v2 import aclgraph_utils
+from vllm_ascend.worker.v2.aclgraph_utils import BatchExecutionDescriptor, ModelAclGraphManager, ModelCudaGraphManager
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
     CudaGraphManager,
@@ -550,3 +552,59 @@ def test_multi_module_param_source_keeps_fia_parameters():
     assert isinstance(source, SharedSource)
     assert source.params is params
     speculator.build_fia_params.assert_called_once_with(2, metadata, False, num_tokens=4)
+
+
+def test_hisparse_refill_captures_separate_graph_and_preserves_resident_dispatch():
+    mode = CUDAGraphMode.FULL_DECODE_ONLY
+    resident = BatchExecutionDescriptor(CUDAGraphMode.FULL, 6, 1, uniform_token_count=6)
+    descriptors = {CUDAGraphMode.FULL: [resident]}
+
+    def init_manager(self, config, *args, **kwargs):
+        self.vllm_config = config
+        self.cudagraph_mode = mode
+        self._capture_descs = descriptors
+        self._capture_mem_samples = []
+        self._graphs_captured = False
+        self.graphs = {}
+        self._decode_descs = {(6, 0, 1): [None, resident]}
+        self._candidates = {}
+        self.lora_capture_cases = [0]
+
+    def capture_graphs(self, *args, **kwargs):
+        for desc in self._capture_descs[CUDAGraphMode.FULL]:
+            assert desc not in self.graphs
+            self.graphs[desc] = object()
+        self._graphs_captured = True
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=1, async_scheduling=False),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        model_config=SimpleNamespace(enable_sleep_mode=False),
+        lora_config=None,
+        kv_transfer_config=SimpleNamespace(kv_connector="HiSparseConnector"),
+        num_speculative_tokens=5,
+        speculative_config=SimpleNamespace(enable_adaptive_verification=False),
+    )
+    with (
+        patch.object(ModelCudaGraphManager, "__init__", init_manager),
+        patch.object(ModelCudaGraphManager, "capture", capture_graphs),
+        patch.object(ModelCudaGraphManager, "_resolve_effective_loras", side_effect=lambda count: count),
+        patch.object(aclgraph_utils.expert_offload, "prepare_graph_capture"),
+        patch.object(aclgraph_utils, "set_graph_params"),
+        patch.object(aclgraph_utils, "communicator_switch", nullcontext),
+        patch.object(aclgraph_utils, "supports_pooled_hisparse", return_value=True, create=True),
+    ):
+        manager = ModelAclGraphManager(config, torch.device("cpu"), mode, {6: 1}, SimpleNamespace(update_stream=None))
+        manager.capture(torch.nn.Identity(), SimpleNamespace(), None, None, None, [], None)
+        assert manager._capture_descs is descriptors
+        assert len(manager.graphs) == 2
+        assert manager.dispatch(1, 6, 6, 0) is resident
+
+        manager.force_eager_target = True
+        manager.hisparse_refill_step = True
+        refill = manager.dispatch(1, 6, 6, 0)
+        assert refill != resident and refill.cg_mode == CUDAGraphMode.FULL
+        assert refill in manager.graphs
+        assert manager.dispatch(1, 5, 5, 0).cg_mode == CUDAGraphMode.NONE
+        manager.release_graphs()
+        assert manager.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.NONE

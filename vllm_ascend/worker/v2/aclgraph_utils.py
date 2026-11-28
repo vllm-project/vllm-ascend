@@ -47,6 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.hisparse import HISPARSE_GROUPED_QUERY_LEN, hisparse_refill_capture, supports_pooled_hisparse
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -90,6 +91,10 @@ class AscendGraphManagerMixin:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config, key_fn=key_fn)
 
 
+class HiSparseRefillDescriptor(BatchExecutionDescriptor):
+    """Same execution shape as the resident graph, with a distinct graph key."""
+
+
 class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
@@ -118,11 +123,50 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         self.force_eager_target = False
+        self.hisparse_refill_step = False
+        self._hisparse_refill_desc = self._get_hisparse_refill_descriptor()
         self.update_stream = self.model_runner.update_stream
         expert_offload.prepare_graph_capture(self, super().needs_capture)
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def _get_hisparse_refill_descriptor(self) -> HiSparseRefillDescriptor | None:
+        config = self.vllm_config
+        transfer = config.kv_transfer_config
+        if (
+            self.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+            or config.scheduler_config.max_num_seqs != 1
+            or config.scheduler_config.async_scheduling
+            or config.cache_config.enable_prefix_caching
+            or config.model_config.enable_sleep_mode
+            or config.lora_config is not None
+            or transfer is None
+            or transfer.kv_connector != "HiSparseConnector"
+            or config.num_speculative_tokens + 1 != HISPARSE_GROUPED_QUERY_LEN
+            or getattr(config.speculative_config, "enable_adaptive_verification", False)
+            or not supports_pooled_hisparse(config)
+        ):
+            return None
+
+        for desc in self._capture_descs.get(CUDAGraphMode.FULL, ()):
+            if (
+                desc.num_tokens == desc.uniform_token_count == HISPARSE_GROUPED_QUERY_LEN
+                and desc.num_reqs == desc.num_ubatches == 1
+                and desc.num_active_loras == 0
+            ):
+                return HiSparseRefillDescriptor(
+                    cg_mode=CUDAGraphMode.FULL,
+                    num_tokens=desc.num_tokens,
+                    num_reqs=desc.num_reqs,
+                    uniform_token_count=desc.uniform_token_count,
+                    max_query_len=desc.max_query_len,
+                )
+        return None
+
+    @property
+    def has_hisparse_refill_graph(self) -> bool:
+        return self._hisparse_refill_desc is not None and self._hisparse_refill_desc in self.graphs
 
     def dispatch(
         self,
@@ -134,6 +178,15 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         if self.force_eager_target:
+            if (
+                self.hisparse_refill_step
+                and (refill_desc := self._hisparse_refill_desc) is not None
+                and refill_desc in self.graphs
+                and num_reqs == num_ubatches == 1
+                and num_tokens == uniform_token_count == refill_desc.num_tokens
+                and num_active_loras == 0
+            ):
+                return refill_desc
             # FULL_DECODE_ONLY has no mixed-graph candidate.
             uniform_token_count = max_query_len = None
         return super().dispatch(
@@ -148,6 +201,8 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
+        if isinstance(desc, HiSparseRefillDescriptor):
+            logger.info_once("[hisparse] Replaying FULL target with cold Q6 refill", scope="process")
         assert self.update_stream is not None
         with set_current_vllm_config(self.vllm_config):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
@@ -245,7 +300,7 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         model = ModelWithContext(model, device_metadata=metadata)
         try:
             with communicator_switch():
-                return super().capture(
+                capture_args = (
                     model,
                     model_state,
                     input_buffers,
@@ -253,11 +308,27 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
                     block_tables,
                     attn_groups,
                     kv_cache_config,
+                )
+                capture_kwargs = dict(
                     pcp_manager=pcp_manager,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
                 )
+                super().capture(*capture_args, **capture_kwargs)
+                if refill_desc := self._hisparse_refill_desc:
+                    # Capture the same Q6 inputs into a distinct graph. Keep the
+                    # additional allocation in the measured graph memory delta.
+                    descriptors, samples = self._capture_descs, self._capture_mem_samples
+                    self._capture_descs = {CUDAGraphMode.FULL: [refill_desc]}
+                    self._capture_mem_samples = None
+                    scope = hisparse_refill_capture.set(True)
+                    try:
+                        super().capture(*capture_args, **capture_kwargs)
+                    finally:
+                        hisparse_refill_capture.reset(scope)
+                        self._capture_descs, self._capture_mem_samples = descriptors, samples
+                    logger.info_once("[hisparse] Captured separate FULL Q6 refill graph", scope="process")
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:

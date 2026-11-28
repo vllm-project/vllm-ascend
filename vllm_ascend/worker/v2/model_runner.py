@@ -104,6 +104,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
     make_d2h_plan_launch_hook,
 )
+from vllm_ascend.hisparse import HISPARSE_GROUPED_QUERY_LEN
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
@@ -132,7 +133,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.aclgraph_utils import HiSparseRefillDescriptor, ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     initialize_kernel_block_table_buffers,
@@ -834,6 +835,7 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 if isinstance(graph_manager, ModelAclGraphManager):
                     graph_manager.force_eager_target = False
+                    graph_manager.hisparse_refill_step = False
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
@@ -946,6 +948,23 @@ class NPUModelRunner(GPUModelRunner):
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         if self.pcp_manager is not None:
             self.pcp_manager.set_dispatch_batch_req_state(batch_state)
+        graph_manager = getattr(self, "cudagraph_manager", None)
+        if (
+            isinstance(graph_manager, ModelAclGraphManager)
+            and graph_manager.force_eager_target
+            and graph_manager.has_hisparse_refill_graph
+            and batch_state is not None
+            and not batch_state.has_prefill
+            and len(batch_state.req_ids) == 1
+            and uniform_token_count == batch_state.num_tokens == HISPARSE_GROUPED_QUERY_LEN
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnectorMetadata
+
+            graph_manager.hisparse_refill_step = (
+                isinstance(scheduler_output.kv_connector_metadata, HiSparseConnectorMetadata)
+                and len(scheduler_output.scheduled_spec_decode_tokens.get(batch_state.req_ids[0], ()))
+                == HISPARSE_GROUPED_QUERY_LEN - 1
+            )
         expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
@@ -1237,6 +1256,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            hisparse_refill=isinstance(batch_desc, HiSparseRefillDescriptor),
         )
         # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
         # helper; PCPManager.partition_batch now takes the batch descriptor.

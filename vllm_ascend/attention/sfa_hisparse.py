@@ -27,7 +27,12 @@ from vllm_ascend.attention.sfa_v1 import (
     needs_pcp_kv_gather,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.hisparse import cache_ops, supports_pooled_hisparse
+from vllm_ascend.hisparse import (
+    HISPARSE_GROUPED_QUERY_LEN,
+    cache_ops,
+    hisparse_refill_capture,
+    supports_pooled_hisparse,
+)
 from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
@@ -691,6 +696,40 @@ class AscendHiSparseImpl(AscendSFAImpl):
             return None
         return storage, page_stride
 
+    def _capture_full_refill(self, query, query_rope, logical, metadata):
+        cache = self.hisparse_cache
+        runtime = cache.runtime
+        group = runtime.index_group
+        assert metadata.req_id_per_token is not None
+        assert cache.source_block_table is not None
+        assert runtime.cache_ops.attention_capacity > 0
+        q6 = HISPARSE_GROUPED_QUERY_LEN
+        rows = slice(0, q6)
+        # Execute on one graph stream. Each index group resolves once and each
+        # layer gathers its own payload. Device masks make the dummy plan empty.
+        if runtime.is_group_leader:
+            runtime._resolve_residency(
+                resident=cache,
+                req_id_per_token=metadata.req_id_per_token[rows],
+                num_valid_rows=metadata.query_start_loc[-1:],
+                block_table=cache.source_block_table,
+                topk_indices=logical[rows],
+                block_size=metadata.block_size,
+                shared_rows=rows,
+            )
+        runtime._swap_rows(rows)
+        query_lengths, key_length = runtime.cache_ops.attention_lengths
+        if torch.npu.is_current_stream_capturing():
+            logger.info_once("[hisparse] Capturing FULL Q6 resolver and H2D gather", scope="process")
+        return self._attention_physical(
+            query,
+            query_rope,
+            self.index_group.physical_kv_cache(self.index_group_index),
+            group.shared_topk.physical_topk_indices[rows],
+            indices_are_mapped=True,
+            lengths=(query_lengths[q6 : q6 + 1], key_length),
+        )
+
     def _try_c8_resident_decode_capture(self, query, query_rope, logical_topk, metadata, query_ends, key_lengths):
         cache = self.hisparse_cache
         states = cache.runtime.request_state_indices
@@ -851,6 +890,15 @@ class AscendHiSparseImpl(AscendSFAImpl):
         logical = topk_indices.squeeze(1) if topk_indices.ndim == 3 else topk_indices
         assert metadata.req_id_per_token is not None
         assert metadata.query_start_loc is not None
+        if (
+            metadata.hisparse_for_capture
+            and hisparse_refill_capture.get()
+            and not self.hisparse_cache.draft_layer
+            and metadata.num_reqs == metadata.num_decodes == 1
+            and metadata.num_prefills == 0
+            and metadata.num_decode_tokens == ql_nope.shape[0] == HISPARSE_GROUPED_QUERY_LEN
+        ):
+            return self._capture_full_refill(ql_nope, q_pe, logical, metadata)
         if metadata.num_decodes and metadata.num_prefills:
             resident_output = self._try_c8_resident_mixed(
                 ql_nope, q_pe, logical, metadata, actual_seq_lengths_query, actual_seq_lengths_key

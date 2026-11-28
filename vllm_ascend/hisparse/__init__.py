@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Shared HiSparse cache operations, layouts and Core backend integration."""
 
+from contextvars import ContextVar
 from importlib.util import find_spec
 
 from vllm.config import VllmConfig
@@ -9,6 +10,9 @@ from vllm.config import VllmConfig
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 
 HISPARSE_GROUPED_QUERY_LEN = 6
+
+# True only while building the separate target refill graph in a worker.
+hisparse_refill_capture: ContextVar[bool] = ContextVar("hisparse_refill_capture", default=False)
 
 
 def supports_hybrid_hisparse_core() -> bool:
