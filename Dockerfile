@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-910b-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261124154731-910b-ubuntu22.04-py3.12
 
 WORKDIR /workspace
 
@@ -67,11 +67,13 @@ ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi \
-    https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
+## ========== 修改点1：ASCEND_INDEX_URL 去掉换行反斜杠，一行空格分隔 ==========
+ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
+    ## ========== 修改点2：这里新增chmod，修复op_build权限（核心！） ==========
+    chmod -R +x /usr/local/Ascend/cann/tools/opbuild && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \

@@ -15,14 +15,21 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261124154731-a3-ubuntu22.04-py3.12
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-# Install clang-15 (for triton-ascend)
+# Install clang-15 (for triton-ascend).
+# The image is built for both amd64 and arm64. On amd64 only, gcc-multilib and
+# libc6-dev-i386 supply gnu/stubs-32.h: mfcli kernel install cross-compiles the
+# AICPU acc_offload kernel with bisheng cce, which reaches the host glibc
+# headers and picks the 32-bit stubs branch when __x86_64__ is not defined.
 RUN apt-get update -y && \
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y gcc-multilib libc6-dev-i386; \
+    fi && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
@@ -71,11 +78,12 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
-ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi \
-    https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
+ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
+    ## ========== 修改点2：这里新增chmod，修复op_build权限（核心！） ==========
+    chmod -R +x /usr/local/Ascend/cann/tools/opbuild && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
