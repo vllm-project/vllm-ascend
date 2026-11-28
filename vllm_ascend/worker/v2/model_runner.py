@@ -441,27 +441,30 @@ class NPUModelRunner(GPUModelRunner):
         from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
         from vllm.v1.worker.gpu.cudagraph_utils import _teardown_profiling_state
 
+        from vllm_ascend.compilation.acl_graph import temporary_graph_params
+
         builder = get_kv_cache_config_builder(self.vllm_config)
         groups = get_kv_cache_groups_from_builder(builder, self.vllm_config, self.get_kv_cache_spec())
         minimal = builder.get_kv_cache_config_from_groups(self.vllm_config, groups, num_blocks=1)
         torch.npu.synchronize()
         torch.npu.empty_cache()
         free_before = torch.npu.mem_get_info()[0]
-        try:
-            self.initialize_kv_cache(minimal, is_profiling=True)
-            self.cache_config.num_gpu_blocks = minimal.num_blocks
-            graph_bytes = self.capture_gdn_recovery_graphs(profile_only=True)
-            torch.npu.synchronize()
-            torch.npu.empty_cache()
-            # Includes temporary NULL-page/context metadata, conservatively,
-            # as well as graph-private and non-Torch allocations.
-            measured = max(graph_bytes, free_before - torch.npu.mem_get_info()[0], 0)
-        finally:
+        with temporary_graph_params():
             try:
-                if (executor := self._gdn_recovery_executor()) is not None:
-                    executor.close()
+                self.initialize_kv_cache(minimal, is_profiling=True)
+                self.cache_config.num_gpu_blocks = minimal.num_blocks
+                graph_bytes = self.capture_gdn_recovery_graphs(profile_only=True)
+                torch.npu.synchronize()
+                torch.npu.empty_cache()
+                # Includes temporary NULL-page/context metadata, conservatively,
+                # as well as graph-private and non-Torch allocations.
+                measured = max(graph_bytes, free_before - torch.npu.mem_get_info()[0], 0)
             finally:
-                _teardown_profiling_state(self)
+                try:
+                    if (executor := self._gdn_recovery_executor()) is not None:
+                        executor.close()
+                finally:
+                    _teardown_profiling_state(self)
         # Match the worker's existing non-Torch estimation safety allowance.
         # Deduct it BEFORE KV allocation; do not silently waive a later excess.
         # The second capture runs with a different allocator/ACL/HCCL state.

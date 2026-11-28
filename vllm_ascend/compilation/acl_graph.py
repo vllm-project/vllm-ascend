@@ -4,7 +4,7 @@
 import dataclasses
 import weakref
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -444,3 +444,20 @@ def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any
 
 def get_draft_graph_prefill_params():
     return _draft_graph_prefill_params
+
+
+@contextmanager
+def temporary_graph_params():
+    """Isolate registrations for a synchronized startup-only KV probe.
+
+    Upstream profiling teardown drops managers, but does not know Ascend's
+    target/draft registries. Restore them even if the probe or teardown fails.
+    Never use this scope around concurrent inference or graph replay.
+    """
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    saved = (_graph_params, _draft_graph_params, _draft_graph_prefill_params)
+    _graph_params = _draft_graph_params = _draft_graph_prefill_params = None
+    try:
+        yield
+    finally:
+        _graph_params, _draft_graph_params, _draft_graph_prefill_params = saved

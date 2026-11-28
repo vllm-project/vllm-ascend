@@ -5,7 +5,9 @@ path launches a Plan, convolution Compact and state Commit for each cache group
 before drafting. This opt-in path submits the groups through a worker-owned
 recovery stream and can capture the full recovery sequence in one ACL graph.
 It changes scheduling and metadata movement, not the state recurrence or
-Verify/Commit/Compact numerical algorithms.
+Verify/Commit/Compact numerical algorithms. The same PR also registers audited
+RecoverSSM and optional isolated PLE consumers with the existing Qwen CPU-length
+policy, avoiding an unnecessary exact-count D2H snapshot and main-thread wait.
 
 ## Configuration
 
@@ -84,18 +86,24 @@ and input buffers are owned by the worker, with no global Tensor cache.
 
 Before allocating the real KV pool, startup creates a temporary one-block cache
 using the configured cache planner and profiles recovery only on NULL pages.
-It prepares all dispatch buckets, with int32/int64 sampled counts and both
-sampler-mapping staging variants. The measured reserve covers peak Torch graph
+It prepares all dispatch buckets with the int32 counts returned by V2 sampling
+and both sampler-mapping staging variants. Unexpected dtypes keep eager recovery
+and never trigger request-time capture. The measured reserve covers peak Torch graph
 allocations and retained device-memory growth, including temporary context/cache
 metadata conservatively. The worker deducts it from automatic or explicitly
 requested KV budgets before physical-layout scaling. The temporary executor,
 graphs and cache bindings are then torn down using upstream profiling cleanup.
+Ascend target/draft graph-registration objects are isolated and restored around
+this startup-only probe, including exceptional exits, so temporary NULL-cache
+registrations cannot replace the real capture state.
 
 After the real caches and target/draft graphs are initialized, startup captures
 recovery against the actual contexts. Its measured footprint must fit the
 pre-KV reserve; otherwise startup reports the mismatch. This extra footprint
 also contributes to startup graph-memory reporting. No guessed fixed-size
-reserve or new environment variable is introduced.
+reserve for the graphs or new environment variable is introduced. A separate
+150 MiB non-Torch safety allowance is deducted before KV allocation, matching
+the worker's existing estimation policy; the final measured guard stays strict.
 
 Requests only update metadata and replay prepared graphs. An unprepared context,
 group subset or metadata signature uses eager recovery on the same stream and
@@ -103,6 +111,21 @@ provider, with a warning; it never captures a graph during a request. Startup
 capture still requires real NPU execution and compilation time. Reserving more
 KV memory must also leave room for communication workspaces and in-flight
 transfers. Memory utilization 0.96 is an experiment setting, not a safe default.
+
+## CPU-length capability
+
+For the exact audited Qwen4Exp model-state, MTP speculator and metadata-builder
+pairs, initialization enables the runner's existing producer/consumer skip
+together. Rejection-corrected device lengths remain authoritative. The optional
+PLE builder from #23310 only isolates recovery flags at construction; it uses
+the same audited metadata consumer and is registered explicitly. Unknown
+builders, PCP/DCP, sparse KV offload and incompatible model/speculator paths
+retain exact CPU lengths. No per-layer or unconditional synchronization removal
+is introduced.
+
+This incorporates the change previously tracked in #22866. Qwen4Exp cache and
+provider wiring remains in #23310, and optional TileLang numerical kernels
+remain in #22552.
 
 ## Validation
 
@@ -118,3 +141,13 @@ MTP acceptance, all three recovery kernels in the raw trace, and performance
 against the same provider/configuration with these execution switches disabled.
 Measure throughput without profiling and collect the short trace separately.
 No end-to-end speedup is implied by CPU checks or offline compilation.
+
+## Reading overlap evidence
+
+Different device streams and intersecting kernel-task intervals establish
+execution overlap, not an equal reduction in critical-path latency. Inspect
+recovery completion relative to the final MTP task and compare MTP durations
+with the control: shared compute/bandwidth resources can stretch main-stream
+work even when recovery ends before MTP. Measure throughput in a separate,
+unprofiled round. Do not label a task-interval overlap percentage as the
+percentage of recovery cost eliminated.

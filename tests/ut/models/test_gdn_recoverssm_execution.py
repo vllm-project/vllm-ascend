@@ -440,7 +440,23 @@ def test_memory_probe_cleans_temporary_context(monkeypatch, fails):
     runner.cache_config = NS(num_gpu_blocks=None)
     runner.get_kv_cache_spec = Mock(return_value={})
     runner.initialize_kv_cache = Mock()
-    runner.capture_gdn_recovery_graphs = Mock(return_value=50)
+    from vllm_ascend.compilation import acl_graph
+
+    registry_names = ("_graph_params", "_draft_graph_params", "_draft_graph_prefill_params")
+    saved_registries = {name: object() for name in registry_names}
+    for name, saved in saved_registries.items():
+        monkeypatch.setattr(acl_graph, name, saved)
+
+    def capture(*, profile_only):
+        assert profile_only is True
+        assert all(getattr(acl_graph, name) is None for name in registry_names)
+        # Teardown may leave a newly created probe registry behind. It must not
+        # replace any preexisting target/draft registration on either exit.
+        for name in registry_names:
+            setattr(acl_graph, name, object())
+        return 50
+
+    runner.capture_gdn_recovery_graphs = Mock(side_effect=capture)
     if fails:
         runner.capture_gdn_recovery_graphs.side_effect = RuntimeError("capture failure")
     executor = NS(close=Mock())
@@ -460,6 +476,8 @@ def test_memory_probe_cleans_temporary_context(monkeypatch, fails):
         assert runner.profile_gdn_recovery_memory() == 50 + 150 * (1 << 20)
     executor.close.assert_called_once()
     cleanup.assert_called_once_with(runner)
+    for name, saved in saved_registries.items():
+        assert getattr(acl_graph, name) is saved
     assert runner.initialize_kv_cache.call_args.kwargs == {"is_profiling": True}
     assert planner.get_kv_cache_config_from_groups.call_args.kwargs == {"num_blocks": 1}
 
