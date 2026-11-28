@@ -46,6 +46,7 @@ def test_compact_cache_initializes_after_parent_cache(monkeypatch, mapping):
         assert spec._compact_draft_logits is None
         assert (cache.values == 0).all()
     else:
+        assert spec._compact_draft_logits is not None
         assert spec._compact_draft_logits.shape == (3, 2, len(mapping))
         assert torch.isneginf(cache.values).all()
         assert torch.isneginf(spec._compact_draft_logits).all()
@@ -128,9 +129,13 @@ def test_compact_export_follows_parent_propose(monkeypatch):
         AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: SimpleNamespace(parallel_config=object()))
     )
     events, expected = [], torch.tensor([[1, 3]])
-    monkeypatch.setattr(DSparkSpeculator, "propose", lambda *args, **kwargs: events.append("propose") or expected)
-    spec._export_compact_logits = lambda: events.append("export")
-    spec._proposal_metadata = lambda *args: nullcontext()
+
+    def parent_propose(*args, **kwargs) -> torch.Tensor:
+        events.append("propose")
+        return expected
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
+    monkeypatch.setattr(spec, "_export_compact_logits", lambda: events.append("export"))
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", lambda: nullcontext())
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
     batch = SimpleNamespace(is_prefilling_np=torch.zeros(1, dtype=torch.bool).numpy(), num_reqs=1)

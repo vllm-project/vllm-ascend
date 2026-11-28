@@ -58,6 +58,8 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
+    _d2t_scatter_index: torch.Tensor | None
+
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
@@ -172,12 +174,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         )
 
     def _export_compact_logits(self) -> None:
-        if getattr(self, "_compact_draft_logits", None) is not None and self.draft_watermarker is None:
+        compact_logits: torch.Tensor | None = getattr(self, "_compact_draft_logits", None)
+        if compact_logits is not None and self.draft_watermarker is None:
+            scatter_index = self._d2t_scatter_index
+            assert scatter_index is not None
             # Keep the verifier's target-space cache; export all Markov steps
             # once after draft graph replay, using persistent request slots.
-            self.draft_logits.values.flatten(0, 1).index_copy_(
-                1, self._d2t_scatter_index, self._compact_draft_logits.flatten(0, 1)
-            )
+            self.draft_logits.values.flatten(0, 1).index_copy_(1, scatter_index, compact_logits.flatten(0, 1))
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
         """Pad/trim the DSpark draft LM head around its collectives.
