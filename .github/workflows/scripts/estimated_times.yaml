@@ -72,6 +72,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 340
   tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 340
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 700
+  tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 660
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/rlhf/consistency/test_fa3_mixed_batches.py: 60
   tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30
