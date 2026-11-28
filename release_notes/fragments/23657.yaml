@@ -1,0 +1,10 @@
+pr: 23657
+entries:
+  - category: performance
+    text: >-
+      Reduced drafting overhead for MRV2 DSpark probabilistic sampling with
+      ordered reduced-vocabulary checkpoints on Ascend A2 by avoiding repeated
+      full-vocabulary processing at each draft step. The optimization applies
+      automatically when draft_sample_method="probabilistic" is configured.
+    model: Qwen3.6-35B-A3B
+    hardware: [A2]
