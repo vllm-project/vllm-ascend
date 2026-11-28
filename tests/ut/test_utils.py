@@ -772,6 +772,43 @@ def test_should_reuse_topk_keeps_frequency_logic():
     assert utils.should_reuse_topk(config, 3)
 
 
+@pytest.mark.parametrize(
+    ("groups", "configured", "expected"),
+    [
+        ([SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="deepseek_v4"))], 0, 0),
+        ([SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="deepseek_v41"))], 8192, 8192),
+        (
+            [
+                SimpleNamespace(
+                    kv_cache_spec=SimpleNamespace(kv_cache_specs={"l": SimpleNamespace(model_version="deepseek_v41")})
+                )
+            ],
+            8192,
+            8192,
+        ),
+        (
+            [
+                SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="deepseek_v41")),
+                SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="qwen3_next")),
+            ],
+            8192,
+            8192,
+        ),
+        ([SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="qwen3_next"))], 8192, None),
+        ([], 8192, None),
+        (None, 8192, None),
+    ],
+)
+def test_resolve_deepseek_v4_retention_gate(groups, configured, expected):
+    source = SimpleNamespace(prefix_cache_retention_interval=configured)
+    assert utils.resolve_deepseek_v4_retention(source, groups) == expected
+
+
+def test_resolve_deepseek_v4_retention_missing_attr_is_none():
+    group = SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version="deepseek_v41"))
+    assert utils.resolve_deepseek_v4_retention(SimpleNamespace(), [group]) is None
+
+
 def test_check_gdn_layer_supports_kimi_linear_config_property():
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 

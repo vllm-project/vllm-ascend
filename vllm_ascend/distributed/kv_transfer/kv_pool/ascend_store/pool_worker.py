@@ -106,6 +106,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import resolve_deepseek_v4_retention
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
@@ -917,9 +918,9 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        if not isinstance(retention_interval, int):
-            retention_interval = None
+        retention_interval = resolve_deepseek_v4_retention(
+            vllm_config.cache_config, self.kv_cache_config.kv_cache_groups
+        )
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
