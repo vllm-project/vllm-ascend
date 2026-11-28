@@ -1,4 +1,0 @@
-pr: 23571
-entries:
-  - category: bugfix
-    text: Fixed a startup error when loading Kimi KDA weights with prefill context parallelism.
