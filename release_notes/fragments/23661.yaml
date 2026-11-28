@@ -1,0 +1,4 @@
+pr: 23661
+entries:
+  - category: bugfix
+    text: Fixed routed-expert replay capture for MC2 sequence-parallel batches with per-shard padding, so expert IDs remain aligned with local tokens.
