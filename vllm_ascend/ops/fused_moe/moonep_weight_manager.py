@@ -32,6 +32,7 @@ import dataclasses
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from vllm.logger import logger
@@ -42,6 +43,9 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp, home_gemm_apply_mlp
 from vllm_ascend.quantization.quant_type import QuantType
+
+if TYPE_CHECKING:
+    from ascend_moonep.planning import MoonEPCommPlan
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：
 # ``elements_per_row`` 就是载体的 Hp，且要求 ub_bytes / sizeof(bfloat16) / Hp >= 1
@@ -710,6 +714,16 @@ _PREFETCH_OVERLAP = envs.MOONEP_PREFETCH_SIDE_STREAM_OVERLAP
 _PF: dict = {"stream": None, "done": False, "cur_key": None}
 
 
+class _SlotPrefetchReady(NamedTuple):
+    """Cache decision and side-stream completion event for one layer on this Buffer."""
+
+    state: _LayerWeightState
+    plan: MoonEPCommPlan
+    cache_plan: tuple[list[tuple[int, int]], list[tuple[int, int]]] | None
+    skip_prefetch: bool
+    completion_event: torch.npu.Event
+
+
 def select_prefetch_layer(layer) -> None:
     """Select the weight owner at the actual MoE call, including wrapped models."""
     _PF["cur_key"] = id(layer.w13_weight)
@@ -830,7 +844,13 @@ def _pf_stream_hook(buffer, lookup_slot_state: Callable[[int], _LayerWeightState
                     _pf_prefetch(buffer, state, plan_use)
             # Keep the prepared decision and completion event together on this
             # Buffer so the forward path can reuse both.
-            ctx["slot_prefetch_ready"] = (state, plan_use, cache_plan, skip_prefetch, side.record_event())
+            ctx["slot_prefetch_ready"] = _SlotPrefetchReady(
+                state=state,
+                plan=plan_use,
+                cache_plan=cache_plan,
+                skip_prefetch=skip_prefetch,
+                completion_event=side.record_event(),
+            )
         except Exception as exc:  # noqa: BLE001 - keep the MTE fallback
             if ctx.get("_prefetch_use_udma", False):
                 # A partial issue cannot safely fall back and submit again.
@@ -887,9 +907,12 @@ def run_slot_forward(
         prefetched = _pf_ctx.pop("slot_prefetch_ready", None)
     pf_ev = None
     if prefetched is not None:
-        prefetched_state, plan_use, cache_plan, skip_prefetch, pf_ev = prefetched
-        if prefetched_state is not state:
+        if prefetched.state is not state:
             raise RuntimeError("Slot prefetch belongs to a different MoE layer")
+        plan_use = prefetched.plan
+        cache_plan = prefetched.cache_plan
+        skip_prefetch = prefetched.skip_prefetch
+        pf_ev = prefetched.completion_event
     else:
         plan_use, cache_plan, skip_prefetch = _prepare_slot_cache(state, plan_use)
     if not skip_prefetch and pf_ev is None:
