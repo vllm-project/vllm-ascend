@@ -458,6 +458,25 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             self.npu_freeable[mm_hash] = self.npu_cache[mm_hash]
             self.npu_num_freeable_slots += self.npu_cache[mm_hash].num_embeds
 
+    def try_rollback_allocations(self, request: Request, input_ids: list[int]) -> bool:
+        """Release unexecuted CPU allocations when no other request needs them."""
+        cancelled = dict.fromkeys(request.mm_features[i].identifier for i in input_ids)
+        if any(len(self.cached[mm_hash]) > 1 for mm_hash in cancelled):
+            return False
+
+        for input_id in list(self.get_cached_input_ids(request)):
+            if request.mm_features[input_id].identifier in cancelled:
+                self.free_encoder_input(request, input_id)
+        for mm_hash in cancelled:
+            # New score-cache allocations live on the CPU. Once their last
+            # reference is released, the slots are already counted as freeable.
+            self.cpu_num_free_slots += self.cpu_freeable.pop(mm_hash).num_embeds
+            del self.cpu_cache[mm_hash]
+            del self.cached[mm_hash]
+            if mm_hash not in self.cpu_freed:
+                self.cpu_freed.append(mm_hash)
+        return True
+
     def get_manager_metadata(self) -> "ScoreEncoderCacheManagerMetadata":
         promoting = self.promoting
         self.promoting = []
