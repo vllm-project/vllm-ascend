@@ -135,10 +135,8 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 
 def _shares_embedding(candidate, embedding):
-    if isinstance(candidate, BaseLayerWithLoRA):
-        candidate = candidate.base_layer
-    if isinstance(embedding, BaseLayerWithLoRA):
-        embedding = embedding.base_layer
+    candidate = candidate.base_layer if isinstance(candidate, BaseLayerWithLoRA) else candidate
+    embedding = embedding.base_layer if isinstance(embedding, BaseLayerWithLoRA) else embedding
     weight = getattr(embedding, "weight", None)
     return candidate is embedding or (weight is not None and getattr(candidate, "weight", None) is weight)
 
@@ -149,19 +147,21 @@ def _target_uses_embedding(target_model, language_model, embedding, text_config)
     )
 
 
-def _unused_target_embed_owner(target_model, vllm_config):
+def _release_target_embedding(target_model, vllm_config, *, draft_embed=None):
     # The target config keeps the real PP size when the draft runs as a single stage.
     if vllm_config.parallel_config.pipeline_parallel_size <= 1 or not get_pp_group().is_last_rank:
-        return None
+        return
 
     language_model = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
     target_inner = getattr(language_model, "model", language_model)
     embedding = getattr(target_inner, "embed_tokens", None)
     if embedding is None or isinstance(embedding, PPMissingLayer):
-        return None
+        return
     if _target_uses_embedding(target_model, language_model, embedding, vllm_config.model_config.hf_text_config):
-        return None
-    return target_inner
+        return
+    if draft_embed is not None and _shares_embedding(draft_embed, embedding):
+        return
+    target_inner.embed_tokens = PPMissingLayer()
 
 
 def release_unshared_target_embedding(target_model, draft_model, vllm_config):
@@ -169,15 +169,7 @@ def release_unshared_target_embedding(target_model, draft_model, vllm_config):
     draft_embed = getattr(getattr(draft_model, "model", None), "embed_tokens", None)
     if draft_embed is None or isinstance(draft_embed, PPMissingLayer):
         return
-    target_inner = _unused_target_embed_owner(target_model, vllm_config)
-    if target_inner is not None and not _shares_embedding(draft_embed, target_inner.embed_tokens):
-        target_inner.embed_tokens = PPMissingLayer()
-
-
-def _release_target_embedding_after_rotation(target_model, vllm_config):
-    target_inner = _unused_target_embed_owner(target_model, vllm_config)
-    if target_inner is not None:
-        target_inner.embed_tokens = PPMissingLayer()
+    _release_target_embedding(target_model, vllm_config, draft_embed=draft_embed)
 
 
 @torch.no_grad()
@@ -224,4 +216,4 @@ def align_draft_weights(model, projection, vllm_config, *, target_model=None):
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
         if name == "embed_tokens" and rotation is not None and target_model is not None:
-            _release_target_embedding_after_rotation(target_model, vllm_config)
+            _release_target_embedding(target_model, vllm_config)
