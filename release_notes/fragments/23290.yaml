@@ -1,0 +1,4 @@
+pr: 23290
+entries:
+  - category: bugfix
+    text: Fixed the Ascend startup failure with `--cpu-offload-gb` by using explicit copies from pinned CPU memory for model weights.
