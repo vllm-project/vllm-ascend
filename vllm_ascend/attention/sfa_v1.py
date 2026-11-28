@@ -32,6 +32,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.mla_projections import MLAProjectionMixin
 from vllm_ascend.attention.sparse_flash_mla import (
     HIF8_QUANT_MODE,
     SMLA_QUANT_METADATA_SIZE,
@@ -834,7 +835,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         return attn_metadata
 
 
-class AscendSFAImpl(MLAAttentionImpl):
+class AscendSFAImpl(MLAProjectionMixin, MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -893,17 +894,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = kwargs["qk_rope_head_dim"]
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
-        self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
-        self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
-        self.kv_b_proj = kwargs["kv_b_proj"]
-        self.o_proj = kwargs["o_proj"]
+        self._init_projections(kwargs, lora_enabled=get_current_vllm_config().lora_config is not None)
         self.indexer = kwargs["indexer"]
-        self.g_proj = kwargs.get("g_proj")
         # NoPE sparse layers use the same SFA template and native prefill;
         # they do not need an upstream dense-MHA prefill backend.
         if self.qk_rope_head_dim == 0:
             self.supports_dense_mha_prefill = False
-        self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -1117,7 +1113,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
         # loadable (#15463).
-        if not self.rl_weight_update_enabled:
+        if not self.rl_weight_update_enabled and not self.lora_enabled:
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -1176,6 +1172,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Return the enabled fused preprocess type, or None if it cannot run."""
+        # Fused prologs read base weights and bypass LoRA wrappers.
+        if self.lora_enabled:
+            return None
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
 
@@ -1612,6 +1611,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
+        lora_input = q_nope.transpose(0, 1)
         if (
             q_nope.dtype in [torch.float16, torch.bfloat16]
             and hasattr(torch_npu, "npu_transpose_batchmatmul")
@@ -1635,9 +1635,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             ql_nope = torch.bmm(q_nope, self.W_UK_T)
             # Convert from (N, B, L) to (B, N, L)
             ql_nope = ql_nope.transpose(0, 1)
+        self._add_mla_lora(lora_input, ql_nope, is_query=True)
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
+        lora_input = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
         if hasattr(torch_npu, "npu_transpose_batchmatmul"):
             # (B, N, L) -> operator transposes internally -> (B, N, V)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
@@ -1651,6 +1653,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             x = torch.bmm(x, self.W_UV)
             # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
+        self._add_mla_lora(lora_input, x.view(-1, self.local_num_heads, self.v_head_dim), is_query=False)
         return x
 
     def _sfa_preprocess_prolog_v3(

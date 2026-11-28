@@ -418,6 +418,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as backend:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
+            mock_vllm_config.lora_config = None
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
             mock_get_vllm_config.return_value = mock_vllm_config
             # CUDA eligibility must not alter Ascend cache/indexer layout.
@@ -464,6 +465,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
                     mock_vllm_config = MagicMock(spec=VllmConfig)
+                    mock_vllm_config.lora_config = None
                     mock_vllm_config.model_config.hf_text_config = MagicMock(
                         num_hidden_layers=32, first_k_dense_replace=True
                     )
@@ -505,6 +507,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
     ):
         mock_tp_size.return_value = 1
         mock_vllm_config = MagicMock(spec=VllmConfig)
+        mock_vllm_config.lora_config = None
         mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=False)
         mock_get_vllm_config.return_value = mock_vllm_config
         mock_vllm_config.compilation_config = CompilationConfig()
@@ -611,6 +614,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         ):
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
+            mock_vllm_config.lora_config = None
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
             mock_get_vllm_config.return_value = mock_vllm_config
             mock_vllm_config.compilation_config = CompilationConfig()

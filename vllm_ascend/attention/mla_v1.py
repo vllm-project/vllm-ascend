@@ -50,6 +50,7 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.mla_projections import MLAProjectionMixin
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -1057,7 +1058,7 @@ class MLAParamProvider:
         return params
 
 
-class AscendMLAImpl(MLAAttentionImpl):
+class AscendMLAImpl(MLAProjectionMixin, MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1105,13 +1106,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
         self.rotary_emb = kwargs["rotary_emb"]
-        self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
-        self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self._init_projections(kwargs, lora_enabled=self.vllm_config.lora_config is not None)
         self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
         self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
-        self.kv_b_proj = kwargs["kv_b_proj"]
-        self.o_proj = kwargs["o_proj"]
-        self.g_proj = kwargs.get("g_proj")
         # Both supported Kimi AMD implementations can append an output-gate shard.
         # The plain MLA projection also only has the two latent shards, so
         # the shard count identifies the fused layout without importing the
@@ -1132,7 +1129,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
-        self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1155,7 +1151,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Replicated MLA layers use ordinary, non-interleaved KV.
         if not self.use_pcp and not self.use_dcp:
             self.supports_mtp_with_cp_non_trivial_interleave_size = True
-        self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
+        self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config) and not self.lora_enabled
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
             # and has no slot for the extra output-gate shard.
@@ -1262,8 +1258,10 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
         x = x.view(self.num_heads, -1, self.kv_lora_rank)
+        lora_input = x
         # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
         x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_y=(1, 0, 2))
+        self._add_mla_lora(lora_input, x, is_query=False)
         # Convert from (B, N, V) to (B, N * V)
         x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return x
@@ -1275,11 +1273,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         """Keep the DCP result batch-major and fuse both BMM permutations."""
         x = x.view(-1, self.num_heads, self.kv_lora_rank)
         x = x.to(dtype=self.W_UV.dtype)
+        lora_input = x.transpose(0, 1)
         # The operator's batch dimension is num_heads, not the token count.
         if self._supports_fused_v_up_proj_size():
             x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
         else:
             x = torch.bmm(x.transpose(0, 1), self.W_UV).transpose(0, 1)
+        self._add_mla_lora(lora_input, x, is_query=False)
         return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     def _v_up_proj_fp8_batch_major(self, x: torch.Tensor) -> torch.Tensor:
@@ -1304,10 +1304,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        ql_nope = ql_nope.transpose(0, 1)
+        self._add_mla_lora(q_nope, ql_nope, is_query=True)
+        return ql_nope, q_pe
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
+        if self.lora_enabled:
+            return None
         if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
             return None
         if self.fused_qkv_a_proj is None or self.q_proj is None:
@@ -3679,7 +3683,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         dcp_prefill_current_kv_buffers = getattr(self, "_dcp_prefill_current_kv_buffers", None)
         num_prefill_tokens = max(num_actual_tokens - num_decode_tokens, 0)
         use_prolog_v3_strided_cache = (
-            self._cache_requires_prolog_v3_writer(kv_cache)
+            not self.lora_enabled
+            and self._cache_requires_prolog_v3_writer(kv_cache)
             and not self.use_pcp
             and not self.is_pcp_decode_sharded
             and (not decode_requires_current_kv or self.use_dcp)
@@ -3730,6 +3735,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         elif (
             (self.fa_quant_layer or self.enable_mlapo)
+            and not self.lora_enabled
             and not fused_mla_cache
             and (not decode_requires_current_kv or can_use_dcp_prolog)
             # The fused prolog writes only local KV, while sharded decode must gather it.

@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
+from vllm_ascend.attention.mla_projections import MLA_PROJECTION_NAMES
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
@@ -224,6 +225,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             ascend_indexer = None
         q_projection = mla_modules.q_b_proj if q_lora_rank is not None else mla_modules.q_proj
         self.dcp_q_replicate_enabled = getattr(q_projection, "qrep_active", False) is True
+        projections = None
+        if get_current_vllm_config().lora_config is not None:
+            # Register aliases once. The backend reads this same container,
+            # including replacements made by vLLM's LoRA manager.
+            self.projections = projections = nn.ModuleDict(
+                {name: getattr(mla_modules, name) for name in MLA_PROJECTION_NAMES}
+            )
         # AscendMLAAttention opts into upstream's PCP+DCP guard by setting the
         # ``supports_pcp_dcp`` ClassVar on the Ascend backend layer (see
         # vllm_ascend.attention.mla_v1) instead of mutating the shared upstream
@@ -262,6 +270,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
             layer_quant_config=quant_config,
+            projections=projections,
         )
 
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these

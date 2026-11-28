@@ -1,0 +1,6 @@
+pr: 23381
+entries:
+  - category: feature
+    text: >-
+      Added LoRA support for absorbed KV-B projections in Ascend MLA and
+      sparse-attention inference, including query absorption and value expansion.
