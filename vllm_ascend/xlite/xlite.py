@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -55,20 +56,15 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 from vllm_ascend.xlite.utils import (
     _DUMMY_TENSOR,
-    MatmulSlot,
     WeightGetterConfig,
     XModel,
     XModelConfig,
-    _ensure_nd,
     _TensorRepr,
-    _to_fp32,
     get_dotted_attr,
     get_layer_weights,
     has_real_tensor,
-    init_matmul_weights,
     is_dummy_tensor,
     set_dummy_tensor,
-    transform_deq_scale,
     transform_weights,
 )
 
@@ -307,6 +303,26 @@ class XliteModelBase(ABC):
             return True
         return all(torch.allclose(t, t.new_zeros(1)) for t in tensors)
 
+    @staticmethod
+    def _transform_deq_scale(deq_scale: torch.Tensor) -> torch.Tensor:
+        """Repack a dequantization scale into the fixpipe hardware's expected format.
+
+        Data is stored in ``uint64_t``: the upper 32 bits are 0 and the lower 32 bits hold an FP32 value whose lower 10
+        bits are not involved in computation, making the effective data format TF32.
+
+        Args:
+            deq_scale (torch.Tensor): The original dequantization scale tensor.
+
+        Returns:
+            torch.Tensor: The repacked scale tensor for fixpipe computation.
+        """
+        if deq_scale.dtype == torch.int64:
+            return deq_scale
+        deq_scale_fp32 = deq_scale.to(torch.float32)
+        scale = deq_scale_fp32.new_zeros(deq_scale.shape[0] * 2)
+        scale[0::2] = deq_scale_fp32[0::1]
+        return scale
+
     @property
     def hf_text_config(self) -> PretrainedConfig:
         """Convenience property to access HuggingFace text configuration from vLLM config.
@@ -469,6 +485,17 @@ class StandardXliteModel(XliteModelBase):
     _quant_attn_probe_slot: str = "mha_qkv"
     """Slot probed for the quantized full-attention weight layout (MLA adapters probe mla_qkv_a)."""
 
+    @dataclass(frozen=True)
+    class _MatmulSlot:
+        """One matmul binding: source path plus its row/dtype/quant contract."""
+
+        xlite: str
+        source: str
+        row_slice: tuple[int, int] | None = None
+        row_repack: Callable[[torch.Tensor], torch.Tensor] | None = None
+        weight_dtype: torch.dtype | None = None
+        allow_quant: bool = True
+
     def _build_model_config(self) -> None:
         xlite_config, vllm_config, hf_config = self.xlite_config, self.vllm_config, self.hf_text_config
 
@@ -589,18 +616,8 @@ class StandardXliteModel(XliteModelBase):
     def _bind_dense_mlp(self, layers: Sequence[nn.Module]) -> None:
         """Bind the dense MLP slots (MoE layers carry no gate_up_proj and are skipped)."""
         mlp_prefix = self._decoder_layer_mlp_module
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("mlp_up_gate", f"{mlp_prefix}.gate_up_proj"),
-            quantized=self.quantization,
-        )
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("mlp_down", f"{mlp_prefix}.down_proj"),
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "mlp_up_gate", f"{mlp_prefix}.gate_up_proj")
+        self.init_matmul_weights(layers, "mlp_down", f"{mlp_prefix}.down_proj")
 
     def _bind_moe_common(self, layers: Sequence[nn.Module]) -> None:
         """Router gate and routed/shared expert slots shared by all MoE adapters."""
@@ -612,21 +629,11 @@ class StandardXliteModel(XliteModelBase):
             layers,
             f"{mlp_prefix}.gate.e_score_correction_bias",
             f"{mlp_prefix}.e_score_correction_bias",  # for MiniMax-2.x compatibility
-            post_processor=_to_fp32,  # numerical stability in the xlite backend
+            post_processor=lambda b: b.to(torch.float32),  # numerical stability in the xlite backend
         )
         se = f"{mlp_prefix}.{self._shared_experts_module}"
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("se_up_gate", f"{se}.gate_up_proj"),
-            quantized=self.quantization,
-        )
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("se_down", f"{se}.down_proj"),
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "se_up_gate", f"{se}.gate_up_proj")
+        self.init_matmul_weights(layers, "se_down", f"{se}.down_proj")
         # Shared-expert gating is a per-model module (absent in most Standard-family
         # architectures); missing modules filter out to an empty list.
         xlite_model.se_gate = get_layer_weights(layers, f"{mlp_prefix}.shared_expert_gate.weight")
@@ -643,7 +650,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_model = self.xlite_model
         xlite_model.re_up_gate_scale_bias = get_layer_weights(layers, f"{re_prefix}.w13_scale_bias", **re_kwargs)
         xlite_model.re_down_scale_bias = get_layer_weights(layers, f"{re_prefix}.w2_scale_bias", **re_kwargs)
-        re_kwargs["post_processor"] = transform_deq_scale
+        re_kwargs["post_processor"] = self._transform_deq_scale
         xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{re_prefix}.w13_weight_scale", **re_kwargs)
         xlite_model.re_down_scale = get_layer_weights(layers, f"{re_prefix}.w2_weight_scale", **re_kwargs)
 
@@ -668,20 +675,8 @@ class StandardXliteModel(XliteModelBase):
         adapts Gemma-style q/k norm weights.
         """
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("mha_qkv", "self_attn.qkv_proj", row_repack=row_repack),
-            mask=mask,
-            quantized=self.quantization,
-        )
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("attn_out", "self_attn.o_proj"),
-            mask=mask,
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "mha_qkv", "self_attn.qkv_proj", mask=mask, row_repack=row_repack)
+        self.init_matmul_weights(layers, "attn_out", "self_attn.o_proj", mask=mask)
         # With a mask, list length no longer means "exists" — probe for real tensors.
         with xlite_model.condition(has_real_tensor):
             xlite_model.mha_q_norm = get_layer_weights(
@@ -699,6 +694,94 @@ class StandardXliteModel(XliteModelBase):
             if xlite_config.qk_norm:
                 xlite_model.mha_q_norm_bias = get_layer_weights(layers, "self_attn.q_norm.bias", mask=mask)
                 xlite_model.mha_k_norm_bias = get_layer_weights(layers, "self_attn.k_norm.bias", mask=mask)
+
+    def _ensure_nd(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Return ``tensor`` in ND layout (row ops on FRACTAL_NZ tensors would corrupt data)."""
+        if torch_npu.get_npu_format(tensor) == torch_npu.Format.FRACTAL_NZ:  # type: ignore[attr-defined]
+            return torch_npu.npu_format_cast(tensor, torch_npu.Format.ND)  # type: ignore[attr-defined]
+        return tensor
+
+    def _slot_transform(self, slot: _MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the slot's row contract to one real weight/side tensor."""
+        if tensor.ndim == 0 or tensor.numel() == 0:
+            return tensor
+        if slot.row_slice is not None:
+            start, length = slot.row_slice
+            tensor = self._ensure_nd(tensor)[start : start + length].contiguous()
+        if slot.row_repack is not None:
+            tensor = slot.row_repack(tensor)
+        if slot.weight_dtype is not None:
+            tensor = self._ensure_nd(tensor).to(slot.weight_dtype)
+        return tensor
+
+    def _slot_deq_transform(self, slot: _MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
+        """Slot row contract followed by the fixpipe repack, for deq_scale-like side tensors."""
+        return self._transform_deq_scale(self._slot_transform(slot, tensor))
+
+    def init_matmul_weights(
+        self,
+        layers: Sequence[nn.Module],
+        xlite_prefix: str,
+        model_prefix: str,
+        *,
+        mask: Sequence[bool] | None = None,
+        row_slice: tuple[int, int] | None = None,
+        row_repack: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        weight_dtype: torch.dtype | None = None,
+        allow_quant: bool = True,
+        quantized: bool | None = None,
+    ) -> None:
+        """Bind one matmul slot: main weight plus quant side tensors when the model is quantized."""
+        quantized = self.quantization if quantized is None else quantized
+        slot = self._MatmulSlot(
+            xlite_prefix,
+            model_prefix,
+            row_slice=row_slice,
+            row_repack=row_repack,
+            weight_dtype=weight_dtype,
+            allow_quant=allow_quant,
+        )
+        source = slot.source
+        row_contract = partial(self._slot_transform, slot)
+        deq_contract = partial(self._slot_deq_transform, slot)
+        setattr(
+            self.xlite_model,
+            slot.xlite,
+            get_layer_weights(layers, f"{source}.weight", mask=mask, post_processor=row_contract),
+        )
+        if not quantized:
+            return
+
+        # DSA's indexer has shared layers (no own weights), so `mask` pads them with `_DUMMY_TENSOR`; the list is
+        # thus never empty and a naive `len() > 0` check would misclassify dynamic-quant matmuls as static. Static
+        # quant is when `aclnn_input_scale_reciprocal` exists and at least one entry is a real (non-dummy) tensor.
+        input_scale = get_layer_weights(layers, f"{source}.aclnn_input_scale_reciprocal", mask=mask)
+        if not slot.allow_quant:
+            scale_path = f"{source}.weight_scale"
+            scales = input_scale if has_real_tensor(input_scale) else get_layer_weights(layers, scale_path, mask=mask)
+            if has_real_tensor(scales):
+                raise ValueError(
+                    f"xlite: {source} is quantized in this checkpoint, but only native-dtype weights are supported"
+                )
+        static = has_real_tensor(input_scale)
+        if static:
+            setattr(self.xlite_model, f"{slot.xlite}_input_scale", input_scale)
+            setattr(
+                self.xlite_model,
+                f"{slot.xlite}_input_offset",
+                get_layer_weights(layers, f"{source}.aclnn_input_offset", mask=mask),
+            )
+            setattr(
+                self.xlite_model,
+                f"{slot.xlite}_quant_bias",
+                get_layer_weights(layers, f"{source}.quant_bias", mask=mask, post_processor=row_contract),
+            )
+        deq_source = f"{source}.deq_scale" if static else f"{source}.weight_scale"
+        setattr(
+            self.xlite_model,
+            f"{slot.xlite}_deq_scale",
+            get_layer_weights(layers, deq_source, mask=mask, post_processor=deq_contract),
+        )
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         # TODO: remove the type conversion once `xlite` accepts and defaults the cache in FP32 format
@@ -1117,7 +1200,7 @@ class Qwen35XliteModel(HybridXliteBase):
             """Repack ``[q|gate interleaved, k, v]`` rows; also used for 1-D quant side tensors."""
             if w.numel() == 0 or not xlite_config.attn_output_gate:
                 return w  # native [Q|K|V] is already the C++ layout.
-            w = _ensure_nd(w)  # split/reshape/cat need the ND row-major view
+            w = self._ensure_nd(w)  # split/reshape/cat need the ND row-major view
             rows = w.shape[0]
             # Derive the local q rows from the tensor itself so a global/local q_size mismatch
             # cannot silently skip the repack.
@@ -1148,14 +1231,14 @@ class Qwen35XliteModel(HybridXliteBase):
 
         # Fused rows [q|k|v|z] and [b|a]; the row slice also cuts their quant side tensors.
         kda_slots = [
-            MatmulSlot("linear_in_proj_qkv", "linear_attn.in_proj_qkvz", row_slice=(0, 2 * kdl + vdl)),
-            MatmulSlot("linear_in_proj_z", "linear_attn.in_proj_qkvz", row_slice=(2 * kdl + vdl, vdl)),
-            MatmulSlot("linear_in_proj_b", "linear_attn.in_proj_ba", row_slice=(0, n_v_local)),
-            MatmulSlot("linear_in_proj_a", "linear_attn.in_proj_ba", row_slice=(n_v_local, n_v_local)),
-            MatmulSlot("linear_out_proj", "linear_attn.out_proj"),
+            ("linear_in_proj_qkv", "linear_attn.in_proj_qkvz", (0, 2 * kdl + vdl)),
+            ("linear_in_proj_z", "linear_attn.in_proj_qkvz", (2 * kdl + vdl, vdl)),
+            ("linear_in_proj_b", "linear_attn.in_proj_ba", (0, n_v_local)),
+            ("linear_in_proj_a", "linear_attn.in_proj_ba", (n_v_local, n_v_local)),
+            ("linear_out_proj", "linear_attn.out_proj", None),
         ]
-        for slot in kda_slots:
-            init_matmul_weights(self.xlite_model, layers, slot, mask=kda_mask, quantized=self.quantization)
+        for xlite_prefix, source, row_slice in kda_slots:
+            self.init_matmul_weights(layers, xlite_prefix, source, mask=kda_mask, row_slice=row_slice)
         xlite_model.linear_conv1d = get_layer_weights(layers, "linear_attn.conv1d.weight", mask=kda_mask)
         xlite_model.linear_a_log = get_layer_weights(layers, "linear_attn.A_log", mask=kda_mask)
         xlite_model.linear_dt_bias = get_layer_weights(layers, "linear_attn.dt_bias", mask=kda_mask)
@@ -1231,20 +1314,8 @@ class DeepseekV3XliteModel(Glm4MoeXliteModel):
         list index-aligned with the (hybrid) layer list.
         """
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("mla_qkv_a", "self_attn.fused_qkv_a_proj"),
-            mask=mask,
-            quantized=self.quantization,
-        )
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("mla_q_b", "self_attn.q_b_proj"),
-            mask=mask,
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "mla_qkv_a", "self_attn.fused_qkv_a_proj", mask=mask)
+        self.init_matmul_weights(layers, "mla_q_b", "self_attn.q_b_proj", mask=mask)
         xlite_model.mla_q_norm = get_layer_weights(layers, "self_attn.q_a_layernorm.weight", mask=mask)
         xlite_model.mla_kv_norm = get_layer_weights(layers, "self_attn.kv_a_layernorm.weight", mask=mask)
         xlite_model.mla_wuv = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UV", mask=mask)
@@ -1301,13 +1372,7 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         layers, _ = self._get_layers_and_model_prefix()
 
         mask: list[bool] | None = getattr(self.xlite_config, "index_full_mask", None) or None
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("index_q_b", "self_attn.indexer.wq_b"),
-            mask=mask,
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "index_q_b", "self_attn.indexer.wq_b", mask=mask)
         xlite_model.index_k_weights_proj = get_layer_weights(
             layers, "self_attn.indexer.wk_weights_proj.weight", mask=mask
         )
@@ -1458,13 +1523,7 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
     def _bind_full_layer_weights(self, layers: Sequence[nn.Module], full_mask: Sequence[bool]) -> None:
         """Sparse-MLA + kpool indexer slots (non-KDA layers, i.e. ``full_mask``)."""
         self._bind_mla_weights(layers, full_mask)
-        init_matmul_weights(
-            self.xlite_model,
-            layers,
-            MatmulSlot("attn_out", "self_attn.o_proj"),
-            mask=full_mask,
-            quantized=self.quantization,
-        )
+        self.init_matmul_weights(layers, "attn_out", "self_attn.o_proj", mask=full_mask)
         self._bind_indexer_weights(layers, full_mask)
 
     def _bind_plain_slots(
@@ -1490,7 +1549,7 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
         fused = get_layer_weights(layers, source, mask=mask)
 
         def _slice(t: torch.Tensor, start: int, length: int) -> torch.Tensor:
-            t = _ensure_nd(t)[start : start + length].contiguous()
+            t = self._ensure_nd(t)[start : start + length].contiguous()
             return post(t) if post is not None else t
 
         return {
@@ -1522,13 +1581,13 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
             layers, "self_attn.in_proj_qkvbfg_a.weight", kda_mask, slices
         ).items():
             setattr(xlite_model, slot, weights)
-        for matmul_slot in (
-            MatmulSlot("linear_f_b_proj", "self_attn.f_b_proj"),
-            MatmulSlot("linear_g_b_proj", "self_attn.g_b_proj"),
-            MatmulSlot("linear_out_proj", "self_attn.o_proj"),
+        for xlite_prefix, source in (
+            ("linear_f_b_proj", "self_attn.f_b_proj"),
+            ("linear_g_b_proj", "self_attn.g_b_proj"),
+            ("linear_out_proj", "self_attn.o_proj"),
         ):
             # KDA matmul is non-quantized in xlite; the checkpoint weight_scale has no consumer.
-            init_matmul_weights(self.xlite_model, layers, matmul_slot, mask=kda_mask, quantized=False)
+            self.init_matmul_weights(layers, xlite_prefix, source, mask=kda_mask, quantized=False)
         # KDA conv is a fused [q|k|v] TP-sharded weight in the current model. Split it
         # into the three xlite slots and cast to the activation dtype the kernel requires.
         conv_slices = {
@@ -1561,12 +1620,13 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
         xlite_model = self.xlite_model
         idx_hd = self.hf_text_config.index_head_dim
         # wq_b is fp32-cast (native-dtype only); allow_quant fail-closes quantized indexer checkpoints.
-        init_matmul_weights(
-            self.xlite_model,
+        self.init_matmul_weights(
             layers,
-            MatmulSlot("index_q_b", "self_attn.indexer.wq_b", weight_dtype=torch.float32, allow_quant=False),
+            "index_q_b",
+            "self_attn.indexer.wq_b",
             mask=mla_mask,
-            quantized=self.quantization,
+            weight_dtype=torch.float32,
+            allow_quant=False,
         )
         # wk_weights_proj is fused [idx_hd, hidden] wk + [n_head, hidden] weights_proj; keep [N, K].
         index_slices = {
@@ -1578,7 +1638,7 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
             "self_attn.indexer.wk_weights_proj.weight",
             mla_mask,
             index_slices,
-            post=_to_fp32,
+            post=lambda w: w.to(torch.float32),
         ).items():
             setattr(xlite_model, slot, weights)
         # native validates the APE as fp32 [kpool, head_dim]; all indexer params cast to fp32.
@@ -1591,13 +1651,17 @@ class Glm5NextXliteModel(HybridXliteBase, DeepseekV32XliteModel):
                 "index_kpool_gate": "self_attn.indexer.index_kpool_compress_gate",
                 "index_kpool_ape": "self_attn.indexer.index_kpool_compress_ape",
             },
-            post=_to_fp32,
+            post=lambda w: w.to(torch.float32),
         )
 
     def _bind_mhc_weights(self, layers: Sequence[nn.Module]) -> None:
         """MHC residual-mixing params (fp32, every layer)."""
         for slot in ("hc_attn_fn", "hc_attn_base", "hc_attn_scale", "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale"):
-            setattr(self.xlite_model, slot, get_layer_weights(layers, slot, post_processor=_to_fp32))
+            setattr(
+                self.xlite_model,
+                slot,
+                get_layer_weights(layers, slot, post_processor=lambda w: w.to(torch.float32)),
+            )
 
     def _bind_shared_weights(self, layers: Sequence[nn.Module]) -> None:
         """MHC residual mixing, then the common dense MLP/MoE/quant binding."""
