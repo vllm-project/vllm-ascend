@@ -1799,6 +1799,17 @@ void npu_indexer_region_score_ids_out_meta(
     }
 }
 
+void npu_quant_matmul_out_meta(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& x2_scale,
+    c10::optional<at::Tensor> x1_scale,
+    c10::optional<at::Tensor> bias,
+    int64_t group_size,
+    at::Tensor& out)
+{
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1828,6 +1839,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
+    ops.impl("npu_quant_matmul_out", &vllm_ascend::meta::npu_quant_matmul_out_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
